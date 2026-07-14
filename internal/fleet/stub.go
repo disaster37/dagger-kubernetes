@@ -33,7 +33,7 @@ func NewStubProvider() *StubProvider {
 	}
 }
 
-func (p *StubProvider) EnsureStatefulSet(version string, image string) error {
+func (p *StubProvider) EnsureStatefulSet(version, image string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -125,7 +125,7 @@ func (p *StubProvider) ScaleDown(version string, ordinal int) error {
 	return nil
 }
 
-func (p *StubProvider) GetReadyReplicaIP(version string, podName string) (string, error) {
+func (p *StubProvider) GetReadyReplicaIP(version, podName string) (string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -142,7 +142,7 @@ func (p *StubProvider) GetReadyReplicaIP(version string, podName string) (string
 	return r.PodIP, nil
 }
 
-func (p *StubProvider) WaitForReady(version string, podName string) error {
+func (p *StubProvider) WaitForReady(version, podName string) error {
 	return nil
 }
 
@@ -154,7 +154,7 @@ func (p *StubProvider) AllVersions() ([]string, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	var versions []string
+	versions := make([]string, 0, len(p.versions))
 	for v := range p.versions {
 		versions = append(versions, v)
 	}

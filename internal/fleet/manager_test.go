@@ -7,7 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/disaster/dagger-cache/internal/session"
+	"github.com/disaster/dagger-kubernetes/internal/session"
 )
 
 func TestAcquireWithNoReplicas(t *testing.T) {

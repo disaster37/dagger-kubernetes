@@ -8,25 +8,25 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/disaster/dagger-cache/internal/session"
+	"github.com/disaster/dagger-kubernetes/internal/session"
 )
 
 type AcquireResult struct {
-	PodName  string
-	PodIP    string
-	Version  string
-	Image    string
+	PodName string
+	PodIP   string
+	Version string
+	Image   string
 }
 
 type Manager struct {
-	provider                 Provider
-	sessions                 *session.Store
-	maxReplicasPerVersion    int
-	maxSessionsPerReplica    int
-	replicaIdleTTL           time.Duration
-	versionRetention         time.Duration
-	minReplicasPerVersion    int
-	logger                   *zap.Logger
+	provider              Provider
+	sessions              *session.Store
+	maxReplicasPerVersion int
+	maxSessionsPerReplica int
+	replicaIdleTTL        time.Duration
+	versionRetention      time.Duration
+	minReplicasPerVersion int
+	logger                *zap.Logger
 }
 
 type ManagerConfig struct {
@@ -165,7 +165,7 @@ func (m *Manager) Sweep(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) sweepVersion(ctx context.Context, version string) error {
+func (m *Manager) sweepVersion(_ context.Context, version string) error {
 	replicas, err := m.provider.GetReplicas(version)
 	if err != nil {
 		return err

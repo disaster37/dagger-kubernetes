@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Helm: vendored dependency archives (rebuilt via `helm dependency update`)
+helm/**/charts/*.tgz
+
 # Editor/IDE
 # .idea/
 # .vscode/

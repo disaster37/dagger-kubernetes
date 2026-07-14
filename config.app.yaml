@@ -1,57 +1,41 @@
+# Supervisor runtime configuration.
+#
+# Only deployment-specific values are listed here. Every other option falls
+# back to the compiled-in defaults in internal/config/config.go. To see the
+# full set of options with explanations, copy config.app.yaml.sample to
+# config.app.yaml and edit from there.
+#
+# Any value below can also be overridden by an environment variable using the
+# DAGGER_CACHE_ prefix, e.g. DAGGER_CACHE_LOG_LEVEL=debug or
+# DAGGER_CACHE_CACHE_BACKEND=s3. Environment variables take precedence over
+# this file.
+
+# --- Endpoints & public URLs (set these per deployment) ----------------------
 server:
-  control_addr: ":8080"
-  data_addr: ":8443"
+  control_addr: ":8080"        # Hertz HTTPS control API
+  data_addr: ":8443"            # mTLS L4 data-plane proxy
   data_hostname: "data.supv.example.com"
   public_url: "https://supv.example.com"
   ui_url: "https://ui.supv.example.com"
+
+# --- Authentication ----------------------------------------------------------
 auth:
   internal:
-    enabled: true
-    tokens_file: "/etc/dagger-cache/tokens"
-  oauth:
+    tokens_file: "/etc/dagger-cache/tokens"   # newline-separated bearer tokens
+  oauth:                                       # optional; disabled by default
     enabled: false
     provider: "github"
     client_id: "${OAUTH_CLIENT_ID}"
     client_secret: "${OAUTH_CLIENT_SECRET}"
     redirect_url: "https://ui.supv.example.com/auth/callback"
     allowed_orgs: ["acme"]
-telemetry:
-  collector_url: "http://otel-collector:4318"
-  tempo_url: "http://tempo:3200"
-  loki_url: "http://loki:3100"
-  prometheus_url: "http://prometheus:9090"
+
+# --- Remote shared cache -----------------------------------------------------
 cache:
-  backend: "registry"
-  registry: "cache.reg/dagger-cache"
-  s3: { bucket: "", region: "" }
-  ref_per_version: true
-fleet:
-  namespace: "dagger-cache"
-  max_replicas_per_version: 3
-  max_sessions_per_replica: 8
-  replica_idle_ttl: "5m"
-  version_retention: "24h"
-  min_replicas_per_version: 0
-ca:
-  minting_ca_secret: "supervisor-minting-ca"
-  client_cert_ttl: "2h"
-tls:
-  server_cert_secret: "supervisor-tls"
-lease_ttl: "2m"
+  backend: "registry"               # "registry" (OCI) or "s3"
+  registry: "cache.reg/dagger-cache" # OCI repository for BuildKit cache blobs
+
+# --- Allowed Dagger engine versions ------------------------------------------
 version:
-  floor: "v0.19.0"
-  allowlist: ["0.19","0.20","0.21"]
-ci:
-  github:
-    job_summary: true
-    check_runs: true
-  jenkins:
-    dynamic_stages: true
-  drone:
-    config_extension: true
-ui:
-  enabled: true
-  spa_dir: "/opt/dagger-cache/ui"
-log_level: "info"
-otel:
-  otlp_endpoint: ""
+  floor: "v0.19.0"                          # minimum supported engine
+  allowlist: ["0.19", "0.20", "0.21"]       # major.minor prefixes to admit

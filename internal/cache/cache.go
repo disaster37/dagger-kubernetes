@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/disaster/dagger-cache/internal/version"
+	"github.com/disaster/dagger-kubernetes/internal/version"
 )
 
 type Backend struct {

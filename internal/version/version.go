@@ -18,12 +18,12 @@ type Version struct {
 }
 
 type Resolver struct {
-	mu         sync.RWMutex
-	allowlist  map[string]bool
-	floor      *Version
-	releases   map[string][]string
-	lastFetch  time.Time
-	cacheTTL   time.Duration
+	mu        sync.RWMutex
+	allowlist map[string]bool
+	floor     *Version
+	releases  map[string][]string
+	lastFetch time.Time
+	cacheTTL  time.Duration
 }
 
 var versionRe = regexp.MustCompile(`^v?(\d+)\.(\d+)(?:\.(\d+))?$`)

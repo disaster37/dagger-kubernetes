@@ -15,8 +15,8 @@ type LiveClient struct {
 }
 
 type LiveHub struct {
-	mu       sync.RWMutex
-	clients  map[string]map[*LiveClient]bool
+	mu      sync.RWMutex
+	clients map[string]map[*LiveClient]bool
 }
 
 func NewLiveHub() *LiveHub {
@@ -78,22 +78,22 @@ func (h *LiveHub) writePump(client *LiveClient) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer func() {
 		ticker.Stop()
-		client.Conn.Close()
+		_ = client.Conn.Close()
 	}()
 
 	for {
 		select {
 		case message, ok := <-client.Send:
 			if !ok {
-				client.Conn.WriteMessage(websocket.CloseMessage, []byte{})
+				_ = client.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 		case <-ticker.C:
-			client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 			if err := client.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}

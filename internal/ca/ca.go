@@ -16,7 +16,7 @@ import (
 
 type SerializableCertificate struct {
 	CertificateChain [][]byte `json:"certificate_chain"` // DER-encoded
-	PrivateKey       []byte   `json:"private_key"`        // PKCS8 DER
+	PrivateKey       []byte   `json:"private_key"`       // PKCS8 DER
 }
 
 type MintingCA struct {

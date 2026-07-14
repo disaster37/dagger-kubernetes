@@ -17,13 +17,13 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.uber.org/zap"
 
-	"github.com/disaster/dagger-cache/internal/ca"
-	"github.com/disaster/dagger-cache/internal/cache"
-	"github.com/disaster/dagger-cache/internal/fleet"
-	"github.com/disaster/dagger-cache/internal/observ"
-	"github.com/disaster/dagger-cache/internal/session"
-	"github.com/disaster/dagger-cache/internal/telemetry"
-	"github.com/disaster/dagger-cache/internal/version"
+	"github.com/disaster/dagger-kubernetes/internal/ca"
+	"github.com/disaster/dagger-kubernetes/internal/cache"
+	"github.com/disaster/dagger-kubernetes/internal/fleet"
+	"github.com/disaster/dagger-kubernetes/internal/observ"
+	"github.com/disaster/dagger-kubernetes/internal/session"
+	"github.com/disaster/dagger-kubernetes/internal/telemetry"
+	"github.com/disaster/dagger-kubernetes/internal/version"
 )
 
 type EngineRequest struct {
@@ -37,13 +37,13 @@ type EngineRequest struct {
 }
 
 type EngineSpecResponse struct {
-	Image      string                          `json:"image"`
-	URL        string                          `json:"url"`
-	Cert       *ca.SerializableCertificate     `json:"cert"`
-	InstanceID string                          `json:"instance_id"`
-	Location   string                          `json:"location"`
-	OrgID      string                          `json:"org_id,omitempty"`
-	UserID     string                          `json:"user_id,omitempty"`
+	Image      string                      `json:"image"`
+	URL        string                      `json:"url"`
+	Cert       *ca.SerializableCertificate `json:"cert"`
+	InstanceID string                      `json:"instance_id"`
+	Location   string                      `json:"location"`
+	OrgID      string                      `json:"org_id,omitempty"`
+	UserID     string                      `json:"user_id,omitempty"`
 }
 
 type ErrorResponse struct {
@@ -64,14 +64,14 @@ type Server struct {
 }
 
 type ServerConfig struct {
-	ControlAddr    string
-	DataAddr       string
-	DataHost       string
-	PublicURL      string
-	UIURL          string
-	CollectorURL   string
-	TempoURL       string
-	TokensFile     string
+	ControlAddr  string
+	DataAddr     string
+	DataHost     string
+	PublicURL    string
+	UIURL        string
+	CollectorURL string
+	TempoURL     string
+	TokensFile   string
 }
 
 func NewServer(
@@ -95,6 +95,7 @@ func NewServer(
 	}
 }
 
+//nolint:gocritic
 func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 	mux := http.NewServeMux()
 
@@ -114,8 +115,9 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 	handler := withMiddleware(mux, s.logger)
 
 	s.httpServer = &http.Server{
-		Addr:    s.cfg.ControlAddr,
-		Handler: handler,
+		Addr:              s.cfg.ControlAddr,
+		ReadHeaderTimeout: 10 * time.Second,
+		Handler:           handler,
 	}
 
 	go func() {
@@ -159,7 +161,7 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 
 func (s *Server) Shutdown(ctx context.Context) error {
 	if s.tlsListener != nil {
-		s.tlsListener.Close()
+		_ = s.tlsListener.Close()
 	}
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
@@ -169,12 +171,12 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	_, _ = w.Write([]byte("ok"))
 }
 
 func (s *Server) handleReadyz(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ready"))
+	_, _ = w.Write([]byte("ready"))
 }
 
 func (s *Server) handleEngines(w http.ResponseWriter, r *http.Request) {
@@ -194,7 +196,7 @@ func (s *Server) handleEngines(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid body")
 		return
 	}
-	defer r.Body.Close()
+	defer func() { _ = r.Body.Close() }()
 
 	var req EngineRequest
 	if err := json.Unmarshal(body, &req); err != nil {
@@ -256,7 +258,7 @@ func (s *Server) handleEngines(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
-	json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (s *Server) extractVersion(image string) (*version.Version, error) {
@@ -316,7 +318,7 @@ func (s *Server) handleAdminVersions(w http.ResponseWriter, r *http.Request) {
 	for i, v := range versions {
 		out[i] = v.String()
 	}
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, out)
 }
 
 func (s *Server) handleFleetInfo(w http.ResponseWriter, r *http.Request) {
@@ -325,18 +327,18 @@ func (s *Server) handleFleetInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, infos)
+	writeJSON(w, infos)
 }
 
 func (s *Server) handleCacheInfo(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, map[string]string{
 		"backend":  s.cacheBackend.Type,
 		"registry": s.cacheBackend.Registry,
 	})
 }
 
 func (s *Server) handleDataConn(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
@@ -359,8 +361,8 @@ func (s *Server) handleDataConn(conn net.Conn) {
 		return
 	}
 
-	s.sessions.IncInFlight(fp)
-	defer s.sessions.DecInFlight(fp)
+	_ = s.sessions.IncInFlight(fp)
+	defer func() { _ = s.sessions.DecInFlight(fp) }()
 
 	podIP, err := s.fleetManager.GetVersionFleet(lease.Version)
 	if err != nil {
@@ -386,9 +388,9 @@ func (s *Server) handleDataConn(conn net.Conn) {
 		s.logger.Error("backend dial failed", zap.String("ip", targetIP), zap.Error(err))
 		return
 	}
-	defer backend.Close()
+	defer func() { _ = backend.Close() }()
 
-	s.sessions.Touch(fp)
+	_ = s.sessions.Touch(fp)
 
 	errc := make(chan error, 2)
 	go func() {
@@ -401,8 +403,8 @@ func (s *Server) handleDataConn(conn net.Conn) {
 	}()
 
 	<-errc
-	conn.Close()
-	backend.Close()
+	_ = conn.Close()
+	_ = backend.Close()
 }
 
 func extractToken(r *http.Request) (string, error) {
@@ -426,13 +428,12 @@ func extractToken(r *http.Request) (string, error) {
 func writeError(w http.ResponseWriter, status int, message string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(ErrorResponse{Message: message})
+	_ = json.NewEncoder(w).Encode(ErrorResponse{Message: message})
 }
-
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func writeJSON(w http.ResponseWriter, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(v)
 }
 
 func withMiddleware(next http.Handler, logger *zap.Logger) http.Handler {

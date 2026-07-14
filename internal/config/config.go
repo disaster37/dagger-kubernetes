@@ -12,10 +12,10 @@ type Config struct {
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	Cache     CacheConfig     `mapstructure:"cache"`
 	Fleet     FleetConfig     `mapstructure:"fleet"`
-	CA       CAConfig       `mapstructure:"ca"`
-	TLS      TLSConfig      `mapstructure:"tls"`
-	Version  VersionConfig  `mapstructure:"version"`
-	LeaseTTL time.Duration  `mapstructure:"lease_ttl"`
+	CA        CAConfig        `mapstructure:"ca"`
+	TLS       TLSConfig       `mapstructure:"tls"`
+	Version   VersionConfig   `mapstructure:"version"`
+	LeaseTTL  time.Duration   `mapstructure:"lease_ttl"`
 	CI        CIConfig        `mapstructure:"ci"`
 	UI        UIConfig        `mapstructure:"ui"`
 	LogLevel  string          `mapstructure:"log_level"`
@@ -57,10 +57,10 @@ type TelemetryConfig struct {
 }
 
 type CacheConfig struct {
-	Backend       string `mapstructure:"backend"`
-	Registry      string `mapstructure:"registry"`
+	Backend       string   `mapstructure:"backend"`
+	Registry      string   `mapstructure:"registry"`
 	S3            S3Config `mapstructure:"s3"`
-	RefPerVersion bool   `mapstructure:"ref_per_version"`
+	RefPerVersion bool     `mapstructure:"ref_per_version"`
 }
 
 type S3Config struct {
@@ -69,12 +69,12 @@ type S3Config struct {
 }
 
 type FleetConfig struct {
-	Namespace              string        `mapstructure:"namespace"`
-	MaxReplicasPerVersion  int           `mapstructure:"max_replicas_per_version"`
-	MaxSessionsPerReplica  int           `mapstructure:"max_sessions_per_replica"`
-	ReplicaIdleTTL         time.Duration `mapstructure:"replica_idle_ttl"`
-	VersionRetention       time.Duration `mapstructure:"version_retention"`
-	MinReplicasPerVersion  int           `mapstructure:"min_replicas_per_version"`
+	Namespace             string        `mapstructure:"namespace"`
+	MaxReplicasPerVersion int           `mapstructure:"max_replicas_per_version"`
+	MaxSessionsPerReplica int           `mapstructure:"max_sessions_per_replica"`
+	ReplicaIdleTTL        time.Duration `mapstructure:"replica_idle_ttl"`
+	VersionRetention      time.Duration `mapstructure:"version_retention"`
+	MinReplicasPerVersion int           `mapstructure:"min_replicas_per_version"`
 }
 
 type CAConfig struct {
@@ -92,9 +92,9 @@ type VersionConfig struct {
 }
 
 type CIConfig struct {
-	GitHub  GHAConfig  `mapstructure:"github"`
+	GitHub  GHAConfig     `mapstructure:"github"`
 	Jenkins JenkinsConfig `mapstructure:"jenkins"`
-	Drone   DroneConfig `mapstructure:"drone"`
+	Drone   DroneConfig   `mapstructure:"drone"`
 }
 
 type GHAConfig struct {

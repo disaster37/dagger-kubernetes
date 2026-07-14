@@ -1,0 +1,127 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: "1.26"
+  NODE_VERSION: "22"
+
+jobs:
+  lint:
+    name: Lint (golangci-lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: false
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v2.12.2
+          args: --timeout=10m
+
+  ui:
+    name: UI typecheck & build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: ui/package.json
+      - name: Install deps
+        working-directory: ui
+        run: npm install
+      - name: Typecheck
+        working-directory: ui
+        run: npm run typecheck
+      - name: Build
+        working-directory: ui
+        run: npm run build
+
+  test:
+    name: Go tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Go vet
+        run: go vet ./...
+      - name: Run tests
+        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+      - name: Upload coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage.out
+          if-no-files-found: ignore
+
+  build:
+    name: Build binaries
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Build supervisor
+        run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/supervisor ./cmd/supervisor/
+      - name: Build dagger-cache-ci
+        run: CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o bin/dagger-cache-ci ./cmd/dagger-cache-ci/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries
+          path: bin/
+
+  docker:
+    name: Build Docker image
+    runs-on: ubuntu-latest
+    needs: [test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build (no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: dagger-kubernetes/supervisor:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          load: true
+      - name: Smoke test image
+        run: docker run --rm dagger-kubernetes/supervisor:ci -h
+
+  helm:
+    name: Helm chart lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/setup-helm@v4
+        with:
+          version: v3.14.0
+      - name: Build dependencies
+        run: helm dependency update helm/dagger-kubernetes
+      - name: Lint chart
+        run: helm lint helm/dagger-kubernetes
+      - name: Template (default values, tools enabled)
+        run: helm template dagger-kubernetes helm/dagger-kubernetes --debug > /dev/null
+      - name: Template (tools disabled)
+        run: helm template dagger-kubernetes helm/dagger-kubernetes --debug --set tools.otelCollector.enabled=false --set tools.registry.enabled=false > /dev/null

@@ -1,4 +1,4 @@
-module github.com/disaster/dagger-cache
+module github.com/disaster/dagger-kubernetes
 
 go 1.26.3
 

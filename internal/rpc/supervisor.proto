@@ -2,7 +2,7 @@ syntax = "proto3";
 
 package supervisor;
 
-option go_package = "github.com/disaster/dagger-cache/internal/rpc";
+option go_package = "github.com/disaster/dagger-kubernetes/internal/rpc";
 
 service Supervisor {
   rpc AcquireEngine(AcquireEngineRequest) returns (AcquireEngineResponse);

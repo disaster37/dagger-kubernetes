@@ -1,0 +1,190 @@
+# dagger-kubernetes Helm chart values
+# ---------------------------------------------------------------------------
+# Copy to your own values file and override as needed, e.g.:
+#   helm install dagger-kubernetes ./helm/dagger-kubernetes -f my-values.yaml
+
+# --- Image -----------------------------------------------------------------
+image:
+  repository: ghcr.io/disaster/dagger-kubernetes
+  tag: ""                # defaults to Chart.appVersion when empty
+  pullPolicy: IfNotPresent
+  pullSecrets: []        # e.g. [{ name: ghcr-pull-secret }]
+
+# --- Naming / namespace ----------------------------------------------------
+nameOverride: ""
+fullnameOverride: ""
+namespace: dagger-kubernetes
+
+# --- Supervisor runtime ----------------------------------------------------
+replicaCount: 2
+
+supervisor:
+  extraEnv: []
+  config:
+    server:
+      dataHostname: "data.supv.example.com"
+      publicUrl: "https://supv.example.com"
+      uiUrl: "https://ui.supv.example.com"
+    auth:
+      oauth:
+        enabled: false
+        provider: "github"
+        clientId: "${OAUTH_CLIENT_ID}"
+        clientSecret: "${OAUTH_CLIENT_SECRET}"
+        redirectUrl: "https://ui.supv.example.com/auth/callback"
+        allowedOrgs: ["acme"]
+    telemetry:
+      # collectorUrl is derived from the otel-collector dependency when enabled.
+      collectorUrl: ""
+      tempoUrl: "http://tempo:3200"
+      lokiUrl: "http://loki:3100"
+      prometheusUrl: "http://prometheus:9090"
+    cache:
+      backend: "registry"            # "registry" (OCI) or "s3"
+      # registry is derived from the docker-registry dependency when enabled.
+      registry: ""
+      refPerVersion: true
+      s3:
+        bucket: ""
+        region: ""
+    fleet:
+      minReplicasPerVersion: 0
+      maxReplicasPerVersion: 3
+      maxSessionsPerReplica: 8
+      replicaIdleTtl: "5m"
+      versionRetention: "24h"
+    ca:
+      clientCertTtl: "2h"
+    leaseTtl: "2m"
+    version:
+      floor: "v0.19.0"
+      allowlist: ["0.19", "0.20", "0.21"]
+    logLevel: "info"
+    otel:
+      otlpEndpoint: ""               # empty disables the supervisor's own OTLP export
+
+# --- Authentication secrets ------------------------------------------------
+auth:
+  # Static bearer tokens, one per line (newline-separated at runtime).
+  tokens: []
+  # - "super-secret-token-1"
+
+# --- Minting CA & TLS (provide your own) -----------------------------------
+ca:
+  crt: ""    # PEM-encoded CA certificate
+  key: ""    # PEM-encoded CA private key
+tls:
+  crt: ""    # PEM-encoded server certificate
+  key: ""    # PEM-encoded server private key
+
+# --- Services --------------------------------------------------------------
+service:
+  control:
+    type: ClusterIP
+    port: 80
+    nodePort: ""
+  data:
+    type: LoadBalancer
+    port: 443
+
+# --- Ingress ---------------------------------------------------------------
+ingress:
+  enabled: true
+  className: ""
+  annotations: {}
+  hosts:
+    - host: supv.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+  #  - secretName: supv-tls
+  #    hosts:
+  #      - supv.example.com
+
+# --- Autoscaling -----------------------------------------------------------
+autoscaling:
+  enabled: false
+  minReplicas: 2
+  maxReplicas: 6
+  targetCPUUtilizationPercentage: 80
+  targetMemoryUtilizationPercentage: ""
+
+# --- Resources -------------------------------------------------------------
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 512Mi
+
+# --- Pod scheduling & security --------------------------------------------
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  runAsGroup: 10001
+  fsGroup: 10001
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop: ["ALL"]
+
+serviceAccount:
+  annotations: {}
+
+# --- Prometheus ServiceMonitor --------------------------------------------
+serviceMonitor:
+  enabled: false
+  labels: {}
+  interval: 30s
+  scrapeTimeout: 10s
+
+# ===========================================================================
+# Required tools, integrated as Helm chart dependencies.
+# Each can be toggled independently; when enabled, the supervisor config is
+# wired to point at the dependency's in-cluster Service automatically.
+# ===========================================================================
+tools:
+  # OpenTelemetry Collector — receives OTLP from Dagger CLI & supervisor,
+  # fans out to Tempo / Loki / Prometheus backends.
+  otelCollector:
+    enabled: true
+  # Docker registry (OCI) — backs the remote shared cache (BuildKit blobs).
+  registry:
+    enabled: true
+
+# ---------------------------------------------------------------------------
+# Subchart values. Helm forwards these to each dependency. Keys are top-level:
+# `opentelemetry-collector` (chart name) and `registry` (alias of
+# docker-registry). Override freely; defaults shown below.
+# ---------------------------------------------------------------------------
+opentelemetry-collector:
+  mode: deployment
+  replicaCount: 1
+  image:
+    repository: otel/opentelemetry-collector-contrib
+    tag: "0.108.0"
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+  service:
+    type: ClusterIP
+
+registry:
+  # docker-registry subchart (stable/docker-registry, aliased as `registry`).
+  replicaCount: 1
+  persistence:
+    enabled: true
+    size: 50Gi
+  storage: filesystem
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi

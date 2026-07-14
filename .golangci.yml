@@ -1,0 +1,57 @@
+version: "2"
+
+run:
+  timeout: 10m
+  go: "1.26"
+  modules-download-mode: readonly
+
+linters:
+  default: none
+  enable:
+    - errcheck
+    - govet
+    - ineffassign
+    - staticcheck
+    - unused
+    - gosec
+    - revive
+    - gocritic
+    - misspell
+    - unconvert
+    - gocyclo
+    - bodyclose
+    - copyloopvar
+    - dupl
+    - nakedret
+    - prealloc
+    - unparam
+    - whitespace
+  settings:
+    gocyclo:
+      min-complexity: 20
+    gocritic:
+      enabled-tags:
+        - performance
+        - style
+    revive:
+      severity: warning
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - dupl
+          - gocyclo
+          - gosec
+          - errcheck
+      - path: cmd/
+        linters:
+          - gocyclo
+
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    goimports:
+      local-prefixes:
+        - github.com/disaster/dagger-kubernetes

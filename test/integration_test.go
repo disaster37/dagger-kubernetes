@@ -8,13 +8,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/disaster/dagger-cache/internal/api"
-	"github.com/disaster/dagger-cache/internal/ca"
-	"github.com/disaster/dagger-cache/internal/cache"
-	"github.com/disaster/dagger-cache/internal/fleet"
-	"github.com/disaster/dagger-cache/internal/session"
-	"github.com/disaster/dagger-cache/internal/version"
 	"go.uber.org/zap"
+
+	"github.com/disaster/dagger-kubernetes/internal/api"
+	"github.com/disaster/dagger-kubernetes/internal/ca"
+	"github.com/disaster/dagger-kubernetes/internal/cache"
+	"github.com/disaster/dagger-kubernetes/internal/fleet"
+	"github.com/disaster/dagger-kubernetes/internal/session"
+	"github.com/disaster/dagger-kubernetes/internal/version"
 )
 
 func TestProvisionEngineFlow(t *testing.T) {
@@ -142,6 +143,7 @@ func TestHealthEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GET /healthz: %v", err)
 	}
+	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.StatusCode)
 	}

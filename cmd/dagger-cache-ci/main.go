@@ -39,17 +39,18 @@ func main() {
 		os.Exit(1)
 	}
 
-	os.Setenv("DAGGER_CLOUD_URL", *serverURL)
-	os.Setenv("DAGGER_CLOUD_TOKEN", *token)
-	os.Setenv("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "dagger-cloud://self")
+	_ = os.Setenv("DAGGER_CLOUD_URL", *serverURL)
+	_ = os.Setenv("DAGGER_CLOUD_TOKEN", *token)
+	_ = os.Setenv("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "dagger-cloud://self")
 
 	if *version != "" {
-		os.Setenv("_EXPERIMENTAL_DAGGER_TAG", *version)
+		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", *version)
 		vslug := strings.ReplaceAll(strings.ReplaceAll(*version, ".", "-"), "v", "")
 		cacheRef := fmt.Sprintf("%s:V%s", *cacheRegistry, vslug)
-		os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
+		_ = os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
 	}
 
+	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.Command("dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -68,7 +69,7 @@ func main() {
 
 		switch *ciMode {
 		case "gha":
-			emitGHAAnnotations(traceURL, traceID, logOutput)
+			emitGHAAnnotations(traceURL, traceID)
 		case "jenkins":
 			emitJenkinsStages(traceURL, traceID)
 		case "drone":
@@ -86,18 +87,19 @@ func extractTraceID(output string) string {
 	return match
 }
 
-func emitGHAAnnotations(traceURL, traceID, logOutput string) {
+func emitGHAAnnotations(traceURL, traceID string) {
 	fmt.Printf("::notice title=Dagger Pipeline::Pipeline View: %s\n", traceURL)
 
 	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
 	if summaryFile != "" {
-		f, err := os.OpenFile(summaryFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0644)
+		//nolint:gosec // trusted env var set by GitHub Actions
+		f, err := os.OpenFile(summaryFile, os.O_APPEND|os.O_WRONLY|os.O_CREATE, 0o600)
 		if err == nil {
-			defer f.Close()
-			fmt.Fprintf(f, "## Dagger Pipeline\n\n")
-			fmt.Fprintf(f, "[Live Pipeline View](%s)\n\n", traceURL)
-			fmt.Fprintf(f, "| Trace ID | Status |\n|---|---|\n")
-			fmt.Fprintf(f, "| `%s` | View |\n", traceID)
+			defer func() { _ = f.Close() }()
+			_, _ = fmt.Fprintf(f, "## Dagger Pipeline\n\n")
+			_, _ = fmt.Fprintf(f, "[Live Pipeline View](%s)\n\n", traceURL)
+			_, _ = fmt.Fprintf(f, "| Trace ID | Status |\n|---|---|\n")
+			_, _ = fmt.Fprintf(f, "| `%s` | View |\n", traceID)
 		}
 	}
 
@@ -126,10 +128,10 @@ func pollSummary(traceURL string) {
 		}
 		var data map[string]interface{}
 		if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
-			resp.Body.Close()
+			_ = resp.Body.Close()
 			continue
 		}
-		resp.Body.Close()
+		_ = resp.Body.Close()
 
 		status, _ := data["status"].(string)
 		if status == "success" || status == "failed" || status == "canceled" {

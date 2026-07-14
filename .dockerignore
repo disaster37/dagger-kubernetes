@@ -1,0 +1,30 @@
+# VCS / git
+.git
+.gitignore
+.github
+.kilo
+
+# Build artifacts
+*.exe
+*.test
+*.out
+dagger-cache-ci
+dist/
+bin/
+
+# Local config & env (keep sample)
+config.app.yaml
+.env
+
+# Docs & design files
+docs/
+*.md
+!README.md
+
+# IDE
+.idea/
+.vscode/
+
+# Node
+ui/node_modules
+ui/dist

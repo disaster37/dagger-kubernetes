@@ -1,0 +1,9 @@
+dependencies:
+- name: opentelemetry-collector
+  repository: https://open-telemetry.github.io/opentelemetry-helm-charts
+  version: 0.108.0
+- name: docker-registry
+  repository: https://charts.helm.sh/stable
+  version: 1.9.6
+digest: sha256:bd94d50a7c11c0dca75b7ec39634463ea3a854b46fc79344192300a91c03de27
+generated: "2026-07-14T11:13:01.940398044Z"

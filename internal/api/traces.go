@@ -7,7 +7,7 @@ import (
 	"github.com/gorilla/websocket"
 	"go.uber.org/zap"
 
-	"github.com/disaster/dagger-cache/internal/telemetry"
+	"github.com/disaster/dagger-kubernetes/internal/telemetry"
 )
 
 var upgrader = websocket.Upgrader{
@@ -32,11 +32,11 @@ func (s *Server) handleTracesRoutes(w http.ResponseWriter, r *http.Request) {
 	s.handleTracesDetail(w, r)
 }
 
-func (s *Server) handleTracesList(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleTracesList(w http.ResponseWriter, _ *http.Request) {
 	traces := []map[string]string{
 		{"trace_id": "example-1", "status": "success", "version": "v0.21.4"},
 	}
-	writeJSON(w, http.StatusOK, traces)
+	writeJSON(w, traces)
 }
 
 func (s *Server) handleTracesDetail(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func (s *Server) handleTracesDetail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, http.StatusOK, trace)
+	writeJSON(w, trace)
 }
 
 func (s *Server) handleTracesLogs(w http.ResponseWriter, r *http.Request) {
@@ -62,7 +62,7 @@ func (s *Server) handleTracesLogs(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "missing trace ID")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{
+	writeJSON(w, map[string]string{
 		"trace_id": traceID,
 		"logs":     "",
 	})

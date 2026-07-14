@@ -8,16 +8,16 @@ import (
 )
 
 type SpanNode struct {
-	SpanID      string              `json:"span_id"`
-	ParentSpanID string             `json:"parent_span_id"`
-	TraceID     string              `json:"trace_id"`
-	Name        string              `json:"name"`
-	Status      string              `json:"status"`
-	StartTime   time.Time           `json:"start_time"`
-	Duration    time.Duration       `json:"duration_ms"`
-	Attributes  map[string]string   `json:"attributes"`
-	Children    []*SpanNode         `json:"children"`
-	Logs        []SpanLog           `json:"logs,omitempty"`
+	SpanID       string            `json:"span_id"`
+	ParentSpanID string            `json:"parent_span_id"`
+	TraceID      string            `json:"trace_id"`
+	Name         string            `json:"name"`
+	Status       string            `json:"status"`
+	StartTime    time.Time         `json:"start_time"`
+	Duration     time.Duration     `json:"duration_ms"`
+	Attributes   map[string]string `json:"attributes"`
+	Children     []*SpanNode       `json:"children"`
+	Logs         []SpanLog         `json:"logs,omitempty"`
 }
 
 type SpanLog struct {
@@ -26,14 +26,14 @@ type SpanLog struct {
 }
 
 type TraceInfo struct {
-	TraceID    string    `json:"trace_id"`
-	RootSpan   *SpanNode `json:"root_span"`
-	Status     string    `json:"status"`
-	StartTime  time.Time `json:"start_time"`
+	TraceID    string        `json:"trace_id"`
+	RootSpan   *SpanNode     `json:"root_span"`
+	Status     string        `json:"status"`
+	StartTime  time.Time     `json:"start_time"`
 	Duration   time.Duration `json:"duration_ms"`
-	Version    string    `json:"version"`
-	CIProvider string    `json:"ci_provider,omitempty"`
-	CIRepo     string    `json:"ci_repo,omitempty"`
+	Version    string        `json:"version"`
+	CIProvider string        `json:"ci_provider,omitempty"`
+	CIRepo     string        `json:"ci_repo,omitempty"`
 }
 
 type SpanTreeReconstructor struct {
@@ -55,7 +55,7 @@ func (r *SpanTreeReconstructor) GetTrace(traceID string) (*TraceInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	var raw map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {

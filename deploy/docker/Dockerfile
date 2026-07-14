@@ -1,19 +1,25 @@
 FROM golang:1.26-alpine AS builder
 
+RUN apk add --no-cache git ca-certificates
 WORKDIR /app
 COPY go.mod go.sum ./
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
 COPY . .
-RUN CGO_ENABLED=0 go build -o /supervisor ./cmd/supervisor/
+ENV CGO_ENABLED=0
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    go build -trimpath -ldflags "-s -w" -o /supervisor ./cmd/supervisor/
 
 FROM alpine:3.20
 
-RUN apk add --no-cache ca-certificates tzdata
+RUN apk add --no-cache ca-certificates tzdata \
+    && update-ca-certificates \
+    && addgroup -S dagger && adduser -S -G dagger -u 10001 dagger
 
 COPY --from=builder /supervisor /usr/local/bin/supervisor
-COPY config.app.yaml /etc/dagger-cache/config.app.yaml
 
+USER dagger
 EXPOSE 8080 8443
-
 ENTRYPOINT ["/usr/local/bin/supervisor"]
-CMD ["--config=/etc/dagger-cache/config.app.yaml"]
+CMD ["--config=/etc/dagger-kubernetes/config.app.yaml"]

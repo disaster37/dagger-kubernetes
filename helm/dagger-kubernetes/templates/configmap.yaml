@@ -1,0 +1,68 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}-config
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+data:
+  config.app.yaml: |
+    server:
+      control_addr: ":8080"
+      data_addr: ":8443"
+      data_hostname: {{ .Values.supervisor.config.server.dataHostname | quote }}
+      public_url: {{ .Values.supervisor.config.server.publicUrl | quote }}
+      ui_url: {{ .Values.supervisor.config.server.uiUrl | quote }}
+    auth:
+      internal:
+        enabled: true
+        tokens_file: "/etc/dagger-kubernetes/tokens"
+      oauth:
+        enabled: {{ .Values.supervisor.config.auth.oauth.enabled }}
+{{- with .Values.supervisor.config.auth.oauth }}
+        provider: {{ .provider | quote }}
+        client_id: {{ .clientId | quote }}
+        client_secret: {{ .clientSecret | quote }}
+        redirect_url: {{ .redirectUrl | quote }}
+        allowed_orgs:
+{{ toYaml .allowedOrgs | indent 10 }}
+{{- end }}
+    telemetry:
+      collector_url: {{ include "dagger-kubernetes.collectorUrl" . | quote }}
+      tempo_url: {{ .Values.supervisor.config.telemetry.tempoUrl | quote }}
+      loki_url: {{ .Values.supervisor.config.telemetry.lokiUrl | quote }}
+      prometheus_url: {{ .Values.supervisor.config.telemetry.prometheusUrl | quote }}
+    cache:
+      backend: {{ .Values.supervisor.config.cache.backend | quote }}
+      registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}
+      ref_per_version: {{ .Values.supervisor.config.cache.refPerVersion }}
+{{- if eq .Values.supervisor.config.cache.backend "s3" }}
+      s3:
+        bucket: {{ .Values.supervisor.config.cache.s3.bucket | quote }}
+        region: {{ .Values.supervisor.config.cache.s3.region | quote }}
+{{- end }}
+    fleet:
+      namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
+      min_replicas_per_version: {{ .Values.supervisor.config.fleet.minReplicasPerVersion }}
+      max_replicas_per_version: {{ .Values.supervisor.config.fleet.maxReplicasPerVersion }}
+      max_sessions_per_replica: {{ .Values.supervisor.config.fleet.maxSessionsPerReplica }}
+      replica_idle_ttl: {{ .Values.supervisor.config.fleet.replicaIdleTtl | quote }}
+      version_retention: {{ .Values.supervisor.config.fleet.versionRetention | quote }}
+    ca:
+      minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
+      client_cert_ttl: {{ .Values.supervisor.config.ca.clientCertTtl | quote }}
+    tls:
+      server_cert_secret: {{ include "dagger-kubernetes.fullname" . }}-tls
+    lease_ttl: {{ .Values.supervisor.config.leaseTtl | quote }}
+    version:
+      floor: {{ .Values.supervisor.config.version.floor | quote }}
+      allowlist:
+{{ toYaml .Values.supervisor.config.version.allowlist | indent 8 }}
+    ui:
+      enabled: true
+      spa_dir: "/opt/dagger-kubernetes/ui"
+    log_level: {{ .Values.supervisor.config.logLevel | quote }}
+{{- with .Values.supervisor.config.otel }}
+    otel:
+      otlp_endpoint: {{ .otlpEndpoint | quote }}
+{{- end }}

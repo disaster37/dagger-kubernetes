@@ -1,0 +1,104 @@
+# ===========================================================================
+# dagger-kubernetes Supervisor — full configuration reference.
+# Copy this file to config.app.yaml and edit the values you need; any key
+# omitted here falls back to the compiled-in defaults in
+# internal/config/config.go.
+#
+# Every value can also be set via an environment variable using the
+# DAGGER_CACHE_ prefix (dots -> underscores, uppercase). Examples:
+#   server.public_url        -> DAGGER_CACHE_SERVER_PUBLIC_URL
+#   cache.registry           -> DAGGER_CACHE_CACHE_REGISTRY
+#   fleet.max_replicas_per_version -> DAGGER_CACHE_FLEET_MAX_REPLICAS_PER_VERSION
+# Environment variables take precedence over this file.
+# ===========================================================================
+
+# --- Endpoints & public URLs ------------------------------------------------
+server:
+  control_addr: ":8080"        # Address the Hertz HTTPS control API listens on.
+  data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
+  data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
+  public_url: "https://supv.example.com"  # Public base URL of the control plane.
+  ui_url: "https://ui.supv.example.com"   # Public base URL of the pipeline UI.
+
+# --- Authentication ----------------------------------------------------------
+auth:
+  # Static bearer-token auth. Tokens live one per line in tokens_file.
+  internal:
+    enabled: true
+    tokens_file: "/etc/dagger-kubernetes/tokens"
+
+  # Optional OAuth (e.g. GitHub) for human/UI login.
+  oauth:
+    enabled: false
+    provider: "github"                 # "github" (extensible).
+    client_id: "${OAUTH_CLIENT_ID}"    # set via env, do not commit secrets.
+    client_secret: "${OAUTH_CLIENT_SECRET}"
+    redirect_url: "https://ui.supv.example.com/auth/callback"
+    allowed_orgs: ["acme"]             # users must belong to one of these orgs.
+
+# --- Telemetry backend endpoints --------------------------------------------
+# Used by the Supervisor to query traces/logs/metrics for the UI and to
+# forward Dagger CLI OTLP when DAGGER_CACHE_OTEL_OTLP_ENDPOINT is empty.
+telemetry:
+  collector_url: "http://otel-collector:4318"   # OTLP/HTTP collector.
+  tempo_url: "http://tempo:3200"                # Tempo traces API.
+  loki_url: "http://loki:3100"                  # Loki logs API.
+  prometheus_url: "http://prometheus:9090"      # Prometheus metrics API.
+
+# --- Remote shared cache -----------------------------------------------------
+cache:
+  backend: "registry"               # "registry" (OCI) or "s3".
+  registry: "cache.reg/dagger-cache" # OCI repository for BuildKit cache blobs.
+  s3:                                # used only when backend == "s3".
+    bucket: ""
+    region: ""
+  ref_per_version: true              # tag cache refs per engine version (V<major>-<minor>-<patch>).
+
+# --- Engine fleet (Kubernetes) ----------------------------------------------
+fleet:
+  namespace: "dagger-kubernetes"                # namespace engines run in.
+  min_replicas_per_version: 0              # floor for the per-version autoscaler.
+  max_replicas_per_version: 3              # ceiling for the per-version autoscaler.
+  max_sessions_per_replica: 8              # sessions pinned to one engine pod.
+  replica_idle_ttl: "5m"                    # idle pod TTL before scale-down.
+  version_retention: "24h"                 # how long a version's StatefulSet lingers with 0 replicas.
+
+# --- Certificate authority (client mTLS) -------------------------------------
+ca:
+  minting_ca_secret: "supervisor-minting-ca"  # K8s Secret holding the minting CA.
+  client_cert_ttl: "2h"                        # TTL of client certs minted at lease grant.
+
+# --- TLS ---------------------------------------------------------------------
+tls:
+  server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key for the data plane.
+
+# --- Lease -------------------------------------------------------------------
+lease_ttl: "2m"   # TTL of a client's engine lease; renew before this expires.
+
+# --- Allowed Dagger engine versions ------------------------------------------
+version:
+  floor: "v0.19.0"                          # minimum engine version admitted.
+  allowlist: ["0.19", "0.20", "0.21"]       # major.minor prefixes admitted (empty = admit all >= floor).
+
+# --- CI integration feature flags -------------------------------------------
+# These toggle optional niceties; safe to leave at defaults.
+ci:
+  github:
+    job_summary: true      # post a $GITHUB_STEP_SUMMARY with the trace link.
+    check_runs: true      # create Check Runs annotated with cache stats.
+  jenkins:
+    dynamic_stages: true   # split Dagger steps into Jenkins stages.
+  drone:
+    config_extension: true # enable the .drone.yml config extension.
+
+# --- Pipeline UI -------------------------------------------------------------
+ui:
+  enabled: true                  # serve the SPA from the control plane.
+  spa_dir: "/opt/dagger-kubernetes/ui"  # path to the built SPA assets.
+
+# --- Logging -----------------------------------------------------------------
+log_level: "info"   # debug | info | warn | error
+
+# --- Outgoing OTLP -----------------------------------------------------------
+otel:
+  otlp_endpoint: ""  # if set, the Supervisor exports its own OTLP here; empty disables.

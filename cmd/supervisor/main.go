@@ -11,14 +11,14 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/disaster/dagger-cache/internal/api"
-	"github.com/disaster/dagger-cache/internal/ca"
-	"github.com/disaster/dagger-cache/internal/cache"
-	"github.com/disaster/dagger-cache/internal/config"
-	"github.com/disaster/dagger-cache/internal/fleet"
-	"github.com/disaster/dagger-cache/internal/observ"
-	"github.com/disaster/dagger-cache/internal/session"
-	"github.com/disaster/dagger-cache/internal/version"
+	"github.com/disaster/dagger-kubernetes/internal/api"
+	"github.com/disaster/dagger-kubernetes/internal/ca"
+	"github.com/disaster/dagger-kubernetes/internal/cache"
+	"github.com/disaster/dagger-kubernetes/internal/config"
+	"github.com/disaster/dagger-kubernetes/internal/fleet"
+	"github.com/disaster/dagger-kubernetes/internal/observ"
+	"github.com/disaster/dagger-kubernetes/internal/session"
+	"github.com/disaster/dagger-kubernetes/internal/version"
 )
 
 func main() {
@@ -36,7 +36,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "failed to init logger: %v\n", err)
 		os.Exit(1)
 	}
-	defer logger.Sync()
+	defer func() { _ = logger.Sync() }()
 
 	logger.Info("dagger-cache supervisor starting",
 		zap.String("control_addr", cfg.Server.ControlAddr),
