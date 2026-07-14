@@ -1,0 +1,109 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dagger-cache
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: supervisor
+  namespace: dagger-cache
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: supervisor-role
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "pods", "pods/exec", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: supervisor-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: supervisor-role
+subjects:
+  - kind: ServiceAccount
+    name: supervisor
+    namespace: dagger-cache
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: supervisor-minting-ca
+  namespace: dagger-cache
+type: Opaque
+data:
+  ca.crt: ""
+  ca.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: supervisor-tls
+  namespace: dagger-cache
+type: kubernetes.io/tls
+data:
+  tls.crt: ""
+  tls.key: ""
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: engine-registry-auth
+  namespace: dagger-cache
+type: kubernetes.io/dockerconfigjson
+data:
+  .dockerconfigjson: ""
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: supervisor-config
+  namespace: dagger-cache
+data:
+  config.app.yaml: |
+    server:
+      control_addr: ":8080"
+      data_addr: ":8443"
+      data_hostname: "data.supv.example.com"
+      public_url: "https://supv.example.com"
+      ui_url: "https://ui.supv.example.com"
+    auth:
+      internal:
+        enabled: true
+        tokens_file: "/etc/dagger-cache/tokens"
+    telemetry:
+      collector_url: "http://otel-collector:4318"
+      tempo_url: "http://tempo:3200"
+      loki_url: "http://loki:3100"
+      prometheus_url: "http://prometheus:9090"
+    cache:
+      backend: "registry"
+      registry: "cache.reg/dagger-cache"
+      ref_per_version: true
+    fleet:
+      namespace: "dagger-cache"
+      max_replicas_per_version: 3
+      max_sessions_per_replica: 8
+      replica_idle_ttl: "5m"
+      version_retention: "24h"
+    ca:
+      minting_ca_secret: "supervisor-minting-ca"
+      client_cert_ttl: "2h"
+    tls:
+      server_cert_secret: "supervisor-tls"
+    version:
+      floor: "v0.19.0"
+      allowlist: ["0.19","0.20","0.21"]
+    log_level: "info"

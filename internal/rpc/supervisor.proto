@@ -1,0 +1,61 @@
+syntax = "proto3";
+
+package supervisor;
+
+option go_package = "github.com/disaster/dagger-cache/internal/rpc";
+
+service Supervisor {
+  rpc AcquireEngine(AcquireEngineRequest) returns (AcquireEngineResponse);
+  rpc ReleaseEngine(ReleaseEngineRequest) returns (ReleaseEngineResponse);
+  rpc GetFleetStatus(GetFleetStatusRequest) returns (GetFleetStatusResponse);
+  rpc PurgeCache(PurgeCacheRequest) returns (PurgeCacheResponse);
+}
+
+message AcquireEngineRequest {
+  string token = 1;
+  string version = 2;
+  string image = 3;
+  string trace_id = 4;
+  string client_id = 5;
+}
+
+message AcquireEngineResponse {
+  string instance_id = 1;
+  string pod_name = 2;
+  string pod_ip = 3;
+  string cert_fingerprint = 4;
+  bytes certificate_chain = 5;
+  bytes private_key = 6;
+}
+
+message ReleaseEngineRequest {
+  string cert_fingerprint = 1;
+}
+
+message ReleaseEngineResponse {
+  bool success = 1;
+}
+
+message GetFleetStatusRequest {
+  string version = 1;
+}
+
+message GetFleetStatusResponse {
+  repeated ReplicaInfo replicas = 1;
+}
+
+message ReplicaInfo {
+  string name = 1;
+  int32 ordinal = 2;
+  string pod_ip = 3;
+  bool ready = 4;
+  int32 pinned_sessions = 5;
+}
+
+message PurgeCacheRequest {
+  string version = 1;
+}
+
+message PurgeCacheResponse {
+  bool success = 1;
+}

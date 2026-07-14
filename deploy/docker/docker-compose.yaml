@@ -1,0 +1,90 @@
+version: "3.9"
+
+services:
+  supervisor:
+    build:
+      context: ../..
+      dockerfile: deploy/docker/Dockerfile
+    ports:
+      - "8080:8080"
+      - "8443:8443"
+    environment:
+      - DAGGER_CACHE_PROVIDER=docker
+      - DAGGER_CACHE_CONTROL_ADDR=:8080
+      - DAGGER_CACHE_DATA_ADDR=:8443
+      - DAGGER_CACHE_DATA_HOSTNAME=localhost
+      - DAGGER_CACHE_UI_URL=http://localhost:5173
+      - DAGGER_CACHE_COLLECTOR_URL=http://otel-collector:4318
+      - DAGGER_CACHE_TEMPO_URL=http://tempo:3200
+      - DAGGER_CACHE_LOKI_URL=http://loki:3100
+      - DAGGER_CACHE_PROMETHEUS_URL=http://prometheus:9090
+      - DAGGER_CACHE_CACHE_BACKEND=registry
+      - DAGGER_CACHE_CACHE_REGISTRY=localhost:5000/dagger-cache
+      - DAGGER_CACHE_LOG_LEVEL=debug
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - cache-registry
+    networks:
+      - dagger-cache
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:latest
+    ports:
+      - "4318:4318"
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otel/config.yaml
+    networks:
+      - dagger-cache
+
+  tempo:
+    image: grafana/tempo:latest
+    command: ["-config.file=/etc/tempo.yaml"]
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./tempo.yaml:/etc/tempo.yaml
+    networks:
+      - dagger-cache
+
+  loki:
+    image: grafana/loki:latest
+    ports:
+      - "3100:3100"
+    networks:
+      - dagger-cache
+
+  prometheus:
+    image: prom/prometheus:latest
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yaml:/etc/prometheus/prometheus.yml
+    networks:
+      - dagger-cache
+
+  grafana:
+    image: grafana/grafana:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_AUTH_ANONYMOUS_ENABLED=true
+    networks:
+      - dagger-cache
+
+  cache-registry:
+    image: registry:2
+    ports:
+      - "5000:5000"
+    environment:
+      - REGISTRY_STORAGE_DELETE_ENABLED=true
+    volumes:
+      - registry-data:/var/lib/registry
+    networks:
+      - dagger-cache
+
+networks:
+  dagger-cache:
+
+volumes:
+  registry-data:

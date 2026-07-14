@@ -1,0 +1,57 @@
+server:
+  control_addr: ":8080"
+  data_addr: ":8443"
+  data_hostname: "data.supv.example.com"
+  public_url: "https://supv.example.com"
+  ui_url: "https://ui.supv.example.com"
+auth:
+  internal:
+    enabled: true
+    tokens_file: "/etc/dagger-cache/tokens"
+  oauth:
+    enabled: false
+    provider: "github"
+    client_id: "${OAUTH_CLIENT_ID}"
+    client_secret: "${OAUTH_CLIENT_SECRET}"
+    redirect_url: "https://ui.supv.example.com/auth/callback"
+    allowed_orgs: ["acme"]
+telemetry:
+  collector_url: "http://otel-collector:4318"
+  tempo_url: "http://tempo:3200"
+  loki_url: "http://loki:3100"
+  prometheus_url: "http://prometheus:9090"
+cache:
+  backend: "registry"
+  registry: "cache.reg/dagger-cache"
+  s3: { bucket: "", region: "" }
+  ref_per_version: true
+fleet:
+  namespace: "dagger-cache"
+  max_replicas_per_version: 3
+  max_sessions_per_replica: 8
+  replica_idle_ttl: "5m"
+  version_retention: "24h"
+  min_replicas_per_version: 0
+ca:
+  minting_ca_secret: "supervisor-minting-ca"
+  client_cert_ttl: "2h"
+tls:
+  server_cert_secret: "supervisor-tls"
+lease_ttl: "2m"
+version:
+  floor: "v0.19.0"
+  allowlist: ["0.19","0.20","0.21"]
+ci:
+  github:
+    job_summary: true
+    check_runs: true
+  jenkins:
+    dynamic_stages: true
+  drone:
+    config_extension: true
+ui:
+  enabled: true
+  spa_dir: "/opt/dagger-cache/ui"
+log_level: "info"
+otel:
+  otlp_endpoint: ""

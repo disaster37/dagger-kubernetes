@@ -1,0 +1,110 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: supervisor
+  namespace: dagger-cache
+  labels:
+    app: supervisor
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: supervisor
+  template:
+    metadata:
+      labels:
+        app: supervisor
+    spec:
+      serviceAccountName: supervisor
+      containers:
+        - name: supervisor
+          image: dagger-cache/supervisor:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: control
+              containerPort: 8080
+            - name: data
+              containerPort: 8443
+          args:
+            - "--config=/etc/dagger-cache/config.app.yaml"
+          env:
+            - name: DAGGER_CACHE_LOG_LEVEL
+              value: "info"
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dagger-cache
+              readOnly: true
+            - name: tls
+              mountPath: /etc/dagger-cache/tls
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: control
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: control
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: config
+          configMap:
+            name: supervisor-config
+        - name: tls
+          secret:
+            secretName: supervisor-tls
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: supervisor-control
+  namespace: dagger-cache
+spec:
+  selector:
+    app: supervisor
+  ports:
+    - name: http
+      port: 80
+      targetPort: control
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: supervisor-data
+  namespace: dagger-cache
+spec:
+  selector:
+    app: supervisor
+  type: LoadBalancer
+  ports:
+    - name: tls
+      port: 443
+      targetPort: data
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: supervisor-ingress
+  namespace: dagger-cache
+spec:
+  rules:
+    - host: supv.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: supervisor-control
+                port:
+                  number: 80
