@@ -9,15 +9,14 @@ services:
       - "8080:8080"
       - "8443:8443"
     environment:
-      - DAGGER_CACHE_PROVIDER=docker
-      - DAGGER_CACHE_CONTROL_ADDR=:8080
-      - DAGGER_CACHE_DATA_ADDR=:8443
-      - DAGGER_CACHE_DATA_HOSTNAME=localhost
-      - DAGGER_CACHE_UI_URL=http://localhost:5173
-      - DAGGER_CACHE_COLLECTOR_URL=http://otel-collector:4318
-      - DAGGER_CACHE_TEMPO_URL=http://tempo:3200
-      - DAGGER_CACHE_LOKI_URL=http://loki:3100
-      - DAGGER_CACHE_PROMETHEUS_URL=http://prometheus:9090
+      - DAGGER_CACHE_SERVER_CONTROL_ADDR=:8080
+      - DAGGER_CACHE_SERVER_DATA_ADDR=:8443
+      - DAGGER_CACHE_SERVER_DATA_HOSTNAME=localhost
+      - DAGGER_CACHE_SERVER_PUBLIC_URL=http://localhost:8080
+      - DAGGER_CACHE_TELEMETRY_COLLECTOR_URL=http://otel-collector:4318
+      - DAGGER_CACHE_TELEMETRY_TEMPO_URL=http://tempo:3200
+      - DAGGER_CACHE_TELEMETRY_LOKI_URL=http://loki:3100
+      - DAGGER_CACHE_TELEMETRY_VICTORIA_URL=http://victoria:8428
       - DAGGER_CACHE_CACHE_BACKEND=registry
       - DAGGER_CACHE_CACHE_REGISTRY=localhost:5000/dagger-cache
       - DAGGER_CACHE_LOG_LEVEL=debug
@@ -54,12 +53,15 @@ services:
     networks:
       - dagger-cache
 
-  prometheus:
-    image: prom/prometheus:latest
+  victoria:
+    image: victoriametrics/victoria-metrics:latest
     ports:
-      - "9090:9090"
+      - "8428:8428"
     volumes:
-      - ./prometheus.yaml:/etc/prometheus/prometheus.yml
+      - victoria-data:/victoria-metrics-data
+    command:
+      - -storageDataPath=/victoria-metrics-data
+      - -retentionPeriod=30d
     networks:
       - dagger-cache
 
@@ -88,3 +90,4 @@ networks:
 
 volumes:
   registry-data:
+  victoria-data:

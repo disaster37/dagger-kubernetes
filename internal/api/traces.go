@@ -1,111 +1,87 @@
 package api
 
 import (
-	"net/http"
-	"strings"
+	"context"
 
-	"github.com/gorilla/websocket"
-	"go.uber.org/zap"
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/disaster/dagger-kubernetes/internal/telemetry"
 )
 
-var upgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
-
-func (s *Server) handleTracesRoutes(w http.ResponseWriter, r *http.Request) {
-	path := r.URL.Path
-
-	if strings.HasSuffix(path, "/live") {
-		s.handleTracesLive(w, r)
+func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
+	if _, err := s.tokenValidator.ValidateRequest(c); err != nil {
+		writeError(c, consts.StatusUnauthorized, "unauthorized")
 		return
 	}
-	if strings.HasSuffix(path, "/logs") {
-		s.handleTracesLogs(w, r)
-		return
-	}
-	if path == "/api/v1/traces" || path == "/api/v1/traces/" {
-		s.handleTracesList(w, r)
-		return
-	}
-	s.handleTracesDetail(w, r)
-}
 
-func (s *Server) handleTracesList(w http.ResponseWriter, _ *http.Request) {
 	traces := []map[string]string{
 		{"trace_id": "example-1", "status": "success", "version": "v0.21.4"},
 	}
-	writeJSON(w, traces)
+	writeJSON(c, traces)
 }
 
-func (s *Server) handleTracesDetail(w http.ResponseWriter, r *http.Request) {
-	traceID := extractTraceID(r.URL.Path)
+func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
+	if _, err := s.tokenValidator.ValidateRequest(c); err != nil {
+		writeError(c, consts.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	traceID := c.Param("traceID")
 	if traceID == "" {
-		writeError(w, http.StatusBadRequest, "missing trace ID")
+		writeError(c, consts.StatusBadRequest, "missing trace ID")
 		return
 	}
 
 	reconstructor := telemetry.NewSpanTreeReconstructor(s.cfg.TempoURL)
 	trace, err := reconstructor.GetTrace(traceID)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "trace not found")
+		writeError(c, consts.StatusNotFound, "trace not found")
 		return
 	}
 
-	writeJSON(w, trace)
+	writeJSON(c, trace)
 }
 
-func (s *Server) handleTracesLogs(w http.ResponseWriter, r *http.Request) {
-	traceID := extractTraceID(strings.TrimSuffix(r.URL.Path, "/logs"))
-	if traceID == "" {
-		writeError(w, http.StatusBadRequest, "missing trace ID")
+func (s *Server) handleTracesLogs(_ context.Context, c *app.RequestContext) {
+	if _, err := s.tokenValidator.ValidateRequest(c); err != nil {
+		writeError(c, consts.StatusUnauthorized, "unauthorized")
 		return
 	}
-	writeJSON(w, map[string]string{
-		"trace_id": traceID,
-		"logs":     "",
-	})
+
+	traceID := c.Param("traceID")
+	if traceID == "" {
+		writeError(c, consts.StatusBadRequest, "missing trace ID")
+		return
+	}
+
+	s.queryAndWriteTraceLogs(traceID, c)
 }
 
-func (s *Server) handleTracesLive(w http.ResponseWriter, r *http.Request) {
-	traceID := extractTraceID(strings.TrimSuffix(r.URL.Path, "/live"))
+// handleTracesLive streams live span updates for a trace over Server-Sent
+// Events using Hertz's native SSE writer.
+func (s *Server) handleTracesLive(ctx context.Context, c *app.RequestContext) {
+	if _, err := s.tokenValidator.ValidateRequest(c); err != nil {
+		writeError(c, consts.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	traceID := c.Param("traceID")
 	if traceID == "" {
-		writeError(w, http.StatusBadRequest, "missing trace ID")
+		writeError(c, consts.StatusBadRequest, "missing trace ID")
 		return
 	}
 
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		s.logger.Error("websocket upgrade failed", zap.Error(err))
-		return
-	}
+	c.SetStatusCode(consts.StatusOK)
+	c.Response.Header.Set("Content-Type", "text/event-stream")
+	c.Response.Header.Set("Cache-Control", "no-cache")
+	c.Response.Header.Set("Connection", "keep-alive")
 
-	client := &telemetry.LiveClient{
-		Conn:    conn,
-		TraceID: traceID,
-		Send:    make(chan []byte, 256),
-	}
+	client := telemetry.NewLiveClient(c, traceID)
 
 	s.liveHub.Subscribe(traceID, client)
 
-	go func() {
-		defer s.liveHub.Unsubscribe(traceID, client)
-		for {
-			_, _, err := conn.ReadMessage()
-			if err != nil {
-				break
-			}
-		}
-	}()
-}
-
-func extractTraceID(path string) string {
-	parts := strings.Split(strings.Trim(path, "/"), "/")
-	for i, p := range parts {
-		if p == "traces" && i+1 < len(parts) {
-			return parts[i+1]
-		}
-	}
-	return ""
+	<-ctx.Done()
+	s.liveHub.Unsubscribe(traceID, client)
+	<-client.Done()
 }

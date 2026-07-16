@@ -78,7 +78,6 @@ data:
       data_addr: ":8443"
       data_hostname: "data.supv.example.com"
       public_url: "https://supv.example.com"
-      ui_url: "https://ui.supv.example.com"
     auth:
       internal:
         enabled: true
@@ -87,7 +86,7 @@ data:
       collector_url: "http://otel-collector:4318"
       tempo_url: "http://tempo:3200"
       loki_url: "http://loki:3100"
-      prometheus_url: "http://prometheus:9090"
+      victoria_url: "http://victoria:8428"
     cache:
       backend: "registry"
       registry: "cache.reg/dagger-cache"

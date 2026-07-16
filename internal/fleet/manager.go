@@ -6,8 +6,9 @@ import (
 	"sort"
 	"time"
 
-	"go.uber.org/zap"
+	"github.com/sirupsen/logrus"
 
+	"github.com/disaster/dagger-kubernetes/internal/observ"
 	"github.com/disaster/dagger-kubernetes/internal/session"
 )
 
@@ -21,12 +22,13 @@ type AcquireResult struct {
 type Manager struct {
 	provider              Provider
 	sessions              *session.Store
+	metrics               *observ.Metrics
 	maxReplicasPerVersion int
 	maxSessionsPerReplica int
 	replicaIdleTTL        time.Duration
 	versionRetention      time.Duration
 	minReplicasPerVersion int
-	logger                *zap.Logger
+	logger                *logrus.Logger
 }
 
 type ManagerConfig struct {
@@ -37,10 +39,11 @@ type ManagerConfig struct {
 	MinReplicasPerVersion int
 }
 
-func NewManager(provider Provider, sessions *session.Store, cfg ManagerConfig, logger *zap.Logger) *Manager {
+func NewManager(provider Provider, sessions *session.Store, cfg ManagerConfig, logger *logrus.Logger, metrics *observ.Metrics) *Manager {
 	return &Manager{
 		provider:              provider,
 		sessions:              sessions,
+		metrics:               metrics,
 		maxReplicasPerVersion: cfg.MaxReplicasPerVersion,
 		maxSessionsPerReplica: cfg.MaxSessionsPerReplica,
 		replicaIdleTTL:        cfg.ReplicaIdleTTL,
@@ -63,6 +66,7 @@ func (m *Manager) Acquire(ctx context.Context, version string) (*AcquireResult, 
 	if err != nil {
 		return nil, fmt.Errorf("get replicas: %w", err)
 	}
+	m.observeReplicas(version, replicas)
 
 	var bestMatch *Replica
 	bestPinned := m.maxSessionsPerReplica + 1
@@ -80,11 +84,11 @@ func (m *Manager) Acquire(ctx context.Context, version string) (*AcquireResult, 
 	}
 
 	if bestMatch != nil {
-		m.logger.Info("acquired existing replica",
-			zap.String("version", version),
-			zap.String("pod", bestMatch.Name),
-			zap.Int("pinned", bestPinned),
-		)
+		m.logger.WithFields(logrus.Fields{
+			"version": version,
+			"pod":     bestMatch.Name,
+			"pinned":  bestPinned,
+		}).Info("acquired existing replica")
 		return &AcquireResult{
 			PodName: bestMatch.Name,
 			PodIP:   bestMatch.PodIP,
@@ -100,7 +104,10 @@ func (m *Manager) Acquire(ctx context.Context, version string) (*AcquireResult, 
 	}
 
 	targetReplicas := currentCount + 1
-	m.logger.Info("scaling up", zap.String("version", version), zap.Int("target", targetReplicas))
+	m.logger.WithFields(logrus.Fields{
+		"version": version,
+		"target":  targetReplicas,
+	}).Info("scaling up")
 
 	if err := m.provider.ScaleUp(version, targetReplicas); err != nil {
 		return nil, fmt.Errorf("scale up: %w", err)
@@ -131,8 +138,9 @@ func (m *Manager) Unpin(certFP string) {
 func (m *Manager) GetVersionFleet(version string) (*FleetInfo, error) {
 	replicas, err := m.provider.GetReplicas(version)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("get replicas: %w", err)
 	}
+	m.observeReplicas(version, replicas)
 
 	info := &FleetInfo{
 		Version:  version,
@@ -159,7 +167,9 @@ func (m *Manager) Sweep(ctx context.Context) error {
 
 	for _, version := range versions {
 		if err := m.sweepVersion(ctx, version); err != nil {
-			m.logger.Error("sweep version error", zap.String("version", version), zap.Error(err))
+			m.logger.WithFields(logrus.Fields{
+				"version": version,
+			}).WithError(err).Error("sweep version error")
 		}
 	}
 	return nil
@@ -168,8 +178,9 @@ func (m *Manager) Sweep(ctx context.Context) error {
 func (m *Manager) sweepVersion(_ context.Context, version string) error {
 	replicas, err := m.provider.GetReplicas(version)
 	if err != nil {
-		return err
+		return fmt.Errorf("get replicas: %w", err)
 	}
+	m.observeReplicas(version, replicas)
 
 	sortDescendingOrdinal(replicas)
 
@@ -182,11 +193,11 @@ func (m *Manager) sweepVersion(_ context.Context, version string) error {
 			continue
 		}
 
-		m.logger.Info("scaling down idle replica",
-			zap.String("version", version),
-			zap.String("pod", r.Name),
-			zap.Duration("idle", idle),
-		)
+		m.logger.WithFields(logrus.Fields{
+			"version": version,
+			"pod":     r.Name,
+			"idle":    idle,
+		}).Info("scaling down idle replica")
 
 		if err := m.provider.ScaleDown(version, r.Ordinal); err != nil {
 			return fmt.Errorf("scale down %s: %w", r.Name, err)
@@ -215,8 +226,9 @@ func sortDescendingOrdinal(replicas []Replica) {
 func (m *Manager) ScaleToZero(version string) error {
 	replicas, err := m.provider.GetReplicas(version)
 	if err != nil {
-		return err
+		return fmt.Errorf("get replicas: %w", err)
 	}
+	m.observeReplicas(version, replicas)
 
 	sortDescendingOrdinal(replicas)
 
@@ -225,7 +237,7 @@ func (m *Manager) ScaleToZero(version string) error {
 			continue
 		}
 		if err := m.provider.ScaleDown(version, r.Ordinal); err != nil {
-			return err
+			return fmt.Errorf("scale down %s: %w", r.Name, err)
 		}
 	}
 	return nil
@@ -234,17 +246,28 @@ func (m *Manager) ScaleToZero(version string) error {
 func (m *Manager) AllFleetInfo() ([]FleetInfo, error) {
 	versions, err := m.provider.AllVersions()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("all versions: %w", err)
 	}
 
 	var infos []FleetInfo
 	for _, v := range versions {
 		info, err := m.GetVersionFleet(v)
 		if err != nil {
-			m.logger.Error("get version fleet", zap.String("version", v), zap.Error(err))
+			m.logger.WithFields(logrus.Fields{
+				"version": v,
+			}).WithError(err).Error("get version fleet")
 			continue
 		}
 		infos = append(infos, *info)
 	}
 	return infos, nil
+}
+
+// observeReplicas publishes the per-version replica count. It is safe to call
+// when no Metrics were injected.
+func (m *Manager) observeReplicas(version string, replicas []Replica) {
+	if m.metrics == nil {
+		return
+	}
+	m.metrics.ActiveReplicas.WithLabelValues(version).Set(float64(len(replicas)))
 }

@@ -95,7 +95,7 @@ func (p *StubProvider) ScaleUp(version string, targetReplicas int) error {
 	for len(sts.replicasM) < targetReplicas {
 		ordinal := len(sts.replicasM)
 		podName := fmt.Sprintf("dagger-engine-%s-%d", version, ordinal)
-		ip := fmt.Sprintf("10.0.0.%d", sts.nextIP+1)
+		ip := fmt.Sprintf("10.0.0.%d", (sts.nextIP%254)+1)
 		sts.nextIP++
 
 		sts.replicasM[podName] = &Replica{

@@ -2,7 +2,9 @@ package telemetry
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 )
@@ -36,6 +38,8 @@ type TraceInfo struct {
 	CIRepo     string        `json:"ci_repo,omitempty"`
 }
 
+var hexTraceID = regexp.MustCompile(`^[a-fA-F0-9]{16,}$`)
+
 type SpanTreeReconstructor struct {
 	tempoURL   string
 	httpClient *http.Client
@@ -51,15 +55,18 @@ func NewSpanTreeReconstructor(tempoURL string) *SpanTreeReconstructor {
 }
 
 func (r *SpanTreeReconstructor) GetTrace(traceID string) (*TraceInfo, error) {
-	resp, err := r.httpClient.Get(r.tempoURL + "/api/traces/" + traceID)
+	if !hexTraceID.MatchString(traceID) {
+		return nil, fmt.Errorf("invalid trace ID format")
+	}
+	resp, err := r.httpClient.Get(fmt.Sprintf("%s/api/traces/%s", r.tempoURL, traceID))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("query tempo trace: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	var raw map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("decode tempo response: %w", err)
 	}
 
 	return r.reconstruct(traceID, raw), nil

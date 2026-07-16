@@ -87,7 +87,7 @@ func (r *Resolver) IsAllowed(v *Version) bool {
 func (r *Resolver) ResolveMinimal(raw string) (*Version, error) {
 	v, err := Parse(raw)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse version: %w", err)
 	}
 	if v.Patch != 0 {
 		return v, nil

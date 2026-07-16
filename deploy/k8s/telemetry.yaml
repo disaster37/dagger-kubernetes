@@ -66,7 +66,7 @@ data:
       loki:
         endpoint: "http://loki:3100/loki/api/v1/push"
       prometheusremotewrite:
-        endpoint: "http://prometheus:9090/prometheus/api/v1/write"
+        endpoint: "http://victoria:8428/api/v1/write"
     service:
       pipelines:
         traces:
@@ -81,3 +81,61 @@ data:
           receivers: [otlp]
           processors: [batch]
           exporters: [prometheusremotewrite]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: victoria
+  namespace: dagger-cache
+  labels:
+    app: victoria
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: victoria
+  template:
+    metadata:
+      labels:
+        app: victoria
+    spec:
+      containers:
+        - name: victoria-metrics
+          image: victoriametrics/victoria-metrics:latest
+          args:
+            - -storageDataPath=/storage
+            - -retentionPeriod=30d
+          ports:
+            - name: http
+              containerPort: 8428
+          volumeMounts:
+            - name: storage
+              mountPath: /storage
+      volumes:
+        - name: storage
+          persistentVolumeClaim:
+            claimName: victoria-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: victoria
+  namespace: dagger-cache
+spec:
+  selector:
+    app: victoria
+  ports:
+    - name: http
+      port: 8428
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: victoria-pvc
+  namespace: dagger-cache
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 20Gi

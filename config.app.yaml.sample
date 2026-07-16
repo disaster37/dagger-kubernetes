@@ -17,15 +17,14 @@ server:
   control_addr: ":8080"        # Address the Hertz HTTPS control API listens on.
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
-  public_url: "https://supv.example.com"  # Public base URL of the control plane.
-  ui_url: "https://ui.supv.example.com"   # Public base URL of the pipeline UI.
+  public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI).
 
 # --- Authentication ----------------------------------------------------------
 auth:
   # Static bearer-token auth. Tokens live one per line in tokens_file.
   internal:
     enabled: true
-    tokens_file: "/etc/dagger-kubernetes/tokens"
+    tokens_file: "/etc/dagger-cache/tokens"
 
   # Optional OAuth (e.g. GitHub) for human/UI login.
   oauth:
@@ -33,7 +32,7 @@ auth:
     provider: "github"                 # "github" (extensible).
     client_id: "${OAUTH_CLIENT_ID}"    # set via env, do not commit secrets.
     client_secret: "${OAUTH_CLIENT_SECRET}"
-    redirect_url: "https://ui.supv.example.com/auth/callback"
+    redirect_url: "https://supv.example.com/auth/callback"
     allowed_orgs: ["acme"]             # users must belong to one of these orgs.
 
 # --- Telemetry backend endpoints --------------------------------------------
@@ -43,12 +42,14 @@ telemetry:
   collector_url: "http://otel-collector:4318"   # OTLP/HTTP collector.
   tempo_url: "http://tempo:3200"                # Tempo traces API.
   loki_url: "http://loki:3100"                  # Loki logs API.
-  prometheus_url: "http://prometheus:9090"      # Prometheus metrics API.
+  victoria_url: "http://victoria:8428"           # VictoriaMetrics API (PromQL-compatible).
 
 # --- Remote shared cache -----------------------------------------------------
 cache:
   backend: "registry"               # "registry" (OCI) or "s3".
   registry: "cache.reg/dagger-cache" # OCI repository for BuildKit cache blobs.
+  public_host: ""                   # public vhost for cache (engines push/pull through Supervisor).
+  internal_addr: ""                 # internal address:port of the OCI registry (e.g. localhost:5000).
   s3:                                # used only when backend == "s3".
     bucket: ""
     region: ""
@@ -56,7 +57,7 @@ cache:
 
 # --- Engine fleet (Kubernetes) ----------------------------------------------
 fleet:
-  namespace: "dagger-kubernetes"                # namespace engines run in.
+  namespace: "dagger-cache"                # namespace engines run in.
   min_replicas_per_version: 0              # floor for the per-version autoscaler.
   max_replicas_per_version: 3              # ceiling for the per-version autoscaler.
   max_sessions_per_replica: 8              # sessions pinned to one engine pod.
@@ -70,7 +71,9 @@ ca:
 
 # --- TLS ---------------------------------------------------------------------
 tls:
-  server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key for the data plane.
+  provider: "embedded"              # "embedded" (goca, default) | "cert-manager" | "external".
+  server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key for cert-manager/external.
+  ca_path: "/var/lib/dagger-cache/ca"   # path to persist the embedded CA (Docker bind-mount or PVC).
 
 # --- Lease -------------------------------------------------------------------
 lease_ttl: "2m"   # TTL of a client's engine lease; renew before this expires.
@@ -90,11 +93,6 @@ ci:
     dynamic_stages: true   # split Dagger steps into Jenkins stages.
   drone:
     config_extension: true # enable the .drone.yml config extension.
-
-# --- Pipeline UI -------------------------------------------------------------
-ui:
-  enabled: true                  # serve the SPA from the control plane.
-  spa_dir: "/opt/dagger-kubernetes/ui"  # path to the built SPA assets.
 
 # --- Logging -----------------------------------------------------------------
 log_level: "info"   # debug | info | warn | error

@@ -5,13 +5,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
+	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol/sse"
 )
 
+// LiveClient is a single SSE subscriber for a trace. The SSE writer is owned by
+// the HTTP handler that created it; writePump pushes events to it and signals
+// done when it exits so the handler can finalize the response.
 type LiveClient struct {
-	Conn    *websocket.Conn
+	writer  *sse.Writer
 	TraceID string
 	Send    chan []byte
+	done    chan struct{}
 }
 
 type LiveHub struct {
@@ -78,23 +83,21 @@ func (h *LiveHub) writePump(client *LiveClient) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer func() {
 		ticker.Stop()
-		_ = client.Conn.Close()
+		_ = client.writer.Close()
+		close(client.done)
 	}()
 
 	for {
 		select {
 		case message, ok := <-client.Send:
 			if !ok {
-				_ = client.Conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
-			_ = client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := client.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
+			if err := client.writer.WriteEvent("", "message", message); err != nil {
 				return
 			}
 		case <-ticker.C:
-			_ = client.Conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-			if err := client.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			if err := client.writer.WriteKeepAlive(); err != nil {
 				return
 			}
 		}
@@ -105,4 +108,22 @@ func (h *LiveHub) ClientCount(traceID string) int {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 	return len(h.clients[traceID])
+}
+
+// NewLiveClient constructs a LiveClient bound to a fresh SSE writer for the
+// given request context. The HTTP handler must have set the SSE response
+// headers beforehand. Done is closed when writePump exits so the handler can
+// finalize the response cleanly.
+func NewLiveClient(c *app.RequestContext, traceID string) *LiveClient {
+	return &LiveClient{
+		writer:  sse.NewWriter(c),
+		TraceID: traceID,
+		Send:    make(chan []byte, 256),
+		done:    make(chan struct{}),
+	}
+}
+
+// Done returns a channel that is closed when the client's writePump exits.
+func (c *LiveClient) Done() <-chan struct{} {
+	return c.done
 }

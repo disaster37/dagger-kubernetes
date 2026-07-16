@@ -14,6 +14,11 @@ import (
 	"time"
 )
 
+type Provider interface {
+	MintingCA() (*MintingCA, error)
+	ServerTLSCert() (tls.Certificate, error)
+}
+
 type SerializableCertificate struct {
 	CertificateChain [][]byte `json:"certificate_chain"` // DER-encoded
 	PrivateKey       []byte   `json:"private_key"`       // PKCS8 DER
@@ -68,7 +73,7 @@ func NewMintingCA(clientCertTTL time.Duration) (*MintingCA, error) {
 func NewMintingCAFromPEM(certPEM, keyPEM []byte, clientCertTTL time.Duration) (*MintingCA, error) {
 	certBlock, _ := pem.Decode(certPEM)
 	if certBlock == nil {
-		return nil, fmt.Errorf("failed to decode CA cert PEM")
+		return nil, fmt.Errorf("decode CA cert PEM: no PEM block found")
 	}
 
 	cert, err := x509.ParseCertificate(certBlock.Bytes)
@@ -78,7 +83,7 @@ func NewMintingCAFromPEM(certPEM, keyPEM []byte, clientCertTTL time.Duration) (*
 
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
-		return nil, fmt.Errorf("failed to decode CA key PEM")
+		return nil, fmt.Errorf("decode CA key PEM: no PEM block found")
 	}
 
 	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)

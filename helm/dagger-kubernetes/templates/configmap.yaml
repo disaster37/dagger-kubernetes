@@ -12,11 +12,10 @@ data:
       data_addr: ":8443"
       data_hostname: {{ .Values.supervisor.config.server.dataHostname | quote }}
       public_url: {{ .Values.supervisor.config.server.publicUrl | quote }}
-      ui_url: {{ .Values.supervisor.config.server.uiUrl | quote }}
     auth:
       internal:
         enabled: true
-        tokens_file: "/etc/dagger-kubernetes/tokens"
+        tokens_file: "/etc/dagger-cache/tokens"
       oauth:
         enabled: {{ .Values.supervisor.config.auth.oauth.enabled }}
 {{- with .Values.supervisor.config.auth.oauth }}
@@ -31,7 +30,7 @@ data:
       collector_url: {{ include "dagger-kubernetes.collectorUrl" . | quote }}
       tempo_url: {{ .Values.supervisor.config.telemetry.tempoUrl | quote }}
       loki_url: {{ .Values.supervisor.config.telemetry.lokiUrl | quote }}
-      prometheus_url: {{ .Values.supervisor.config.telemetry.prometheusUrl | quote }}
+      victoria_url: {{ .Values.supervisor.config.telemetry.victoriaUrl | quote }}
     cache:
       backend: {{ .Values.supervisor.config.cache.backend | quote }}
       registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}
@@ -58,9 +57,6 @@ data:
       floor: {{ .Values.supervisor.config.version.floor | quote }}
       allowlist:
 {{ toYaml .Values.supervisor.config.version.allowlist | indent 8 }}
-    ui:
-      enabled: true
-      spa_dir: "/opt/dagger-kubernetes/ui"
     log_level: {{ .Values.supervisor.config.logLevel | quote }}
 {{- with .Values.supervisor.config.otel }}
     otel:

@@ -16,7 +16,6 @@ server:
   data_addr: ":8443"            # mTLS L4 data-plane proxy
   data_hostname: "data.supv.example.com"
   public_url: "https://supv.example.com"
-  ui_url: "https://ui.supv.example.com"
 
 # --- Authentication ----------------------------------------------------------
 auth:

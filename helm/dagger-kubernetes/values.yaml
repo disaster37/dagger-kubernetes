@@ -24,7 +24,6 @@ supervisor:
     server:
       dataHostname: "data.supv.example.com"
       publicUrl: "https://supv.example.com"
-      uiUrl: "https://ui.supv.example.com"
     auth:
       oauth:
         enabled: false
@@ -38,7 +37,7 @@ supervisor:
       collectorUrl: ""
       tempoUrl: "http://tempo:3200"
       lokiUrl: "http://loki:3100"
-      prometheusUrl: "http://prometheus:9090"
+      victoriaUrl: "http://victoria:8428"
     cache:
       backend: "registry"            # "registry" (OCI) or "s3"
       # registry is derived from the docker-registry dependency when enabled.

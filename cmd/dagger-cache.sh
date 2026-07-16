@@ -2,7 +2,7 @@
 set -euo pipefail
 
 DAGGER_CACHE_SERVER="${DAGGER_CACHE_SERVER:-https://supv.example.com}"
-DAGGER_CACHE_UI="${DAGGER_CACHE_UI:-https://ui.supv.example.com}"
+DAGGER_CACHE_UI="${DAGGER_CACHE_UI:-$DAGGER_CACHE_SERVER}"
 CACHE_REGISTRY="${CACHE_REGISTRY:-cache.reg/dagger-cache}"
 
 if [ -z "${DAGGER_CLOUD_TOKEN:-}" ]; then

@@ -192,7 +192,8 @@ Or skip the env-var juggling and use the wrapper:
 | `config.app.yaml.sample`  | Fully-commented reference. Copy → edit → deploy.   |
 
 The Supervisor's `--config` flag points at the file to load (default
-`/etc/dagger-cache/config.app.yaml` in the container, see
+`config.app.yaml`; in the container this is typically mounted as
+`/etc/dagger-cache/config.app.yaml`, see
 `deploy/k8s/supervisor.yaml`). The `config.app.yaml` shipped here is a
 **minimal** example: it only lists deployment-specific values; every other
 option falls back to the compiled-in defaults in
@@ -233,14 +234,14 @@ inline comments. The sections below summarise the most important ones.
 | `server`     | `control_addr`              | `:8080`                          | Hertz HTTPS control API.                          |
 |              | `data_addr`                 | `:8443`                          | mTLS L4 data proxy.                               |
 |              | `data_hostname`             | `data.supv.example.com`          | Public data-plane hostname.                       |
-|              | `public_url` / `ui_url`     | `https://supv.example.com`       | Public control/UI URLs.                           |
+|              | `public_url`                | `https://supv.example.com`       | Public control/UI URL.                            |
 | `auth.internal` | `enabled`                | `true`                           | Static bearer-token auth.                         |
 |              | `tokens_file`               | `/etc/dagger-cache/tokens`       | One token per line.                               |
 | `auth.oauth` | `enabled`                   | `false`                          | OAuth (GitHub) for UI login.                      |
 |              | `provider`                  | `github`                         |                                                   |
 |              | `allowed_orgs`              | —                                | Restrict login to members of these orgs.          |
 | `telemetry`  | `collector_url`             | `http://otel-collector:4318`     | OTLP/HTTP.                                         |
-|              | `tempo_url` / `loki_url` / `prometheus_url` | `http://tempo:3200` etc. | Backend query APIs.                               |
+|              | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc. | Backend query APIs.                               |
 | `cache`      | `backend`                   | `registry`                       | `registry` (OCI) or `s3`.                         |
 |              | `registry`                  | `cache.reg/dagger-cache`          | OCI repository.                                   |
 |              | `s3.bucket` / `s3.region`    | —                                | Used only when `backend=s3`.                      |
@@ -260,8 +261,6 @@ inline comments. The sections below summarise the most important ones.
 | `ci.github`  | `job_summary` / `check_runs`| `true` / `true`                  | CI niceties.                                       |
 | `ci.jenkins` | `dynamic_stages`            | `true`                           |                                                   |
 | `ci.drone`   | `config_extension`          | `true`                           |                                                   |
-| `ui`         | `enabled`                   | `true`                           | Serve the SPA from the control plane.            |
-|              | `spa_dir`                   | `/opt/dagger-cache/ui`           | Built SPA assets.                                  |
 | `log_level`  | —                           | `info`                           | `debug`/`info`/`warn`/`error`.                    |
 | `otel`       | `otlp_endpoint`             | `""`                             | If set, the Supervisor exports its own OTLP here. |
 
@@ -306,10 +305,11 @@ sessions for `replica_idle_ttl` are scaled down, and a version that has had
 zero replicas for `version_retention` is garbage-collected (StatefulSet +
 PVs removed).
 
-The fleet provider is selected by `DAGGER_CACHE_PROVIDER`
-(`kubernetes` in prod, `docker` in dev compose). The Docker provider runs
-engine containers on the Supervisor host's Docker socket — handy for local
-testing.
+The fleet provider is currently a stub (in-memory) for testing and
+development. Production Kubernetes integration is a future milestone; today
+the stub provider manages simulated engine StatefulSets per version. The
+`fleet` configuration section controls the autoscaler behavior for this
+provider.
 
 ---
 
@@ -350,8 +350,8 @@ Two independent mechanisms:
   the recommended path for CI.
 - **OAuth (GitHub)** — `auth.oauth` is for human/UI login only. Set
   `enabled: true`, supply `client_id`/`client_secret` via env, and list the
-  orgs allowed to log in via `allowed_orgs`. The redirect URL must match
-  `<ui_url>/auth/callback`.
+   orgs allowed to log in via `allowed_orgs`. The redirect URL must match
+   `<public_url>/auth/callback`.
 
 ---
 
@@ -379,13 +379,12 @@ Defaults point at the compose service names, which match
 - **OTel Collector** (`collector_url`) — receives OTLP from the Dagger CLI.
 - **Tempo** (`tempo_url`) — traces.
 - **Loki** (`loki_url`) — logs.
-- **Prometheus** (`prometheus_url`) — metrics.
+- **VictoriaMetrics** (`victoria_url`) — metrics (PromQL-compatible).
 - **Grafana** (compose only) — dashboards on port 3000.
 
-The UI (`ui/`) is a Vite SPA. Build it with `cd ui && npm run build`; the
-output goes to `ui.spa_dir` (default `/opt/dagger-cache/ui`). When
-`ui.enabled: true`, the control plane serves the SPA at `/` and trace links
-like `/traces/<id>`.
+The UI is an embedded Vite SPA (packaged in `ui-dist/` via `//go:embed`). It
+is always served by the control plane at `/` and trace links like
+`/traces/<id>`. No separate configuration is needed.
 
 To export the Supervisor's *own* OTLP (e.g. to the same collector), set
 `otel.otlp_endpoint`. Leave it empty to disable.
@@ -439,7 +438,6 @@ steps:
       server_url: https://supv.example.com
       token:
         from_secret: dagger_cache_token
-      ui_url: https://ui.supv.example.com
       version: v0.21.4
 ```
 
@@ -496,15 +494,14 @@ all delegate to (or mirror) this script.
 The Supervisor mirrors the Dagger cloud contract. Monitor these files in
 the Dagger source tree for breaking changes:
 
-- `internal/cloud/client.go` — `EngineSpec` format returned by
+- `core/schema` — `EngineSpec` format returned by
   `POST /v1/engines`.
 - `engine/telemetry/cloud.go` — OTLP export configuration.
 - `engine/client/client.go` — cache env var handling
   (`_EXPERIMENTAL_DAGGER_CACHE_CONFIG`) and runner-host negotiation.
 
 When any of these change shape, update
-[`internal/api`](../internal/api) (control handlers),
-[`internal/dataplane`](../internal/dataplane) (L4 proxy) and the
+[`internal/api`](../internal/api) (control handlers and L4 data-plane proxy) and the
 [`test/integration_test.go`](../test/integration_test.go) contract tests
 accordingly.
 

@@ -1,27 +1,36 @@
 package observ
 
 import (
-	"os"
+	"io"
 
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"github.com/sirupsen/logrus"
 )
 
-func NewLogger(level string) (*zap.Logger, error) {
-	var zl zapcore.Level
-	if err := zl.UnmarshalText([]byte(level)); err != nil {
-		return nil, err
+// NewLogger builds a structured JSON logrus logger.
+// An unrecognized level falls back to InfoLevel (per project convention).
+func NewLogger(level string) *logrus.Logger {
+	logger := logrus.New()
+	logger.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
+	})
+
+	lvl, err := logrus.ParseLevel(level)
+	if err != nil {
+		lvl = logrus.InfoLevel
 	}
+	logger.SetLevel(lvl)
 
-	encoderCfg := zap.NewProductionEncoderConfig()
-	encoderCfg.TimeKey = "timestamp"
-	encoderCfg.EncodeTime = zapcore.ISO8601TimeEncoder
+	return logger
+}
 
-	core := zapcore.NewCore(
-		zapcore.NewJSONEncoder(encoderCfg),
-		zapcore.AddSync(os.Stdout),
-		zl,
-	)
-
-	return zap.New(core, zap.AddCaller(), zap.AddStacktrace(zapcore.ErrorLevel)), nil
+// NewTestLogger returns a logrus logger that discards all output, for use in
+// unit and integration tests.
+func NewTestLogger() *logrus.Logger {
+	logger := logrus.New()
+	logger.SetFormatter(&logrus.JSONFormatter{
+		TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
+	})
+	logger.SetOutput(io.Discard)
+	logger.SetLevel(logrus.DebugLevel)
+	return logger
 }

@@ -2,7 +2,6 @@ package main
 
 import (
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -11,42 +10,62 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/urfave/cli/v2"
 )
 
 var traceIDRe = regexp.MustCompile(`[a-f0-9]{32,}`)
 
 func main() {
-	serverURL := flag.String("server", "", "Dagger Cache server URL (required)")
-	token := flag.String("token", "", "Dagger Cloud token (required)")
-	uiURL := flag.String("ui-url", "", "UI URL for trace links")
-	cacheRegistry := flag.String("cache-registry", "cache.reg/dagger-cache", "Cache registry host/repo")
-	version := flag.String("version", "", "Dagger engine version")
-	ciMode := flag.String("ci", "", "CI mode: gha, jenkins, drone")
-	flag.Parse()
-
-	if *serverURL == "" || *token == "" {
-		fmt.Fprintf(os.Stderr, "Error: --server and --token required\n")
+	app := &cli.App{
+		Name:  "dagger-cache-ci",
+		Usage: "Dagger Cache CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
+		Flags: []cli.Flag{
+			&cli.StringFlag{Name: "server", Usage: "Dagger Cache server URL (required)"},
+			&cli.StringFlag{Name: "token", Usage: "Dagger Cloud token (required)"},
+			&cli.StringFlag{Name: "ui-url", Usage: "UI URL for trace links"},
+			&cli.StringFlag{Name: "cache-registry", Value: "cache.reg/dagger-cache", Usage: "Cache registry host/repo"},
+			&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
+			&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
+		},
+		Action: run,
+	}
+	if err := app.Run(os.Args); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
+}
 
-	if *uiURL == "" {
-		*uiURL = *serverURL
+func run(c *cli.Context) error {
+	serverURL := c.String("server")
+	token := c.String("token")
+
+	if serverURL == "" || token == "" {
+		return fmt.Errorf("--server and --token required")
 	}
 
-	cmdArgs := flag.Args()
+	uiURL := c.String("ui-url")
+	if uiURL == "" {
+		uiURL = serverURL
+	}
+
+	cacheRegistry := c.String("cache-registry")
+	version := c.String("version")
+	ciMode := c.String("ci")
+
+	cmdArgs := c.Args().Slice()
 	if len(cmdArgs) == 0 {
-		fmt.Fprintf(os.Stderr, "Error: no dagger command specified\n")
-		os.Exit(1)
+		return fmt.Errorf("no dagger command specified")
 	}
 
-	_ = os.Setenv("DAGGER_CLOUD_URL", *serverURL)
-	_ = os.Setenv("DAGGER_CLOUD_TOKEN", *token)
+	_ = os.Setenv("DAGGER_CLOUD_URL", serverURL)
+	_ = os.Setenv("DAGGER_CLOUD_TOKEN", token)
 	_ = os.Setenv("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "dagger-cloud://self")
 
-	if *version != "" {
-		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", *version)
-		vslug := strings.ReplaceAll(strings.ReplaceAll(*version, ".", "-"), "v", "")
-		cacheRef := fmt.Sprintf("%s:V%s", *cacheRegistry, vslug)
+	if version != "" {
+		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", version)
+		vslug := strings.ReplaceAll(strings.ReplaceAll(version, ".", "-"), "v", "")
+		cacheRef := fmt.Sprintf("%s:V%s", cacheRegistry, vslug)
 		_ = os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
 	}
 
@@ -64,10 +83,10 @@ func main() {
 	traceID := extractTraceID(logOutput)
 
 	if traceID != "" {
-		traceURL := fmt.Sprintf("%s/traces/%s", *uiURL, traceID)
+		traceURL := fmt.Sprintf("%s/traces/%s", uiURL, traceID)
 		fmt.Fprintf(os.Stderr, "\nPipeline View: %s\n", traceURL)
 
-		switch *ciMode {
+		switch ciMode {
 		case "gha":
 			emitGHAAnnotations(traceURL, traceID)
 		case "jenkins":
@@ -77,14 +96,11 @@ func main() {
 		}
 	}
 
-	if err != nil {
-		os.Exit(1)
-	}
+	return err
 }
 
 func extractTraceID(output string) string {
-	match := traceIDRe.FindString(output)
-	return match
+	return traceIDRe.FindString(output)
 }
 
 func emitGHAAnnotations(traceURL, traceID string) {

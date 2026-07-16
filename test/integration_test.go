@@ -5,21 +5,38 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
-
 	"github.com/disaster/dagger-kubernetes/internal/api"
+	"github.com/disaster/dagger-kubernetes/internal/auth"
 	"github.com/disaster/dagger-kubernetes/internal/ca"
 	"github.com/disaster/dagger-kubernetes/internal/cache"
 	"github.com/disaster/dagger-kubernetes/internal/fleet"
+	"github.com/disaster/dagger-kubernetes/internal/observ"
 	"github.com/disaster/dagger-kubernetes/internal/session"
 	"github.com/disaster/dagger-kubernetes/internal/version"
 )
 
+func writeTempTokens(t *testing.T, token string) string {
+	t.Helper()
+	f, err := os.CreateTemp("", "tokens-*")
+	if err != nil {
+		t.Fatalf("create tokens file: %v", err)
+	}
+	if _, err := f.WriteString(token); err != nil {
+		t.Fatalf("write tokens file: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close tokens file: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(f.Name()) })
+	return f.Name()
+}
+
 func TestProvisionEngineFlow(t *testing.T) {
-	logger := zap.NewNop()
+	logger := observ.NewTestLogger()
 	mintingCA, err := ca.NewMintingCA(2 * time.Hour)
 	if err != nil {
 		t.Fatalf("NewMintingCA: %v", err)
@@ -39,22 +56,24 @@ func TestProvisionEngineFlow(t *testing.T) {
 		ReplicaIdleTTL:        5 * time.Minute,
 		VersionRetention:      24 * time.Hour,
 		MinReplicasPerVersion: 0,
-	}, logger)
+	}, logger, observ.NewMetrics(nil))
 
 	cacheBackend := &cache.Backend{
 		Type:     "registry",
 		Registry: "cache.reg/dagger-cache",
 	}
 
+	tokensFile := writeTempTokens(t, "test-token")
+	tokenValidator := auth.NewTokenValidator(tokensFile, true, logger)
+
 	server := api.NewServer(&api.ServerConfig{
 		ControlAddr:  ":18080",
 		DataAddr:     ":18443",
 		DataHost:     "localhost",
 		PublicURL:    "http://localhost:18080",
-		UIURL:        "http://localhost:5173",
 		CollectorURL: "http://localhost:4318",
 		TempoURL:     "http://localhost:3200",
-	}, logger, mintingCA, fleetManager, sessions, cacheBackend, versionResolver)
+	}, logger, observ.NewMetrics(nil), mintingCA, fleetManager, sessions, cacheBackend, versionResolver, tokenValidator)
 
 	serverTLS, err := mintingCA.TLSCertificate()
 	if err != nil {
@@ -85,7 +104,7 @@ func TestProvisionEngineFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
-	req.SetBasicAuth("test-token", "")
+	req.Header.Set("Authorization", "Bearer test-token")
 	req.Header.Set("Content-Type", "application/json")
 
 	resp, err := http.DefaultClient.Do(req)
@@ -115,18 +134,18 @@ func TestProvisionEngineFlow(t *testing.T) {
 }
 
 func TestHealthEndpoint(t *testing.T) {
-	logger := zap.NewNop()
+	logger := observ.NewTestLogger()
 	mintingCA, _ := ca.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := version.NewResolver("v0.19.0", nil, nil)
 	sessions := session.NewStore(2 * time.Minute)
 	provider := fleet.NewStubProvider()
-	fleetManager := fleet.NewManager(provider, sessions, fleet.ManagerConfig{}, logger)
+	fleetManager := fleet.NewManager(provider, sessions, fleet.ManagerConfig{}, logger, observ.NewMetrics(nil))
 	cacheBackend := &cache.Backend{Type: "registry", Registry: "cache.reg/dagger-cache"}
 
 	server := api.NewServer(&api.ServerConfig{
 		ControlAddr: ":18081",
 		DataAddr:    ":18444",
-	}, logger, mintingCA, fleetManager, sessions, cacheBackend, versionResolver)
+	}, logger, observ.NewMetrics(nil), mintingCA, fleetManager, sessions, cacheBackend, versionResolver, auth.NewTokenValidator("", false, logger))
 
 	serverTLS, _ := mintingCA.TLSCertificate()
 

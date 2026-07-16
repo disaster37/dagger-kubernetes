@@ -1,0 +1,10 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "permission": {
+    "edit": {
+      "AGENTS.md": "ask",
+      "CONTRIBUTING.md": "ask",
+      "*": "allow"
+    }
+  }
+}
