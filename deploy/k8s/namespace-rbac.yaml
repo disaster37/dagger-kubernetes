@@ -97,6 +97,13 @@ data:
       max_sessions_per_replica: 8
       replica_idle_ttl: "5m"
       version_retention: "24h"
+      engine_storage_class: ""
+      engine_storage_size: "50Gi"
+      engine_cpu_request: "500m"
+      engine_cpu_limit: "2000m"
+      engine_memory_request: "1Gi"
+      engine_memory_limit: "8Gi"
+      engine_extra_args: []
     ca:
       minting_ca_secret: "supervisor-minting-ca"
       client_cert_ttl: "2h"

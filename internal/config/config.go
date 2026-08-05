@@ -73,12 +73,25 @@ type S3Config struct {
 }
 
 type FleetConfig struct {
-	Namespace             string        `mapstructure:"namespace"`
-	MaxReplicasPerVersion int           `mapstructure:"max_replicas_per_version"`
-	MaxSessionsPerReplica int           `mapstructure:"max_sessions_per_replica"`
-	ReplicaIdleTTL        time.Duration `mapstructure:"replica_idle_ttl"`
-	VersionRetention      time.Duration `mapstructure:"version_retention"`
-	MinReplicasPerVersion int           `mapstructure:"min_replicas_per_version"`
+	Namespace             string            `mapstructure:"namespace"`
+	MaxReplicasPerVersion int               `mapstructure:"max_replicas_per_version"`
+	MaxSessionsPerReplica int               `mapstructure:"max_sessions_per_replica"`
+	ReplicaIdleTTL        time.Duration     `mapstructure:"replica_idle_ttl"`
+	VersionRetention      time.Duration     `mapstructure:"version_retention"`
+	MinReplicasPerVersion int               `mapstructure:"min_replicas_per_version"`
+	EngineImageRegistry   string            `mapstructure:"engine_image_registry"`
+	EngineStorageClass    string            `mapstructure:"engine_storage_class"`
+	EngineStorageSize     string            `mapstructure:"engine_storage_size"`
+	EngineCPURequest      string            `mapstructure:"engine_cpu_request"`
+	EngineCPULimit        string            `mapstructure:"engine_cpu_limit"`
+	EngineMemoryRequest   string            `mapstructure:"engine_memory_request"`
+	EngineMemoryLimit     string            `mapstructure:"engine_memory_limit"`
+	EngineTerminationGrace int              `mapstructure:"engine_termination_grace_seconds"`
+	EngineNodeSelector    map[string]string `mapstructure:"engine_node_selector"`
+	EngineTolerations     []string          `mapstructure:"engine_tolerations"`
+	EngineExtraArgs       []string          `mapstructure:"engine_extra_args"`
+	EnginePullPolicy      string            `mapstructure:"engine_pull_policy"`
+	EnginePrivileged      bool              `mapstructure:"engine_privileged"`
 }
 
 type CAConfig struct {
@@ -164,6 +177,19 @@ func Load(configFile string) (*Config, error) {
 	v.SetDefault("fleet.replica_idle_ttl", 5*time.Minute)
 	v.SetDefault("fleet.version_retention", 24*time.Hour)
 	v.SetDefault("fleet.min_replicas_per_version", 0)
+	v.SetDefault("fleet.engine_image_registry", "registry.dagger.io/engine")
+	v.SetDefault("fleet.engine_storage_class", "")
+	v.SetDefault("fleet.engine_storage_size", "50Gi")
+	v.SetDefault("fleet.engine_cpu_request", "500m")
+	v.SetDefault("fleet.engine_cpu_limit", "2000m")
+	v.SetDefault("fleet.engine_memory_request", "1Gi")
+	v.SetDefault("fleet.engine_memory_limit", "8Gi")
+	v.SetDefault("fleet.engine_termination_grace_seconds", 120)
+	v.SetDefault("fleet.engine_node_selector", map[string]string{})
+	v.SetDefault("fleet.engine_tolerations", []string{})
+	v.SetDefault("fleet.engine_extra_args", []string{})
+	v.SetDefault("fleet.engine_pull_policy", "IfNotPresent")
+	v.SetDefault("fleet.engine_privileged", true)
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)

@@ -6,12 +6,17 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/disaster/dagger-kubernetes/internal/api"
 	"github.com/disaster/dagger-kubernetes/internal/auth"
@@ -90,7 +95,7 @@ func run(c *cli.Context) error {
 
 	tokenValidator := auth.NewTokenValidator(cfg.Auth.Internal.TokensFile, cfg.Auth.Internal.Enabled, logger)
 
-	provider := fleet.NewStubProvider()
+	provider := createProvider(cfg, logger)
 	fleetManager := fleet.NewManager(provider, sessions, fleet.ManagerConfig{
 		MaxReplicasPerVersion: cfg.Fleet.MaxReplicasPerVersion,
 		MaxSessionsPerReplica: cfg.Fleet.MaxSessionsPerReplica,
@@ -165,4 +170,81 @@ func selectTLSProvider(cfg *config.Config) (ca.Provider, error) {
 	default:
 		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.TLS.Provider)
 	}
+}
+
+func createProvider(cfg *config.Config, logger *logrus.Logger) fleet.Provider {
+	clientset, err := newK8sClientset()
+	if err != nil {
+		logger.WithError(err).Warn("failed to create k8s clientset, using stub provider")
+		return fleet.NewStubProvider()
+	}
+
+	tolerations, err := parseTolerations(cfg.Fleet.EngineTolerations)
+	if err != nil {
+		logger.WithError(err).Warn("failed to parse engine tolerations, using stub provider")
+		return fleet.NewStubProvider()
+	}
+
+	k8sCfg := fleet.K8sProviderConfig{
+		Namespace:           cfg.Fleet.Namespace,
+		ImageRegistry:       cfg.Fleet.EngineImageRegistry,
+		StorageClass:        cfg.Fleet.EngineStorageClass,
+		StorageSize:         cfg.Fleet.EngineStorageSize,
+		CPURequest:          cfg.Fleet.EngineCPURequest,
+		CPULimit:            cfg.Fleet.EngineCPULimit,
+		MemoryRequest:       cfg.Fleet.EngineMemoryRequest,
+		MemoryLimit:         cfg.Fleet.EngineMemoryLimit,
+		TerminationGraceSec: int64(cfg.Fleet.EngineTerminationGrace),
+		NodeSelector:        cfg.Fleet.EngineNodeSelector,
+		Tolerations:         tolerations,
+		ExtraArgs:           cfg.Fleet.EngineExtraArgs,
+		PullPolicy:          corev1.PullPolicy(cfg.Fleet.EnginePullPolicy),
+		Privileged:          cfg.Fleet.EnginePrivileged,
+	}
+
+	return fleet.NewK8sProvider(clientset, k8sCfg)
+}
+
+func newK8sClientset() (kubernetes.Interface, error) {
+	config, err := rest.InClusterConfig()
+	if err != nil {
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		configOverrides := &clientcmd.ConfigOverrides{}
+		kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
+		config, err = kubeConfig.ClientConfig()
+		if err != nil {
+			return nil, fmt.Errorf("cannot load in-cluster or kubeconfig: %w", err)
+		}
+	}
+
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create clientset: %w", err)
+	}
+	return clientset, nil
+}
+
+func parseTolerations(raw []string) ([]corev1.Toleration, error) {
+	var tols []corev1.Toleration
+	for _, rawTol := range raw {
+		parts := strings.SplitN(rawTol, ":", 3)
+		if len(parts) < 1 {
+			return nil, fmt.Errorf("invalid toleration: %s", rawTol)
+		}
+		tol := corev1.Toleration{
+			Key:      parts[0],
+			Operator: corev1.TolerationOpEqual,
+		}
+		if len(parts) >= 2 && parts[1] != "" {
+			tol.Value = parts[1]
+		}
+		if len(parts) >= 3 && parts[2] != "" {
+			tol.Effect = corev1.TaintEffect(parts[2])
+		}
+		if tol.Value == "" {
+			tol.Operator = corev1.TolerationOpExists
+		}
+		tols = append(tols, tol)
+	}
+	return tols, nil
 }

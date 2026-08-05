@@ -52,6 +52,19 @@ supervisor:
       maxSessionsPerReplica: 8
       replicaIdleTtl: "5m"
       versionRetention: "24h"
+      engineImageRegistry: "registry.dagger.io/engine"
+      engineStorageClass: ""
+      engineStorageSize: "50Gi"
+      engineCPURequest: "500m"
+      engineCPULimit: "2000m"
+      engineMemoryRequest: "1Gi"
+      engineMemoryLimit: "8Gi"
+      engineTerminationGraceSeconds: 120
+      enginePullPolicy: "IfNotPresent"
+      enginePrivileged: true
+      engineNodeSelector: {}
+      engineTolerations: []
+      engineExtraArgs: []
     ca:
       clientCertTtl: "2h"
     leaseTtl: "2m"

@@ -86,7 +86,7 @@ func NewMintingCAFromPEM(certPEM, keyPEM []byte, clientCertTTL time.Duration) (*
 		return nil, fmt.Errorf("decode CA key PEM: no PEM block found")
 	}
 
-	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
+	key, err := parsePrivateKey(keyBlock.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("parse CA key: %w", err)
 	}
@@ -156,11 +156,11 @@ func (ca *MintingCA) TLSCertificate() (tls.Certificate, error) {
 func (ca *MintingCA) EncodePEM() (certPEM, keyPEM []byte, err error) {
 	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.certDER})
 
-	keyDER, err := x509.MarshalECPrivateKey(ca.key.(*ecdsa.PrivateKey))
+	keyDER, err := x509.MarshalPKCS8PrivateKey(ca.key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("marshal CA key: %w", err)
 	}
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
 
 	return certPEM, keyPEM, nil
 }
@@ -190,4 +190,22 @@ func (sc *SerializableCertificate) TLSClientCertificate() (tls.Certificate, erro
 		Certificate: sc.CertificateChain,
 		PrivateKey:  key,
 	}, nil
+}
+
+func parsePrivateKey(der []byte) (crypto.Signer, error) {
+	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
+		return key, nil
+	}
+	if key, err := x509.ParseECPrivateKey(der); err == nil {
+		return key, nil
+	}
+	key, err := x509.ParsePKCS8PrivateKey(der)
+	if err != nil {
+		return nil, err
+	}
+	signer, ok := key.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("key type %T does not implement crypto.Signer", key)
+	}
+	return signer, nil
 }

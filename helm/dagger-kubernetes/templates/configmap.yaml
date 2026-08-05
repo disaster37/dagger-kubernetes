@@ -47,6 +47,22 @@ data:
       max_sessions_per_replica: {{ .Values.supervisor.config.fleet.maxSessionsPerReplica }}
       replica_idle_ttl: {{ .Values.supervisor.config.fleet.replicaIdleTtl | quote }}
       version_retention: {{ .Values.supervisor.config.fleet.versionRetention | quote }}
+      engine_image_registry: {{ .Values.supervisor.config.fleet.engineImageRegistry | quote }}
+      engine_storage_class: {{ .Values.supervisor.config.fleet.engineStorageClass | quote }}
+      engine_storage_size: {{ .Values.supervisor.config.fleet.engineStorageSize | quote }}
+      engine_cpu_request: {{ .Values.supervisor.config.fleet.engineCPURequest | quote }}
+      engine_cpu_limit: {{ .Values.supervisor.config.fleet.engineCPULimit | quote }}
+      engine_memory_request: {{ .Values.supervisor.config.fleet.engineMemoryRequest | quote }}
+      engine_memory_limit: {{ .Values.supervisor.config.fleet.engineMemoryLimit | quote }}
+      engine_termination_grace_seconds: {{ .Values.supervisor.config.fleet.engineTerminationGraceSeconds }}
+      engine_pull_policy: {{ .Values.supervisor.config.fleet.enginePullPolicy | quote }}
+      engine_privileged: {{ .Values.supervisor.config.fleet.enginePrivileged }}
+      engine_node_selector:
+{{ toYaml .Values.supervisor.config.fleet.engineNodeSelector | indent 8 }}
+      engine_tolerations:
+{{ toYaml .Values.supervisor.config.fleet.engineTolerations | indent 8 }}
+      engine_extra_args:
+{{ toYaml .Values.supervisor.config.fleet.engineExtraArgs | indent 8 }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
       client_cert_ttl: {{ .Values.supervisor.config.ca.clientCertTtl | quote }}

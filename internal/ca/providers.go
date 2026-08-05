@@ -70,8 +70,11 @@ func (p *EmbeddedProvider) ServerTLSCert() (tls.Certificate, error) {
 
 func (p *EmbeddedProvider) createCA(certPath, keyPath string) (*MintingCA, error) {
 	identity := goca.Identity{
-		Organization: "dagger-cache",
-		Country:      "US",
+		Organization:       "dagger-cache",
+		OrganizationalUnit: "engineering",
+		Country:            "US",
+		Locality:           "San Francisco",
+		Province:           "California",
 	}
 
 	caInstance, err := goca.New("dagger-cache-minting-ca", identity)

@@ -113,7 +113,7 @@ func (m *Manager) Acquire(ctx context.Context, version string) (*AcquireResult, 
 		return nil, fmt.Errorf("scale up: %w", err)
 	}
 
-	newPodName := fmt.Sprintf("dagger-engine-%s-%d", version, currentCount)
+	newPodName := podName(version, currentCount)
 	if err := m.provider.WaitForReady(version, newPodName); err != nil {
 		return nil, fmt.Errorf("wait for ready: %w", err)
 	}
@@ -144,7 +144,7 @@ func (m *Manager) GetVersionFleet(version string) (*FleetInfo, error) {
 
 	info := &FleetInfo{
 		Version:  version,
-		STSName:  fmt.Sprintf("dagger-engine-%s", version),
+		STSName:  stsName(version),
 		Replicas: len(replicas),
 	}
 
@@ -266,7 +266,7 @@ func (m *Manager) AllFleetInfo() ([]FleetInfo, error) {
 // observeReplicas publishes the per-version replica count. It is safe to call
 // when no Metrics were injected.
 func (m *Manager) observeReplicas(version string, replicas []Replica) {
-	if m.metrics == nil {
+	if m.metrics == nil || m.metrics.ActiveReplicas == nil {
 		return
 	}
 	m.metrics.ActiveReplicas.WithLabelValues(version).Set(float64(len(replicas)))

@@ -19,9 +19,11 @@ services:
       - DAGGER_CACHE_TELEMETRY_VICTORIA_URL=http://victoria:8428
       - DAGGER_CACHE_CACHE_BACKEND=registry
       - DAGGER_CACHE_CACHE_REGISTRY=localhost:5000/dagger-cache
+      - DAGGER_CACHE_TLS_CA_PATH=/tmp/dagger-cache/ca
       - DAGGER_CACHE_LOG_LEVEL=debug
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./data/tokens:/etc/dagger-cache/tokens:ro
     depends_on:
       - cache-registry
     networks:
@@ -49,7 +51,7 @@ services:
   loki:
     image: grafana/loki:latest
     ports:
-      - "3100:3100"
+      - "3101:3100"
     networks:
       - dagger-cache
 

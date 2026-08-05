@@ -64,6 +64,21 @@ fleet:
   replica_idle_ttl: "5m"                    # idle pod TTL before scale-down.
   version_retention: "24h"                 # how long a version's StatefulSet lingers with 0 replicas.
 
+  # --- Engine pod template ---------------------------------------------------
+  engine_image_registry: "registry.dagger.io/engine"  # base registry for engine images.
+  engine_storage_class: ""                            # StorageClass for engine PVCs (default uses default).
+  engine_storage_size: "50Gi"                         # local cache disk per engine pod.
+  engine_cpu_request: "500m"                          # CPU request per engine pod.
+  engine_cpu_limit: "2000m"                           # CPU limit per engine pod.
+  engine_memory_request: "1Gi"                        # memory request per engine pod.
+  engine_memory_limit: "8Gi"                          # memory limit per engine pod.
+  engine_termination_grace_seconds: 120               # termination grace period for engine pods.
+  engine_pull_policy: "IfNotPresent"                   # engine image pull policy.
+  engine_privileged: true                             # run engine container as privileged.
+  engine_node_selector: {}                            # node selector for engine pods (map).
+  engine_tolerations: []                              # tolerations in "key:value:effect" format.
+  engine_extra_args: []                               # additional CLI args passed to dagger engine.
+
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:
   minting_ca_secret: "supervisor-minting-ca"  # K8s Secret holding the minting CA.

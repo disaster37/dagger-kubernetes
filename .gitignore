@@ -33,3 +33,8 @@ helm/**/charts/*.tgz
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# Node
+node_modules/
+npm-debug.log
+yarn-error.log

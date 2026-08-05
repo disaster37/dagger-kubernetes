@@ -94,7 +94,7 @@ func (p *StubProvider) ScaleUp(version string, targetReplicas int) error {
 
 	for len(sts.replicasM) < targetReplicas {
 		ordinal := len(sts.replicasM)
-		podName := fmt.Sprintf("dagger-engine-%s-%d", version, ordinal)
+		podName := podName(version, ordinal)
 		ip := fmt.Sprintf("10.0.0.%d", (sts.nextIP%254)+1)
 		sts.nextIP++
 
@@ -119,7 +119,7 @@ func (p *StubProvider) ScaleDown(version string, ordinal int) error {
 		return fmt.Errorf("statefulset not found for version %s", version)
 	}
 
-	podName := fmt.Sprintf("dagger-engine-%s-%d", version, ordinal)
+	podName := podName(version, ordinal)
 	delete(sts.replicasM, podName)
 	sts.replicas--
 	return nil
