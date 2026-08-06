@@ -1,4 +1,4 @@
-# Dagger Cache
+# Dagger Cache (`dagger-kubernetes`)
 
 A self-hosted, **Dagger-Cloud-compatible** platform that gives you remote
 shared cache, auto-scaling engine fleets, a live pipeline UI, and drop-in CI
@@ -11,7 +11,7 @@ The Supervisor (`cmd/supervisor`) provides three functions:
 2. **Data Plane** (mTLS L4 proxy) — pins the client's TLS connection to the
    specific engine replica pod that holds its lease.
 3. **OTLP Ingest** — forwards Dagger CLI telemetry to the local stack
-   (Tempo / Loki / Prometheus) and powers the pipeline UI.
+   (Tempo / Loki / VictoriaMetrics) and powers the pipeline UI.
 
 The Dagger CLI talks to the Supervisor exactly as it would talk to Dagger
 Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
@@ -23,7 +23,7 @@ Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
 
 - [Quick start](#quick-start)
   - [Docker (local dev)](#docker-local-dev)
-  - [Kubernetes](#kubernetes)
+  - [Kubernetes (Helm)](#kubernetes-helm)
   - [Client setup](#client-setup)
 - [Architecture](#architecture)
 - [Configuration](#configuration)
@@ -35,13 +35,15 @@ Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
 - [Remote shared cache](#remote-shared-cache)
 - [Authentication](#authentication)
 - [TLS & client certificates](#tls--client-certificates)
-- [Telemetry & UI](#telemetry--ui)
+- [Telemetry stack](#telemetry-stack)
+- [Pipeline UI](#pipeline-ui)
 - [CI integrations](#ci-integrations)
   - [GitHub Actions](#github-actions)
   - [Jenkins](#jenkins)
   - [Drone](#drone)
 - [Client wrapper script](#client-wrapper-script)
 - [Operations](#operations)
+- [Production checklist](#production-checklist)
 - [Contract drift monitoring](#contract-drift-monitoring)
 - [Development](#development)
 
@@ -52,7 +54,7 @@ Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
 ### Docker (local dev)
 
 The fastest way to get a running stack (Supervisor + OTel Collector + Tempo +
-Loki + Prometheus + Grafana + a local OCI cache registry):
+Loki + VictoriaMetrics + Grafana + a local OCI cache registry):
 
 ```bash
 cd deploy/docker
@@ -67,8 +69,8 @@ Ports exposed:
 | Supervisor data| 8443 | mTLS data plane                         |
 | OTel collector | 4318 | OTLP/HTTP                               |
 | Tempo          | 3200 | traces API                             |
-| Loki           | 3100 | logs API                               |
-| Prometheus     | 9090 | metrics API                            |
+| Loki           | 3101 | logs API (host port 3101→3100)         |
+| VictoriaMetrics| 8428 | metrics API                            |
 | Grafana        | 3000 | anonymous login enabled                |
 | Cache registry | 5000 | `registry:2`, stores BuildKit blobs    |
 
@@ -76,34 +78,58 @@ The compose file configures the Supervisor entirely through
 `DAGGER_CACHE_*` environment variables, so no `config.app.yaml` is mounted
 in dev mode.
 
-### Kubernetes
+### Kubernetes (Helm)
+
+The recommended production deployment uses the Helm chart, which bundles the
+Supervisor and all required infrastructure as subchart dependencies:
 
 ```bash
-# 1. Create namespace + RBAC, the cache registry, the telemetry stack,
-#    and the Supervisor Deployment/Service/Ingress.
-kubectl apply -f deploy/k8s/
+# 1. Fetch chart dependencies
+helm dependency build helm/dagger-kubernetes
 
-# 2. Create the config from the sample, then load it as a ConfigMap.
-cp config.app.yaml.sample config.app.yaml
-# edit hostnames, OAuth creds, allowed versions, etc.
-kubectl create configmap supervisor-config \
-  --from-file=config.app.yaml -n dagger-cache
+# 2. Generate certificates
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -days 3650 -nodes -keyout ca.key -out ca.crt \
+  -subj "/CN=Dagger Minting CA"
 
-# 3. Provision TLS + minting-CA secrets (see TLS section below).
-kubectl create secret tls supervisor-tls \
-  --cert=tlscert.pem --key=tlskey.pem -n dagger-cache
-# ... and a minting CA secret named supervisor-minting-ca
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -days 365 -nodes -keyout tls.key -out tls.crt \
+  -subj "/CN=data.your-domain.com" \
+  -addext "subjectAltName=DNS:data.your-domain.com"
 
-# 4. Create a token for your CI clients.
+# 3. Generate a token
 TOKEN=$(openssl rand -hex 32)
-echo "$TOKEN" > tokens
-kubectl create secret generic supervisor-tokens \
-  --from-file=tokens -n dagger-cache
+
+# 4. Customize values
+cp helm/dagger-kubernetes/values.yaml my-values.yaml
+# Edit server.dataHostname, server.publicUrl, ingress.hosts
+
+# 5. Install
+helm install dagger-kubernetes helm/dagger-kubernetes \
+  -f my-values.yaml \
+  --namespace dagger-stack --create-namespace \
+  --set ca.crt="$(cat ca.crt)" \
+  --set ca.key="$(cat ca.key)" \
+  --set tls.crt="$(cat tls.crt)" \
+  --set tls.key="$(cat tls.key)" \
+  --set-string "auth.tokens[0]=$TOKEN"
 ```
 
-The Supervisor reads `/etc/dagger-cache/config.app.yaml` (see
-`deploy/k8s/supervisor.yaml`). Health/readiness probes hit `/healthz` and
-`/readyz` on the control port.
+The Helm chart deploys:
+- **Supervisor** — control plane + data plane
+- **OpenTelemetry Collector** — OTLP ingest, fans out to Tempo/Loki/VictoriaMetrics
+- **Grafana Tempo** — distributed tracing (traces)
+- **Grafana Loki** — log aggregation (logs)
+- **VictoriaMetrics** — PromQL-compatible metrics
+- **Grafana** — dashboards with auto-provisioned datasources
+- **OCI Registry** — remote shared cache backend
+
+Every tool is toggleable individually (`tools.<name>.enabled: false`). When
+disabled, you provide your own endpoint in `supervisor.config.telemetry` and
+`supervisor.config.cache`.
+
+See [`helm/dagger-kubernetes/README.md`](../helm/dagger-kubernetes/README.md)
+for full Helm documentation, production sizing, and upgrade instructions.
 
 ### Client setup
 
@@ -152,13 +178,13 @@ Or skip the env-var juggling and use the wrapper:
                                          │             │             │
                           mints client   │             │             │ forwards OTLP
                           cert + lease   │             │             │
-                  ┌──────────────────────┘             │             └──► OTel Collector ─► Tempo/Loki/Prom
-                  │                                    │
-                  ▼                                    ▼
-   ┌─────────────────────────────┐      ┌────────────────────────────────┐
-   │  Engine fleet (K8s)         │      │  Cache (OCI registry / S3)      │
-   │  per-version StatefulSet    │◄─────│  registry:2 or S3 bucket        │
-   │  dagger-engine-v0-21-4      │push/│  ref: cache.reg/...:V0-21-4    │
+                  ┌──────────────────────┘             │             └──► OTel Collector ─► Tempo/Loki/Victoria
+                  │                                    │                        │
+                  ▼                                    ▼                        ▼
+   ┌─────────────────────────────┐      ┌────────────────────────────────┐  ┌───────────┐
+   │  Engine fleet (K8s)         │      │  Cache (OCI registry / S3)      │  │  Grafana   │
+   │  per-version StatefulSet    │◄─────│  registry:2 or S3 bucket        │  │ dashboards │
+   │  dagger-engine-v0-21-4      │push/│  ref: cache.reg/...:V0-21-4    │  └───────────┘
    │  autoscaled 0..N            │pull │                                │
    └─────────────────────────────┘      └────────────────────────────────┘
 ```
@@ -178,7 +204,8 @@ Or skip the env-var juggling and use the wrapper:
    (`_EXPERIMENTAL_DAGGER_CACHE_CONFIG`).
 5. CLI emits OTLP telemetry; the Supervisor forwards it to the local
    collector, which fans out to Tempo (traces), Loki (logs) and
-   Prometheus (metrics). The pipeline UI reads those backends directly.
+   VictoriaMetrics (metrics). The pipeline UI reads those backends directly.
+6. Grafana provides unified dashboards over all three telemetry backends.
 
 ---
 
@@ -193,10 +220,9 @@ Or skip the env-var juggling and use the wrapper:
 
 The Supervisor's `--config` flag points at the file to load (default
 `config.app.yaml`; in the container this is typically mounted as
-`/etc/dagger-cache/config.app.yaml`, see
-`deploy/k8s/supervisor.yaml`). The `config.app.yaml` shipped here is a
-**minimal** example: it only lists deployment-specific values; every other
-option falls back to the compiled-in defaults in
+`/etc/dagger-kubernetes/config.app.yaml`). The `config.app.yaml` shipped
+here is a **minimal** example: it only lists deployment-specific values;
+every other option falls back to the compiled-in defaults in
 `internal/config/config.go`.
 
 To start from scratch:
@@ -241,7 +267,7 @@ inline comments. The sections below summarise the most important ones.
 |              | `provider`                  | `github`                         |                                                   |
 |              | `allowed_orgs`              | —                                | Restrict login to members of these orgs.          |
 | `telemetry`  | `collector_url`             | `http://otel-collector:4318`     | OTLP/HTTP.                                         |
-|              | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc. | Backend query APIs.                               |
+|              | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc. | Backend query APIs (auto-wired by Helm).          |
 | `cache`      | `backend`                   | `registry`                       | `registry` (OCI) or `s3`.                         |
 |              | `registry`                  | `cache.reg/dagger-cache`          | OCI repository.                                   |
 |              | `s3.bucket` / `s3.region`    | —                                | Used only when `backend=s3`.                      |
@@ -281,7 +307,7 @@ go build -o supervisor ./cmd/supervisor                # server
 Or via the Docker image:
 
 ```bash
-docker build -t dagger-cache/supervisor:latest -f deploy/docker/Dockerfile .
+docker build -t dagger-cache/supervisor:latest .
 docker run -p 8080:8080 -p 8443:8443 \
   -v "$PWD/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
   -v "$PWD/tokens:/etc/dagger-cache/tokens:ro" \
@@ -305,11 +331,9 @@ sessions for `replica_idle_ttl` are scaled down, and a version that has had
 zero replicas for `version_retention` is garbage-collected (StatefulSet +
 PVs removed).
 
-The fleet provider is currently a stub (in-memory) for testing and
-development. Production Kubernetes integration is a future milestone; today
-the stub provider manages simulated engine StatefulSets per version. The
-`fleet` configuration section controls the autoscaler behavior for this
-provider.
+The fleet provider contains both a stub (in-memory, for testing) and a real
+Kubernetes provider (`internal/fleet/k8s.go`) that manages StatefulSets,
+Services, Pods, PVCs, and ConfigMaps.
 
 ---
 
@@ -370,24 +394,63 @@ provision both secrets before applying the Supervisor.
 
 ---
 
-## Telemetry & UI
+## Telemetry stack
 
-The telemetry stack is optional but recommended — it powers the pipeline UI.
-Defaults point at the compose service names, which match
-`deploy/docker/docker-compose.yaml` and `deploy/k8s/telemetry.yaml`:
+The telemetry stack is integrated as Helm subchart dependencies and powers
+the pipeline UI and Grafana dashboards. Each component is toggleable:
 
-- **OTel Collector** (`collector_url`) — receives OTLP from the Dagger CLI.
-- **Tempo** (`tempo_url`) — traces.
-- **Loki** (`loki_url`) — logs.
-- **VictoriaMetrics** (`victoria_url`) — metrics (PromQL-compatible).
-- **Grafana** (compose only) — dashboards on port 3000.
+### OpenTelemetry Collector
+Receives OTLP/HTTP telemetry from the Dagger CLI and the Supervisor on port
+4318. Fans out traces to Tempo, logs to Loki, and metrics to VictoriaMetrics.
 
-The UI is an embedded Vite SPA (packaged in `ui-dist/` via `//go:embed`). It
-is always served by the control plane at `/` and trace links like
-`/traces/<id>`. No separate configuration is needed.
+### Grafana Tempo
+Distributed tracing backend. Stores OTLP traces. Exposes the HTTP query API
+on port 3100. The Helm chart defaults to local filesystem storage with
+persistent volumes.
+
+### Grafana Loki
+Log aggregation backend. Stores OTLP logs. Exposes the Loki HTTP API on port
+3100. Deployed in SingleBinary mode (sufficient for up to ~20 GB/day). For
+production, switch to `SimpleScalable` with S3/GCS object storage.
+
+### VictoriaMetrics
+PromQL-compatible metrics backend. Stores OTLP metrics via the Prometheus
+remote write protocol. Exposes the HTTP API on port 8428. Single-server
+deployment with persistent volumes.
+
+### Grafana
+Unified dashboards for Tempo (traces), Loki (logs), and VictoriaMetrics
+(metrics). Datasources are auto-provisioned via a ConfigMap with label
+`grafana_datasource: "1"`. Default credentials: `admin` / `admin` (change in
+production). Includes trace-to-logs correlation configured out of the box.
+
+Default URLs (auto-wired by Helm):
+
+| Component | Config key | Default URL |
+|---|---|---|
+| OTel Collector | `telemetry.collector_url` | `<release>-opentelemetry-collector:4318` |
+| Tempo | `telemetry.tempo_url` | `<release>-tempo:3100` |
+| Loki | `telemetry.loki_url` | `<release>-loki:3100` |
+| VictoriaMetrics | `telemetry.victoria_url` | `<release>-victoria-metrics-single:8428` |
 
 To export the Supervisor's *own* OTLP (e.g. to the same collector), set
 `otel.otlp_endpoint`. Leave it empty to disable.
+
+---
+
+## Pipeline UI
+
+The UI is an embedded Vue 3 SPA (packaged in `ui-dist/` via `//go:embed`).
+It is always served by the control plane at `/` and trace links like
+`/traces/<id>`. No separate configuration is needed.
+
+Features:
+- **Pipeline list** — all CI runs with status, duration, engine version
+- **Trace viewer** — waterfall view of spans, with child/parent relationships
+- **Live view** — SSE-streamed trace updates during execution
+- **Log viewer** — log lines correlated by trace ID, queried from Loki
+- **Fleet dashboard** — active engines, replicas per version, session counts
+- **Cache status** — registry health, cache hit rates
 
 ---
 
@@ -483,9 +546,29 @@ all delegate to (or mirror) this script.
   `fleet.replica_idle_ttl` (scale-down aggressiveness),
   `fleet.version_retention` (how long a quiet version lingers).
 - **Health:** `GET /healthz` and `GET /readyz` on the control port are
-  wired to the K8s probes in `deploy/k8s/supervisor.yaml`.
-- **Backups:** the cache registry's PV (`registry-data` volume in compose)
-  is the durable asset; back it up if you care about cold-start cache hits.
+  wired to the K8s probes.
+- **Backups:** the cache registry and telemetry backends use persistent
+  volumes. Back up the following PVCs:
+  - Registry PV (cache data)
+  - Tempo PV (trace data)
+  - Loki PV (log data)
+  - VictoriaMetrics PV (metrics data)
+
+---
+
+## Production checklist
+
+- [ ] Set `grafana.adminPassword` to a strong value
+- [ ] Use `cert-manager` or external TLS provider instead of embedded CA
+- [ ] Provision all required K8s Secrets before install (CA, TLS, tokens)
+- [ ] Configure persistent storage for all stateful components
+- [ ] Set appropriate resource requests/limits per component
+- [ ] Configure ingress with TLS for the control plane
+- [ ] Enable Prometheus ServiceMonitor if using Prometheus Operator
+- [ ] Set `fleet.minReplicasPerVersion: 1` for warm engine pools
+- [ ] Configure object storage (S3/GCS) for Loki and Tempo in production
+- [ ] Use external OAuth provider (GitHub) with org restrictions for UI access
+- [ ] Rotate tokens regularly
 
 ---
 
@@ -521,6 +604,9 @@ cd deploy/docker && docker compose up -d --build
 
 # Build the UI
 cd ui && npm install && npm run build
+
+# Lint
+golangci-lint run ./...
 ```
 
 Integration tests (`test/integration_test.go`) exercise the full

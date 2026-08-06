@@ -125,3 +125,5 @@ jobs:
         run: helm template dagger-kubernetes helm/dagger-kubernetes --debug > /dev/null
       - name: Template (tools disabled)
         run: helm template dagger-kubernetes helm/dagger-kubernetes --debug --set tools.otelCollector.enabled=false --set tools.registry.enabled=false > /dev/null
+      - name: Template (all tools disabled, standalone mode)
+        run: helm template dagger-kubernetes helm/dagger-kubernetes --debug --set tools.otelCollector.enabled=false --set tools.registry.enabled=false --set tools.tempo.enabled=false --set tools.loki.enabled=false --set tools.victoria.enabled=false --set tools.grafana.enabled=false > /dev/null

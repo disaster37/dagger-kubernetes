@@ -5,5 +5,17 @@ dependencies:
 - name: docker-registry
   repository: https://charts.helm.sh/stable
   version: 1.9.6
-digest: sha256:bd94d50a7c11c0dca75b7ec39634463ea3a854b46fc79344192300a91c03de27
-generated: "2026-07-14T11:13:01.940398044Z"
+- name: tempo
+  repository: https://grafana.github.io/helm-charts
+  version: 1.24.4
+- name: loki
+  repository: https://grafana.github.io/helm-charts
+  version: 7.2.0
+- name: victoria-metrics-single
+  repository: https://victoriametrics.github.io/helm-charts/
+  version: 0.44.0
+- name: grafana
+  repository: https://grafana.github.io/helm-charts
+  version: 10.5.15
+digest: sha256:8193537416816e8467126f509ab60fc891d55f4f869e5742275126742d1c264a
+generated: "2026-08-06T06:31:40.686107854Z"

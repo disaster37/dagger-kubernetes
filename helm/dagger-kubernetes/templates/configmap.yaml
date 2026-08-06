@@ -28,9 +28,9 @@ data:
 {{- end }}
     telemetry:
       collector_url: {{ include "dagger-kubernetes.collectorUrl" . | quote }}
-      tempo_url: {{ .Values.supervisor.config.telemetry.tempoUrl | quote }}
-      loki_url: {{ .Values.supervisor.config.telemetry.lokiUrl | quote }}
-      victoria_url: {{ .Values.supervisor.config.telemetry.victoriaUrl | quote }}
+      tempo_url: {{ include "dagger-kubernetes.tempoUrl" . | quote }}
+      loki_url: {{ include "dagger-kubernetes.lokiUrl" . | quote }}
+      victoria_url: {{ include "dagger-kubernetes.victoriaUrl" . | quote }}
     cache:
       backend: {{ .Values.supervisor.config.cache.backend | quote }}
       registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}

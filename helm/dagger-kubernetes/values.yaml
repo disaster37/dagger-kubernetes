@@ -13,7 +13,9 @@ image:
 # --- Naming / namespace ----------------------------------------------------
 nameOverride: ""
 fullnameOverride: ""
-namespace: dagger-kubernetes
+# Namespace for the supervisor and its subchart dependencies.
+# Defaults to the release namespace when empty.
+namespace: ""
 
 # --- Supervisor runtime ----------------------------------------------------
 replicaCount: 2
@@ -170,6 +172,18 @@ tools:
   # Docker registry (OCI) — backs the remote shared cache (BuildKit blobs).
   registry:
     enabled: true
+  # Grafana Tempo — distributed tracing backend, stores OTLP traces.
+  tempo:
+    enabled: true
+  # Grafana Loki — log aggregation backend, stores OTLP logs.
+  loki:
+    enabled: true
+  # VictoriaMetrics — PromQL-compatible metrics backend, stores OTLP metrics.
+  victoria:
+    enabled: true
+  # Grafana — unified dashboards for Tempo, Loki, and VictoriaMetrics data.
+  grafana:
+    enabled: true
 
 # ---------------------------------------------------------------------------
 # Subchart values. Helm forwards these to each dependency. Keys are top-level:
@@ -185,9 +199,46 @@ opentelemetry-collector:
   resources:
     requests:
       cpu: 100m
-      memory: 128Mi
+      memory: 256Mi
   service:
     type: ClusterIP
+  # The collector subchart uses tpl() on config, so Go template expressions
+  # like {{ .Release.Name }} are resolved correctly at install time.
+  config:
+    receivers:
+      otlp:
+        protocols:
+          http:
+            endpoint: 0.0.0.0:4318
+    processors:
+      batch: {}
+    exporters:
+      otlphttp/tempo:
+        endpoint: http://{{ .Release.Name }}-tempo:4318
+        tls:
+          insecure: true
+      loki:
+        endpoint: http://{{ .Release.Name }}-loki:3100/loki/api/v1/push
+        tls:
+          insecure: true
+      prometheusremotewrite:
+        endpoint: http://{{ .Release.Name }}-victoria-metrics-single:8428/prometheus/api/v1/write
+        tls:
+          insecure: true
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlphttp/tempo]
+        logs:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [loki]
+        metrics:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [prometheusremotewrite]
 
 registry:
   # docker-registry subchart (stable/docker-registry, aliased as `registry`).
@@ -200,3 +251,63 @@ registry:
     requests:
       cpu: 100m
       memory: 128Mi
+
+# Tempo — distributed tracing backend. Receives OTLP traces from the collector.
+tempo:
+  persistence:
+    enabled: true
+    size: 20Gi
+  tempo:
+    retention: 48h
+    storage:
+      trace:
+        backend: local
+        local:
+          path: /var/tempo/traces
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+# Loki — log aggregation backend. Receives OTLP logs from the collector.
+loki:
+  deploymentMode: SingleBinary
+  singleBinary:
+    replicas: 1
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+  backend:
+    replicas: 0
+  read:
+    replicas: 0
+  write:
+    replicas: 0
+  loki:
+    useTestSchema: true
+    storage:
+      bucketNames:
+        chunks: chunks
+        ruler: ruler
+
+# VictoriaMetrics single-server — metrics backend. Receives OTLP metrics from the collector.
+victoria:
+  server:
+    persistentVolume:
+      enabled: true
+      size: 20Gi
+    resources:
+      requests:
+        cpu: 100m
+        memory: 256Mi
+
+# Grafana — dashboards for Tempo (traces), Loki (logs), and VictoriaMetrics (metrics).
+# Connect to the UI at the Grafana Service URL (default credentials: admin / admin).
+# Datasources are auto-provisioned via a ConfigMap template (see grafana-datasources.yaml).
+grafana:
+  adminPassword: "admin"
+  sidecar:
+    datasources:
+      enabled: true
+      label: grafana_datasource

@@ -156,9 +156,40 @@ test(session): add expiry edge case coverage
 
 Every change that introduces, modifies, or removes a feature, a configuration key, or a design decision must update the corresponding documentation:
 
-- **`config.app.yaml.sample`** — Must reflect all config keys, their types, defaults, and a brief comment for each. Always kept in sync with `internal/config/config.go`.
-- **`docs/README.md`** — User-facing documentation covering setup, configuration, operations, and CI integrations.
-- **`docs/design/`** — Architecture Decision Records must be created for new architectural decisions and updated when existing decisions change.
+- **`config.app.yaml.sample`** — Must reflect all config keys, their types, defaults, and a brief comment for each. Always kept in sync with `internal/config/config.go`. If a new key is added to the config struct, add the corresponding entry with a comment in the sample file.
+
+- **`helm/dagger-kubernetes/README.md`** — Helm chart documentation covering install, upgrade, dependencies, configuration reference, production recommendations, and storage sizing. Must be updated when:
+  - A new subchart dependency is added or removed
+  - A new Helm value is introduced or changed
+  - Auto-wiring logic changes
+  - Production sizing recommendations change
+
+- **`helm/dagger-kubernetes/values.yaml`** — The canonical default values for the Helm chart. Every `supervisor.config.*` key must match the Viper config struct. Every subchart value exposed must have a comment. Keep comments consistent with `config.app.yaml.sample`.
+
+- **`docs/README.md`** — User-facing documentation covering setup, configuration, operations, and CI integrations. Must be updated when:
+  - A new feature is added or removed
+  - The deployment method changes
+  - New ports, endpoints, or services are introduced
+  - The architecture diagram needs updating
+  - CI integration instructions change
+
+- **`docs/design/`** — Architecture Decision Records (ADRs) must be created for new architectural decisions and updated when existing decisions change. ADRs explain *why* a decision was made, not just *what* was done. Follow the existing `ADR-NNN-title.md` naming convention.
+
+### Files that must stay in sync
+
+These three files define the same configuration schema from different perspectives. They **must** be updated together:
+
+| File | Perspective |
+|---|---|
+| `internal/config/config.go` | Go struct definition + defaults |
+| `config.app.yaml.sample` | Full YAML reference with comments |
+| `helm/dagger-kubernetes/values.yaml` | Helm chart default values |
+
+When adding a config key:
+1. Add the struct field + `mapstructure` tag + `v.SetDefault()` in `config.go`
+2. Add the key + comment in `config.app.yaml.sample`
+3. Add the key + Helm template rendering in `helm/dagger-kubernetes/templates/configmap.yaml`
+4. Add the default value + comment in `helm/dagger-kubernetes/values.yaml`
 
 Outdated docs are a bug. Documentation changes are part of the same PR as the code change.
 
