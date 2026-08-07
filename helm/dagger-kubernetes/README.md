@@ -5,6 +5,43 @@ engine fleets, live pipeline UI, and drop-in CI integration.
 
 The chart deploys the Supervisor control plane and all required infrastructure
 as Helm subchart dependencies, each toggleable independently.
+<!-- version-marker -->
+   [^1]: Latest released version: `0.1.0`
+
+## Install from the GHCR OCI repository
+
+Published images and the chart are pushed to GHCR on release tags.
+This is the recommended way to install for production:
+
+```bash
+# Create a values override for your environment
+cat > my-values.yaml <<'EOF'
+ingress:
+  hosts:
+    - supv.example.com
+supervisor:
+  config:
+    server:
+      dataHostname: data.your-domain.com
+      publicUrl: https://supv.example.com
+EOF
+
+# Install directly from GHCR (no local clone needed)
+helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+  --version 0.1.0 -f my-values.yaml \
+  --namespace dagger-stack --create-namespace \
+  --set ca.crt="$(cat ca.crt)" \
+  --set ca.key="$(cat ca.key)" \
+  --set tls.crt="$(cat tls.crt)" \
+  --set tls.key="$(cat tls.key)" \
+  --set-string "auth.tokens[0]=$TOKEN"
+```
+
+List available versions:
+
+```bash
+helm show chart oci://ghcr.io/disaster/charts/dagger-kubernetes | grep version
+```
 
 ## Required tools (chart dependencies)
 
@@ -45,9 +82,15 @@ supervisor:
       registry: "my-registry:5000/dagger-cache"
 ```
 
-## Quick install
+## Install from source (local development)
+
+Use this approach when customizing the chart or developing locally:
 
 ```bash
+# 0. Clone the repository
+git clone https://github.com/disaster/dagger-kubernetes.git
+cd dagger-kubernetes
+
 # 1. Fetch dependencies (downloads subcharts to charts/)
 helm dependency build helm/dagger-kubernetes
 
@@ -226,22 +269,19 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
 
-## Using the published OCI chart
-
-Published images and the chart are pushed to GHCR on release tags:
-
-```bash
-helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
-  --version <version> -f my-values.yaml
-```
-
 ## Upgrading
 
-```bash
-# Fetch updated dependencies
-helm dependency update helm/dagger-kubernetes
+From the OCI repository (recommended):
 
-# Upgrade
+```bash
+helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+  --version 0.1.0 -f my-values.yaml --namespace dagger-stack
+```
+
+From source:
+
+```bash
+helm dependency update helm/dagger-kubernetes
 helm upgrade dagger-kubernetes helm/dagger-kubernetes \
   -f my-values.yaml --namespace dagger-stack
 ```

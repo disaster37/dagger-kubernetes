@@ -80,14 +80,11 @@ in dev mode.
 
 ### Kubernetes (Helm)
 
-The recommended production deployment uses the Helm chart, which bundles the
-Supervisor and all required infrastructure as subchart dependencies:
+The recommended production deployment uses the Helm chart published to the
+GitHub Container Registry (GHCR) as an OCI artifact on every release:
 
 ```bash
-# 1. Fetch chart dependencies
-helm dependency build helm/dagger-kubernetes
-
-# 2. Generate certificates
+# 1. Generate certificates
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -days 3650 -nodes -keyout ca.key -out ca.crt \
   -subj "/CN=Dagger Minting CA"
@@ -97,15 +94,24 @@ openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
   -subj "/CN=data.your-domain.com" \
   -addext "subjectAltName=DNS:data.your-domain.com"
 
-# 3. Generate a token
+# 2. Generate a token
 TOKEN=$(openssl rand -hex 32)
 
-# 4. Customize values
-cp helm/dagger-kubernetes/values.yaml my-values.yaml
-# Edit server.dataHostname, server.publicUrl, ingress.hosts
+# 3. Create a values override
+cat > my-values.yaml <<'EOF'
+ingress:
+  hosts:
+    - supv.example.com
+supervisor:
+  config:
+    server:
+      dataHostname: data.your-domain.com
+      publicUrl: https://supv.example.com
+EOF
 
-# 5. Install
-helm install dagger-kubernetes helm/dagger-kubernetes \
+# 4. Install from the GHCR OCI repository
+helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+  --version 0.1.0 \
   -f my-values.yaml \
   --namespace dagger-stack --create-namespace \
   --set ca.crt="$(cat ca.crt)" \
@@ -113,6 +119,22 @@ helm install dagger-kubernetes helm/dagger-kubernetes \
   --set tls.crt="$(cat tls.crt)" \
   --set tls.key="$(cat tls.key)" \
   --set-string "auth.tokens[0]=$TOKEN"
+```
+
+To list available chart versions:
+
+```bash
+helm show chart oci://ghcr.io/disaster/charts/dagger-kubernetes | grep version
+```
+
+For local development or customization, you can install directly from the
+chart source by cloning the repository:
+
+```bash
+git clone https://github.com/disaster/dagger-kubernetes.git
+cd dagger-kubernetes
+helm dependency build helm/dagger-kubernetes
+helm install dagger-kubernetes helm/dagger-kubernetes -f my-values.yaml ...
 ```
 
 The Helm chart deploys:
@@ -304,7 +326,16 @@ go build -o supervisor ./cmd/supervisor                # server
 ./supervisor --config=config.app.yaml
 ```
 
-Or via the Docker image:
+Or via the published Docker image from GHCR:
+
+```bash
+docker run -p 8080:8080 -p 8443:8443 \
+  -v "$PWD/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
+  -v "$PWD/tokens:/etc/dagger-cache/tokens:ro" \
+  ghcr.io/disaster/dagger-kubernetes:latest
+```
+
+To build from source:
 
 ```bash
 docker build -t dagger-cache/supervisor:latest .
