@@ -132,6 +132,9 @@ internal/observ/                — logrus logger factory + Prometheus metrics
 internal/session/               — in-memory lease store
 internal/telemetry/             — live hub, Tempo/Loki/Victoria clients
 internal/version/               — version parser + resolver
+dagger/                         — local Dagger module (CI pipeline)
+hack/                           — dev scripts (dagger-cache.sh, update-helm-docs.sh)
+deploy/helm/                    — Helm chart
 test/                           — integration tests
 docs/design/                    — architecture decision records
 ```

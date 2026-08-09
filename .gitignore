@@ -28,7 +28,7 @@ go.work.sum
 .env
 
 # Helm: vendored dependency archives (rebuilt via `helm dependency update`)
-helm/**/charts/*.tgz
+deploy/helm/**/charts/*.tgz
 
 # Editor/IDE
 # .idea/
@@ -38,3 +38,9 @@ helm/**/charts/*.tgz
 node_modules/
 npm-debug.log
 yarn-error.log
+
+# Local build artifacts
+/dagger-cache-ci
+/supervisor
+bin/
+out/

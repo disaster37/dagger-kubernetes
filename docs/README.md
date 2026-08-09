@@ -133,8 +133,8 @@ chart source by cloning the repository:
 ```bash
 git clone https://github.com/disaster/dagger-kubernetes.git
 cd dagger-kubernetes
-helm dependency build helm/dagger-kubernetes
-helm install dagger-kubernetes helm/dagger-kubernetes -f my-values.yaml ...
+helm dependency build deploy/helm/dagger-kubernetes
+helm install dagger-kubernetes deploy/helm/dagger-kubernetes -f my-values.yaml ...
 ```
 
 The Helm chart deploys:
@@ -150,7 +150,7 @@ Every tool is toggleable individually (`tools.<name>.enabled: false`). When
 disabled, you provide your own endpoint in `supervisor.config.telemetry` and
 `supervisor.config.cache`.
 
-See [`helm/dagger-kubernetes/README.md`](../helm/dagger-kubernetes/README.md)
+See [`deploy/helm/dagger-kubernetes/README.md`](../deploy/helm/dagger-kubernetes/README.md)
 for full Helm documentation, production sizing, and upgrade instructions.
 
 ### Client setup
@@ -175,7 +175,7 @@ dagger call github.com/your-org/ci@v1.0.0 build
 Or skip the env-var juggling and use the wrapper:
 
 ```bash
-./cmd/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
+./hack/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
 ---
@@ -542,7 +542,7 @@ appends a summary step with the trace link.
 
 ## Client wrapper script
 
-`cmd/dagger-cache.sh` wires up the standard env vars and prints the
+`hack/dagger-cache.sh` wires up the standard env vars and prints the
 pipeline-view link after the run:
 
 ```bash
@@ -551,7 +551,7 @@ export DAGGER_CACHE_UI=https://ui.supv.example.com
 export DAGGER_CLOUD_TOKEN=<token>
 export DAGGER_TAG=v0.21.4          # optional
 
-./cmd/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
+./hack/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
 It derives the cache ref (`cache.reg/dagger-cache:V0-21-4`) from
@@ -638,6 +638,9 @@ cd ui && npm install && npm run build
 
 # Lint
 golangci-lint run ./...
+
+# Run the full CI pipeline locally (Dagger CLI required — see DAGGER.md)
+dagger call -m ./dagger --src . ci export --path out
 ```
 
 Integration tests (`test/integration_test.go`) exercise the full

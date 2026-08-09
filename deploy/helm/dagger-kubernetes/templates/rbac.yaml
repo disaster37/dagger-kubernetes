@@ -1,0 +1,43 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+{{- with .Values.serviceAccount.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["services", "pods", "pods/exec", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "configmaps", "secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "dagger-kubernetes.fullname" . }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "dagger-kubernetes.fullname" . }}
+    namespace: {{ include "dagger-kubernetes.namespace" . }}

@@ -1,0 +1,100 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "dagger-kubernetes.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "dagger-kubernetes.selectorLabels" . | nindent 8 }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "dagger-kubernetes.fullname" . }}
+      {{- with .Values.image.pullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: supervisor
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--config=/etc/dagger-kubernetes/config.app.yaml"
+          env:
+            - name: DAGGER_CACHE_LOG_LEVEL
+              value: {{ .Values.supervisor.config.logLevel | quote }}
+            {{- with .Values.supervisor.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          ports:
+            - name: control
+              containerPort: 8080
+            - name: data
+              containerPort: 8443
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dagger-kubernetes
+              readOnly: true
+            - name: tokens
+              mountPath: /etc/dagger-kubernetes/tokens
+              subPath: tokens
+              readOnly: true
+            - name: tls
+              mountPath: /etc/dagger-kubernetes/tls
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: control
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: control
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+      volumes:
+        - name: config
+          configMap:
+            name: {{ include "dagger-kubernetes.fullname" . }}-config
+        - name: tokens
+          secret:
+            secretName: {{ include "dagger-kubernetes.fullname" . }}-tokens
+            optional: true
+        - name: tls
+          secret:
+            secretName: {{ include "dagger-kubernetes.fullname" . }}-tls
+        - name: tmp
+          emptyDir: {}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

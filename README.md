@@ -18,13 +18,17 @@ Quick links:
 | Path                | Contents                                              |
 |---------------------|-------------------------------------------------------|
 | `cmd/supervisor`    | The Supervisor server (control + data plane + OTLP). |
-| `cmd/dagger-cache-ci`, `cmd/dagger-cache.sh` | CI helper + client wrapper.           |
-| `internal/`         | Config, API, dataplane, fleet, cache, CA, telemetry, …|
+| `cmd/dagger-cache-ci`, `hack/dagger-cache.sh` | CI helper + client wrapper.           |
+| `internal/`         | Config, API, fleet, cache, CA, telemetry, …          |
+| `dagger/`           | Local Dagger module — CI pipeline.                   |
+| `hack/`             | Dev scripts (`dagger-cache.sh`, `update-helm-docs.sh`). |
 | `deploy/docker`     | Local dev compose stack.                              |
 | `deploy/k8s`        | Kubernetes manifests.                                 |
+| `deploy/helm`        | Helm chart.                                           |
 | `ci-integrations/`  | GHA action, Jenkins shared lib, Drone extension.     |
 | `ui/`               | Vite SPA pipeline UI.                                 |
 | `docs/README.md`    | Complete usage guide.                                 |
+| `DAGGER.md`         | Dagger CI command reference.                         |
 | `config.app.yaml`   | Live example config (minimal).                         |
 | `config.app.yaml.sample` | Fully-commented config reference.                |
 

@@ -1,0 +1,22 @@
+# Patterns to ignore when packaging the dagger-kubernetes chart.
+# NOTE: do NOT exclude charts/*.tgz here — vendored dependencies must be
+# included so the packaged chart is self-contained. Keep them out of git
+# via the repository .gitignore instead.
+
+# Source control
+.git/
+.gitignore
+.github/
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local values / secrets
+my-values.yaml
+values.local.yaml
+*.secret.yaml

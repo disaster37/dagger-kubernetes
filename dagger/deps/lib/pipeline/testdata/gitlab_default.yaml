@@ -1,0 +1,17 @@
+dagger:
+    stage: dagger
+    image: docker:stable-dind
+    script:
+        - |-
+          if [ -n "$CI_COMMIT_TAG" ]; then VERSION="$CI_COMMIT_TAG"; elif [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then VERSION="0.0.0-pr.${CI_MERGE_REQUEST_IID}.${CI_PIPELINE_IID}"; else VERSION="0.0.0-rc.${CI_PIPELINE_IID}"; fi
+          if [ -n "$CI_COMMIT_TAG" ]; then BRANCH_NAME='main'; elif [ "$CI_PIPELINE_SOURCE" = "merge_request_event" ]; then BRANCH_NAME="$CI_MERGE_REQUEST_SOURCE_BRANCH_NAME"; else BRANCH_NAME="$CI_COMMIT_BRANCH"; fi
+        - dagger call -m 'github.com/disaster37/dagger-library-go/helm@v2' --src '.' 'ci' --ci 'github' --version ${VERSION} --registry-username 'env:REGISTRY_USERNAME' --registry-password 'env:REGISTRY_PASSWORD' --git-token 'env:GIT_TOKEN' --git-repo-url ${CI_REPOSITORY_URL} --git-branch ${BRANCH_NAME} export --path .
+    timeout: 30m
+    rules:
+        - if: $CI_COMMIT_TAG
+        - changes:
+            - '**/*'
+          if: $CI_COMMIT_BRANCH
+        - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+stages:
+    - dagger

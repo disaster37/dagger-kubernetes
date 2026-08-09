@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHART_DIR="${ROOT}/helm/dagger-kubernetes"
+CHART_DIR="${ROOT}/deploy/helm/dagger-kubernetes"
 CHART_YAML="${CHART_DIR}/Chart.yaml"
 README="${CHART_DIR}/README.md"
 

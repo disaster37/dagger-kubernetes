@@ -1,0 +1,18 @@
+{
+  "name": "dagger-cache",
+  "engineVersion": "v0.21.8",
+  "sdk": {
+    "source": "go"
+  },
+  "dependencies": [
+    {
+      "name": "golang",
+      "source": "deps/golang"
+    },
+    {
+      "name": "helm",
+      "source": "github.com/disaster37/dagger-library-go/helm@2.0.10",
+      "pin": "b753e824a9c4beec16d624fb1b7f59b073934c78"
+    }
+  ]
+}

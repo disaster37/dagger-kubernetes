@@ -132,16 +132,40 @@ go tool cover -func=coverage.out | grep total
 golangci-lint run ./...
 ```
 
+## Dagger
+
+The CI pipeline is a local Dagger module in `dagger/` (module name `dagger-cache`).
+It delegates lint and build to the `golang` module and helm lint to the `helm`
+module from `github.com/disaster37/dagger-library-go` (pinned at `2.0.10`); test,
+UI, docker, and the helm template matrix are implemented locally because the
+upstream modules cannot express `-race`, the UI build, the Dockerfile smoke
+test, or `helm template`. See [`DAGGER.md`](./DAGGER.md) for the full reference.
+
+```bash
+# Full CI pipeline (lint + test + ui + build + docker + helm)
+dagger call -m ./dagger ci export --path out
+
+# Individual functions
+dagger call -m ./dagger lint
+dagger call -m ./dagger test export --path coverage.out
+dagger call -m ./dagger build export --path bin
+dagger call -m ./dagger docker
+dagger call -m ./dagger helm
+```
+
 ## Project structure
 ```
-cmd/supervisor/     Main server entry point (urfave/cli)
+cmd/supervisor/      Main server entry point (urfave/cli)
 cmd/dagger-cache-ci/ CI helper binary (urfave/cli)
-internal/           Private packages (api, auth, ca, cache, config, fleet, observ, session, telemetry, version)
-test/               Integration / functional tests
-docs/design/        Architecture decision records
-ui/                 Vue 3 SPA (Vite + TypeScript)
-deploy/             Docker Compose + K8s manifests
-helm/               Helm chart
+internal/            Private packages (api, auth, ca, cache, config, fleet, observ, session, telemetry, version)
+dagger/              Local Dagger module — CI pipeline (delegates to dagger-library-go golang/helm)
+hack/                Dev scripts (dagger-cache.sh client wrapper, update-helm-docs.sh)
+test/                Integration / functional tests
+docs/design/         Architecture decision records
+ui/                  Vue 3 SPA (Vite + TypeScript); embeds via internal/api/ui-dist/
+deploy/docker        Docker Compose dev stack
+deploy/k8s           Kubernetes manifests
+deploy/helm/         Helm chart
 ```
 
 ## Commit messages
@@ -158,13 +182,13 @@ Every change that introduces, modifies, or removes a feature, a configuration ke
 
 - **`config.app.yaml.sample`** — Must reflect all config keys, their types, defaults, and a brief comment for each. Always kept in sync with `internal/config/config.go`. If a new key is added to the config struct, add the corresponding entry with a comment in the sample file.
 
-- **`helm/dagger-kubernetes/README.md`** — Helm chart documentation covering install, upgrade, dependencies, configuration reference, production recommendations, and storage sizing. Must be updated when:
+- **`deploy/helm/dagger-kubernetes/README.md`** — Helm chart documentation covering install, upgrade, dependencies, configuration reference, production recommendations, and storage sizing. Must be updated when:
   - A new subchart dependency is added or removed
   - A new Helm value is introduced or changed
   - Auto-wiring logic changes
   - Production sizing recommendations change
 
-- **`helm/dagger-kubernetes/values.yaml`** — The canonical default values for the Helm chart. Every `supervisor.config.*` key must match the Viper config struct. Every subchart value exposed must have a comment. Keep comments consistent with `config.app.yaml.sample`.
+- **`deploy/helm/dagger-kubernetes/values.yaml`** — The canonical default values for the Helm chart. Every `supervisor.config.*` key must match the Viper config struct. Every subchart value exposed must have a comment. Keep comments consistent with `config.app.yaml.sample`.
 
 - **`docs/README.md`** — User-facing documentation covering setup, configuration, operations, and CI integrations. Must be updated when:
   - A new feature is added or removed
@@ -183,15 +207,22 @@ These three files define the same configuration schema from different perspectiv
 |---|---|
 | `internal/config/config.go` | Go struct definition + defaults |
 | `config.app.yaml.sample` | Full YAML reference with comments |
-| `helm/dagger-kubernetes/values.yaml` | Helm chart default values |
+| `deploy/helm/dagger-kubernetes/values.yaml` | Helm chart default values |
 
 When adding a config key:
 1. Add the struct field + `mapstructure` tag + `v.SetDefault()` in `config.go`
 2. Add the key + comment in `config.app.yaml.sample`
-3. Add the key + Helm template rendering in `helm/dagger-kubernetes/templates/configmap.yaml`
-4. Add the default value + comment in `helm/dagger-kubernetes/values.yaml`
+3. Add the key + Helm template rendering in `deploy/helm/dagger-kubernetes/templates/configmap.yaml`
+4. Add the default value + comment in `deploy/helm/dagger-kubernetes/values.yaml`
 
 Outdated docs are a bug. Documentation changes are part of the same PR as the code change.
+
+### Wrapper script sync
+`hack/dagger-cache.sh` and `ci-integrations/gha/dagger-cache.sh` must stay
+byte-identical. The copy in `ci-integrations/gha/` exists so the GitHub Actions
+composite action (`ci-integrations/gha/action.yml`) can invoke it from its own
+directory. When editing one, copy it verbatim to the other and verify with
+`cmp hack/dagger-cache.sh ci-integrations/gha/dagger-cache.sh`.
 
 ## PR checklist
 - [ ] Tests cover new code (target 100% coverage)

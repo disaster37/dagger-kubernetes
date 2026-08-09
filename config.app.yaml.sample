@@ -12,11 +12,11 @@
 # Environment variables take precedence over this file.
 #
 # When deploying with the Helm chart (recommended for production), the
-# config file is rendered from helm/dagger-kubernetes/values.yaml and
+# config file is rendered from deploy/helm/dagger-kubernetes/values.yaml and
 # auto-wires telemetry/cache URLs to the in-cluster dependency Services.
 # The Helm chart also manages the telemetry stack (OTel Collector, Tempo,
 # Loki, VictoriaMetrics, Grafana) and the OCI cache registry as subchart
-# dependencies, each toggleable independently. See helm/README.md.
+# dependencies, each toggleable independently. See deploy/helm/dagger-kubernetes/README.md.
 # ===========================================================================
 
 # --- Endpoints & public URLs ------------------------------------------------

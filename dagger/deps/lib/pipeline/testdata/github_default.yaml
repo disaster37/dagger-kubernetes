@@ -1,0 +1,35 @@
+name: dagger
+"on":
+    pull_request:
+        branches:
+            - main
+    push:
+        branches:
+            - main
+        tags:
+            - '*'
+    release:
+        types:
+            - created
+jobs:
+    dagger:
+        permissions:
+            contents: write
+            packages: write
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v2
+            - uses: dagger/dagger-for-github@v7
+              name: Call Dagger Function
+              with:
+                args: dagger call -m 'github.com/disaster37/dagger-library-go/helm@v2' --src '.' 'ci' --ci 'github' --version ${VERSION} --registry-username 'env:REGISTRY_USERNAME' --registry-password 'env:REGISTRY_PASSWORD' --git-token 'env:GITHUB_TOKEN' --git-repo-url ${{ github.repositoryUrl }} --git-branch ${BRANCH_NAME} export --path .
+                cloud-token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
+                module: github.com/disaster37/dagger-library-go/helm@v2
+                verb: call
+                version: ""
+              env:
+                BRANCH_NAME: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_type == 'tag' && 'main' || github.ref_name }}
+                GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+                REGISTRY_USERNAME: ${{ secrets.GITHUB_TOKEN }}
+                VERSION: ${{ github.ref_type == 'tag' && github.ref_name || github.event_name == 'pull_request' && format('0.0.0-pr.{0}.{1}', github.event.number, github.run_number) || format('0.0.0-rc.{0}', github.run_number) }}
