@@ -14,8 +14,39 @@ import (
 	"dagger/dagger-cache/internal/dagger"
 )
 
-// chartDir is the single source of truth for the helm chart path.
-const chartDir = "deploy/helm/dagger-kubernetes"
+const (
+	// chartDir is the single source of truth for the helm chart path.
+	chartDir = "deploy/helm/dagger-kubernetes"
+
+	// Pinned tool images and versions. Keep in sync with DAGGER.md.
+	golangImage         = "golang:1.26"
+	nodeImage           = "node:22-alpine"
+	helmImage           = "alpine/helm:3.14.0"
+	golangciLintVersion = "v2.12.2"
+)
+
+// binaries lists the Go binaries produced by Build.
+var binaries = []struct {
+	main string
+	out  string
+}{
+	{main: "./cmd/supervisor/", out: "bin/supervisor"},
+	{main: "./cmd/dagger-cache-ci/", out: "bin/dagger-cache-ci"},
+}
+
+// helmTemplateMatrix lists the --set combinations from the original CI.
+var helmTemplateMatrix = [][]string{
+	{},
+	{"--set", "tools.otelCollector.enabled=false", "--set", "tools.registry.enabled=false"},
+	{
+		"--set", "tools.otelCollector.enabled=false",
+		"--set", "tools.registry.enabled=false",
+		"--set", "tools.tempo.enabled=false",
+		"--set", "tools.loki.enabled=false",
+		"--set", "tools.victoria.enabled=false",
+		"--set", "tools.grafana.enabled=false",
+	},
+}
 
 // DaggerCache is the root type for the dagger-cache module.
 type DaggerCache struct {
@@ -31,23 +62,20 @@ func New(
 	return &DaggerCache{Src: src}
 }
 
-// Lint runs golangci-lint v2.12.2 against the Go source.
+// Lint runs golangci-lint against the Go source.
 //
-// It delegates to the golang module with a custom base container
-// (golang:1.26 with golangci-lint v2.12.2 preinstalled) to preserve the CI pin.
+// It delegates to the golang module with a custom base container that has
+// golangci-lint preinstalled, preserving the CI version pin.
 func (m *DaggerCache) Lint(ctx context.Context) (string, error) {
+	install := fmt.Sprintf(
+		"curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b $(go env GOPATH)/bin %s",
+		golangciLintVersion,
+	)
 	base := dag.Container().
-		From("golang:1.26").
-		WithExec([]string{
-			"bash", "-c",
-			fmt.Sprintf(
-				"curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b $(go env GOPATH)/bin v2.12.2",
-			),
-		})
+		From(golangImage).
+		WithExec([]string{"bash", "-c", install})
 
-	g := dag.Golang(m.Src, dagger.GolangOpts{Base: base})
-
-	out, err := g.Lint(ctx)
+	out, err := dag.Golang(m.Src, dagger.GolangOpts{Base: base}).Lint(ctx)
 	if err != nil {
 		return "", fmt.Errorf("golangci-lint: %w", err)
 	}
@@ -61,7 +89,7 @@ func (m *DaggerCache) Lint(ctx context.Context) (string, error) {
 // used and CGO_ENABLED is not set to 0.
 func (m *DaggerCache) Test(ctx context.Context) (*dagger.File, error) {
 	ctr := dag.Container().
-		From("golang:1.26").
+		From(golangImage).
 		WithMountedDirectory("/src", m.Src).
 		WithWorkdir("/src").
 		WithExec([]string{"go", "vet", "./..."}).
@@ -83,14 +111,13 @@ func (m *DaggerCache) Test(ctx context.Context) (*dagger.File, error) {
 // Ui builds the Vue 3 SPA and returns the dist/ directory.
 //
 // Implemented locally because the upstream golang module has no UI support.
-// Mirrors the Dockerfile: node:22-alpine, npm ci || npm install, typecheck,
-// build.
+// Mirrors the Dockerfile: npm ci || npm install, typecheck, build.
 func (m *DaggerCache) Ui(ctx context.Context) (*dagger.Directory, error) {
 	ctr := dag.Container().
-		From("node:22-alpine").
+		From(nodeImage).
 		WithMountedDirectory("/ui", m.Src.Directory("ui")).
 		WithWorkdir("/ui").
-		WithExec([]string{"sh", "-c", "npm ci || npm install"}).
+		WithExec([]string{"npm", "ci"}).
 		WithExec([]string{"npm", "run", "typecheck"}).
 		WithExec([]string{"npm", "run", "build"})
 
@@ -109,19 +136,11 @@ func (m *DaggerCache) Ui(ctx context.Context) (*dagger.Directory, error) {
 func (m *DaggerCache) Build(ctx context.Context) (*dagger.Directory, error) {
 	g := dag.Golang(m.Src)
 
-	supervisor := g.Build(dagger.GolangBuildOpts{
-		Main: "./cmd/supervisor/",
-		Out:  "bin/supervisor",
-	})
-
-	ci := g.Build(dagger.GolangBuildOpts{
-		Main: "./cmd/dagger-cache-ci/",
-		Out:  "bin/dagger-cache-ci",
-	})
-
-	bin := dag.Directory().
-		WithFile("bin/supervisor", supervisor.File("bin/supervisor")).
-		WithFile("bin/dagger-cache-ci", ci.File("bin/dagger-cache-ci"))
+	bin := dag.Directory()
+	for _, b := range binaries {
+		out := g.Build(dagger.GolangBuildOpts{Main: b.main, Out: b.out})
+		bin = bin.WithFile(b.out, out.File(b.out))
+	}
 
 	return bin, nil
 }
@@ -132,9 +151,9 @@ func (m *DaggerCache) Build(ctx context.Context) (*dagger.Directory, error) {
 // support. The image entrypoint is `supervisor`, so `-h` exercises the
 // urfave/cli help path.
 func (m *DaggerCache) Docker(ctx context.Context) (*dagger.Container, error) {
-	ctr := m.Src.DockerBuild()
+	ctr := m.Src.DockerBuild().
+		WithExec([]string{"-h"}, dagger.ContainerWithExecOpts{UseEntrypoint: true})
 
-	ctr = ctr.WithExec([]string{"-h"}, dagger.ContainerWithExecOpts{UseEntrypoint: true})
 	if _, err := ctr.Sync(ctx); err != nil {
 		return nil, fmt.Errorf("docker smoke test: %w", err)
 	}
@@ -143,43 +162,25 @@ func (m *DaggerCache) Docker(ctx context.Context) (*dagger.Container, error) {
 }
 
 // Helm lints the chart (delegated to the helm module) and runs the template
-// matrix locally (alpine/helm:3.14.0) with the three --set combos from the
-// original CI.
+// matrix locally with the three --set combos from the original CI.
 func (m *DaggerCache) Helm(ctx context.Context) error {
 	chart := m.Src.Directory(chartDir)
 
-	h := dag.Helm(chart)
-
-	if _, err := h.Lint(ctx); err != nil {
+	if _, err := dag.Helm(chart).Lint(ctx); err != nil {
 		return fmt.Errorf("helm lint: %w", err)
 	}
 
-	templateMatrix := [][]string{
-		{},
-		{"--set", "tools.otelCollector.enabled=false", "--set", "tools.registry.enabled=false"},
-		{
-			"--set", "tools.otelCollector.enabled=false",
-			"--set", "tools.registry.enabled=false",
-			"--set", "tools.tempo.enabled=false",
-			"--set", "tools.loki.enabled=false",
-			"--set", "tools.victoria.enabled=false",
-			"--set", "tools.grafana.enabled=false",
-		},
-	}
+	// The subchart archives are gitignored, so fetch the dependencies first;
+	// each template variant runs in a fresh container without charts/.
+	base := dag.Container().
+		From(helmImage).
+		WithMountedDirectory("/src", m.Src).
+		WithWorkdir("/src").
+		WithExec([]string{"helm", "dependency", "update", chartDir})
 
-	for i, sets := range templateMatrix {
-		cmd := []string{
-			"helm", "template", "dagger-kubernetes", chartDir, "--debug",
-		}
-		cmd = append(cmd, sets...)
-
-		ctr := dag.Container().
-			From("alpine/helm:3.14.0").
-			WithMountedDirectory("/src", m.Src).
-			WithWorkdir("/src").
-			WithExec(cmd)
-
-		if _, err := ctr.Sync(ctx); err != nil {
+	for i, sets := range helmTemplateMatrix {
+		cmd := append([]string{"helm", "template", "dagger-kubernetes", chartDir, "--debug"}, sets...)
+		if _, err := base.WithExec(cmd).Sync(ctx); err != nil {
 			return fmt.Errorf("helm template variant %d: %w", i, err)
 		}
 	}
@@ -218,8 +219,5 @@ func (m *DaggerCache) Ci(ctx context.Context) (*dagger.Directory, error) {
 		return nil, err
 	}
 
-	return dag.Directory().
-		WithFile("bin/supervisor", bin.File("bin/supervisor")).
-		WithFile("bin/dagger-cache-ci", bin.File("bin/dagger-cache-ci")).
-		WithFile("coverage.out", coverage), nil
+	return bin.WithFile("coverage.out", coverage), nil
 }

@@ -26,10 +26,10 @@ runs:
     - name: Run Dagger with Cache
       shell: bash
       run: |
-        ${GITHUB_ACTION_PATH}/dagger-cache.sh run \
-          "${{ inputs.module }}" \
-          ${{ inputs.args }}
+        "${GITHUB_ACTION_PATH}/dagger-cache.sh" run "${DC_MODULE}" ${DC_ARGS}
       env:
+        DC_MODULE: ${{ inputs.module }}
+        DC_ARGS: ${{ inputs.args }}
         DAGGER_CACHE_SERVER: ${{ inputs.server-url }}
         DAGGER_CACHE_UI: ${{ inputs.ui-url || inputs.server-url }}
         DAGGER_CLOUD_TOKEN: ${{ inputs.token }}

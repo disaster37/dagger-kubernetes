@@ -1,4 +1,4 @@
-/dagger.gen.go
-/internal/dagger
+# Generated code (dagger.gen.go, internal/dagger) is committed on purpose so
+# `go build ./...` works without running Dagger codegen first.
 /internal/telemetry
 /.env

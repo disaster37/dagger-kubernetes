@@ -26,6 +26,9 @@ Install the CLI:
 curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=0.21.8 sh
 ```
 
+The installer places the binary in `./bin` by default (override with
+`BIN_DIR=/some/dir`); add it to your `PATH` or invoke it as `./bin/dagger`.
+
 ## Full CI
 
 ```bash
@@ -47,16 +50,19 @@ Outputs:
 | `lint` | `dagger call -m ./dagger --src . lint` | golangci-lint stdout |
 | `test` | `dagger call -m ./dagger --src . test export --path coverage.out` | `coverage.out` file |
 | `ui` | `dagger call -m ./dagger --src . ui export --path ui-dist` | `dist/` directory |
-| `build` | `dagger call -m ./dagger --src . build export --path bin` | `bin/` directory with both binaries |
+| `build` | `dagger call -m ./dagger --src . build export --path .` | `bin/` directory with both binaries (the returned directory already contains `bin/`, so export to `.`) |
 | `docker` | `dagger call -m ./dagger --src . docker` | built `Container` |
 | `helm` | `dagger call -m ./dagger --src . helm` | (no return value; fails on error) |
 
-## Direct Daggerverse module usage (bypassing local module)
+## Direct module usage (bypassing local module)
 
-The upstream `golang` module can be called directly. Because the repo root has no Go files, `--main` is required:
+The `golang` module can be called directly via the vendored copy at
+`dagger/deps/golang`. (The remote `github.com/disaster37/dagger-library-go/golang@2.0.10`
+reference cannot be used — it fails to load for the `include` reason noted
+above.) Because the repo root has no Go files, `--main` is required:
 
 ```bash
-dagger call -m github.com/disaster37/dagger-library-go/golang@2.0.10 --src . ci --main ./cmd/supervisor --out bin/supervisor export --path .
+dagger call -m ./dagger/deps/golang --src . ci --main ./cmd/supervisor --out bin/supervisor export --path .
 ```
 
 > **Caveat:** upstream `test` runs without `-race` (hardcoded flags). The local module's `Test` is used instead for parity with the original CI. Upstream `Build` omits `-trimpath` (release builds still use the Dockerfile / `release.yml` path, unaffected).

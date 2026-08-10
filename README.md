@@ -24,7 +24,7 @@ Quick links:
 | `hack/`             | Dev scripts (`dagger-cache.sh`, `update-helm-docs.sh`). |
 | `deploy/docker`     | Local dev compose stack.                              |
 | `deploy/k8s`        | Kubernetes manifests.                                 |
-| `deploy/helm`        | Helm chart.                                           |
+| `deploy/helm`       | Helm chart.                                           |
 | `ci-integrations/`  | GHA action, Jenkins shared lib, Drone extension.     |
 | `ui/`               | Vite SPA pipeline UI.                                 |
 | `docs/README.md`    | Complete usage guide.                                 |

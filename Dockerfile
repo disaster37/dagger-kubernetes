@@ -5,7 +5,7 @@ FROM node:22-alpine AS ui-builder
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
-    npm ci || npm install
+    npm ci
 COPY ui/ ./
 RUN npm run build
 

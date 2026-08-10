@@ -23,6 +23,10 @@ services:
       - DAGGER_CACHE_LOG_LEVEL=debug
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
+      # Generate your own bearer token and write it to ./data/tokens before
+      # starting the stack, e.g.:
+      #   mkdir -p data && head -c 32 /dev/urandom | xxd -p -u > data/tokens
+      # The tokens file is gitignored and must never be committed.
       - ./data/tokens:/etc/dagger-cache/tokens:ro
     depends_on:
       - cache-registry

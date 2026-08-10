@@ -143,14 +143,15 @@ test, or `helm template`. See [`DAGGER.md`](./DAGGER.md) for the full reference.
 
 ```bash
 # Full CI pipeline (lint + test + ui + build + docker + helm)
-dagger call -m ./dagger ci export --path out
+dagger call -m ./dagger --src . ci export --path out
 
 # Individual functions
-dagger call -m ./dagger lint
-dagger call -m ./dagger test export --path coverage.out
-dagger call -m ./dagger build export --path bin
-dagger call -m ./dagger docker
-dagger call -m ./dagger helm
+dagger call -m ./dagger --src . lint
+dagger call -m ./dagger --src . test export --path coverage.out
+dagger call -m ./dagger --src . ui export --path ui-dist
+dagger call -m ./dagger --src . build export --path .
+dagger call -m ./dagger --src . docker
+dagger call -m ./dagger --src . helm
 ```
 
 ## Project structure
