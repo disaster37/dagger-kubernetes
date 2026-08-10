@@ -6,7 +6,7 @@ metadata:
   labels:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
 spec:
-  replicas: {{ .Values.replicaCount }}
+  replicas: {{ .Values.supervisor.replicaCount }}
   selector:
     matchLabels:
       {{- include "dagger-kubernetes.selectorLabels" . | nindent 6 }}
@@ -16,21 +16,21 @@ spec:
         {{- include "dagger-kubernetes.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
+        {{- with .Values.supervisor.podAnnotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "dagger-kubernetes.fullname" . }}
-      {{- with .Values.image.pullSecrets }}
+      {{- with .Values.supervisor.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       securityContext:
-        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+        {{- toYaml .Values.supervisor.podSecurityContext | nindent 8 }}
       containers:
         - name: supervisor
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
-          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          image: "{{ .Values.supervisor.image.repository }}:{{ .Values.supervisor.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.supervisor.image.pullPolicy }}
           args:
             - "--config=/etc/dagger-kubernetes/config.app.yaml"
           env:
@@ -74,9 +74,9 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- toYaml .Values.supervisor.resources | nindent 12 }}
           securityContext:
-            {{- toYaml .Values.securityContext | nindent 12 }}
+            {{- toYaml .Values.supervisor.securityContext | nindent 12 }}
       volumes:
         - name: config
           configMap:
@@ -91,21 +91,21 @@ spec:
         - name: tmp
           emptyDir: {}
         - name: db
-          {{- if .Values.persistence.enabled }}
+          {{- if .Values.supervisor.persistence.enabled }}
           persistentVolumeClaim:
             claimName: {{ include "dagger-kubernetes.fullname" . }}-db
           {{- else }}
           emptyDir: {}
           {{- end }}
-      {{- with .Values.nodeSelector }}
+      {{- with .Values.supervisor.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.affinity }}
+      {{- with .Values.supervisor.affinity }}
       affinity:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.tolerations }}
+      {{- with .Values.supervisor.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}

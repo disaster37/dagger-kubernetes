@@ -5,15 +5,28 @@ metadata:
   namespace: {{ include "dagger-kubernetes.namespace" . }}
   labels:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
-{{- with .Values.serviceAccount.annotations }}
+{{- with .Values.supervisor.serviceAccount.annotations }}
   annotations:
     {{- toYaml . | nindent 4 }}
 {{- end }}
 ---
+# The supervisor only manages engine StatefulSets, Services, ConfigMaps,
+# PVCs, Pods and (optionally) Secrets within its own fleet namespace
+# (= the release namespace). A namespaced Role is sufficient and avoids
+# granting cluster-wide read/write access to every Secret in the cluster
+# (CWE-250 / CWE-269). Set `supervisor.serviceAccount.clusterScope: true`
+# only if you run engine fleets across multiple namespaces.
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.supervisor.serviceAccount.clusterScope }}
 kind: ClusterRole
+{{- else }}
+kind: Role
+{{- end }}
 metadata:
   name: {{ include "dagger-kubernetes.fullname" . }}
+  {{- if not .Values.supervisor.serviceAccount.clusterScope }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  {{- end }}
   labels:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
 rules:
@@ -21,21 +34,39 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["services", "pods", "pods/exec", "pods/log"]
+    resources: ["services", "pods", "pods/log"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # pods/exec is only needed to stream engine logs / attach to engines.
   - apiGroups: [""]
-    resources: ["persistentvolumeclaims", "configmaps", "secrets"]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Secrets: the supervisor mints per-engine client certs from the minting
+  # CA and may store them in Secrets. It never needs to delete Secrets
+  # (the owning StatefulSet/namespace lifecycle cleans them up), so `delete`
+  # is intentionally omitted to limit blast radius (CWE-269).
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.supervisor.serviceAccount.clusterScope }}
 kind: ClusterRoleBinding
+{{- else }}
+kind: RoleBinding
+{{- end }}
 metadata:
   name: {{ include "dagger-kubernetes.fullname" . }}
+  {{- if not .Values.supervisor.serviceAccount.clusterScope }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  {{- end }}
   labels:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: {{ if .Values.supervisor.serviceAccount.clusterScope }}ClusterRole{{ else }}Role{{ end }}
   name: {{ include "dagger-kubernetes.fullname" . }}
 subjects:
   - kind: ServiceAccount

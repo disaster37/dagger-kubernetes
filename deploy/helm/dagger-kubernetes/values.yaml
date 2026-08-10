@@ -3,24 +3,61 @@
 # Copy to your own values file and override as needed, e.g.:
 #   helm install dagger-kubernetes ./deploy/helm/dagger-kubernetes -f my-values.yaml
 
-# --- Image -----------------------------------------------------------------
-image:
-  repository: ghcr.io/disaster/dagger-kubernetes
-  tag: ""                # defaults to Chart.appVersion when empty
-  pullPolicy: IfNotPresent
-  pullSecrets: []        # e.g. [{ name: ghcr-pull-secret }]
-
-# --- Naming / namespace ----------------------------------------------------
+# --- Naming / namespace (chart-level) -------------------------------------
 nameOverride: ""
 fullnameOverride: ""
 # Namespace for the supervisor and its subchart dependencies.
 # Defaults to the release namespace when empty.
 namespace: ""
 
-# --- Supervisor runtime ----------------------------------------------------
-replicaCount: 2
-
+# --- Supervisor (control-plane pod) ---------------------------------------
+# Pod-level keys live under `supervisor:`; config under `supervisor.config.*`.
 supervisor:
+  image:
+    repository: ghcr.io/disaster/dagger-kubernetes
+    tag: ""                # defaults to Chart.appVersion when empty
+    pullPolicy: IfNotPresent
+    pullSecrets: []        # e.g. [{ name: ghcr-pull-secret }]
+  replicaCount: 2
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+  # SQLite database PVC. disabled → emptyDir (all users/tokens lost on
+  # pod restart — dev only). storageClass="" uses the cluster default.
+  persistence:
+    enabled: false
+    storageClass: ""
+    size: 1Gi
+  podAnnotations: {}
+  podSecurityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+  autoscaling:
+    enabled: false
+    minReplicas: 2
+    maxReplicas: 6
+    targetCPUUtilizationPercentage: 80
+    targetMemoryUtilizationPercentage: ""
+  serviceAccount:
+    annotations: {}
+    # clusterScope: false (default) → namespaced Role/RoleBinding limited to
+    # the release namespace. Set true only if engine fleets span multiple
+    # namespaces (grants cluster-wide access — security-sensitive).
+    clusterScope: false
   extraEnv: []
   config:
     server:
@@ -80,11 +117,11 @@ supervisor:
       engineNodeSelector: {}
       engineTolerations: []
       engineExtraArgs: []
-      engineExtraEnv: {}            # extra env vars on engine pods (proxy vars etc.)
-      engineExtraEnvFrom: {}        # env vars from Secret keys: {ENV_NAME: {secret_name, key}} (proxy credentials)
+      engineExtraEnv: {}            # env vars on engine pods (e.g. proxy vars)
+      engineExtraEnvFrom: {}        # env vars sourced from Secret keys
       engineCaSecret: ""            # Secret with custom CA PEM bundle; empty = disabled
       engineCaSecretKey: "ca.crt"   # key inside engineCaSecret
-      engineDebug: false            # engine.toml debug = true
+      engineDebug: false            # enable engine.toml [debug]
       engineLogFormat: "json"       # engine.toml [log] format; "" omits
       engineRegistryMirrors: {}     # e.g. {"docker.io": ["mirror.gcr.io"]}
     ca:
@@ -98,7 +135,7 @@ supervisor:
     otel:
       otlpEndpoint: ""               # empty disables the supervisor's own OTLP export
 
-# --- Authentication secrets ------------------------------------------------
+# --- Authentication secrets (chart-level) ----------------------------------
 auth:
   # Static bearer tokens, one per line (newline-separated at runtime).
   # DEPRECATED: legacy fallback only. Migrate with `supervisor migrate-tokens`
@@ -109,17 +146,7 @@ auth:
   # auto-generates one on first boot and persists it in the SQLite DB.
   jwtSecret: ""
 
-# --- Persistence (SQLite database) ----------------------------------------
-# The multi-user store (users, groups, tokens, projects, trace metadata) lives
-# in a single SQLite file at database.path. Persist it on a PVC in production;
-# with persistence.enabled=false an emptyDir is used and all users/tokens are
-# LOST on pod restart (dev only).
-persistence:
-  enabled: false
-  storageClass: ""
-  size: 1Gi
-
-# --- Minting CA & TLS (provide your own) -----------------------------------
+# --- Minting CA & TLS (chart-level, provide your own) ----------------------
 ca:
   crt: ""    # PEM-encoded CA certificate
   key: ""    # PEM-encoded CA private key
@@ -127,7 +154,7 @@ tls:
   crt: ""    # PEM-encoded server certificate
   key: ""    # PEM-encoded server private key
 
-# --- Services --------------------------------------------------------------
+# --- Services (chart-level) -----------------------------------------------
 service:
   control:
     type: ClusterIP
@@ -137,7 +164,7 @@ service:
     type: LoadBalancer
     port: 443
 
-# --- Ingress ---------------------------------------------------------------
+# --- Ingress (chart-level) -------------------------------------------------
 ingress:
   enabled: true
   className: ""
@@ -152,54 +179,15 @@ ingress:
   #    hosts:
   #      - supv.example.com
 
-# --- Autoscaling -----------------------------------------------------------
-autoscaling:
-  enabled: false
-  minReplicas: 2
-  maxReplicas: 6
-  targetCPUUtilizationPercentage: 80
-  targetMemoryUtilizationPercentage: ""
-
-# --- Resources -------------------------------------------------------------
-resources:
-  requests:
-    cpu: 100m
-    memory: 128Mi
-  limits:
-    cpu: 500m
-    memory: 512Mi
-
-# --- Pod scheduling & security --------------------------------------------
-podAnnotations: {}
-nodeSelector: {}
-tolerations: []
-affinity: {}
-podSecurityContext:
-  runAsNonRoot: true
-  runAsUser: 10001
-  runAsGroup: 10001
-  fsGroup: 10001
-securityContext:
-  allowPrivilegeEscalation: false
-  readOnlyRootFilesystem: true
-  capabilities:
-    drop: ["ALL"]
-
-serviceAccount:
-  annotations: {}
-
-# --- Prometheus ServiceMonitor --------------------------------------------
+# --- Prometheus ServiceMonitor (chart-level) -------------------------------
 serviceMonitor:
   enabled: false
   labels: {}
   interval: 30s
   scrapeTimeout: 10s
 
-# ===========================================================================
-# Required tools, integrated as Helm chart dependencies.
-# Each can be toggled independently; when enabled, the supervisor config is
-# wired to point at the dependency's in-cluster Service automatically.
-# ===========================================================================
+# --- Observability tools (enabled = install subchart) ----------------------
+# Chart dependencies. Disable any tool and point the supervisor elsewhere.
 tools:
   # OpenTelemetry Collector — receives OTLP from Dagger CLI & supervisor,
   # fans out to Tempo / Loki / Prometheus backends.
@@ -221,11 +209,9 @@ tools:
   grafana:
     enabled: true
 
-# ---------------------------------------------------------------------------
-# Subchart values. Helm forwards these to each dependency. Keys are top-level:
-# `opentelemetry-collector` (chart name) and `registry` (alias of
-# docker-registry). Override freely; defaults shown below.
-# ---------------------------------------------------------------------------
+# --- Subchart overrides ----------------------------------------------------
+# Forwarded to each dependency. All PVC-bearing subcharts support
+# `storageClassName` (empty = cluster default StorageClass).
 opentelemetry-collector:
   mode: deployment
   replicaCount: 1
@@ -276,12 +262,13 @@ opentelemetry-collector:
           processors: [batch]
           exporters: [prometheusremotewrite]
 
+# docker-registry subchart (stable/docker-registry, aliased as registry).
 registry:
-  # docker-registry subchart (stable/docker-registry, aliased as `registry`).
   replicaCount: 1
   persistence:
     enabled: true
     size: 50Gi
+    storageClass: ""    # empty = cluster default StorageClass
   storage: filesystem
   resources:
     requests:
@@ -293,6 +280,7 @@ tempo:
   persistence:
     enabled: true
     size: 20Gi
+    storageClassName: ""    # empty = cluster default StorageClass
   tempo:
     retention: 48h
     storage:
@@ -305,11 +293,16 @@ tempo:
         cpu: 100m
         memory: 256Mi
 
-# Loki — log aggregation backend. Receives OTLP logs from the collector.
+# Loki — log aggregation backend (SingleBinary with PVC persistence).
+# For S3/GCS object storage, see `loki.loki.storage`.
 loki:
   deploymentMode: SingleBinary
   singleBinary:
     replicas: 1
+    persistence:
+      enabled: true
+      size: 20Gi
+      storageClass: ""    # empty = cluster default StorageClass
     resources:
       requests:
         cpu: 100m
@@ -333,16 +326,21 @@ victoria:
     persistentVolume:
       enabled: true
       size: 20Gi
+      storageClassName: ""    # empty = cluster default StorageClass
     resources:
       requests:
         cpu: 100m
         memory: 256Mi
 
-# Grafana — dashboards for Tempo (traces), Loki (logs), and VictoriaMetrics (metrics).
-# Connect to the UI at the Grafana Service URL (default credentials: admin / admin).
-# Datasources are auto-provisioned via a ConfigMap template (see grafana-datasources.yaml).
+# Grafana — unified dashboards (auto-provisioned datasources).
+# adminPassword empty (default) → the Grafana subchart generates a random
+# 40-char password and stores it in a Secret named <release>-grafana.
+# Retrieve it with:
+#   kubectl get secret -n <ns> <release>-grafana -o jsonpath="{.data.admin-password}" | base64 -d ; echo
+# Set an explicit password only in non-production or when you have a secret
+# management workflow that rotates it.
 grafana:
-  adminPassword: "admin"
+  adminPassword: ""
   sidecar:
     datasources:
       enabled: true
