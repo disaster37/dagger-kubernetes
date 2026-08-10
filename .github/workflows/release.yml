@@ -1,127 +1,28 @@
 name: Release
 
 on:
-  push:
-    tags:
-      - "*"
-  workflow_dispatch:
-    inputs:
-      version:
-        description: "Version"
-        required: true
-
-permissions:
-  contents: read
-  packages: write
-
-env:
-  REGISTRY: ghcr.io
+  release:
+    types: [created]
 
 jobs:
-  meta:
+  release:
     runs-on: ubuntu-latest
-    outputs:
-      version: ${{ steps.meta.outputs.version }}
-    steps:
-      - id: meta
-        env:
-          EVENT: ${{ github.event_name }}
-          INPUT_VERSION: ${{ inputs.version }}
-        run: |
-          if [ "$EVENT" = "workflow_dispatch" ]; then v="$INPUT_VERSION"; else v="${GITHUB_REF_NAME#v}"; fi
-          printf '%s' "$v" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$' || { echo "invalid version"; exit 1; }
-          echo "version=${v}" >> "$GITHUB_OUTPUT"
-
-  docker:
-    name: Build & publish image
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
-      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-      - name: Log in to GHCR
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Extract metadata
-        id: docker-meta
-        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
-        with:
-          images: ghcr.io/${{ github.repository_owner }}/dagger-kubernetes
-          tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest
-      - name: Build and push
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.docker-meta.outputs.tags }}
-          labels: ${{ steps.docker-meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-  helm:
-    name: Package & publish Helm chart
-    runs-on: ubuntu-latest
-    needs: [meta, docker]
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: azure/setup-helm@1a275c3b69536ee54be43f2070a358922e12c8d4 # v4
-        with:
-          version: v3.14.0
-      - name: Update chart appVersion
-        env:
-          VERSION: ${{ needs.meta.outputs.version }}
-        run: |
-          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" deploy/helm/dagger-kubernetes/Chart.yaml
-      - name: Lint
-        run: helm lint deploy/helm/dagger-kubernetes
-      - name: Package
-        run: |
-          mkdir -p out
-          helm dependency update deploy/helm/dagger-kubernetes
-          helm package deploy/helm/dagger-kubernetes --destination out
-      - name: Upload chart artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: chart
-          path: out/*.tgz
-          if-no-files-found: error
-      - name: Log in to GHCR (helm)
-        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Push chart to GHCR
-        run: |
-          for pkg in out/*.tgz; do
-            helm push "$pkg" "oci://${REGISTRY}/${GITHUB_REPOSITORY_OWNER,,}/charts"
-          done
-
-  docs:
-    name: Update Helm docs
-    runs-on: ubuntu-latest
-    needs: [meta, docker, helm]
     permissions:
       contents: write
+      packages: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       - name: Update Helm README version
         env:
-          VERSION: ${{ needs.meta.outputs.version }}
-        run: scripts/update-helm-docs.sh "${VERSION}"
-      - name: Commit updated docs
-        env:
-          VERSION: ${{ needs.meta.outputs.version }}
+          REGISTRY: ghcr.io
+          VERSION: ${{ github.event.release.tag_name }}
+        shell: bash
         run: |
+          bash scripts/update-helm-docs.sh "${VERSION}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add deploy/helm/dagger-kubernetes/README.md
@@ -130,37 +31,4 @@ jobs:
             exit 0
           fi
           git commit -m "docs: bump Helm README version to ${VERSION}"
-          git push
-
-  release:
-    name: GitHub Release
-    runs-on: ubuntu-latest
-    needs: [meta, docker, helm, docs]
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
-        with:
-          go-version: "1.26"
-      - name: Build release binaries
-        run: |
-          mkdir -p dist
-          for os in linux darwin; do
-            for arch in amd64 arm64; do
-              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" \
-                -o dist/dagger-kubernetes-ci-${os}-${arch} ./cmd/ci/
-              CGO_ENABLED=0 GOOS=$os GOARCH=$arch go build -trimpath -ldflags "-s -w" \
-                -o dist/supervisor-${os}-${arch} ./cmd/api/
-            done
-          done
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: chart
-          path: dist
-      - uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
-        with:
-          files: dist/*
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          git push origin HEAD:refs/heads/main
