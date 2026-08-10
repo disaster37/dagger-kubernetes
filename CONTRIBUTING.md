@@ -141,6 +141,13 @@ golangci-lint run ./...
 
 ## Dagger
 
+**Always run the full CI pipeline locally before pushing.** Changes that pass `go test ./...` locally can still fail in CI because the Dagger pipeline also runs `golangci-lint`, builds binaries, validates the Helm chart, builds the UI, and runs tests with `-race`. Breakage here wastes reviewer time and delays the PR.
+
+```bash
+# Run before every push:
+dagger call -m ./dagger --src . ci export --path out
+```
+
 The CI pipeline is a local Dagger module in `dagger/` (module name `dagger-cache`).
 It delegates lint and build to the `golang` module and helm lint to the `helm`
 module from `github.com/disaster37/dagger-library-go` (pinned at `2.0.10`); test,
@@ -238,6 +245,7 @@ directory. When editing one, copy it verbatim to the other and verify with
 `cmp scripts/dagger-cache.sh ci-integrations/gha/dagger-cache.sh`.
 
 ## PR checklist
+- [ ] `dagger call -m ./dagger --src . ci export --path out` passes locally
 - [ ] Tests cover new code (target 100% coverage)
 - [ ] Integration test proves feature works with real Dagger client
 - [ ] `golangci-lint run ./...` passes

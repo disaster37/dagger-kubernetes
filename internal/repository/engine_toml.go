@@ -80,7 +80,7 @@ func tomlEscape(s string) string {
 			b.WriteString("\\t")
 		default:
 			if c < 0x20 || c == 0x7f {
-				b.WriteString(fmt.Sprintf("\\u%04x", c))
+				fmt.Fprintf(&b, "\\u%04x", c)
 			} else {
 				b.WriteByte(c)
 			}
