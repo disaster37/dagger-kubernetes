@@ -8,16 +8,16 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newGroupService(t *testing.T) (*GroupService, *UserService, *repos) {
+func newGroupService(t *testing.T) (*GroupService, *UserService) {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	gsvc := NewGroupService(r.groups, r.users, testLogger())
 	usvc := NewUserService(r.users, r.groups, testLogger())
-	return gsvc, usvc, r
+	return gsvc, usvc
 }
 
 func TestGroupServiceCreate(t *testing.T) {
-	gsvc, _, _ := newGroupService(t)
+	gsvc, _ := newGroupService(t)
 	ctx := context.Background()
 
 	g, err := gsvc.Create(ctx, GroupInput{Name: "Eng", MaxRunnerSessions: 8, AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
@@ -30,7 +30,7 @@ func TestGroupServiceCreate(t *testing.T) {
 }
 
 func TestGroupServiceValidation(t *testing.T) {
-	gsvc, _, _ := newGroupService(t)
+	gsvc, _ := newGroupService(t)
 	ctx := context.Background()
 
 	cases := []struct {
@@ -52,7 +52,7 @@ func TestGroupServiceValidation(t *testing.T) {
 }
 
 func TestGroupServiceCRUD(t *testing.T) {
-	gsvc, _, _ := newGroupService(t)
+	gsvc, _ := newGroupService(t)
 	ctx := context.Background()
 
 	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
@@ -87,12 +87,12 @@ func TestGroupServiceCRUD(t *testing.T) {
 }
 
 func TestGroupServiceSetMembers(t *testing.T) {
-	gsvc, usvc, _ := newGroupService(t)
+	gsvc, usvc := newGroupService(t)
 	ctx := context.Background()
 
 	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
-	u1 := seedUserSvc(t, usvc, "u1", domain.RoleUser)
-	u2 := seedUserSvc(t, usvc, "u2", domain.RoleUser)
+	u1 := seedUserSvc(t, usvc, "u1")
+	u2 := seedUserSvc(t, usvc, "u2")
 
 	if err := gsvc.SetMembers(ctx, g.ID, []string{u1.ID, u2.ID, u1.ID}); err != nil {
 		t.Fatalf("SetMembers: %v", err)

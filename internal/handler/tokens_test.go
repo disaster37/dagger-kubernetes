@@ -15,7 +15,7 @@ func TestMyTokenCreateAndMeta(t *testing.T) {
 	env := newTestEnv(t, false)
 	e := newAuthEngine(env.server)
 
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 
 	// alice already has a token (from createUserAndToken); meta returns it.
 	resp := ut.PerformRequest(e, "GET", "/api/v1/tokens/me", nil, ut.Header{Key: "Authorization", Value: bearer})
@@ -77,7 +77,7 @@ func TestMyTokenRegenerate(t *testing.T) {
 	env := newTestEnv(t, false)
 	e := newAuthEngine(env.server)
 
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 
 	resp := ut.PerformRequest(e, "PUT", "/api/v1/tokens/me/regenerate", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
@@ -94,7 +94,7 @@ func TestMyTokenRevoke(t *testing.T) {
 	env := newTestEnv(t, false)
 	e := newAuthEngine(env.server)
 
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 
 	resp := ut.PerformRequest(e, "DELETE", "/api/v1/tokens/me", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusNoContent {

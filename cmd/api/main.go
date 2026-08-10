@@ -178,7 +178,7 @@ func run(c *cli.Context) error {
 
 	var oauthSvc *service.GitHubOAuthService
 	if cfg.Auth.OAuth.Enabled {
-		oauthSvc = service.NewGitHubOAuthService(cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
+		oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
 	}
 
 	// --- Fleet + telemetry wiring ---
@@ -204,7 +204,7 @@ func run(c *cli.Context) error {
 		VictoriaURL:  cfg.Telemetry.VictoriaURL,
 		CertPath:     controlTLSCertPath,
 		KeyPath:      controlTLSKeyPath,
-	}, handler.Deps{
+	}, &handler.Deps{
 		Logger:          logger,
 		Metrics:         metrics,
 		MintingCA:       serverMintingCA,

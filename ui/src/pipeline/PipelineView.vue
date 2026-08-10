@@ -57,7 +57,7 @@ const dagNodes = ref<any[]>([])
 const logs = ref<string[]>([])
 const logContainer = ref<HTMLElement>()
 
-let ws: WebSocket | null = null
+let eventSource: EventSource | null = null
 
 onMounted(async () => {
   try {
@@ -69,8 +69,8 @@ onMounted(async () => {
     console.error('Failed to fetch trace', e)
   }
 
-  ws = connectLiveTrace(traceId)
-  ws.onmessage = (event) => {
+  eventSource = connectLiveTrace(traceId)
+  eventSource.onmessage = (event) => {
     const update = JSON.parse(event.data)
     if (update.type === 'span_update' && update.span) {
       if (trace.value.root_span) {
@@ -85,7 +85,7 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
-  if (ws) ws.close()
+  if (eventSource) eventSource.close()
 })
 
 function flattenTree(node: any): any[] {

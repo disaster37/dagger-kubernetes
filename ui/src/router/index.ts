@@ -28,7 +28,7 @@ router.beforeEach(async (to) => {
   }
   // Bootstrap the user from the stored token on first navigation.
   if (!auth.user) {
-    await auth.fetchMe()
+    await auth.loadUser()
   }
   if (to.meta.admin && !auth.isAdmin) {
     return { path: '/pipelines' }

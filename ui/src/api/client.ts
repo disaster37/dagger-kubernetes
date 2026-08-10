@@ -173,13 +173,13 @@ export async function fetchTrace(id: string): Promise<TraceRow> {
   const { data } = await api.get(`/api/v1/traces/${id}`)
   return data
 }
-export async function fetchFleetInfo(): Promise<unknown> {
+export async function fetchFleetInfo(): Promise<any[]> {
   const { data } = await api.get('/api/v1/fleet')
-  return data
+  return data as any[]
 }
-export async function fetchCacheInfo(): Promise<unknown> {
+export async function fetchCacheInfo(): Promise<{ backend: string; registry: string }> {
   const { data } = await api.get('/api/v1/cache')
-  return data
+  return data as { backend: string; registry: string }
 }
 
 // SSE live trace stream (EventSource cannot set headers; use ?token= query param).

@@ -61,7 +61,7 @@ func TestMiddlewareRequireAdminRejectsUser(t *testing.T) {
 	env := newTestEnv(t, false)
 	e := newAuthEngine(env.server)
 
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 	resp := ut.PerformRequest(e, "GET", "/api/v1/users", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusForbidden {
 		t.Fatalf("user hitting admin route: %d, want 403", resp.Result().StatusCode())
@@ -94,7 +94,7 @@ func TestAuthorizeTraceOwnerSeesOwn(t *testing.T) {
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
-	bearer, u := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, u := env.createUserAndToken(t)
 	// Seed a trace owned by alice (unassigned).
 	if err := env.server.traceMeta.UpsertProvision(ctx, "trace-own", u.ID); err != nil {
 		t.Fatalf("upsert provision: %v", err)
@@ -127,7 +127,7 @@ func TestAuthorizeTraceNonMember404(t *testing.T) {
 	env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "trace-group", GroupID: g.ID, UserID: admin.ID})
 
 	// Non-member user gets 404 on detail.
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 	resp := ut.PerformRequest(e, "GET", "/api/v1/traces/trace-group", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusNotFound {
 		t.Fatalf("non-member: %d, want 404", resp.Result().StatusCode())
@@ -153,7 +153,7 @@ func TestAuthorizeTraceNonMemberUnknownTrace404(t *testing.T) {
 	env := newTestEnv(t, false)
 	e := newAuthEngine(env.server)
 
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 	resp := ut.PerformRequest(e, "GET", "/api/v1/traces/unknown-trace", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusNotFound {
 		t.Fatalf("non-member unknown trace: %d, want 404 (fail-closed)", resp.Result().StatusCode())

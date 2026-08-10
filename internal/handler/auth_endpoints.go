@@ -228,7 +228,7 @@ func (s *Server) handleOAuthLogin(_ context.Context, c *app.RequestContext) {
 		writeError(c, consts.StatusNotFound, "oauth not enabled")
 		return
 	}
-	redirect := safeRedirectPath(string(c.Query("redirect")))
+	redirect := safeRedirectPath(c.Query("redirect"))
 	state, err := s.jwt.IssueOAuthState(redirect)
 	if err != nil {
 		writeError(c, consts.StatusInternalServerError, "oauth state error")
@@ -244,8 +244,8 @@ func (s *Server) handleOAuthCallback(_ context.Context, c *app.RequestContext) {
 		writeError(c, consts.StatusNotFound, "oauth not enabled")
 		return
 	}
-	code := string(c.Query("code"))
-	state := string(c.Query("state"))
+	code := c.Query("code")
+	state := c.Query("state")
 
 	// Validate the state token, then exchange the code. Any failure lands the
 	// browser back on the login screen with an error hint.

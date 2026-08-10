@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"strings"
 	"testing"
@@ -58,7 +59,7 @@ func TestLoadOrCreateJWTSecretGeneratedAndPersisted(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reload: %v", err)
 	}
-	if string(again) != string(got) {
+	if !bytes.Equal(again, got) {
 		t.Fatal("generated secret must be persisted and reused")
 	}
 }

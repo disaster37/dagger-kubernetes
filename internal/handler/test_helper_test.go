@@ -89,7 +89,7 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 		ControlAddr: ":0",
 		DataAddr:    ":0",
 		DataHost:    "localhost",
-	}, Deps{
+	}, &Deps{
 		Logger:          logger,
 		Metrics:         observ.NewMetrics(nil),
 		MintingCA:       mintingCA,
@@ -134,10 +134,11 @@ func (e *testEnv) loginAsAdmin(t *testing.T) string {
 	return "Bearer " + access
 }
 
-// createUserAndToken creates a user + API token and returns the bearer header.
-func (e *testEnv) createUserAndToken(t *testing.T, username string, role domain.Role) (string, *domain.User) {
+// createUserAndToken creates a user named "alice" (RoleUser) + API token and
+// returns the bearer header.
+func (e *testEnv) createUserAndToken(t *testing.T) (string, *domain.User) {
 	t.Helper()
-	u, err := e.users.Create(context.Background(), username, "password123", role)
+	u, err := e.users.Create(context.Background(), "alice", "password123", domain.RoleUser)
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}

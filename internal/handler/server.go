@@ -140,7 +140,7 @@ type Server struct {
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
-func NewServer(cfg *ServerConfig, deps Deps) *Server {
+func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 	return &Server{
 		cfg:             cfg,
 		logger:          deps.Logger,

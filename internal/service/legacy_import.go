@@ -23,7 +23,7 @@ type LegacyImportResult struct {
 // auto-created "legacy" group. Idempotent: tokens already present (by hash)
 // are skipped. dryRun reports what would happen without writing.
 func ImportTokensFile(ctx context.Context, path string, users *UserService, tokens *TokenService, groups *GroupService, logger *logrus.Logger, dryRun bool) (*LegacyImportResult, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) //nolint:gosec // G304: path is admin-configured, not user input.
 	if err != nil {
 		return nil, fmt.Errorf("read tokens file %s: %w", path, err)
 	}

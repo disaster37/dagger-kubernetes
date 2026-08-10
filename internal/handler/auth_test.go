@@ -8,8 +8,6 @@ import (
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/common/ut"
-
-	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func TestExtractTokenSchemes(t *testing.T) {
@@ -86,7 +84,7 @@ func TestRequireAuthEnabledRejects(t *testing.T) {
 func TestRequireAuthWithQueryFallback(t *testing.T) {
 	env := newTestEnv(t, false)
 
-	bearer, _ := env.createUserAndToken(t, "alice", domain.RoleUser)
+	bearer, _ := env.createUserAndToken(t)
 	token := strings.TrimPrefix(bearer, "Bearer ")
 
 	// Token via query param authenticates.

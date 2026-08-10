@@ -20,7 +20,7 @@ func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	f := domain.TraceFilter{Limit: clampLimit(string(c.Query("limit")))}
+	f := domain.TraceFilter{Limit: clampLimit(c.Query("limit"))}
 	if id.IsAdmin() {
 		// Admin may narrow with ?group_id= (repeatable); the "unassigned"
 		// keyword selects only traces without a group. Without a filter
@@ -82,7 +82,7 @@ func (s *Server) handleTracesLive(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	if _, ok := s.authorizeTrace(c, traceID); !ok {
+	if !s.authorizeTrace(c, traceID) {
 		return
 	}
 
@@ -113,7 +113,7 @@ func (s *Server) authorizeTraceRequest(c *app.RequestContext) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	if _, ok := s.authorizeTrace(c, traceID); !ok {
+	if !s.authorizeTrace(c, traceID) {
 		return "", false
 	}
 	return traceID, true

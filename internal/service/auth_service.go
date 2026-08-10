@@ -115,13 +115,13 @@ func (a *AuthService) identityForUser(ctx context.Context, userID string, method
 }
 
 // Login authenticates a user and issues a fresh JWT pair.
-func (a *AuthService) Login(ctx context.Context, username, password string) (string, string, *domain.User, error) {
-	u, err := a.users.Authenticate(ctx, username, password)
+func (a *AuthService) Login(ctx context.Context, username, password string) (access, refresh string, u *domain.User, err error) {
+	u, err = a.users.Authenticate(ctx, username, password)
 	if err != nil {
 		a.logger.WithField("username", username).Debug("login failed")
 		return "", "", nil, err
 	}
-	access, refresh, err := a.issuePairForUser(ctx, u)
+	access, refresh, err = a.issuePairForUser(ctx, u)
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -131,7 +131,7 @@ func (a *AuthService) Login(ctx context.Context, username, password string) (str
 
 // Refresh validates a refresh token, reloads the user, and issues a new pair
 // (rotation).
-func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (string, string, error) {
+func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (access, refresh string, err error) {
 	claims, err := a.jwt.ParseRefresh(refreshToken)
 	if err != nil {
 		return "", "", domain.ErrUnauthenticated
@@ -144,7 +144,7 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (string,
 }
 
 // issuePairForUser issues a JWT pair with the user's current group membership.
-func (a *AuthService) issuePairForUser(ctx context.Context, u *domain.User) (string, string, error) {
+func (a *AuthService) issuePairForUser(ctx context.Context, u *domain.User) (access, refresh string, err error) {
 	gids, _ := a.groups.GroupsForUser(ctx, u.ID)
 	return a.jwt.IssuePair(u, groupIDs(gids))
 }

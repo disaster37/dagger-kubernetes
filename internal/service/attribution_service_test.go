@@ -10,20 +10,20 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newAttributionForTest(t *testing.T) (*AttributionService, *ProjectService, *GroupService, *UserService, *repos) {
+func newAttributionForTest(t *testing.T) (*AttributionService, *GroupService, *UserService, *repos) {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	psvc := NewProjectService(r.projects, r.groups, testLogger())
 	gsvc := NewGroupService(r.groups, r.users, testLogger())
 	usvc := NewUserService(r.users, r.groups, testLogger())
 	asvc := NewAttributionService(psvc, r.groups, r.traceMeta, testLogger())
-	return asvc, psvc, gsvc, usvc, r
+	return asvc, gsvc, usvc, r
 }
 
 func TestAttributionProvision(t *testing.T) {
-	asvc, _, _, usvc, _ := newAttributionForTest(t)
+	asvc, _, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	asvc.Provision(ctx, "t1", u.ID)
 	meta, err := asvc.traceMeta.Get(ctx, "t1")
@@ -35,7 +35,7 @@ func TestAttributionProvision(t *testing.T) {
 	}
 
 	// Second provision by a different user does not steal.
-	u2 := seedUserSvc(t, usvc, "u2", domain.RoleUser)
+	u2 := seedUserSvc(t, usvc, "u2")
 	asvc.Provision(ctx, "t1", u2.ID)
 	meta, _ = asvc.traceMeta.Get(ctx, "t1")
 	if meta.UserID != u.ID {
@@ -47,9 +47,9 @@ func TestAttributionProvision(t *testing.T) {
 }
 
 func TestAttributionIngestExplicitAssignment(t *testing.T) {
-	asvc, _, gsvc, usvc, _ := newAttributionForTest(t)
+	asvc, gsvc, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 	g, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true})
 	proj, _ := asvc.projects.Create(ctx, "github.com/acme/api", g.ID)
 
@@ -66,9 +66,9 @@ func TestAttributionIngestExplicitAssignment(t *testing.T) {
 }
 
 func TestAttributionIngestRegexAutoAssign(t *testing.T) {
-	asvc, _, gsvc, usvc, _ := newAttributionForTest(t)
+	asvc, gsvc, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	// Two groups with patterns; first by id order should win.
 	g1, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true, AutoAssignPattern: `^github\.com/acme/.*`})
@@ -100,18 +100,15 @@ func TestAttributionIngestRegexAutoAssign(t *testing.T) {
 }
 
 func TestAttributionIngestInvalidRegexSkipped(t *testing.T) {
-	asvc, _, gsvc, usvc, _ := newAttributionForTest(t)
+	asvc, gsvc, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	// Group with an invalid pattern is skipped (no panic); a valid group matches.
 	// Note: GroupService rejects invalid patterns at Create time, so we insert
 	// directly via the repo to simulate a bad row.
 	gBad := &domain.Group{ID: newID(), Name: "BadPat", AgentAvailable: true, AutoAssignPattern: "["}
-	if err := asvc.groups.Create(ctx, gBad); err == nil {
-		// Some repos validate at write; if Create rejected it, the test still
-		// passes (no panic). If it accepted, autoAssign must skip it.
-	}
+	_ = asvc.groups.Create(ctx, gBad)
 	gGood, _ := gsvc.Create(ctx, GroupInput{Name: "GoodPat", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
 	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "github", "v0.21.4", "success", 0, time.Now().UTC())
@@ -125,9 +122,9 @@ func TestAttributionIngestInvalidRegexSkipped(t *testing.T) {
 }
 
 func TestAttributionIngestGroupSetOnce(t *testing.T) {
-	asvc, _, gsvc, usvc, r := newAttributionForTest(t)
+	asvc, gsvc, usvc, r := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 	g1, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true})
 	asvc.projects.Create(ctx, "github.com/acme/api", g1.ID)
 
@@ -150,9 +147,9 @@ func TestAttributionIngestGroupSetOnce(t *testing.T) {
 }
 
 func TestAttributionIngestNoCIRepo(t *testing.T) {
-	asvc, _, _, usvc, _ := newAttributionForTest(t)
+	asvc, _, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 	asvc.Ingest(ctx, "t1", u.ID, "", "", "v0.21.4", "success", 0, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != "" {
@@ -167,9 +164,9 @@ func TestAttributionIngestNoCIRepo(t *testing.T) {
 // before persistence (CWE-770): oversized trace IDs are dropped and
 // oversized span fields are treated as absent.
 func TestAttributionIngestBoundsFields(t *testing.T) {
-	asvc, _, _, usvc, r := newAttributionForTest(t)
+	asvc, _, usvc, r := newAttributionForTest(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	// Oversized trace ID: dropped entirely.
 	asvc.Ingest(ctx, strings.Repeat("t", maxIngestFieldLen+1), u.ID, "github.com/acme/api", "", "", "", 0, time.Time{})

@@ -50,7 +50,7 @@ type attemptLimiter struct {
 func newAttemptLimiter() *attemptLimiter {
 	return &attemptLimiter{
 		attempts: make(map[string]*attemptInfo),
-		now:      func() time.Time { return time.Now() },
+		now:      time.Now,
 	}
 }
 

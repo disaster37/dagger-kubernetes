@@ -11,7 +11,7 @@ import (
 )
 
 // tokenCols is the canonical column list shared by all api_tokens queries.
-const tokenCols = `id, user_id, token_hash, prefix, created_at, last_used_at`
+const tokenCols = `id, user_id, token_hash, prefix, created_at, last_used_at` //nolint:gosec // G101: column name, not a credential.
 
 // TokenRepo is the SQLite implementation of domain.APITokenRepository.
 type TokenRepo struct {

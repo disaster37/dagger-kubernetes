@@ -13,9 +13,9 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newOAuthService(t *testing.T, cfg domain.OAuthConfig, ghSrv *httptest.Server) (*GitHubOAuthService, *UserService, *GroupService, *repos) {
+func newOAuthService(t *testing.T, cfg *domain.OAuthConfig, ghSrv *httptest.Server) (*GitHubOAuthService, *UserService, *GroupService) {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	logger := testLogger()
 	usvc := NewUserService(r.users, r.groups, logger)
 	gsvc := NewGroupService(r.groups, r.users, logger)
@@ -25,10 +25,10 @@ func newOAuthService(t *testing.T, cfg domain.OAuthConfig, ghSrv *httptest.Serve
 		svc.tokenURL = ghSrv.URL + "/login/oauth/access_token"
 		svc.apiBaseURL = ghSrv.URL
 	}
-	return svc, usvc, gsvc, r
+	return svc, usvc, gsvc
 }
 
-func newGitHubServer(t *testing.T, allowedOrg string, userID int, userLogin string, orgs []string) *httptest.Server {
+func newGitHubServer(t *testing.T, orgs []string) *httptest.Server {
 	t.Helper()
 	mux := http.NewServeMux()
 	mux.HandleFunc("/login/oauth/access_token", func(w http.ResponseWriter, r *http.Request) {
@@ -37,11 +37,11 @@ func newGitHubServer(t *testing.T, allowedOrg string, userID int, userLogin stri
 	})
 	mux.HandleFunc("/user", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{"id": userID, "login": userLogin})
+		_ = json.NewEncoder(w).Encode(map[string]any{"id": 42, "login": "ghuser"})
 	})
 	mux.HandleFunc("/user/orgs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		orgList := []map[string]string{}
+		orgList := make([]map[string]string, 0, len(orgs))
 		for _, o := range orgs {
 			orgList = append(orgList, map[string]string{"login": o})
 		}
@@ -53,7 +53,7 @@ func newGitHubServer(t *testing.T, allowedOrg string, userID int, userLogin stri
 }
 
 func TestOAuthCompleteSuccess(t *testing.T) {
-	gh := newGitHubServer(t, "acme", 42, "ghuser", []string{"acme"})
+	gh := newGitHubServer(t, []string{"acme"})
 	cfg := domain.OAuthConfig{
 		Enabled:      true,
 		ClientID:     "cid",
@@ -61,7 +61,7 @@ func TestOAuthCompleteSuccess(t *testing.T) {
 		RedirectURL:  "https://supv.example.com/api/v1/auth/oauth/github/callback",
 		AllowedOrgs:  []string{"acme"},
 	}
-	svc, usvc, _, _ := newOAuthService(t, cfg, gh)
+	svc, usvc, _ := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
 	access, refresh, u, err := svc.Complete(ctx, "code")
@@ -90,14 +90,14 @@ func TestOAuthCompleteSuccess(t *testing.T) {
 }
 
 func TestOAuthCompleteOrgNotAllowed(t *testing.T) {
-	gh := newGitHubServer(t, "acme", 42, "ghuser", []string{"other-org"})
+	gh := newGitHubServer(t, []string{"other-org"})
 	cfg := domain.OAuthConfig{
 		Enabled:      true,
 		ClientID:     "cid",
 		ClientSecret: "csec",
 		AllowedOrgs:  []string{"acme"},
 	}
-	svc, _, _, _ := newOAuthService(t, cfg, gh)
+	svc, _, _ := newOAuthService(t, &cfg, gh)
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if !errors.Is(err, domain.ErrForbidden) {
 		t.Fatalf("org not allowed: %v, want ErrForbidden", err)
@@ -105,21 +105,21 @@ func TestOAuthCompleteOrgNotAllowed(t *testing.T) {
 }
 
 func TestOAuthCompleteNoAllowedOrgsRestriction(t *testing.T) {
-	gh := newGitHubServer(t, "", 42, "ghuser", []string{"anyorg"})
+	gh := newGitHubServer(t, []string{"anyorg"})
 	cfg := domain.OAuthConfig{
 		Enabled:      true,
 		ClientID:     "cid",
 		ClientSecret: "csec",
 		AllowedOrgs:  nil, // empty = allow all
 	}
-	svc, _, _, _ := newOAuthService(t, cfg, gh)
+	svc, _, _ := newOAuthService(t, &cfg, gh)
 	if _, _, _, err := svc.Complete(context.Background(), "code"); err != nil {
 		t.Fatalf("Complete with no org restriction: %v", err)
 	}
 }
 
 func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
-	gh := newGitHubServer(t, "", 42, "ghuser", []string{})
+	gh := newGitHubServer(t, []string{})
 	cfg := domain.OAuthConfig{
 		Enabled:      true,
 		ClientID:     "cid",
@@ -127,7 +127,7 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 		AllowedOrgs:  nil,
 		DefaultGroup: "auto-join",
 	}
-	svc, _, gsvc, _ := newOAuthService(t, cfg, gh)
+	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
 	// Pre-create the default group.
@@ -144,9 +144,9 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 }
 
 func TestOAuthCompleteUsernameCollision(t *testing.T) {
-	gh := newGitHubServer(t, "", 42, "ghuser", []string{})
+	gh := newGitHubServer(t, []string{})
 	cfg := domain.OAuthConfig{Enabled: true, ClientID: "cid", ClientSecret: "csec", AllowedOrgs: nil}
-	svc, usvc, _, _ := newOAuthService(t, cfg, gh)
+	svc, usvc, _ := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
 	// Pre-create a user named "ghuser".
@@ -163,10 +163,10 @@ func TestOAuthCompleteUsernameCollision(t *testing.T) {
 
 func TestOAuthLoginURL(t *testing.T) {
 	cfg := domain.OAuthConfig{Enabled: true, ClientID: "cid", RedirectURL: "https://supv.example.com/cb"}
-	svc, _, _, _ := newOAuthService(t, cfg, nil)
-	url := svc.LoginURL("state123")
-	if !contains(url, "client_id=cid") || !contains(url, "state=state123") || !contains(url, "redirect_uri=https") {
-		t.Fatalf("login url = %q", url)
+	svc, _, _ := newOAuthService(t, &cfg, nil)
+	loginURL := svc.LoginURL("state123")
+	if !contains(loginURL, "client_id=cid") || !contains(loginURL, "state=state123") || !contains(loginURL, "redirect_uri=https") {
+		t.Fatalf("login url = %q", loginURL)
 	}
 }
 
@@ -174,7 +174,7 @@ func TestOAuthLoginURL(t *testing.T) {
 // characters are percent-encoded and cannot corrupt the query string.
 func TestOAuthLoginURLEscapesParams(t *testing.T) {
 	cfg := domain.OAuthConfig{Enabled: true, ClientID: "cid&evil=1", RedirectURL: "https://supv.example.com/cb?x=1&y=2"}
-	svc, _, _, _ := newOAuthService(t, cfg, nil)
+	svc, _, _ := newOAuthService(t, &cfg, nil)
 	u, err := url.Parse(svc.LoginURL("state123"))
 	if err != nil {
 		t.Fatalf("parse login url: %v", err)

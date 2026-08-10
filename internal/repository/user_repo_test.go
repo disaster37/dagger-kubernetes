@@ -100,7 +100,7 @@ func TestUserRepoDuplicateUsername(t *testing.T) {
 	repo := NewUserRepo(db)
 	ctx := context.Background()
 
-	seedUser(t, db, "bob", domain.RoleUser)
+	seedUser(t, db, "bob")
 
 	dup := &domain.User{ID: newID(), Username: "Bob", Role: domain.RoleUser}
 	if err := repo.Create(ctx, dup); err == nil {

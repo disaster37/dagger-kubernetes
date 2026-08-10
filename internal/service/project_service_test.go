@@ -9,17 +9,16 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newProjectService(t *testing.T) (*ProjectService, *GroupService, *UserService, *repos) {
+func newProjectService(t *testing.T) (*ProjectService, *GroupService) {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	psvc := NewProjectService(r.projects, r.groups, testLogger())
 	gsvc := NewGroupService(r.groups, r.users, testLogger())
-	usvc := NewUserService(r.users, r.groups, testLogger())
-	return psvc, gsvc, usvc, r
+	return psvc, gsvc
 }
 
 func TestProjectServiceCRUD(t *testing.T) {
-	psvc, gsvc, _, _ := newProjectService(t)
+	psvc, gsvc := newProjectService(t)
 	ctx := context.Background()
 
 	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
@@ -85,7 +84,7 @@ func TestProjectServiceCRUD(t *testing.T) {
 }
 
 func TestProjectServiceGetOrCreateByName(t *testing.T) {
-	psvc, _, _, _ := newProjectService(t)
+	psvc, _ := newProjectService(t)
 	ctx := context.Background()
 
 	p1, err := psvc.GetOrCreateByName(ctx, "github.com/acme/api")
@@ -104,7 +103,7 @@ func TestProjectServiceGetOrCreateByName(t *testing.T) {
 // TestProjectServiceNameTooLong verifies project names are length-bounded
 // (CWE-770) for both explicit creation and OTLP auto-creation.
 func TestProjectServiceNameTooLong(t *testing.T) {
-	psvc, _, _, _ := newProjectService(t)
+	psvc, _ := newProjectService(t)
 	ctx := context.Background()
 
 	long := strings.Repeat("a", maxProjectNameLen+1)

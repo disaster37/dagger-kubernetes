@@ -45,12 +45,12 @@ func NewJWTService(secret []byte, accessTTL, refreshTTL time.Duration) *JWTServi
 }
 
 // IssuePair returns signed access + refresh tokens for the user.
-func (s *JWTService) IssuePair(u *domain.User, groupIDs []string) (string, string, error) {
-	access, err := s.issue(u, groupIDs, typAccess, s.accessTTL)
+func (s *JWTService) IssuePair(u *domain.User, groupIDs []string) (access, refresh string, err error) {
+	access, err = s.issue(u, groupIDs, typAccess, s.accessTTL)
 	if err != nil {
 		return "", "", fmt.Errorf("issue access: %w", err)
 	}
-	refresh, err := s.issue(u, groupIDs, typRefresh, s.refreshTTL)
+	refresh, err = s.issue(u, groupIDs, typRefresh, s.refreshTTL)
 	if err != nil {
 		return "", "", fmt.Errorf("issue refresh: %w", err)
 	}

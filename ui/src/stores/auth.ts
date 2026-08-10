@@ -27,7 +27,7 @@ export const useAuthStore = defineStore('auth', () => {
     user.value = res.user
   }
 
-  async function fetchMe(): Promise<void> {
+  async function loadUser(): Promise<void> {
     try {
       user.value = await fetchMe()
     } catch {
@@ -43,7 +43,7 @@ export const useAuthStore = defineStore('auth', () => {
     }
     refreshInFlight = (async () => {
       try {
-        const res = await refreshRequest(refreshToken.value)
+        const res = await refreshRequest(refreshToken.value!)
         setTokens(res.access_token, res.refresh_token)
         return true
       } catch {
@@ -64,5 +64,5 @@ export const useAuthStore = defineStore('auth', () => {
     localStorage.removeItem('dagger_cache_refresh_token')
   }
 
-  return { token, refreshToken, user, isAuthenticated, isAdmin, groups, login, setTokens, fetchMe, refreshSession, logout }
+  return { token, refreshToken, user, isAuthenticated, isAdmin, groups, login, setTokens, loadUser, refreshSession, logout }
 })

@@ -33,8 +33,8 @@ type GitHubOAuthService struct {
 }
 
 // NewGitHubOAuthService returns a GitHubOAuthService.
-func NewGitHubOAuthService(cfg domain.OAuthConfig, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *GitHubOAuthService {
-	return &GitHubOAuthService{
+func NewGitHubOAuthService(cfg *domain.OAuthConfig, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *GitHubOAuthService {
+	return &GitHubOAuthService{ //nolint:gosec // G101: OAuth client secret is config-derived, not hardcoded.
 		clientID:     cfg.ClientID,
 		clientSecret: cfg.ClientSecret,
 		redirectURL:  cfg.RedirectURL,
@@ -65,7 +65,7 @@ func (s *GitHubOAuthService) LoginURL(state string) string {
 // Complete exchanges the code for a GitHub access token, fetches the user
 // profile and orgs, enforces allowed_orgs, ensures a local user, optionally
 // auto-joins the default group, and issues a JWT pair.
-func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (string, string, *domain.User, error) {
+func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access, refresh string, u *domain.User, err error) {
 	accessToken, err := s.exchangeCode(ctx, code)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("exchange code: %w", err)
@@ -85,21 +85,21 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (string,
 		return "", "", nil, domain.ErrForbidden
 	}
 
-	user, created, err := s.users.EnsureOAuthUser(ctx, "github", strconv.Itoa(ghUser.ID), ghUser.Login)
+	u, created, err := s.users.EnsureOAuthUser(ctx, "github", strconv.Itoa(ghUser.ID), ghUser.Login)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("ensure oauth user: %w", err)
 	}
 
 	if created && s.defaultGroup != "" {
-		s.joinDefaultGroup(ctx, user.ID)
+		s.joinDefaultGroup(ctx, u.ID)
 	}
 
-	gids, _ := s.groups.GroupsForUser(ctx, user.ID)
-	access, refresh, err := s.jwt.IssuePair(user, groupIDs(gids))
+	gids, _ := s.groups.GroupsForUser(ctx, u.ID)
+	access, refresh, err = s.jwt.IssuePair(u, groupIDs(gids))
 	if err != nil {
 		return "", "", nil, fmt.Errorf("issue jwt: %w", err)
 	}
-	return access, refresh, user, nil
+	return access, refresh, u, nil
 }
 
 // joinDefaultGroup best-effort adds a newly created OAuth user to the
@@ -184,7 +184,7 @@ func (s *GitHubOAuthService) fetchOrgs(ctx context.Context, accessToken string) 
 // getJSON issues an authenticated GET against the GitHub API and decodes the
 // JSON response into out.
 func (s *GitHubOAuthService) getJSON(ctx context.Context, path, accessToken string, out any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiBaseURL+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.apiBaseURL+path, http.NoBody)
 	if err != nil {
 		return err
 	}
@@ -203,7 +203,7 @@ func (s *GitHubOAuthService) getJSON(ctx context.Context, path, accessToken stri
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func orgsIntersect(allowed []string, have []string) bool {
+func orgsIntersect(allowed, have []string) bool {
 	hset := make(map[string]bool, len(have))
 	for _, h := range have {
 		hset[h] = true

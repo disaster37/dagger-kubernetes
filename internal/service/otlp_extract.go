@@ -59,8 +59,8 @@ func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
 
 	// Index span IDs present in this payload.
 	present := make(map[string]bool, len(spans))
-	for _, s := range spans {
-		present[s.SpanID] = true
+	for i := range spans {
+		present[spans[i].SpanID] = true
 	}
 
 	// Root = span whose parent is absent in this payload.

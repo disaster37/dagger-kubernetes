@@ -7,7 +7,6 @@ import (
 
 	"dagger/golang/internal/dagger"
 
-	"dagger.io/dagger/dag"
 	"emperror.dev/errors"
 	cimodule "github.com/disaster37/dagger-library-go/lib/ci"
 	"github.com/disaster37/dagger-library-go/lib/pipeline"

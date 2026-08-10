@@ -69,8 +69,8 @@ func New(
 // golangci-lint preinstalled, preserving the CI version pin.
 func (m *DaggerCache) Lint(ctx context.Context) (string, error) {
 	install := fmt.Sprintf(
-		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C $(go env GOPATH)/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 %s/golangci-lint && rm /tmp/golangci-lint.tar.gz",
-		golangciLintVersion, strings.TrimPrefix(golangciLintVersion, "v"), golangciLintVersion,
+		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C $(go env GOPATH)/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 golangci-lint-%s-linux-amd64/golangci-lint && rm /tmp/golangci-lint.tar.gz",
+		golangciLintVersion, strings.TrimPrefix(golangciLintVersion, "v"), strings.TrimPrefix(golangciLintVersion, "v"),
 	)
 	base := dag.Container().
 		From(golangImage).

@@ -14,8 +14,8 @@ func TestTraceMetaRepoProvisionSetOnce(t *testing.T) {
 	repo := NewTraceMetaRepo(db)
 	ctx := context.Background()
 
-	u1 := seedUser(t, db, "u1", domain.RoleUser)
-	u2 := seedUser(t, db, "u2", domain.RoleUser)
+	u1 := seedUser(t, db, "u1")
+	u2 := seedUser(t, db, "u2")
 
 	if err := repo.UpsertProvision(ctx, "t1", u1.ID); err != nil {
 		t.Fatalf("UpsertProvision: %v", err)
@@ -93,8 +93,8 @@ func TestTraceMetaRepoListScoping(t *testing.T) {
 	g1 := &domain.Group{ID: newID(), Name: "G1", AgentAvailable: true}
 	grepo.Create(ctx, g1)
 
-	u1 := seedUser(t, db, "u1", domain.RoleUser) // member of g1
-	u2 := seedUser(t, db, "u2", domain.RoleUser) // not a member
+	u1 := seedUser(t, db, "u1") // member of g1
+	u2 := seedUser(t, db, "u2") // not a member
 	grepo.SetMembers(ctx, g1.ID, []string{u1.ID})
 
 	// trace in g1
@@ -148,7 +148,7 @@ func TestTraceMetaRepoListUnassignedOnly(t *testing.T) {
 	g1 := &domain.Group{ID: newID(), Name: "G1", AgentAvailable: true}
 	grepo.Create(ctx, g1)
 
-	u1 := seedUser(t, db, "u1", domain.RoleUser)
+	u1 := seedUser(t, db, "u1")
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "in-group", GroupID: g1.ID, UserID: u1.ID, StartedAt: time.Now().UTC()})
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "unassigned-1", UserID: u1.ID, StartedAt: time.Now().UTC()})
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "unassigned-2", StartedAt: time.Now().UTC()})

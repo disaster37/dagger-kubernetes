@@ -43,7 +43,7 @@ func (s *Server) requireAuth(c *app.RequestContext) bool {
 func (s *Server) requireAuthWithQueryFallback(c *app.RequestContext) bool {
 	bearer, _ := extractToken(c)
 	if bearer == "" {
-		bearer = string(c.Query("token"))
+		bearer = c.Query("token")
 	}
 	id, err := s.auth.Resolve(context.Background(), bearer)
 	if err != nil {
@@ -86,37 +86,38 @@ func identityOf(c *app.RequestContext) *domain.Identity {
 //   - group member (meta.GroupID != "" && id.HasGroup): allowed
 //   - otherwise: 404 "trace not found" (do not leak existence)
 //
-// Returns the meta (which may be nil for admins on unknown traces) and ok.
-func (s *Server) authorizeTrace(c *app.RequestContext, traceID string) (*domain.TraceMeta, bool) {
+// Returns ok; the loaded meta is unused by callers (they re-fetch via the
+// trace repository) so it is not returned.
+func (s *Server) authorizeTrace(c *app.RequestContext, traceID string) bool {
 	id := identityOf(c)
 	if id == nil {
 		// No identity resolved (should not happen on gated routes); deny.
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
-		return nil, false
+		return false
 	}
 
 	meta, err := s.traceMeta.Get(context.Background(), traceID)
 	if err != nil {
 		if id.IsAdmin() {
 			// Admins may view unknown traces (e.g. Tempo-only traces).
-			return nil, true
+			return true
 		}
 		// Fail closed for non-admins: 404 (don't leak existence).
 		writeError(c, consts.StatusNotFound, "trace not found")
-		return nil, false
+		return false
 	}
 
 	if id.IsAdmin() {
-		return meta, true
+		return true
 	}
 	if meta.UserID != "" && meta.UserID == id.UserID {
-		return meta, true
+		return true
 	}
 	if meta.GroupID != "" && id.HasGroup(meta.GroupID) {
-		return meta, true
+		return true
 	}
 	writeError(c, consts.StatusNotFound, "trace not found")
-	return nil, false
+	return false
 }
 
 // attributionUserID returns the user id recorded in trace attribution, or ""

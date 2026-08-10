@@ -8,18 +8,18 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newTokenService(t *testing.T) (*TokenService, *UserService, *repos) {
+func newTokenService(t *testing.T) (*TokenService, *UserService) {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	tsvc := NewTokenService(r.tokens, testLogger())
 	usvc := NewUserService(r.users, r.groups, testLogger())
-	return tsvc, usvc, r
+	return tsvc, usvc
 }
 
 func TestTokenServiceGenerateAndValidate(t *testing.T) {
-	tsvc, usvc, _ := newTokenService(t)
+	tsvc, usvc := newTokenService(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	plaintext, meta, err := tsvc.Generate(ctx, u.ID)
 	if err != nil {
@@ -51,9 +51,9 @@ func TestTokenServiceGenerateAndValidate(t *testing.T) {
 }
 
 func TestTokenServiceRegenerateInvalidatesOld(t *testing.T) {
-	tsvc, usvc, _ := newTokenService(t)
+	tsvc, usvc := newTokenService(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	plaintext1, _, _ := tsvc.Generate(ctx, u.ID)
 	plaintext2, _, err := tsvc.Regenerate(ctx, u.ID)
@@ -74,9 +74,9 @@ func TestTokenServiceRegenerateInvalidatesOld(t *testing.T) {
 }
 
 func TestTokenServiceMetaAndRevoke(t *testing.T) {
-	tsvc, usvc, _ := newTokenService(t)
+	tsvc, usvc := newTokenService(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	// No token yet -> ErrNotFound.
 	if _, err := tsvc.Meta(ctx, u.ID); !errors.Is(err, domain.ErrNotFound) {
@@ -105,7 +105,7 @@ func TestTokenServiceMetaAndRevoke(t *testing.T) {
 }
 
 func TestTokenServiceValidateEmpty(t *testing.T) {
-	tsvc, _, _ := newTokenService(t)
+	tsvc, _ := newTokenService(t)
 	if _, err := tsvc.Validate(context.Background(), ""); err != domain.ErrUnauthenticated {
 		t.Fatalf("empty token: %v", err)
 	}
@@ -115,9 +115,9 @@ func TestTokenServiceValidateEmpty(t *testing.T) {
 }
 
 func TestTokenServiceImportRaw(t *testing.T) {
-	tsvc, usvc, _ := newTokenService(t)
+	tsvc, usvc := newTokenService(t)
 	ctx := context.Background()
-	u := seedUserSvc(t, usvc, "u1", domain.RoleUser)
+	u := seedUserSvc(t, usvc, "u1")
 
 	raw := "legacy-token-123"
 	if err := tsvc.ImportRaw(ctx, u.ID, raw); err != nil {

@@ -75,7 +75,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 		ControlAddr: ":18095",
 		DataAddr:    ":18456",
 		DataHost:    "localhost",
-	}, handler.Deps{
+	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc,
@@ -275,7 +275,7 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 		ControlAddr: ":18096",
 		DataAddr:    ":18457",
 		DataHost:    "localhost",
-	}, handler.Deps{
+	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
@@ -319,7 +319,7 @@ func postEngines(t *testing.T, baseURL, bearer, traceID string) int {
 
 func listTraces(t *testing.T, baseURL, bearer string) []string {
 	t.Helper()
-	req, _ := http.NewRequest("GET", baseURL+"/api/v1/traces", nil)
+	req, _ := http.NewRequest("GET", baseURL+"/api/v1/traces", http.NoBody)
 	req.Header.Set("Authorization", bearer)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -342,7 +342,7 @@ func listTraces(t *testing.T, baseURL, bearer string) []string {
 
 func getTrace(t *testing.T, baseURL, bearer, traceID string) int {
 	t.Helper()
-	req, _ := http.NewRequest("GET", baseURL+"/api/v1/traces/"+traceID, nil)
+	req, _ := http.NewRequest("GET", baseURL+"/api/v1/traces/"+traceID, http.NoBody)
 	req.Header.Set("Authorization", bearer)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

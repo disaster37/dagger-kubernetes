@@ -9,7 +9,7 @@ import (
 
 func newLegacyForTest(t *testing.T) (*UserService, *TokenService, *GroupService, *repos) {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	logger := testLogger()
 	usvc := NewUserService(r.users, r.groups, logger)
 	tsvc := NewTokenService(r.tokens, logger)

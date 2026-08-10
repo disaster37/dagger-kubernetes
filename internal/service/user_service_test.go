@@ -9,15 +9,15 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newUserService(t *testing.T) (*UserService, *repos) {
+func newUserService(t *testing.T) *UserService {
 	t.Helper()
-	_, r := newServiceDB(t)
+	r := newServiceDB(t)
 	svc := NewUserService(r.users, r.groups, testLogger())
-	return svc, r
+	return svc
 }
 
 func TestUserServiceCreateAndAuthenticate(t *testing.T) {
-	svc, _ := newUserService(t)
+	svc := newUserService(t)
 	ctx := context.Background()
 
 	u, err := svc.Create(ctx, "alice", "password123", domain.RoleUser)
@@ -41,7 +41,7 @@ func TestUserServiceCreateAndAuthenticate(t *testing.T) {
 }
 
 func TestUserServiceAuthenticateFailures(t *testing.T) {
-	svc, _ := newUserService(t)
+	svc := newUserService(t)
 	ctx := context.Background()
 
 	if _, err := svc.Authenticate(ctx, "nobody", "x"); err != domain.ErrInvalidCredential {
@@ -61,7 +61,7 @@ func TestUserServiceAuthenticateFailures(t *testing.T) {
 }
 
 func TestUserServiceValidation(t *testing.T) {
-	svc, _ := newUserService(t)
+	svc := newUserService(t)
 	ctx := context.Background()
 
 	cases := []struct {
@@ -86,7 +86,7 @@ func TestUserServiceValidation(t *testing.T) {
 }
 
 func TestUserServiceDuplicateUsername(t *testing.T) {
-	svc, _ := newUserService(t)
+	svc := newUserService(t)
 	ctx := context.Background()
 	svc.Create(ctx, "alice", "password123", domain.RoleUser)
 	if _, err := svc.Create(ctx, "Alice", "password123", domain.RoleUser); err == nil {
@@ -95,7 +95,7 @@ func TestUserServiceDuplicateUsername(t *testing.T) {
 }
 
 func TestUserServiceCRUD(t *testing.T) {
-	svc, _ := newUserService(t)
+	svc := newUserService(t)
 	ctx := context.Background()
 
 	u, _ := svc.Create(ctx, "alice", "password123", domain.RoleUser)
@@ -156,7 +156,7 @@ func TestUserServiceCRUD(t *testing.T) {
 }
 
 func TestUserServiceEnsureOAuthUserCollision(t *testing.T) {
-	svc, _ := newUserService(t)
+	svc := newUserService(t)
 	ctx := context.Background()
 
 	// Pre-create a user named "ghuser" so the OAuth user must suffix.

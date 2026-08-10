@@ -104,8 +104,8 @@ func TestGroupRepoMembership(t *testing.T) {
 	if err := grepo.Create(ctx, g); err != nil {
 		t.Fatalf("Create group: %v", err)
 	}
-	u1 := seedUser(t, db, "u1", domain.RoleUser)
-	u2 := seedUser(t, db, "u2", domain.RoleUser)
+	u1 := seedUser(t, db, "u1")
+	u2 := seedUser(t, db, "u2")
 
 	if err := grepo.SetMembers(ctx, g.ID, []string{u1.ID, u2.ID}); err != nil {
 		t.Fatalf("SetMembers: %v", err)
@@ -157,7 +157,7 @@ func TestGroupRepoDeleteCascadesMemberships(t *testing.T) {
 
 	g := &domain.Group{ID: newID(), Name: "G", AgentAvailable: true}
 	grepo.Create(ctx, g)
-	u := seedUser(t, db, "u", domain.RoleUser)
+	u := seedUser(t, db, "u")
 	grepo.SetMembers(ctx, g.ID, []string{u.ID})
 
 	if err := grepo.Delete(ctx, g.ID); err != nil {
@@ -177,7 +177,7 @@ func TestGroupRepoDeleteUserCascadesMemberships(t *testing.T) {
 
 	g := &domain.Group{ID: newID(), Name: "G", AgentAvailable: true}
 	grepo.Create(ctx, g)
-	u := seedUser(t, db, "u", domain.RoleUser)
+	u := seedUser(t, db, "u")
 	grepo.SetMembers(ctx, g.ID, []string{u.ID})
 
 	if err := urepo.Delete(ctx, u.ID); err != nil {

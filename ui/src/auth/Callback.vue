@@ -30,7 +30,7 @@ onMounted(async () => {
 
   if (accessToken && refreshToken) {
     auth.setTokens(accessToken, refreshToken)
-    await auth.fetchMe()
+    await auth.loadUser()
     // Strip the fragment so the token is not left in the URL/history.
     history.replaceState(null, '', '/auth/callback')
     router.push(redirect)

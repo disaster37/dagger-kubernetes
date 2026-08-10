@@ -36,13 +36,13 @@ func newID() string {
 	return hex.EncodeToString(b)
 }
 
-// seedUser inserts and returns a user with the given username/role.
-func seedUser(t *testing.T, db *sql.DB, username string, role domain.Role) *domain.User {
+// seedUser inserts and returns a user with the given username (always RoleUser).
+func seedUser(t *testing.T, db *sql.DB, username string) *domain.User {
 	t.Helper()
 	u := &domain.User{
 		ID:       newID(),
 		Username: username,
-		Role:     role,
+		Role:     domain.RoleUser,
 	}
 	if err := NewUserRepo(db).Create(context.Background(), u); err != nil {
 		t.Fatalf("seed user: %v", err)

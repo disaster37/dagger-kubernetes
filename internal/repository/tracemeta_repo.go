@@ -83,6 +83,7 @@ func (r *TraceMetaRepo) Get(ctx context.Context, traceID string) (*domain.TraceM
 func (r *TraceMetaRepo) List(ctx context.Context, f domain.TraceFilter) ([]*domain.TraceListResult, error) {
 	where, args := traceFilterWhere(f)
 
+	//nolint:gosec // G201: column list is a static constant, not user input.
 	q := fmt.Sprintf(`SELECT %s, COALESCE(g.name, ''), COALESCE(u.username, '')
 		FROM trace_meta tm
 		LEFT JOIN groups g ON g.id = tm.group_id
@@ -115,9 +116,7 @@ func (r *TraceMetaRepo) List(ctx context.Context, f domain.TraceFilter) ([]*doma
 
 // traceFilterWhere builds the WHERE clause (without the WHERE keyword) and
 // bind args for a TraceFilter. An empty clause means no restriction (admin).
-func traceFilterWhere(f domain.TraceFilter) (string, []any) {
-	var args []any
-	var where string
+func traceFilterWhere(f domain.TraceFilter) (where string, args []any) {
 	switch {
 	case f.UnassignedOnly:
 		// Admin "unassigned" view: only traces without a group.
@@ -168,8 +167,10 @@ func scanTraceMeta(row scanner) (*domain.TraceMeta, error) {
 func scanTraceMetaInto(row scanner, m *domain.TraceMeta, extra ...any) error {
 	var userID, groupID sql.NullString
 	var startedAt sql.NullTime
-	dests := []any{&m.TraceID, &userID, &groupID, &m.ProjectName, &m.Status, &m.Version, &m.CIProvider, &m.CIRepo, &m.DurationMS, &startedAt, &m.UpdatedAt}
-	if err := row.Scan(append(dests, extra...)...); err != nil {
+	dests := make([]any, 0, 11+len(extra))
+	dests = append(dests, &m.TraceID, &userID, &groupID, &m.ProjectName, &m.Status, &m.Version, &m.CIProvider, &m.CIRepo, &m.DurationMS, &startedAt, &m.UpdatedAt)
+	dests = append(dests, extra...)
+	if err := row.Scan(dests...); err != nil {
 		return err
 	}
 	m.UserID = userID.String

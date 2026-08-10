@@ -14,7 +14,7 @@ func TestTokenRepoUpsertReplaces(t *testing.T) {
 	repo := NewTokenRepo(db)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u", domain.RoleUser)
+	u := seedUser(t, db, "u")
 
 	tok1 := &domain.APIToken{
 		ID:        newID(),
@@ -73,7 +73,7 @@ func TestTokenRepoTouchLastUsed(t *testing.T) {
 	repo := NewTokenRepo(db)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u", domain.RoleUser)
+	u := seedUser(t, db, "u")
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 
@@ -92,7 +92,7 @@ func TestTokenRepoDelete(t *testing.T) {
 	repo := NewTokenRepo(db)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u", domain.RoleUser)
+	u := seedUser(t, db, "u")
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 
@@ -110,7 +110,7 @@ func TestTokenRepoDeleteUserCascadesToken(t *testing.T) {
 	urepo := NewUserRepo(db)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u", domain.RoleUser)
+	u := seedUser(t, db, "u")
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 

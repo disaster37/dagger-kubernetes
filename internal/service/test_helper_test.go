@@ -2,7 +2,6 @@ package service
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -12,9 +11,9 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
-// newServiceDB opens a fresh SQLite DB and returns it plus repos constructed
-// from it. The DB is cleaned up via t.Cleanup.
-func newServiceDB(t *testing.T) (*sql.DB, *repos) {
+// newServiceDB opens a fresh SQLite DB and returns repos constructed from it.
+// The DB is cleaned up via t.Cleanup.
+func newServiceDB(t *testing.T) *repos {
 	t.Helper()
 	path := t.TempDir() + "/test.db"
 	db, err := repository.OpenSQLite(path)
@@ -25,7 +24,7 @@ func newServiceDB(t *testing.T) (*sql.DB, *repos) {
 		t.Fatalf("Migrate: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	return db, &repos{
+	return &repos{
 		users:     repository.NewUserRepo(db),
 		groups:    repository.NewGroupRepo(db),
 		projects:  repository.NewProjectRepo(db),
@@ -44,10 +43,10 @@ type repos struct {
 
 func testLogger() *logrus.Logger { return observ.NewTestLogger() }
 
-// seedUserSvc creates a user via the UserService and returns it.
-func seedUserSvc(t *testing.T, svc *UserService, username string, role domain.Role) *domain.User {
+// seedUserSvc creates a user (always RoleUser) via the UserService and returns it.
+func seedUserSvc(t *testing.T, svc *UserService, username string) *domain.User {
 	t.Helper()
-	u, err := svc.Create(context.Background(), username, "password123", role)
+	u, err := svc.Create(context.Background(), username, "password123", domain.RoleUser)
 	if err != nil {
 		t.Fatalf("seed user: %v", err)
 	}
