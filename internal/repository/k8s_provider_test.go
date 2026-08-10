@@ -35,6 +35,83 @@ func defaultK8sProvider(extra ...func(*K8sProviderConfig)) (*K8sProvider, *fake.
 	return NewK8sProvider(cs, cfg), cs
 }
 
+const (
+	testEngineVersion = "v0.20.0"
+	testEngineImage   = "registry.dagger.io/engine:v0.20.0"
+)
+
+// ensureEngineSet runs EnsureStatefulSet for the standard test engine version
+// and returns the resulting StatefulSet.
+func ensureEngineSet(t *testing.T, p *K8sProvider, cs *fake.Clientset) *appsv1.StatefulSet {
+	t.Helper()
+	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	return sts
+}
+
+// engineConfigMap fetches the fleet-wide engine ConfigMap or fails the test.
+func engineConfigMap(t *testing.T, cs *fake.Clientset) *corev1.ConfigMap {
+	t.Helper()
+	cm, err := cs.CoreV1().ConfigMaps("dagger-cache").Get(context.Background(), engineConfigMapName, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+	return cm
+}
+
+// requireEnvNames asserts that the env var names appear in exactly the given
+// order (and count).
+func requireEnvNames(t *testing.T, envs []corev1.EnvVar, want []string) {
+	t.Helper()
+	if len(envs) != len(want) {
+		names := make([]string, len(envs))
+		for i, env := range envs {
+			names[i] = env.Name
+		}
+		t.Fatalf("expected %d env vars, got %d: %v", len(want), len(envs), names)
+	}
+	for i, name := range want {
+		if envs[i].Name != name {
+			t.Errorf("env[%d] = %q, want %q", i, envs[i].Name, name)
+		}
+	}
+}
+
+// envByName returns the env var with the given name, or nil.
+func envByName(envs []corev1.EnvVar, name string) *corev1.EnvVar {
+	for i := range envs {
+		if envs[i].Name == name {
+			return &envs[i]
+		}
+	}
+	return nil
+}
+
+// volumeByName returns the pod volume with the given name, or nil.
+func volumeByName(sts *appsv1.StatefulSet, name string) *corev1.Volume {
+	for i := range sts.Spec.Template.Spec.Volumes {
+		if sts.Spec.Template.Spec.Volumes[i].Name == name {
+			return &sts.Spec.Template.Spec.Volumes[i]
+		}
+	}
+	return nil
+}
+
+// mountByName returns the container volume mount with the given name, or nil.
+func mountByName(container *corev1.Container, name string) *corev1.VolumeMount {
+	for i := range container.VolumeMounts {
+		if container.VolumeMounts[i].Name == name {
+			return &container.VolumeMounts[i]
+		}
+	}
+	return nil
+}
+
 func TestK8sEnsureStatefulSet(t *testing.T) {
 	p, cs := defaultK8sProvider()
 
@@ -857,5 +934,229 @@ func TestK8sEngineEnvironVariables(t *testing.T) {
 	}
 	if !hasConfigMount {
 		t.Error("expected engine-config volume mount")
+	}
+}
+
+func TestK8sEngineExtraEnv(t *testing.T) {
+	const proxyURL = "http://proxy.corp.example:3128"
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.ExtraEnv = map[string]string{
+			"HTTPS_PROXY": proxyURL,
+			"https_proxy": proxyURL,
+		}
+	})
+
+	container := ensureEngineSet(t, p, cs).Spec.Template.Spec.Containers[0]
+
+	// Token first, then the literal operator env sorted by name
+	// (HTTPS_PROXY before https_proxy: uppercase sorts first).
+	requireEnvNames(t, container.Env, []string{"DAGGER_CACHE_TOKEN", "HTTPS_PROXY", "https_proxy"})
+	if token := container.Env[0]; token.ValueFrom == nil || token.ValueFrom.SecretKeyRef == nil {
+		t.Error("DAGGER_CACHE_TOKEN must be secret-sourced")
+	}
+	for _, name := range []string{"HTTPS_PROXY", "https_proxy"} {
+		if env := envByName(container.Env, name); env == nil || env.Value != proxyURL {
+			t.Errorf("%s = %+v, want literal value %q", name, env, proxyURL)
+		}
+	}
+}
+
+func TestK8sEngineExtraEnvFrom(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.ExtraEnvFrom = map[string]domain.EnvVarSource{
+			"HTTP_PROXY":  {SecretName: "proxy-credentials", Key: "http_proxy"},
+			"HTTPS_PROXY": {SecretName: "proxy-credentials", Key: "https_proxy"},
+		}
+	})
+
+	container := ensureEngineSet(t, p, cs).Spec.Template.Spec.Containers[0]
+
+	// Token first, then the secret-sourced env sorted by name
+	// (HTTPS_PROXY before HTTP_PROXY: "S" 0x53 < "_" 0x5f).
+	requireEnvNames(t, container.Env, []string{"DAGGER_CACHE_TOKEN", "HTTPS_PROXY", "HTTP_PROXY"})
+	for name, wantKey := range map[string]string{"HTTP_PROXY": "http_proxy", "HTTPS_PROXY": "https_proxy"} {
+		env := envByName(container.Env, name)
+		if env == nil {
+			t.Fatalf("missing env %s", name)
+		}
+		if env.Value != "" {
+			t.Errorf("%s Value should be empty, got %q", name, env.Value)
+		}
+		if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil {
+			t.Fatalf("%s must be secret-sourced", name)
+		}
+		if ref := env.ValueFrom.SecretKeyRef; ref.Name != "proxy-credentials" || ref.Key != wantKey {
+			t.Errorf("%s ref = %+v, want secret proxy-credentials key %s", name, ref, wantKey)
+		}
+	}
+}
+
+func TestK8sEngineExtraEnvCombinedOrder(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.ExtraEnv = map[string]string{
+			"NO_PROXY": "localhost,127.0.0.1",
+		}
+		cfg.ExtraEnvFrom = map[string]domain.EnvVarSource{
+			"HTTP_PROXY": {SecretName: "proxy-credentials", Key: "http_proxy"},
+		}
+		cfg.CASecret = "custom-ca-bundle"
+	})
+
+	container := ensureEngineSet(t, p, cs).Spec.Template.Spec.Containers[0]
+
+	// Deterministic order: token → sorted literal envs → sorted secret-sourced
+	// envs → CA envs.
+	requireEnvNames(t, container.Env, []string{
+		"DAGGER_CACHE_TOKEN",
+		"NO_PROXY",
+		"HTTP_PROXY",
+		"SSL_CERT_FILE",
+		"NODE_EXTRA_CA_CERTS",
+	})
+}
+
+func TestK8sEngineCAInjection(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.CASecret = "custom-ca-bundle"
+		cfg.CAKey = "tls-ca.crt"
+	})
+
+	sts := ensureEngineSet(t, p, cs)
+
+	// Volume ca-bundle with secret name and Items tls-ca.crt→ca.crt.
+	caVol := volumeByName(sts, volumeCABundle)
+	if caVol == nil {
+		t.Fatalf("expected %s volume, got %+v", volumeCABundle, sts.Spec.Template.Spec.Volumes)
+	}
+	if caVol.Secret == nil || caVol.Secret.SecretName != "custom-ca-bundle" {
+		t.Errorf("expected secret custom-ca-bundle, got %+v", caVol.Secret)
+	}
+	if len(caVol.Secret.Items) != 1 || caVol.Secret.Items[0].Key != "tls-ca.crt" || caVol.Secret.Items[0].Path != "ca.crt" {
+		t.Errorf("expected Items tls-ca.crt→ca.crt, got %+v", caVol.Secret.Items)
+	}
+
+	// Mounted read-only at the well-known path, with env vars pointing at it.
+	container := sts.Spec.Template.Spec.Containers[0]
+	caMount := mountByName(&container, volumeCABundle)
+	if caMount == nil {
+		t.Fatalf("expected %s mount, got %+v", volumeCABundle, container.VolumeMounts)
+	}
+	if caMount.MountPath != engineCAMountPath || caMount.SubPath != "ca.crt" || !caMount.ReadOnly {
+		t.Errorf("CA mount = %+v, want path %s subPath ca.crt readOnly", caMount, engineCAMountPath)
+	}
+	for _, name := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"} {
+		if env := envByName(container.Env, name); env == nil || env.Value != engineCAMountPath {
+			t.Errorf("%s = %+v, want value %s", name, env, engineCAMountPath)
+		}
+	}
+}
+
+func TestK8sEngineCAInjectionDisabled(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	sts := ensureEngineSet(t, p, cs)
+
+	if vol := volumeByName(sts, volumeCABundle); vol != nil {
+		t.Errorf("expected no %s volume, got %+v", volumeCABundle, vol)
+	}
+	container := sts.Spec.Template.Spec.Containers[0]
+	if mount := mountByName(&container, volumeCABundle); mount != nil {
+		t.Errorf("expected no %s mount, got %+v", volumeCABundle, mount)
+	}
+	if env := envByName(container.Env, "SSL_CERT_FILE"); env != nil {
+		t.Errorf("expected no SSL_CERT_FILE env, got %+v", env)
+	}
+}
+
+func TestK8sEngineTOMLConfigMap(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.Debug = true
+		cfg.LogFormat = "json"
+		cfg.RegistryMirrors = map[string][]string{
+			"docker.io": {"mirror.gcr.io"},
+		}
+	})
+
+	sts := ensureEngineSet(t, p, cs)
+
+	wantTOML := "debug = true\n\n[log]\n  format = \"json\"\n\n[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
+	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
+		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	}
+
+	// STS has volume dagger-config (ConfigMap source).
+	cfgVol := volumeByName(sts, volumeDaggerConfig)
+	if cfgVol == nil {
+		t.Fatalf("expected %s volume, got %+v", volumeDaggerConfig, sts.Spec.Template.Spec.Volumes)
+	}
+	if cfgVol.ConfigMap == nil || cfgVol.ConfigMap.Name != engineConfigMapName {
+		t.Errorf("expected ConfigMap %s, got %+v", engineConfigMapName, cfgVol.ConfigMap)
+	}
+
+	// Mounted read-only at /etc/dagger/engine.toml via subPath.
+	container := sts.Spec.Template.Spec.Containers[0]
+	tomlMount := mountByName(&container, volumeDaggerConfig)
+	if tomlMount == nil {
+		t.Fatalf("expected %s mount, got %+v", volumeDaggerConfig, container.VolumeMounts)
+	}
+	if tomlMount.MountPath != engineTOMLPath || tomlMount.SubPath != engineTOMLKey || !tomlMount.ReadOnly {
+		t.Errorf("engine.toml mount = %+v, want path %s subPath %s readOnly", tomlMount, engineTOMLPath, engineTOMLKey)
+	}
+}
+
+func TestK8sEngineTOMLDefaultLogFormat(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.LogFormat = "json"
+	})
+	ensureEngineSet(t, p, cs)
+
+	wantTOML := "[log]\n  format = \"json\"\n"
+	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
+		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	}
+}
+
+func TestK8sEngineTOMLEmpty(t *testing.T) {
+	p, cs := defaultK8sProvider()
+
+	// Pre-create a stale ConfigMap to verify deletion.
+	_, err := cs.CoreV1().ConfigMaps("dagger-cache").Create(context.Background(), &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      engineConfigMapName,
+			Namespace: "dagger-cache",
+		},
+		Data: map[string]string{engineTOMLKey: "stale"},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatalf("pre-create stale configmap: %v", err)
+	}
+
+	sts := ensureEngineSet(t, p, cs)
+
+	// ConfigMap should be deleted.
+	if _, err := cs.CoreV1().ConfigMaps("dagger-cache").Get(context.Background(), engineConfigMapName, metav1.GetOptions{}); err == nil {
+		t.Error("expected stale configmap to be deleted")
+	}
+
+	// No dagger-config volume/mount.
+	if vol := volumeByName(sts, volumeDaggerConfig); vol != nil {
+		t.Errorf("expected no %s volume, got %+v", volumeDaggerConfig, vol)
+	}
+	container := sts.Spec.Template.Spec.Containers[0]
+	if mount := mountByName(&container, volumeDaggerConfig); mount != nil {
+		t.Errorf("expected no %s mount, got %+v", volumeDaggerConfig, mount)
+	}
+}
+
+func TestK8sEngineConfigMapIdempotent(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.LogFormat = "json"
+	})
+
+	ensureEngineSet(t, p, cs)
+	ensureEngineSet(t, p, cs) // second ensure takes the update path
+
+	wantTOML := "[log]\n  format = \"json\"\n"
+	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
+		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
 	}
 }

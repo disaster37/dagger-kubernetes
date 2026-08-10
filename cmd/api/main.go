@@ -78,7 +78,7 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	logger := observ.NewLogger(cfg.LogLevel)
+	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	logger.WithFields(logrus.Fields{
 		"control_addr": cfg.Server.ControlAddr,
@@ -182,7 +182,10 @@ func run(c *cli.Context) error {
 	}
 
 	// --- Fleet + telemetry wiring ---
-	provider := createProvider(cfg, logger)
+	provider, err := createProvider(cfg, logger)
+	if err != nil {
+		return fmt.Errorf("create fleet provider: %w", err)
+	}
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: cfg.Fleet.MaxReplicasPerVersion,
 		MaxSessionsPerReplica: cfg.Fleet.MaxSessionsPerReplica,
@@ -356,7 +359,7 @@ func runMigrateTokens(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
-	logger := observ.NewLogger(cfg.LogLevel)
+	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	tokensFile := c.String("tokens-file")
 	if tokensFile == "" {
@@ -407,11 +410,14 @@ func selectTLSProvider(cfg *domain.Config) (domain.CAProvider, error) {
 	}
 }
 
-func createProvider(cfg *domain.Config, logger *logrus.Logger) domain.FleetProvider {
+func createProvider(cfg *domain.Config, logger *logrus.Logger) (domain.FleetProvider, error) {
+	if err := validateFleetEnv(&cfg.Fleet); err != nil {
+		return nil, err
+	}
 	clientset, err := newK8sClientset()
 	if err != nil {
 		logger.WithError(err).Warn("failed to create k8s clientset, using stub provider")
-		return repository.NewStubProvider()
+		return repository.NewStubProvider(), nil
 	}
 
 	k8sCfg := repository.K8sProviderConfig{
@@ -429,9 +435,64 @@ func createProvider(cfg *domain.Config, logger *logrus.Logger) domain.FleetProvi
 		ExtraArgs:           cfg.Fleet.EngineExtraArgs,
 		PullPolicy:          corev1.PullPolicy(cfg.Fleet.EnginePullPolicy),
 		Privileged:          cfg.Fleet.EnginePrivileged,
+		ExtraEnv:            cfg.Fleet.EngineExtraEnv,
+		ExtraEnvFrom:        cfg.Fleet.EngineExtraEnvFrom,
+		CASecret:            cfg.Fleet.EngineCASecret,
+		CAKey:               cfg.Fleet.EngineCASecretKey,
+		Debug:               cfg.Fleet.EngineDebug,
+		LogFormat:           cfg.Fleet.EngineLogFormat,
+		RegistryMirrors:     cfg.Fleet.EngineRegistryMirrors,
 	}
 
-	return repository.NewK8sProvider(clientset, k8sCfg)
+	return repository.NewK8sProvider(clientset, k8sCfg), nil
+}
+
+// validateFleetEnv rejects engine env configuration that Kubernetes would
+// refuse at StatefulSet admission (duplicate container env names) or that is
+// internally inconsistent. Called once at startup (fail fast).
+func validateFleetEnv(fleet *domain.FleetConfig) error {
+	// DAGGER_CACHE_TOKEN is always injected from a secret; SSL_CERT_FILE and
+	// NODE_EXTRA_CA_CERTS are injected when CA injection is enabled.
+	reserved := map[string]bool{"DAGGER_CACHE_TOKEN": true}
+	if fleet.EngineCASecret != "" {
+		reserved["SSL_CERT_FILE"] = true
+		reserved["NODE_EXTRA_CA_CERTS"] = true
+	}
+	for name := range fleet.EngineExtraEnv {
+		if err := validateEnvName(name, "engine_extra_env", reserved); err != nil {
+			return err
+		}
+	}
+	for name, src := range fleet.EngineExtraEnvFrom {
+		if err := validateEnvName(name, "engine_extra_env_from", reserved); err != nil {
+			return err
+		}
+		if _, dup := fleet.EngineExtraEnv[name]; dup {
+			return fmt.Errorf("env var %s is set in both fleet.engine_extra_env and fleet.engine_extra_env_from", name)
+		}
+		if src.SecretName == "" {
+			return fmt.Errorf("fleet.engine_extra_env_from.%s: secret_name must not be empty", name)
+		}
+		if src.Key == "" {
+			return fmt.Errorf("fleet.engine_extra_env_from.%s: key must not be empty", name)
+		}
+	}
+	if fleet.EngineCASecret != "" && fleet.EngineCASecretKey == "" {
+		return fmt.Errorf("fleet.engine_ca_secret_key must not be empty when fleet.engine_ca_secret is set")
+	}
+	return nil
+}
+
+// validateEnvName rejects empty operator-supplied env var names and names the
+// supervisor injects itself. source is the fleet.* config key for errors.
+func validateEnvName(name, source string, reserved map[string]bool) error {
+	if name == "" {
+		return fmt.Errorf("fleet.%s contains an empty env var name", source)
+	}
+	if reserved[name] {
+		return fmt.Errorf("fleet.%s must not set %s: injected by the supervisor", source, name)
+	}
+	return nil
 }
 
 func newK8sClientset() (kubernetes.Interface, error) {

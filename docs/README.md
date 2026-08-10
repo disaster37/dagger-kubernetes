@@ -272,6 +272,12 @@ The Docker compose stack uses only environment variables — no YAML is
 mounted. Secrets (`OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`) should always
 come from env/secrets, never the file.
 
+> **Note:** map-valued config keys (`fleet.engine_extra_env`,
+> `fleet.engine_extra_env_from`, `fleet.engine_registry_mirrors`,
+> `fleet.engine_node_selector`) cannot be overridden via `DAGGER_CACHE_`
+> environment variables — Viper does not bind env vars to map types. Set
+> these in the YAML config file or Helm values instead.
+
 ### Full reference
 
 See [`config/config.app.yaml.sample`](../config/config.app.yaml.sample) for every key with
@@ -300,6 +306,13 @@ inline comments. The sections below summarise the most important ones.
 |              | `max_sessions_per_replica`  | `8`                              | Sessions pinned per pod.                          |
 |              | `replica_idle_ttl`          | `5m`                             | Idle pod TTL before scale-down.                   |
 |              | `version_retention`         | `24h`                            | Time a 0-replica StatefulSet lingers.             |
+|              | `engine_extra_env`          | `{}`                             | Extra env vars on engine pods (proxy vars etc.).  |
+|              | `engine_extra_env_from`     | `{}`                             | Env vars from Secret keys (proxy credentials).    |
+|              | `engine_ca_secret`          | `""`                             | Secret with custom CA PEM bundle; empty = off.    |
+|              | `engine_ca_secret_key`      | `ca.crt`                         | Key inside `engine_ca_secret`.                    |
+|              | `engine_debug`              | `false`                          | `engine.toml: debug = true`.                      |
+|              | `engine_log_format`         | `json`                           | `engine.toml: [log] format`; `""` omits.          |
+|              | `engine_registry_mirrors`   | `{}`                             | `engine.toml` registry mirrors.                   |
 | `ca`         | `minting_ca_secret`         | `supervisor-minting-ca`          | K8s Secret with the minting CA.                   |
 |              | `client_cert_ttl`           | `2h`                             | TTL of minted client certs.                       |
 | `tls`        | `server_cert_secret`        | `supervisor-tls`                 | K8s Secret with `tls.crt`/`tls.key`.              |
@@ -310,6 +323,7 @@ inline comments. The sections below summarise the most important ones.
 | `ci.jenkins` | `dynamic_stages`            | `true`                           |                                                   |
 | `ci.drone`   | `config_extension`          | `true`                           |                                                   |
 | `log_level`  | —                           | `info`                           | `debug`/`info`/`warn`/`error`.                    |
+| `log_format` | —                           | `json`                           | Supervisor log format: `json` / `text`.           |
 | `otel`       | `otlp_endpoint`             | `""`                             | If set, the Supervisor exports its own OTLP here. |
 
 Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
@@ -365,6 +379,56 @@ PVs removed).
 The fleet provider contains both a stub (in-memory, for testing) and a real
 Kubernetes provider (`internal/repository/k8s_provider.go`) that manages StatefulSets,
 Services, Pods, PVCs, and ConfigMaps.
+
+### Enterprise engine environment
+
+The supervisor can inject proxy settings, a custom CA bundle, and a generated
+Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
+
+- **Proxy env vars** (`fleet.engine_extra_env`, `map[string]string`) —
+  injected as literal env vars on the engine container, sorted by name for
+  deterministic pod specs. Covers `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and
+  their lowercase variants, plus any future env (e.g.
+  `KUBERNETES_SERVICE_HOST`).
+- **Secret-sourced env vars** (`fleet.engine_extra_env_from`,
+  `map[string]{secret_name, key}`) — each entry is injected as an env var
+  sourced from a Kubernetes Secret key (`SecretKeyRef`, not `Optional`).
+  Use this for credentials that must never appear in plaintext config or
+  Helm values, e.g. an authenticated proxy whose `HTTP_PROXY` value is
+  `http://user:pass@proxy.corp.example:3128`. If the referenced Secret or
+  key is missing in the cluster, the pod stays in `CreateContainerConfig`
+  error until the operator fixes the Secret — the engine cannot reach the
+  network without the proxy credentials anyway, so silent fallback is
+  undesirable. The supervisor validates at startup that no env name is
+  duplicated across `engine_extra_env` and `engine_extra_env_from`, and
+  that none collides with the supervisor-injected `DAGGER_CACHE_TOKEN` (or
+  `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS` when CA injection is enabled).
+- **Custom CA bundle** (`fleet.engine_ca_secret` + `engine_ca_secret_key`,
+  default `ca.crt`) — references an existing K8s Secret holding a PEM CA
+  bundle. The bundle is mounted read-only at
+  `/etc/ssl/certs/custom-ca.pem` (the Secret key is normalized to file
+  `ca.crt` via a volume `Items` projection, so any key name works), and
+  `SSL_CERT_FILE` + `NODE_EXTRA_CA_CERTS` are pointed at it. The volume is
+  NOT `Optional`: a missing Secret/key fails the pod loudly rather than
+  running with a dangling `SSL_CERT_FILE`. Empty `engine_ca_secret`
+  disables CA injection entirely (pre-change behavior).
+- **Generated `engine.toml`** (`fleet.engine_debug`,
+  `fleet.engine_log_format`, `fleet.engine_registry_mirrors`) — the
+  supervisor renders a legacy BuildKit-style `engine.toml` and stores it in
+  a fleet-wide ConfigMap `dagger-engine-config` (key `engine.toml`), which
+  it ensures on every `EnsureStatefulSet` (i.e. on every acquire). The
+  ConfigMap is mounted via `subPath` at `/etc/dagger/engine.toml`, which
+  the Dagger engine (v0.19+) reads automatically — no extra engine arg or
+  env var is needed. Config edits propagate to new pods on the next
+  acquire; already-running pods keep the old config until restarted or
+  scaled. When the rendered TOML is empty (debug=false, log format `""`,
+  no mirrors), no ConfigMap volume/mount is added and any stale ConfigMap
+  is deleted best-effort — the pod spec reverts to the pre-change shape.
+  By default `engine_log_format: "json"` renders `[log]\n  format = "json"`,
+  so every engine gets the mount by default (intended behavior change).
+
+See [ADR-011](design/ADR-011-engine-env-ca-config-injection.md) for the
+full rationale and alternatives considered.
 
 ---
 

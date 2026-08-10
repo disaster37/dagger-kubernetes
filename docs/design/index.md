@@ -17,3 +17,4 @@ the decision.
 | 008  | [Prometheus metrics DI](ADR-008-prometheus-metrics-di.md)        |
 | 009  | [Clean architecture layering](ADR-009-clean-architecture-layering.md) |
 | 010  | [SQLite-backed multi-user RBAC](ADR-010-sqlite-multiuser-rbac.md) |
+| 011  | [Engine proxy, CA, and engine.toml config injection](ADR-011-engine-env-ca-config-injection.md) |

@@ -77,6 +77,13 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("fleet.engine_extra_args", []string{})
 	v.SetDefault("fleet.engine_pull_policy", "IfNotPresent")
 	v.SetDefault("fleet.engine_privileged", false)
+	v.SetDefault("fleet.engine_extra_env", map[string]string{})
+	v.SetDefault("fleet.engine_ca_secret", "")
+	v.SetDefault("fleet.engine_ca_secret_key", "ca.crt")
+	v.SetDefault("fleet.engine_debug", false)
+	v.SetDefault("fleet.engine_log_format", "json")
+	v.SetDefault("fleet.engine_registry_mirrors", map[string][]string{})
+	v.SetDefault("fleet.engine_extra_env_from", map[string]domain.EnvVarSource{})
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
@@ -98,6 +105,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("ci.drone.config_extension", true)
 
 	v.SetDefault("log_level", "info")
+	v.SetDefault("log_format", "json")
 
 	v.SetDefault("otel.otlp_endpoint", "")
 

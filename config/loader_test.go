@@ -70,6 +70,30 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.OAuth.DefaultGroup != "" {
 		t.Fatalf("auth.oauth.default_group default should be empty, got %q", cfg.Auth.OAuth.DefaultGroup)
 	}
+	if cfg.LogFormat != "json" {
+		t.Fatalf("log_format default = %q, want json", cfg.LogFormat)
+	}
+	if cfg.Fleet.EngineLogFormat != "json" {
+		t.Fatalf("fleet.engine_log_format default = %q, want json", cfg.Fleet.EngineLogFormat)
+	}
+	if cfg.Fleet.EngineCASecretKey != "ca.crt" {
+		t.Fatalf("fleet.engine_ca_secret_key default = %q, want ca.crt", cfg.Fleet.EngineCASecretKey)
+	}
+	if cfg.Fleet.EngineCASecret != "" {
+		t.Fatalf("fleet.engine_ca_secret default should be empty, got %q", cfg.Fleet.EngineCASecret)
+	}
+	if cfg.Fleet.EngineDebug {
+		t.Fatal("fleet.engine_debug default should be false")
+	}
+	if cfg.Fleet.EngineExtraEnv == nil || len(cfg.Fleet.EngineExtraEnv) != 0 {
+		t.Fatalf("fleet.engine_extra_env default should be non-nil and empty, got %v", cfg.Fleet.EngineExtraEnv)
+	}
+	if cfg.Fleet.EngineExtraEnvFrom == nil || len(cfg.Fleet.EngineExtraEnvFrom) != 0 {
+		t.Fatalf("fleet.engine_extra_env_from default should be non-nil and empty, got %v", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	if cfg.Fleet.EngineRegistryMirrors == nil || len(cfg.Fleet.EngineRegistryMirrors) != 0 {
+		t.Fatalf("fleet.engine_registry_mirrors default should be non-nil and empty, got %v", cfg.Fleet.EngineRegistryMirrors)
+	}
 }
 
 func TestLoadFile(t *testing.T) {
@@ -81,9 +105,23 @@ server:
 fleet:
   namespace: "custom-ns"
   max_replicas_per_version: 7
+  engine_extra_env:
+    http_proxy: "http://proxy.corp.example:3128"
+    https_proxy: "http://proxy.corp.example:3128"
+  engine_extra_env_from:
+    http_proxy:
+      secret_name: "proxy-credentials"
+      key: "http_proxy"
+  engine_registry_mirrors:
+    acme-registry:
+      - "mirror.gcr.io"
+      - "hm-registry.hm.dm.ad/docker-hub"
+  engine_ca_secret: "custom-ca-bundle"
+  engine_debug: true
 version:
   allowlist: ["0.21"]
 log_level: "debug"
+log_format: "text"
 `)
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -106,8 +144,37 @@ log_level: "debug"
 	if cfg.LogLevel != "debug" {
 		t.Fatalf("log_level = %q, want debug", cfg.LogLevel)
 	}
+	if cfg.LogFormat != "text" {
+		t.Fatalf("log_format = %q, want text", cfg.LogFormat)
+	}
 	if len(cfg.Version.Allowlist) != 1 || cfg.Version.Allowlist[0] != "0.21" {
 		t.Fatalf("allowlist = %v", cfg.Version.Allowlist)
+	}
+	if len(cfg.Fleet.EngineExtraEnv) != 2 {
+		t.Fatalf("engine_extra_env = %v, want 2 entries", cfg.Fleet.EngineExtraEnv)
+	}
+	if cfg.Fleet.EngineExtraEnv["http_proxy"] != "http://proxy.corp.example:3128" {
+		t.Errorf("engine_extra_env.http_proxy = %q", cfg.Fleet.EngineExtraEnv["http_proxy"])
+	}
+	if len(cfg.Fleet.EngineExtraEnvFrom) != 1 {
+		t.Fatalf("engine_extra_env_from = %v, want 1 entry", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	src := cfg.Fleet.EngineExtraEnvFrom["http_proxy"]
+	if src.SecretName != "proxy-credentials" || src.Key != "http_proxy" {
+		t.Errorf("engine_extra_env_from.http_proxy = %+v", src)
+	}
+	if len(cfg.Fleet.EngineRegistryMirrors) != 1 {
+		t.Fatalf("engine_registry_mirrors = %v, want 1 entry", cfg.Fleet.EngineRegistryMirrors)
+	}
+	mirrors := cfg.Fleet.EngineRegistryMirrors["acme-registry"]
+	if len(mirrors) != 2 || mirrors[0] != "mirror.gcr.io" || mirrors[1] != "hm-registry.hm.dm.ad/docker-hub" {
+		t.Errorf("engine_registry_mirrors.acme-registry = %v", mirrors)
+	}
+	if cfg.Fleet.EngineCASecret != "custom-ca-bundle" {
+		t.Errorf("engine_ca_secret = %q, want custom-ca-bundle", cfg.Fleet.EngineCASecret)
+	}
+	if !cfg.Fleet.EngineDebug {
+		t.Error("engine_debug = false, want true")
 	}
 }
 

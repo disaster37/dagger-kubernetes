@@ -80,6 +80,13 @@ supervisor:
       engineNodeSelector: {}
       engineTolerations: []
       engineExtraArgs: []
+      engineExtraEnv: {}            # extra env vars on engine pods (proxy vars etc.)
+      engineExtraEnvFrom: {}        # env vars from Secret keys: {ENV_NAME: {secret_name, key}} (proxy credentials)
+      engineCaSecret: ""            # Secret with custom CA PEM bundle; empty = disabled
+      engineCaSecretKey: "ca.crt"   # key inside engineCaSecret
+      engineDebug: false            # engine.toml debug = true
+      engineLogFormat: "json"       # engine.toml [log] format; "" omits
+      engineRegistryMirrors: {}     # e.g. {"docker.io": ["mirror.gcr.io"]}
     ca:
       clientCertTtl: "2h"
     leaseTtl: "2m"
@@ -87,6 +94,7 @@ supervisor:
       floor: "v0.19.0"
       allowlist: ["0.19", "0.20", "0.21"]
     logLevel: "info"
+    logFormat: "json"               # supervisor log format: json | text
     otel:
       otlpEndpoint: ""               # empty disables the supervisor's own OTLP export
 

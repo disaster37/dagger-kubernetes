@@ -105,6 +105,26 @@ fleet:
   engine_node_selector: {}                            # node selector for engine pods (map).
   engine_tolerations: []                              # tolerations in "key:value:effect" format.
   engine_extra_args: []                               # additional CLI args passed to dagger engine.
+  engine_extra_env: {}                            # extra env vars for engine pods, e.g. proxy settings:
+    # HTTP_PROXY: "http://proxy.corp.example:3128"
+    # HTTPS_PROXY: "http://proxy.corp.example:3128"
+    # NO_PROXY: "localhost,127.0.0.1,.svc,.cluster.local"
+    # http_proxy: "http://proxy.corp.example:3128"
+    # https_proxy: "http://proxy.corp.example:3128"
+    # no_proxy: "localhost,127.0.0.1,.svc,.cluster.local"
+  engine_extra_env_from: {}                       # env vars sourced from K8s Secret keys (map: env name -> {secret_name, key}).
+    # Use for credentials that must never appear in plaintext config, e.g. an authenticated proxy:
+    # HTTP_PROXY:
+    #   secret_name: "proxy-credentials"
+    #   key: "http_proxy"            # secret value: "http://user:pass@proxy.corp.example:3128"
+    # HTTPS_PROXY:
+    #   secret_name: "proxy-credentials"
+    #   key: "https_proxy"
+  engine_ca_secret: ""                            # K8s Secret with a custom CA PEM bundle for engine pods; empty = disabled.
+  engine_ca_secret_key: "ca.crt"                  # key inside engine_ca_secret holding the PEM bundle.
+  engine_debug: false                             # engine.toml: debug = true (verbose engine logging).
+  engine_log_format: "json"                       # engine.toml: [log] format; "" omits the section.
+  engine_registry_mirrors: {}                     # engine.toml registry mirrors, e.g. {"docker.io": ["mirror.gcr.io"]}.
 
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:
@@ -139,7 +159,8 @@ ci:
     config_extension: true # enable the .drone.yml config extension.
 
 # --- Logging -----------------------------------------------------------------
-log_level: "info"   # debug | info | warn | error
+log_level: "info"    # debug | info | warn | error
+log_format: "json"   # json | text — the supervisor's own log format.
 
 # --- Outgoing OTLP -----------------------------------------------------------
 otel:

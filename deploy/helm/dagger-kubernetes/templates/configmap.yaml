@@ -73,6 +73,16 @@ data:
 {{ toYaml .Values.supervisor.config.fleet.engineTolerations | indent 8 }}
       engine_extra_args:
 {{ toYaml .Values.supervisor.config.fleet.engineExtraArgs | indent 8 }}
+      engine_extra_env:
+{{ toYaml .Values.supervisor.config.fleet.engineExtraEnv | indent 8 }}
+      engine_extra_env_from:
+{{ toYaml .Values.supervisor.config.fleet.engineExtraEnvFrom | indent 8 }}
+      engine_ca_secret: {{ .Values.supervisor.config.fleet.engineCaSecret | quote }}
+      engine_ca_secret_key: {{ .Values.supervisor.config.fleet.engineCaSecretKey | quote }}
+      engine_debug: {{ .Values.supervisor.config.fleet.engineDebug }}
+      engine_log_format: {{ .Values.supervisor.config.fleet.engineLogFormat | quote }}
+      engine_registry_mirrors:
+{{ toYaml .Values.supervisor.config.fleet.engineRegistryMirrors | indent 8 }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
       client_cert_ttl: {{ .Values.supervisor.config.ca.clientCertTtl | quote }}
@@ -84,6 +94,7 @@ data:
       allowlist:
 {{ toYaml .Values.supervisor.config.version.allowlist | indent 8 }}
     log_level: {{ .Values.supervisor.config.logLevel | quote }}
+    log_format: {{ .Values.supervisor.config.logFormat | quote }}
 {{- with .Values.supervisor.config.otel }}
     otel:
       otlp_endpoint: {{ .otlpEndpoint | quote }}

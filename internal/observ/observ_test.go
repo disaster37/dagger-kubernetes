@@ -19,7 +19,7 @@ func TestNewLoggerLevels(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		l := NewLogger(tt.in)
+		l := NewLogger(tt.in, "json")
 		if l == nil {
 			t.Fatalf("NewLogger(%q) returned nil", tt.in)
 		}
@@ -30,9 +30,33 @@ func TestNewLoggerLevels(t *testing.T) {
 }
 
 func TestNewLoggerInvalidLevelFallback(t *testing.T) {
-	l := NewLogger("bogus-level")
+	l := NewLogger("bogus-level", "json")
 	if l.GetLevel() != logrus.InfoLevel {
 		t.Fatalf("expected fallback to InfoLevel, got %v", l.GetLevel())
+	}
+}
+
+func TestNewLoggerFormat(t *testing.T) {
+	tests := []struct {
+		format   string
+		wantText bool
+	}{
+		{"text", true},
+		{"TEXT", true},
+		{"json", false},
+		{"", false},
+		{"bogus", false},
+	}
+
+	for _, tt := range tests {
+		l := NewLogger("info", tt.format)
+		if _, isText := l.Formatter.(*logrus.TextFormatter); isText != tt.wantText {
+			t.Errorf("format %q: formatter = %T, wantText = %v", tt.format, l.Formatter, tt.wantText)
+		}
+		// Level fallback behavior is independent of format.
+		if l.GetLevel() != logrus.InfoLevel {
+			t.Errorf("format %q: expected InfoLevel, got %v", tt.format, l.GetLevel())
+		}
 	}
 }
 

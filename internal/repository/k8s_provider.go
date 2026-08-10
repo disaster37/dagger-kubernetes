@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -25,6 +26,17 @@ const (
 	engineLabelValue   = "dagger-engine"
 	engineLabelVersion = "version"
 	enginePort         = 9999
+
+	engineConfigMapName  = "dagger-engine-config"
+	engineTOMLKey        = "engine.toml"
+	engineTOMLPath       = "/etc/dagger/engine.toml"
+	engineCAMountPath    = "/etc/ssl/certs/custom-ca.pem"
+	engineAuthSecretName = "engine-registry-auth" // holds the cache token; mounted as /etc/dagger
+	caCertFileName       = "ca.crt"               // normalized file name of the CA bundle in engine pods
+	volumeDaggerCache    = "dagger-cache"
+	volumeEngineConfig   = "engine-config"
+	volumeDaggerConfig   = "dagger-config"
+	volumeCABundle       = "ca-bundle"
 )
 
 type K8sProviderConfig struct {
@@ -42,6 +54,13 @@ type K8sProviderConfig struct {
 	ExtraArgs           []string
 	PullPolicy          corev1.PullPolicy
 	Privileged          bool
+	ExtraEnv            map[string]string              // literal env vars added to the engine container
+	ExtraEnvFrom        map[string]domain.EnvVarSource // env vars sourced from Secret keys (proxy credentials)
+	CASecret            string                         // Secret with the custom CA PEM bundle; "" = disabled
+	CAKey               string                         // key inside CASecret (default applied in NewK8sProvider)
+	Debug               bool                           // engine.toml: debug = true
+	LogFormat           string                         // engine.toml: [log] format; "" omits the section
+	RegistryMirrors     map[string][]string            // engine.toml: [registry."<host>"] mirrors
 }
 
 type K8sProvider struct {
@@ -84,6 +103,9 @@ func NewK8sProvider(clientset kubernetes.Interface, cfg K8sProviderConfig) *K8sP
 	if cfg.PullPolicy == "" {
 		cfg.PullPolicy = corev1.PullIfNotPresent
 	}
+	if cfg.CAKey == "" {
+		cfg.CAKey = caCertFileName
+	}
 	return &K8sProvider{
 		clientset: clientset,
 		cfg:       cfg,
@@ -97,14 +119,29 @@ func (p *K8sProvider) engineLabels(version string) map[string]string {
 	}
 }
 
+// renderEngineTOML renders the fleet-wide Dagger engine configuration.
+func (p *K8sProvider) renderEngineTOML() string {
+	return engineTOML{
+		Debug:           p.cfg.Debug,
+		LogFormat:       p.cfg.LogFormat,
+		RegistryMirrors: p.cfg.RegistryMirrors,
+	}.render()
+}
+
 func (p *K8sProvider) EnsureStatefulSet(version, image string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
+	// Rendered once so the ConfigMap content and the pod spec always agree.
+	daggerTOML := p.renderEngineTOML()
+	if err := p.ensureEngineConfigMap(ctx, daggerTOML); err != nil {
+		return fmt.Errorf("ensure engine config map: %w", err)
+	}
+
 	name := domain.StsName(version)
 	labelMap := p.engineLabels(version)
 
-	sts := p.buildStatefulSet(name, version, image, labelMap)
+	sts := p.buildStatefulSet(name, version, image, labelMap, daggerTOML)
 
 	_, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Create(ctx, sts, metav1.CreateOptions{})
 	if err != nil && apierrors.IsAlreadyExists(err) {
@@ -123,7 +160,9 @@ func (p *K8sProvider) EnsureStatefulSet(version, image string) error {
 
 // buildStatefulSet renders the engine StatefulSet for a version. It always
 // starts at zero replicas; scaling is handled separately by setReplicas.
-func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map[string]string) *appsv1.StatefulSet {
+// daggerTOML is the rendered engine.toml content ("" omits the ConfigMap
+// volume and mount).
+func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map[string]string, daggerTOML string) *appsv1.StatefulSet {
 	graceSec := p.cfg.TerminationGraceSec
 	privileged := p.cfg.Privileged
 	replicas := int32(0)
@@ -140,21 +179,8 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 		Image:           image,
 		ImagePullPolicy: p.cfg.PullPolicy,
 		Args:            args,
-		Env: []corev1.EnvVar{
-			{
-				Name: "DAGGER_CACHE_TOKEN",
-				ValueFrom: &corev1.EnvVarSource{
-					SecretKeyRef: &corev1.SecretKeySelector{
-						LocalObjectReference: corev1.LocalObjectReference{Name: "engine-registry-auth"},
-						Key:                  "token",
-					},
-				},
-			},
-		},
-		VolumeMounts: []corev1.VolumeMount{
-			{Name: "dagger-cache", MountPath: "/var/lib/dagger"},
-			{Name: "engine-config", MountPath: "/etc/dagger"},
-		},
+		Env:             p.engineEnv(),
+		VolumeMounts:    p.engineVolumeMounts(daggerTOML),
 		SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -211,24 +237,15 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: &graceSec,
 					Containers:                    []corev1.Container{container},
-					Volumes: []corev1.Volume{
-						{
-							Name: "engine-config",
-							VolumeSource: corev1.VolumeSource{
-								Secret: &corev1.SecretVolumeSource{
-									SecretName: "engine-registry-auth",
-								},
-							},
-						},
-					},
-					Tolerations:  p.cfg.Tolerations,
-					NodeSelector: p.cfg.NodeSelector,
+					Volumes:                       p.podVolumes(daggerTOML),
+					Tolerations:                   p.cfg.Tolerations,
+					NodeSelector:                  p.cfg.NodeSelector,
 				},
 			},
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   "dagger-cache",
+						Name:   volumeDaggerCache, // must match the container volume mount name
 						Labels: labelMap,
 					},
 					Spec: vctSpec,
@@ -240,6 +257,152 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 			},
 		},
 	}
+}
+
+// engineEnv returns the engine container environment: the cache token
+// (always, sourced from the auth secret), then operator-supplied literal and
+// secret-sourced vars (each group sorted by name for deterministic specs),
+// and finally the CA bundle pointers when CA injection is enabled.
+func (p *K8sProvider) engineEnv() []corev1.EnvVar {
+	env := []corev1.EnvVar{secretEnvVar("DAGGER_CACHE_TOKEN", engineAuthSecretName, "token")}
+	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
+		env = append(env, corev1.EnvVar{Name: name, Value: p.cfg.ExtraEnv[name]})
+	}
+	for _, name := range sortedKeys(p.cfg.ExtraEnvFrom) {
+		src := p.cfg.ExtraEnvFrom[name]
+		env = append(env, secretEnvVar(name, src.SecretName, src.Key))
+	}
+	if p.cfg.CASecret != "" {
+		env = append(env,
+			corev1.EnvVar{Name: "SSL_CERT_FILE", Value: engineCAMountPath},
+			corev1.EnvVar{Name: "NODE_EXTRA_CA_CERTS", Value: engineCAMountPath},
+		)
+	}
+	return env
+}
+
+// secretEnvVar returns an env var whose value is one key of a Secret. The
+// reference is deliberately not Optional: a missing credential must keep the
+// pod from starting.
+func secretEnvVar(name, secretName, key string) corev1.EnvVar {
+	return corev1.EnvVar{
+		Name: name,
+		ValueFrom: &corev1.EnvVarSource{
+			SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: secretName},
+				Key:                  key,
+			},
+		},
+	}
+}
+
+// engineVolumeMounts returns the engine container mounts: the data dir and
+// the registry-auth config dir, plus the CA bundle and engine.toml files when
+// enabled (an empty daggerTOML omits the latter).
+func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount {
+	mounts := []corev1.VolumeMount{
+		{Name: volumeDaggerCache, MountPath: "/var/lib/dagger"},
+		{Name: volumeEngineConfig, MountPath: "/etc/dagger"},
+	}
+	if p.cfg.CASecret != "" {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      volumeCABundle,
+			MountPath: engineCAMountPath,
+			SubPath:   caCertFileName,
+			ReadOnly:  true,
+		})
+	}
+	if daggerTOML != "" {
+		mounts = append(mounts, corev1.VolumeMount{
+			Name:      volumeDaggerConfig,
+			MountPath: engineTOMLPath,
+			SubPath:   engineTOMLKey,
+			ReadOnly:  true,
+		})
+	}
+	return mounts
+}
+
+// podVolumes returns the pod volumes: the registry-auth secret dir, plus the
+// CA bundle and the engine.toml ConfigMap when enabled (an empty daggerTOML
+// omits the latter).
+func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
+	volumes := []corev1.Volume{
+		{
+			Name: volumeEngineConfig,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{SecretName: engineAuthSecretName},
+			},
+		},
+	}
+	if p.cfg.CASecret != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeCABundle,
+			VolumeSource: corev1.VolumeSource{
+				Secret: &corev1.SecretVolumeSource{
+					SecretName: p.cfg.CASecret,
+					Items:      []corev1.KeyToPath{{Key: p.cfg.CAKey, Path: caCertFileName}},
+				},
+			},
+		})
+	}
+	if daggerTOML != "" {
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeDaggerConfig,
+			VolumeSource: corev1.VolumeSource{
+				ConfigMap: &corev1.ConfigMapVolumeSource{
+					LocalObjectReference: corev1.LocalObjectReference{Name: engineConfigMapName},
+				},
+			},
+		})
+	}
+	return volumes
+}
+
+// sortedKeys returns the keys of m in ascending order so map-driven pod specs
+// are deterministic.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for key := range m {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// ensureEngineConfigMap creates or updates the fleet-wide ConfigMap holding
+// engine.toml. When the rendered config is empty, a stale ConfigMap is
+// deleted best-effort so pods are not pinned to a removed volume source.
+func (p *K8sProvider) ensureEngineConfigMap(ctx context.Context, daggerTOML string) error {
+	if daggerTOML == "" {
+		err := p.clientset.CoreV1().ConfigMaps(p.cfg.Namespace).Delete(ctx, engineConfigMapName, metav1.DeleteOptions{})
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete configmap %s: %w", engineConfigMapName, err)
+		}
+		return nil
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      engineConfigMapName,
+			Namespace: p.cfg.Namespace,
+			Labels:    map[string]string{engineLabelApp: engineLabelValue},
+		},
+		Data: map[string]string{engineTOMLKey: daggerTOML},
+	}
+	_, err := p.clientset.CoreV1().ConfigMaps(p.cfg.Namespace).Create(ctx, cm, metav1.CreateOptions{})
+	if err != nil && apierrors.IsAlreadyExists(err) {
+		existing, getErr := p.clientset.CoreV1().ConfigMaps(p.cfg.Namespace).Get(ctx, engineConfigMapName, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("get existing configmap %s: %w", engineConfigMapName, getErr)
+		}
+		cm.ResourceVersion = existing.ResourceVersion
+		_, err = p.clientset.CoreV1().ConfigMaps(p.cfg.Namespace).Update(ctx, cm, metav1.UpdateOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("create/update configmap %s: %w", engineConfigMapName, err)
+	}
+	return nil
 }
 
 func (p *K8sProvider) DeleteStatefulSet(version string) error {

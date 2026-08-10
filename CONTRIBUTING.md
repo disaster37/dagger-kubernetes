@@ -39,11 +39,18 @@ Initialize a `*logrus.Logger` with structured fields. Pass loggers via construct
 ```go
 import "github.com/sirupsen/logrus"
 
-func NewLogger(level string) *logrus.Logger {
+func NewLogger(level, format string) *logrus.Logger {
     logger := logrus.New()
-    logger.SetFormatter(&logrus.JSONFormatter{
-        TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
-    })
+    if strings.EqualFold(format, "text") {
+        logger.SetFormatter(&logrus.TextFormatter{
+            TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
+            FullTimestamp:   true,
+        })
+    } else {
+        logger.SetFormatter(&logrus.JSONFormatter{
+            TimestampFormat: "2006-01-02T15:04:05.000Z07:00",
+        })
+    }
     lvl, err := logrus.ParseLevel(level)
     if err != nil {
         lvl = logrus.InfoLevel

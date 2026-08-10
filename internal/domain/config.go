@@ -14,6 +14,7 @@ type Config struct {
 	LeaseTTL  time.Duration   `mapstructure:"lease_ttl"`
 	CI        CIConfig        `mapstructure:"ci"`
 	LogLevel  string          `mapstructure:"log_level"`
+	LogFormat string          `mapstructure:"log_format"` // "json" (default) | "text"
 	OTel      OTelConfig      `mapstructure:"otel"`
 	Database  DatabaseConfig  `mapstructure:"database"`
 }
@@ -86,26 +87,40 @@ type S3Config struct {
 	Region string `mapstructure:"region"`
 }
 
+// EnvVarSource selects one key of a Kubernetes Secret as the value of an
+// engine container env var (fleet.engine_extra_env_from).
+type EnvVarSource struct {
+	SecretName string `mapstructure:"secret_name"`
+	Key        string `mapstructure:"key"`
+}
+
 type FleetConfig struct {
-	Namespace              string            `mapstructure:"namespace"`
-	MaxReplicasPerVersion  int               `mapstructure:"max_replicas_per_version"`
-	MaxSessionsPerReplica  int               `mapstructure:"max_sessions_per_replica"`
-	ReplicaIdleTTL         time.Duration     `mapstructure:"replica_idle_ttl"`
-	VersionRetention       time.Duration     `mapstructure:"version_retention"`
-	MinReplicasPerVersion  int               `mapstructure:"min_replicas_per_version"`
-	EngineImageRegistry    string            `mapstructure:"engine_image_registry"`
-	EngineStorageClass     string            `mapstructure:"engine_storage_class"`
-	EngineStorageSize      string            `mapstructure:"engine_storage_size"`
-	EngineCPURequest       string            `mapstructure:"engine_cpu_request"`
-	EngineCPULimit         string            `mapstructure:"engine_cpu_limit"`
-	EngineMemoryRequest    string            `mapstructure:"engine_memory_request"`
-	EngineMemoryLimit      string            `mapstructure:"engine_memory_limit"`
-	EngineTerminationGrace int               `mapstructure:"engine_termination_grace_seconds"`
-	EngineNodeSelector     map[string]string `mapstructure:"engine_node_selector"`
-	EngineTolerations      []string          `mapstructure:"engine_tolerations"`
-	EngineExtraArgs        []string          `mapstructure:"engine_extra_args"`
-	EnginePullPolicy       string            `mapstructure:"engine_pull_policy"`
-	EnginePrivileged       bool              `mapstructure:"engine_privileged"`
+	Namespace              string                  `mapstructure:"namespace"`
+	MaxReplicasPerVersion  int                     `mapstructure:"max_replicas_per_version"`
+	MaxSessionsPerReplica  int                     `mapstructure:"max_sessions_per_replica"`
+	ReplicaIdleTTL         time.Duration           `mapstructure:"replica_idle_ttl"`
+	VersionRetention       time.Duration           `mapstructure:"version_retention"`
+	MinReplicasPerVersion  int                     `mapstructure:"min_replicas_per_version"`
+	EngineImageRegistry    string                  `mapstructure:"engine_image_registry"`
+	EngineStorageClass     string                  `mapstructure:"engine_storage_class"`
+	EngineStorageSize      string                  `mapstructure:"engine_storage_size"`
+	EngineCPURequest       string                  `mapstructure:"engine_cpu_request"`
+	EngineCPULimit         string                  `mapstructure:"engine_cpu_limit"`
+	EngineMemoryRequest    string                  `mapstructure:"engine_memory_request"`
+	EngineMemoryLimit      string                  `mapstructure:"engine_memory_limit"`
+	EngineTerminationGrace int                     `mapstructure:"engine_termination_grace_seconds"`
+	EngineNodeSelector     map[string]string       `mapstructure:"engine_node_selector"`
+	EngineTolerations      []string                `mapstructure:"engine_tolerations"`
+	EngineExtraArgs        []string                `mapstructure:"engine_extra_args"`
+	EnginePullPolicy       string                  `mapstructure:"engine_pull_policy"`
+	EnginePrivileged       bool                    `mapstructure:"engine_privileged"`
+	EngineExtraEnv         map[string]string       `mapstructure:"engine_extra_env"`
+	EngineExtraEnvFrom     map[string]EnvVarSource `mapstructure:"engine_extra_env_from"`
+	EngineCASecret         string                  `mapstructure:"engine_ca_secret"`
+	EngineCASecretKey      string                  `mapstructure:"engine_ca_secret_key"`
+	EngineDebug            bool                    `mapstructure:"engine_debug"`
+	EngineLogFormat        string                  `mapstructure:"engine_log_format"`
+	EngineRegistryMirrors  map[string][]string     `mapstructure:"engine_registry_mirrors"`
 }
 
 type CAConfig struct {
