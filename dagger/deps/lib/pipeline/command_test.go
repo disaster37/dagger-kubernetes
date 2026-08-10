@@ -92,5 +92,3 @@ func TestAssembleShellCommand_LiteralBinding(t *testing.T) {
 		t.Errorf("expected $MY_VALUE in command, got: %s", cmd)
 	}
 }
-
-

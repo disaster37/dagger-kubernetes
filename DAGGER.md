@@ -62,7 +62,7 @@ reference cannot be used — it fails to load for the `include` reason noted
 above.) Because the repo root has no Go files, `--main` is required:
 
 ```bash
-dagger call -m ./dagger/deps/golang --src . ci --main ./cmd/supervisor --out bin/supervisor export --path .
+dagger call -m ./dagger/deps/golang --src . ci --main ./cmd/api --out bin/supervisor export --path .
 ```
 
 > **Caveat:** upstream `test` runs without `-race` (hardcoded flags). The local module's `Test` is used instead for parity with the original CI. Upstream `Build` omits `-trimpath` (release builds still use the Dockerfile / `release.yml` path, unaffected).

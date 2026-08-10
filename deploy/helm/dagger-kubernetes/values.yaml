@@ -26,14 +26,27 @@ supervisor:
     server:
       dataHostname: "data.supv.example.com"
       publicUrl: "https://supv.example.com"
+    database:
+      path: "/var/lib/dagger-cache/dagger-cache.db"
     auth:
+      internal:
+        enabled: true
+        tokensFile: "/etc/dagger-cache/tokens"
+      bootstrapAdmin:
+        username: "admin"
+        password: ""    # empty = random password logged once at first boot
+      jwt:
+        secret: ""      # empty = auto-generated and persisted in the DB
+        accessTtl: "15m"
+        refreshTtl: "168h"
       oauth:
         enabled: false
         provider: "github"
         clientId: "${OAUTH_CLIENT_ID}"
         clientSecret: "${OAUTH_CLIENT_SECRET}"
-        redirectUrl: "https://ui.supv.example.com/auth/callback"
+        redirectUrl: "https://supv.example.com/api/v1/auth/oauth/github/callback"
         allowedOrgs: ["acme"]
+        defaultGroup: ""
     telemetry:
       # collectorUrl is derived from the otel-collector dependency when enabled.
       collectorUrl: ""
@@ -80,8 +93,23 @@ supervisor:
 # --- Authentication secrets ------------------------------------------------
 auth:
   # Static bearer tokens, one per line (newline-separated at runtime).
+  # DEPRECATED: legacy fallback only. Migrate with `supervisor migrate-tokens`
+  # then remove. See ADR-010.
   tokens: []
   # - "super-secret-token-1"
+  # Optional JWT signing secret (HS256). When empty, the supervisor
+  # auto-generates one on first boot and persists it in the SQLite DB.
+  jwtSecret: ""
+
+# --- Persistence (SQLite database) ----------------------------------------
+# The multi-user store (users, groups, tokens, projects, trace metadata) lives
+# in a single SQLite file at database.path. Persist it on a PVC in production;
+# with persistence.enabled=false an emptyDir is used and all users/tokens are
+# LOST on pod restart (dev only).
+persistence:
+  enabled: false
+  storageClass: ""
+  size: 1Gi
 
 # --- Minting CA & TLS (provide your own) -----------------------------------
 ca:

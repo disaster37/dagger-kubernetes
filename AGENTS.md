@@ -116,43 +116,45 @@ func main() {
 - Standard `testing` package only — no testify, no ginkgo
 - Table-driven tests for parameterized cases
 - Test loggers: `logrus.New()` with output set to `io.Discard`
-- Stub external deps (see `fleet.StubProvider` as example)
-- Integration tests in `test/` directory must prove features work against real Dagger client API contract
+- Stub external deps (see `repository.StubProvider` as example)
+- Integration tests in `tests/integration/` directory must prove features work against real Dagger client API contract
 
 ### Project structure
 ```
-cmd/supervisor/main.go          — urfave/cli entry point
-internal/config/config.go       — Viper config loading + defaults
-internal/api/                   — Hertz route handlers
-internal/auth/                  — token validation
-internal/ca/                    — minting CA + providers
-internal/cache/                 — cache backend (registry/S3)
-internal/fleet/                 — engine fleet autoscaler
-internal/observ/                — logrus logger factory + Prometheus metrics
-internal/session/               — in-memory lease store
-internal/telemetry/             — live hub, Tempo/Loki/Victoria clients
-internal/version/               — version parser + resolver
+cmd/api/main.go                 — urfave/cli entry point (control plane API server, binary name `supervisor`)
+cmd/ci/main.go                  — urfave/cli entry point (CI wrapper, binary name `dagger-cache-ci`)
+config/loader.go                — Viper config loading + defaults (root package, returns *domain.Config)
+config/config.app.yaml          — sample/default config
+internal/domain/                — pure entities + interfaces (stdlib ONLY)
+internal/service/               — business logic (imports domain, observ)
+internal/repository/            — infrastructure implementations (imports domain + drivers)
+internal/handler/               — Hertz HTTP/SSE/L4 handlers (imports service, repository, domain, observ)
+internal/observ/                — logrus logger factory + Prometheus metrics (cross-cutting)
 dagger/                         — local Dagger module (CI pipeline)
-hack/                           — dev scripts (dagger-cache.sh, update-helm-docs.sh)
+scripts/                        — dev scripts (dagger-cache.sh, update-helm-docs.sh)
 deploy/helm/                    — Helm chart
-test/                           — integration tests
+tests/integration/              — black-box integration tests
 docs/design/                    — architecture decision records
 ```
+
+Dependency rule (enforced by imports): `handler → service → domain ← repository`.
+`domain` imports stdlib only. `observ` is a documented cross-cutting exception
+(ADR-009): `service` and `handler` may inject `*observ.Metrics` / `*logrus.Logger`.
 
 ### Dependency injection pattern
 ```go
 type Server struct {
     cfg          *ServerConfig
     logger       *logrus.Logger
-    fleetManager *fleet.Manager
-    sessions     *session.Store
+    fleetManager *service.Manager
+    sessions     domain.SessionStore
 }
 
 func NewServer(
     cfg *ServerConfig,
     logger *logrus.Logger,
-    fleetManager *fleet.Manager,
-    sessions *session.Store,
+    fleetManager *service.Manager,
+    sessions domain.SessionStore,
 ) *Server {
     return &Server{
         cfg:          cfg,
@@ -189,7 +191,7 @@ func withMiddleware(next http.Handler, logger *logrus.Logger) http.Handler {
 
 ### Documentation maintenance
 Every change that introduces, modifies, or removes a feature, a config key, or a design decision must update:
-- `config.app.yaml.sample` — must reflect all config keys, types, defaults, and comments; always in sync with `internal/config/config.go`
+- `config/config.app.yaml.sample` — must reflect all config keys, types, defaults, and comments; always in sync with `config/loader.go`
 - `docs/README.md` — user-facing docs covering setup, configuration, operations, CI integrations
 - `docs/design/` — ADRs must be created for new architectural decisions and updated when existing ones change
 

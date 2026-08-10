@@ -2,7 +2,7 @@
 # dagger-kubernetes Supervisor — full configuration reference.
 # Copy this file to config.app.yaml and edit the values you need; any key
 # omitted here falls back to the compiled-in defaults in
-# internal/config/config.go.
+# config/loader.go.
 #
 # Every value can also be set via an environment variable using the
 # DAGGER_CACHE_ prefix (dots -> underscores, uppercase). Examples:
@@ -21,7 +21,7 @@
 
 # --- Endpoints & public URLs ------------------------------------------------
 server:
-  control_addr: ":8080"        # Address the Hertz HTTPS control API listens on.
+  control_addr: ":8080"        # Address the Hertz control API listens on (TLS enabled when cert/key configured).
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
   public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI).
@@ -29,9 +29,22 @@ server:
 # --- Authentication ----------------------------------------------------------
 auth:
   # Static bearer-token auth. Tokens live one per line in tokens_file.
+  # DEPRECATED: legacy fallback only. Migrate with `supervisor migrate-tokens`
+  # then remove this key. See ADR-010.
   internal:
-    enabled: true
-    tokens_file: "/etc/dagger-cache/tokens"
+    enabled: true                                   # false = auth fully disabled (dev mode).
+    tokens_file: "/etc/dagger-cache/tokens"         # legacy fallback + migration source only.
+
+  # Bootstrap admin: created on first boot when the users table is empty.
+  bootstrap_admin:
+    username: "admin"                               # created on first boot when no users exist.
+    password: ""                                    # empty = random password logged once at first boot.
+
+  # JWT (HS256) issuance for username/password and OAuth login.
+  jwt:
+    secret: ""                                      # HS256 signing key (>= 32 bytes, enforced); empty = auto-generated and persisted in the DB.
+    access_ttl: "15m"
+    refresh_ttl: "168h"                             # 7d; refresh rotated on use.
 
   # Optional OAuth (e.g. GitHub) for human/UI login.
   oauth:
@@ -39,8 +52,15 @@ auth:
     provider: "github"                 # "github" (extensible).
     client_id: "${OAUTH_CLIENT_ID}"    # set via env, do not commit secrets.
     client_secret: "${OAUTH_CLIENT_SECRET}"
-    redirect_url: "https://supv.example.com/auth/callback"
-    allowed_orgs: ["acme"]             # users must belong to one of these orgs.
+    redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"  # backend endpoint (302s to SPA fragment).
+    allowed_orgs: ["acme"]             # users must belong to one of these orgs; empty = allow all.
+    default_group: ""                  # new OAuth users auto-join this group (must exist); empty = none.
+
+# --- Database ----------------------------------------------------------------
+# SQLite file backing the multi-user store (users, groups, tokens, projects,
+# trace metadata). Persist on a volume (PVC / bind-mount) in production.
+database:
+  path: "/var/lib/dagger-cache/dagger-cache.db"
 
 # --- Telemetry backend endpoints --------------------------------------------
 # Used by the Supervisor to query traces/logs/metrics for the UI and to
@@ -81,7 +101,7 @@ fleet:
   engine_memory_limit: "8Gi"                          # memory limit per engine pod.
   engine_termination_grace_seconds: 120               # termination grace period for engine pods.
   engine_pull_policy: "IfNotPresent"                   # engine image pull policy.
-  engine_privileged: true                             # run engine container as privileged.
+  engine_privileged: false                        # run engine container as privileged (set to true only if a BuildKit feature requires it).
   engine_node_selector: {}                            # node selector for engine pods (map).
   engine_tolerations: []                              # tolerations in "key:value:effect" format.
   engine_extra_args: []                               # additional CLI args passed to dagger engine.
@@ -96,6 +116,8 @@ tls:
   provider: "embedded"              # "embedded" (goca, default) | "cert-manager" | "external".
   server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key for cert-manager/external.
   ca_path: "/var/lib/dagger-cache/ca"   # path to persist the embedded CA (Docker bind-mount or PVC).
+  cert_path: "/etc/dagger-cache/tls/tls.crt"  # PEM cert path for the cert-manager/external providers.
+  key_path: "/etc/dagger-cache/tls/tls.key"   # PEM key path for the cert-manager/external providers.
 
 # --- Lease -------------------------------------------------------------------
 lease_ttl: "2m"   # TTL of a client's engine lease; renew before this expires.

@@ -15,3 +15,5 @@ the decision.
 | 006  | [OCI registry cache backend](ADR-006-oci-registry-cache-backend.md) |
 | 007  | [Outbound HTTP clients](ADR-007-outbound-http-clients.md)        |
 | 008  | [Prometheus metrics DI](ADR-008-prometheus-metrics-di.md)        |
+| 009  | [Clean architecture layering](ADR-009-clean-architecture-layering.md) |
+| 010  | [SQLite-backed multi-user RBAC](ADR-010-sqlite-multiuser-rbac.md) |

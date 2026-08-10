@@ -79,7 +79,7 @@ func (r *GitLabRenderer) Render(spec PipelineSpec) (map[string]string, error) {
 	}
 	if spec.Triggers.Push {
 		pushRule := map[string]interface{}{
-			"if":     "$CI_COMMIT_BRANCH",
+			"if":      "$CI_COMMIT_BRANCH",
 			"changes": []string{"**/*"},
 		}
 		rules = append(rules, pushRule)

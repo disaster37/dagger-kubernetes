@@ -4,7 +4,7 @@ A self-hosted, **Dagger-Cloud-compatible** platform that gives you remote
 shared cache, auto-scaling engine fleets, a live pipeline UI, and drop-in CI
 integration — without sending your builds or telemetry to a third party.
 
-The Supervisor (`cmd/supervisor`) provides three functions:
+The Supervisor (`cmd/api`) provides three functions:
 
 1. **Control Plane** (Hertz HTTPS) — `POST /v1/engines` provisions an engine
    pod for the requested Dagger version and returns a lease + certificate.
@@ -175,7 +175,7 @@ dagger call github.com/your-org/ci@v1.0.0 build
 Or skip the env-var juggling and use the wrapper:
 
 ```bash
-./hack/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
+./scripts/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
 ---
@@ -235,23 +235,23 @@ Or skip the env-var juggling and use the wrapper:
 
 ### Files
 
-| File                      | Purpose                                            |
-|---------------------------|----------------------------------------------------|
-| `config.app.yaml`         | Live config checked into the repo (example values). |
-| `config.app.yaml.sample`  | Fully-commented reference. Copy → edit → deploy.   |
+| File                             | Purpose                                            |
+|----------------------------------|----------------------------------------------------|
+| `config/config.app.yaml`         | Live config checked into the repo (example values). |
+| `config/config.app.yaml.sample`  | Fully-commented reference. Copy → edit → deploy.   |
 
 The Supervisor's `--config` flag points at the file to load (default
-`config.app.yaml`; in the container this is typically mounted as
-`/etc/dagger-kubernetes/config.app.yaml`). The `config.app.yaml` shipped
-here is a **minimal** example: it only lists deployment-specific values;
-every other option falls back to the compiled-in defaults in
-`internal/config/config.go`.
+`config/config.app.yaml`; in the container this is typically mounted as
+`/etc/dagger-kubernetes/config.app.yaml`). The `config/config.app.yaml`
+shipped here is a **minimal** example: it only lists deployment-specific
+values; every other option falls back to the compiled-in defaults in
+`config/loader.go`.
 
 To start from scratch:
 
 ```bash
-cp config.app.yaml.sample config.app.yaml
-$EDITOR config.app.yaml
+cp config/config.app.yaml.sample config/config.app.yaml
+$EDITOR config/config.app.yaml
 ```
 
 ### Environment variables
@@ -274,12 +274,12 @@ come from env/secrets, never the file.
 
 ### Full reference
 
-See [`config.app.yaml.sample`](../config.app.yaml.sample) for every key with
+See [`config/config.app.yaml.sample`](../config/config.app.yaml.sample) for every key with
 inline comments. The sections below summarise the most important ones.
 
 | Section      | Key (representative)        | Default                          | Notes                                            |
 |--------------|-----------------------------|----------------------------------|--------------------------------------------------|
-| `server`     | `control_addr`              | `:8080`                          | Hertz HTTPS control API.                          |
+| `server`     | `control_addr`              | `:8080`                          | Hertz control API (TLS when cert/key configured). |
 |              | `data_addr`                 | `:8443`                          | mTLS L4 data proxy.                               |
 |              | `data_hostname`             | `data.supv.example.com`          | Public data-plane hostname.                       |
 |              | `public_url`                | `https://supv.example.com`       | Public control/UI URL.                            |
@@ -321,16 +321,16 @@ Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 From source:
 
 ```bash
-go build -o dagger-cache-ci ./cmd/dagger-cache-ci    # CLI helper
-go build -o supervisor ./cmd/supervisor                # server
-./supervisor --config=config.app.yaml
+go build -o dagger-cache-ci ./cmd/ci    # CLI helper
+go build -o supervisor ./cmd/api                # server
+./supervisor --config=config/config.app.yaml
 ```
 
 Or via the published Docker image from GHCR:
 
 ```bash
 docker run -p 8080:8080 -p 8443:8443 \
-  -v "$PWD/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
+  -v "$PWD/config/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
   -v "$PWD/tokens:/etc/dagger-cache/tokens:ro" \
   ghcr.io/disaster/dagger-kubernetes:latest
 ```
@@ -340,7 +340,7 @@ To build from source:
 ```bash
 docker build -t dagger-cache/supervisor:latest .
 docker run -p 8080:8080 -p 8443:8443 \
-  -v "$PWD/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
+  -v "$PWD/config/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
   -v "$PWD/tokens:/etc/dagger-cache/tokens:ro" \
   dagger-cache/supervisor:latest
 ```
@@ -363,7 +363,7 @@ zero replicas for `version_retention` is garbage-collected (StatefulSet +
 PVs removed).
 
 The fleet provider contains both a stub (in-memory, for testing) and a real
-Kubernetes provider (`internal/fleet/k8s.go`) that manages StatefulSets,
+Kubernetes provider (`internal/repository/k8s_provider.go`) that manages StatefulSets,
 Services, Pods, PVCs, and ConfigMaps.
 
 ---
@@ -397,16 +397,110 @@ cache:
 
 ## Authentication
 
-Two independent mechanisms:
+The supervisor supports multi-user authentication with role-based access
+control (RBAC). Users have roles `admin` or `user`; users belong to zero or
+more **groups**; groups carry engine-session quotas and project visibility.
 
-- **Internal (static bearer tokens)** — `auth.internal.tokens_file` holds
-  one token per line. The CLI presents it as `DAGGER_CLOUD_TOKEN`, which the
-  data plane validates before minting a client cert. This is the default and
-  the recommended path for CI.
-- **OAuth (GitHub)** — `auth.oauth` is for human/UI login only. Set
-  `enabled: true`, supply `client_id`/`client_secret` via env, and list the
-   orgs allowed to log in via `allowed_orgs`. The redirect URL must match
-   `<public_url>/auth/callback`.
+### Auth mechanisms
+
+- **Username + password** → JWT (HS256, access 15m / refresh 7d, rotated on
+  use). The primary path for human/UI login.
+- **GitHub OAuth** (`auth.oauth.enabled: true`) → JWT. The callback is handled
+  by the backend at `/api/v1/auth/oauth/github/callback`, which 302s to the
+  SPA with the tokens in the URL fragment. `allowed_orgs` restricts who may
+  log in (empty = allow all); `default_group` auto-joins new OAuth users to a
+  group.
+- **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
+  at most one token; the plaintext is shown once at creation/regeneration;
+  only the SHA-256 hash is stored. Use it as `DAGGER_CLOUD_TOKEN`. This is the
+  recommended path for CI.
+- **Legacy flat-file tokens** (`auth.internal.tokens_file`) — DEPRECATED.
+  When configured, tokens in the file still authenticate as a synthetic
+  `legacy` admin identity (full access, quota bypass) for zero-breakage
+  migration. Run `supervisor migrate-tokens` to import them as real users +
+  API tokens, then remove the key.
+
+### Bootstrap admin
+
+On first boot with an empty `users` table, the supervisor creates an admin
+from `auth.bootstrap_admin.username` (default `admin`). When
+`auth.bootstrap_admin.password` is empty, a random 16-byte hex password is
+generated and logged once at WARN (the only place a credential is ever
+logged). Set the password explicitly in production.
+
+### Groups, projects, and quota
+
+- **Groups** carry `max_runner_sessions` (0 = unlimited),
+  `agent_available` (whether engines can be provisioned for the group), and
+  an optional `auto_assign_pattern` regex.
+- **Projects** (CI pipelines identified by repo slug) are assigned to groups
+  manually (admin UI), pre-created, or auto-matched by the first group (by id
+  order) whose `auto_assign_pattern` matches the project name.
+- **Quota**: a group's active sessions = active leases of all its members. A
+  multi-group user's session counts against EACH of their groups. Admission to
+  `POST /v1/engines` requires ≥1 group with `agent_available=true` and
+  remaining capacity; admins bypass. Users with no groups get 403.
+
+### Trace visibility
+
+- Admins see all traces.
+- Users see traces where `group_id` is one of their groups, OR `user_id` is
+  themselves (owner always sees own pipelines, even when unassigned).
+- Unknown/missing trace metadata → admin-only (fail-closed; non-admins get
+  404, not 403, to avoid leaking existence).
+
+### JWT secret
+
+`auth.jwt.secret` (HS256). When empty, the supervisor auto-generates a 32-byte
+random secret on first boot and persists it in the SQLite `meta` table. Set it
+explicitly in secret storage (Helm Secret / env) for production before
+dropping the auto-generated one.
+
+### Configuration
+
+See the [Full reference](#full-reference) for all `auth.*` and `database.*`
+keys. Key env overrides: `DAGGER_CACHE_AUTH_JWT_SECRET`,
+`DAGGER_CACHE_DATABASE_PATH`, `DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD`.
+
+### Migration (flat-file → multi-user)
+
+Rollout is backward compatible; no big-bang.
+
+1. **Deploy new binary.** DB auto-created at `database.path`; bootstrap admin
+   created. Existing CI keeps working via the legacy fallback (runs as
+   `legacy` admin identity — exactly today's full-access behavior).
+2. **Import tokens.** `supervisor migrate-tokens --config config.app.yaml`
+   imports each token line as user `legacy-N` (role `user`) with that exact
+   token as its API token, member of an auto-created `legacy` group. Idempotent
+   (skips tokens already present by hash). Reassign users/groups/projects in
+   the UI afterwards.
+3. **Cutover.** Remove/empty `auth.internal.tokens_file` in config. Legacy
+   fallback disappears; only imported tokens, JWTs, and OAuth remain. Rotate
+   the bootstrap admin password; set `auth.jwt.secret` explicitly.
+4. **Configure attribution.** Admin creates real groups, assigns users, sets
+   `auto_assign_pattern` per group, pre-creates projects as needed.
+
+### Security notes
+
+- Password endpoints (`/api/v1/auth/login`, `/api/v1/auth/password`) are
+  protected by an in-memory per username+IP lockout: after 5 consecutive
+  failures the key is locked for 30s, doubling per further failure up to
+  15min. State resets on supervisor restart (single-node deployment).
+- `auth.jwt.secret`, when set explicitly, must be at least 32 bytes (HS256,
+  RFC 7518); shorter values are rejected at startup. When empty, a 32-byte
+  random secret is generated and persisted in the database on first boot.
+- The SQLite database file (password hashes, token hashes, JWT secret) is
+  created with `0600` permissions.
+- All responses carry `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`
+  (clickjacking), and `Referrer-Policy: no-referrer` (keeps the SSE
+  `?token=` param out of Referer headers).
+- Refresh-token revocation is stateless today; password change does not
+  invalidate existing JWTs until expiry (access TTL is 15m).
+- Trace backfill of group metadata after project reassignment is intentional
+  (set-once).
+- `?token=` query-param auth (D14) is limited to the SSE `/live` endpoint
+  (EventSource cannot set headers).
 
 ---
 
@@ -542,7 +636,7 @@ appends a summary step with the trace link.
 
 ## Client wrapper script
 
-`hack/dagger-cache.sh` wires up the standard env vars and prints the
+`scripts/dagger-cache.sh` wires up the standard env vars and prints the
 pipeline-view link after the run:
 
 ```bash
@@ -551,7 +645,7 @@ export DAGGER_CACHE_UI=https://ui.supv.example.com
 export DAGGER_CLOUD_TOKEN=<token>
 export DAGGER_TAG=v0.21.4          # optional
 
-./hack/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
+./scripts/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
 It derives the cache ref (`cache.reg/dagger-cache:V0-21-4`) from
@@ -615,8 +709,8 @@ the Dagger source tree for breaking changes:
   (`_EXPERIMENTAL_DAGGER_CACHE_CONFIG`) and runner-host negotiation.
 
 When any of these change shape, update
-[`internal/api`](../internal/api) (control handlers and L4 data-plane proxy) and the
-[`test/integration_test.go`](../test/integration_test.go) contract tests
+[`internal/handler`](../internal/handler) (control handlers and L4 data-plane proxy) and the
+[`tests/integration/api_test.go`](../tests/integration/api_test.go) contract tests
 accordingly.
 
 ---
@@ -643,7 +737,7 @@ golangci-lint run ./...
 dagger call -m ./dagger --src . ci export --path out
 ```
 
-Integration tests (`test/integration_test.go`) exercise the full
+Integration tests (`tests/integration/api_test.go`) exercise the full
 provision → lease → data-plane flow against stubbed fleet/cache/CA
 providers, so they run without a cluster.
 

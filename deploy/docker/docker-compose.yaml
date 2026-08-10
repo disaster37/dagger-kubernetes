@@ -21,20 +21,26 @@ services:
       - DAGGER_CACHE_CACHE_REGISTRY=localhost:5000/dagger-cache
       - DAGGER_CACHE_TLS_CA_PATH=/tmp/dagger-cache/ca
       - DAGGER_CACHE_LOG_LEVEL=debug
+      - DAGGER_CACHE_DATABASE_PATH=/var/lib/dagger-cache/dagger-cache.db
+      # Set a bootstrap admin password explicitly in production; empty = random
+      # password logged once at first boot.
+      - DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD=
     volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
       # Generate your own bearer token and write it to ./data/tokens before
       # starting the stack, e.g.:
       #   mkdir -p data && head -c 32 /dev/urandom | xxd -p -u > data/tokens
       # The tokens file is gitignored and must never be committed.
+      # DEPRECATED: migrate with `supervisor migrate-tokens` then remove.
       - ./data/tokens:/etc/dagger-cache/tokens:ro
+      # SQLite database (users, groups, tokens, projects, trace metadata).
+      - ./data:/var/lib/dagger-cache
     depends_on:
       - cache-registry
     networks:
       - dagger-cache
 
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:latest
+    image: otel/opentelemetry-collector-contrib:0.127.0
     ports:
       - "4318:4318"
     volumes:
@@ -43,7 +49,7 @@ services:
       - dagger-cache
 
   tempo:
-    image: grafana/tempo:latest
+    image: grafana/tempo:2.7.2
     command: ["-config.file=/etc/tempo.yaml"]
     ports:
       - "3200:3200"
@@ -53,14 +59,14 @@ services:
       - dagger-cache
 
   loki:
-    image: grafana/loki:latest
+    image: grafana/loki:3.6.3
     ports:
       - "3101:3100"
     networks:
       - dagger-cache
 
   victoria:
-    image: victoriametrics/victoria-metrics:latest
+    image: victoriametrics/victoria-metrics:v1.119.0
     ports:
       - "8428:8428"
     volumes:
@@ -72,11 +78,11 @@ services:
       - dagger-cache
 
   grafana:
-    image: grafana/grafana:latest
+    image: grafana/grafana:11.6.2
     ports:
       - "3000:3000"
     environment:
-      - GF_AUTH_ANONYMOUS_ENABLED=true
+      - GF_AUTH_ANONYMOUS_ENABLED=false
     networks:
       - dagger-cache
 

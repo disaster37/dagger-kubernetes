@@ -9,7 +9,7 @@ COPY . .
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags "-s -w" -o /supervisor ./cmd/supervisor/
+    go build -trimpath -ldflags "-s -w" -o /supervisor ./cmd/api/
 
 FROM alpine:3.20
 

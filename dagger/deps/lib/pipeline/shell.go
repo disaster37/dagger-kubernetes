@@ -5,13 +5,13 @@ import (
 )
 
 // shellQuote wraps a string in single quotes for safe insertion in a shell command.
-// Embedded single quotes are escaped as '\'' (end quote, escaped quote, restart quote).
+// Embedded single quotes are escaped as '\” (end quote, escaped quote, restart quote).
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
 
 // ghExprQuote escapes a string for safe use inside a GitHub Actions expression string literal
-// delimited by single quotes. GitHub Actions uses '' to represent a literal single quote.
+// delimited by single quotes. GitHub Actions uses ” to represent a literal single quote.
 func ghExprQuote(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }

@@ -12,13 +12,13 @@ func Supported() []ci.CI { return []ci.CI{ci.Github, ci.Jenkins, ci.Gitlab} }
 // CredentialConfig collects the CI-specific credential overrides provided by
 // Dagger GenerateCi functions.
 type CredentialConfig struct {
-	RegistryUsernameKey   string // GitHub: override registry-username secret name
-	RegistryPasswordKey   string // GitHub: override registry-password secret name
-	RegistryCredential    string // Jenkins: override registry credential ID
-	GitTokenCredential    string // Jenkins: override git-token credential ID
-	RegistryUsernameVar   string // GitLab: override registry-username variable
-	RegistryPasswordVar   string // GitLab: override registry-password variable
-	GitTokenVar           string // GitLab: override git-token variable
+	RegistryUsernameKey string // GitHub: override registry-username secret name
+	RegistryPasswordKey string // GitHub: override registry-password secret name
+	RegistryCredential  string // Jenkins: override registry credential ID
+	GitTokenCredential  string // Jenkins: override git-token credential ID
+	RegistryUsernameVar string // GitLab: override registry-username variable
+	RegistryPasswordVar string // GitLab: override registry-password variable
+	GitTokenVar         string // GitLab: override git-token variable
 }
 
 // ResolveCredentialBindings maps CI-type and credential overrides to the

@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"dagger/dagger-cache/internal/dagger"
 )
@@ -30,8 +31,8 @@ var binaries = []struct {
 	main string
 	out  string
 }{
-	{main: "./cmd/supervisor/", out: "bin/supervisor"},
-	{main: "./cmd/dagger-cache-ci/", out: "bin/dagger-cache-ci"},
+	{main: "./cmd/api/", out: "bin/supervisor"},
+	{main: "./cmd/ci/", out: "bin/dagger-cache-ci"},
 }
 
 // helmTemplateMatrix lists the --set combinations from the original CI.
@@ -68,8 +69,8 @@ func New(
 // golangci-lint preinstalled, preserving the CI version pin.
 func (m *DaggerCache) Lint(ctx context.Context) (string, error) {
 	install := fmt.Sprintf(
-		"curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/main/install.sh | sh -s -- -b $(go env GOPATH)/bin %s",
-		golangciLintVersion,
+		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C $(go env GOPATH)/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 %s/golangci-lint && rm /tmp/golangci-lint.tar.gz",
+		golangciLintVersion, strings.TrimPrefix(golangciLintVersion, "v"), golangciLintVersion,
 	)
 	base := dag.Container().
 		From(golangImage).

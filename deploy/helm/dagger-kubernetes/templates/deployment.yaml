@@ -36,6 +36,8 @@ spec:
           env:
             - name: DAGGER_CACHE_LOG_LEVEL
               value: {{ .Values.supervisor.config.logLevel | quote }}
+            - name: DAGGER_CACHE_DATABASE_PATH
+              value: {{ .Values.supervisor.config.database.path | quote }}
             {{- with .Values.supervisor.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -55,6 +57,8 @@ spec:
             - name: tls
               mountPath: /etc/dagger-kubernetes/tls
               readOnly: true
+            - name: db
+              mountPath: /var/lib/dagger-cache
             - name: tmp
               mountPath: /tmp
           readinessProbe:
@@ -86,6 +90,13 @@ spec:
             secretName: {{ include "dagger-kubernetes.fullname" . }}-tls
         - name: tmp
           emptyDir: {}
+        - name: db
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ include "dagger-kubernetes.fullname" . }}-db
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

@@ -15,7 +15,7 @@ type Renderer interface {
 
 // Renderers maps CI types to their Renderers.
 var Renderers = map[ci.CI]Renderer{
-	ci.Github: &GitHubRenderer{},
+	ci.Github:  &GitHubRenderer{},
 	ci.Jenkins: &JenkinsRenderer{},
 	ci.Gitlab:  &GitLabRenderer{},
 }

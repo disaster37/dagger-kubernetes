@@ -1,23 +1,41 @@
 <template>
   <div style="max-width: 400px; margin: 80px auto; text-align: center;">
-    <p>Authenticating...</p>
+    <p>Authenticating…</p>
   </div>
 </template>
 
 <script setup lang="ts">
 import { onMounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 
-const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 
-onMounted(() => {
-  const code = route.query.code as string
-  if (code) {
-    auth.login(code, '', 'user', 'viewer')
+// safeRedirect mirrors the backend safeRedirectPath: the fragment is
+// attacker-influenceable (anyone can link to /auth/callback#...), so only
+// internal absolute paths are accepted (CWE-601).
+function safeRedirect(path: string | null): string {
+  if (!path || !path.startsWith('/') || path.startsWith('//') || path.includes('\\')) {
+    return '/pipelines'
   }
-  router.push('/pipelines')
+  return path
+}
+
+onMounted(async () => {
+  const params = new URLSearchParams(window.location.hash.slice(1))
+  const accessToken = params.get('access_token')
+  const refreshToken = params.get('refresh_token')
+  const redirect = safeRedirect(params.get('redirect'))
+
+  if (accessToken && refreshToken) {
+    auth.setTokens(accessToken, refreshToken)
+    await auth.fetchMe()
+    // Strip the fragment so the token is not left in the URL/history.
+    history.replaceState(null, '', '/auth/callback')
+    router.push(redirect)
+  } else {
+    router.push('/auth/login?error=oauth')
+  }
 })
 </script>

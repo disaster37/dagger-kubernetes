@@ -13,7 +13,7 @@ dist/
 bin/
 
 # Local config & env (keep sample)
-config.app.yaml
+config/config.app.yaml
 .env
 
 # Docs & design files

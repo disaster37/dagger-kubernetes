@@ -8,7 +8,7 @@ import (
 // strings with proper escaping of $ and quotes to avoid GString interpolation
 // collisions.
 type groovyBuilder struct {
-	b     strings.Builder
+	b      strings.Builder
 	indent int
 }
 

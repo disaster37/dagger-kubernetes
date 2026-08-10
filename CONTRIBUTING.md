@@ -114,10 +114,10 @@ Every package must target 100% code coverage. CI enforces this with `go test -co
 
 ### Test conventions
 - Use standard `testing` package (no testify/ginkgo)
-- Stub implementations for external dependencies (see `fleet.StubProvider`)
+- Stub implementations for external dependencies (see `repository.StubProvider`)
 - Use `t.Fatalf("describe: %v", err)` for fatal assertions
 - `logrus.New()` with `Discard` output for test loggers
-- Place integration tests in `test/` directory; unit tests alongside source in `*_test.go` files
+- Place integration tests in `tests/integration/` directory; unit tests alongside source in `*_test.go` files
 
 ### Running tests
 ```bash
@@ -156,14 +156,19 @@ dagger call -m ./dagger --src . helm
 
 ## Project structure
 ```
-cmd/supervisor/      Main server entry point (urfave/cli)
-cmd/dagger-cache-ci/ CI helper binary (urfave/cli)
-internal/            Private packages (api, auth, ca, cache, config, fleet, observ, session, telemetry, version)
+cmd/api/             Main server entry point (urfave/cli, binary `supervisor`)
+cmd/ci/              CI helper binary (urfave/cli, binary `dagger-cache-ci`)
+config/              Viper config loader + config.app.yaml / sample
+internal/domain/     Pure entities + interfaces (stdlib only)
+internal/service/    Business logic (imports domain, observ)
+internal/repository/ Infrastructure implementations (imports domain + drivers)
+internal/handler/    Hertz HTTP/SSE/L4 handlers (imports service, repository, domain, observ)
+internal/observ/     logrus logger factory + Prometheus metrics (cross-cutting)
 dagger/              Local Dagger module — CI pipeline (delegates to dagger-library-go golang/helm)
-hack/                Dev scripts (dagger-cache.sh client wrapper, update-helm-docs.sh)
-test/                Integration / functional tests
+scripts/             Dev scripts (dagger-cache.sh client wrapper, update-helm-docs.sh)
+tests/integration/   Black-box integration tests
 docs/design/         Architecture decision records
-ui/                  Vue 3 SPA (Vite + TypeScript); embeds via internal/api/ui-dist/
+ui/                  Vue 3 SPA (Vite + TypeScript); embeds via internal/handler/ui-dist/
 deploy/docker        Docker Compose dev stack
 deploy/k8s           Kubernetes manifests
 deploy/helm/         Helm chart
@@ -181,7 +186,7 @@ test(session): add expiry edge case coverage
 
 Every change that introduces, modifies, or removes a feature, a configuration key, or a design decision must update the corresponding documentation:
 
-- **`config.app.yaml.sample`** — Must reflect all config keys, their types, defaults, and a brief comment for each. Always kept in sync with `internal/config/config.go`. If a new key is added to the config struct, add the corresponding entry with a comment in the sample file.
+- **`config/config.app.yaml.sample`** — Must reflect all config keys, their types, defaults, and a brief comment for each. Always kept in sync with `config/loader.go`. If a new key is added to the config struct, add the corresponding entry with a comment in the sample file.
 
 - **`deploy/helm/dagger-kubernetes/README.md`** — Helm chart documentation covering install, upgrade, dependencies, configuration reference, production recommendations, and storage sizing. Must be updated when:
   - A new subchart dependency is added or removed
@@ -189,7 +194,7 @@ Every change that introduces, modifies, or removes a feature, a configuration ke
   - Auto-wiring logic changes
   - Production sizing recommendations change
 
-- **`deploy/helm/dagger-kubernetes/values.yaml`** — The canonical default values for the Helm chart. Every `supervisor.config.*` key must match the Viper config struct. Every subchart value exposed must have a comment. Keep comments consistent with `config.app.yaml.sample`.
+- **`deploy/helm/dagger-kubernetes/values.yaml`** — The canonical default values for the Helm chart. Every `supervisor.config.*` key must match the Viper config struct. Every subchart value exposed must have a comment. Keep comments consistent with `config/config.app.yaml.sample`.
 
 - **`docs/README.md`** — User-facing documentation covering setup, configuration, operations, and CI integrations. Must be updated when:
   - A new feature is added or removed
@@ -206,24 +211,24 @@ These three files define the same configuration schema from different perspectiv
 
 | File | Perspective |
 |---|---|
-| `internal/config/config.go` | Go struct definition + defaults |
-| `config.app.yaml.sample` | Full YAML reference with comments |
+| `config/loader.go` | Go struct definition + defaults |
+| `config/config.app.yaml.sample` | Full YAML reference with comments |
 | `deploy/helm/dagger-kubernetes/values.yaml` | Helm chart default values |
 
 When adding a config key:
-1. Add the struct field + `mapstructure` tag + `v.SetDefault()` in `config.go`
-2. Add the key + comment in `config.app.yaml.sample`
+1. Add the struct field + `mapstructure` tag + `v.SetDefault()` in `config/loader.go`
+2. Add the key + comment in `config/config.app.yaml.sample`
 3. Add the key + Helm template rendering in `deploy/helm/dagger-kubernetes/templates/configmap.yaml`
 4. Add the default value + comment in `deploy/helm/dagger-kubernetes/values.yaml`
 
 Outdated docs are a bug. Documentation changes are part of the same PR as the code change.
 
 ### Wrapper script sync
-`hack/dagger-cache.sh` and `ci-integrations/gha/dagger-cache.sh` must stay
+`scripts/dagger-cache.sh` and `ci-integrations/gha/dagger-cache.sh` must stay
 byte-identical. The copy in `ci-integrations/gha/` exists so the GitHub Actions
 composite action (`ci-integrations/gha/action.yml`) can invoke it from its own
 directory. When editing one, copy it verbatim to the other and verify with
-`cmp hack/dagger-cache.sh ci-integrations/gha/dagger-cache.sh`.
+`cmp scripts/dagger-cache.sh ci-integrations/gha/dagger-cache.sh`.
 
 ## PR checklist
 - [ ] Tests cover new code (target 100% coverage)
@@ -235,6 +240,6 @@ directory. When editing one, copy it verbatim to the other and verify with
 - [ ] Logging uses logrus structured fields
 - [ ] HTTP uses hertz (cloudwego)
 - [ ] CLI uses urfave/cli
-- [ ] `config.app.yaml.sample` updated if config keys changed
+- [ ] `config/config.app.yaml.sample` updated if config keys changed
 - [ ] `docs/README.md` updated if user-facing behavior changed
 - [ ] `docs/design/` updated if architectural decisions changed

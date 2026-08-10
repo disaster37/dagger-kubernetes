@@ -1,9 +1,9 @@
 # Supervisor runtime configuration.
 #
 # Only deployment-specific values are listed here. Every other option falls
-# back to the compiled-in defaults in internal/config/config.go. To see the
-# full set of options with explanations, copy config.app.yaml.sample to
-# config.app.yaml and edit from there.
+# back to the compiled-in defaults in config/loader.go. To see the
+# full set of options with explanations, copy config/config.app.yaml.sample to
+# config/config.app.yaml and edit from there.
 #
 # Any value below can also be overridden by an environment variable using the
 # DAGGER_CACHE_ prefix, e.g. DAGGER_CACHE_LOG_LEVEL=debug or
@@ -12,7 +12,7 @@
 
 # --- Endpoints & public URLs (set these per deployment) ----------------------
 server:
-  control_addr: ":8080"        # Hertz HTTPS control API
+  control_addr: ":8080"        # Hertz control API (TLS enabled when cert/key configured)
   data_addr: ":8443"            # mTLS L4 data-plane proxy
   data_hostname: "data.supv.example.com"
   public_url: "https://supv.example.com"
@@ -20,14 +20,26 @@ server:
 # --- Authentication ----------------------------------------------------------
 auth:
   internal:
-    tokens_file: "/etc/dagger-cache/tokens"   # newline-separated bearer tokens
+    tokens_file: "/etc/dagger-cache/tokens"   # DEPRECATED legacy fallback; migrate with `supervisor migrate-tokens` then remove.
+  bootstrap_admin:
+    username: "admin"                         # created on first boot when no users exist.
+    password: ""                               # empty = random password logged once at first boot.
+  jwt:
+    secret: ""                                 # HS256 signing key (>= 32 bytes, enforced); empty = auto-generated and persisted in the DB.
+    access_ttl: "15m"
+    refresh_ttl: "168h"
   oauth:                                       # optional; disabled by default
     enabled: false
     provider: "github"
     client_id: "${OAUTH_CLIENT_ID}"
     client_secret: "${OAUTH_CLIENT_SECRET}"
-    redirect_url: "https://ui.supv.example.com/auth/callback"
+    redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"
     allowed_orgs: ["acme"]
+    default_group: ""                          # new OAuth users auto-join this group (must exist); empty = none.
+
+# --- Database ----------------------------------------------------------------
+database:
+  path: "/var/lib/dagger-cache/dagger-cache.db"  # SQLite file (users, groups, tokens, projects, trace metadata).
 
 # --- Remote shared cache -----------------------------------------------------
 cache:

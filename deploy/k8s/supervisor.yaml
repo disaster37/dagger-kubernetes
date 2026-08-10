@@ -30,6 +30,8 @@ spec:
           env:
             - name: DAGGER_CACHE_LOG_LEVEL
               value: "info"
+            - name: DAGGER_CACHE_DATABASE_PATH
+              value: "/var/lib/dagger-cache/dagger-cache.db"
           volumeMounts:
             - name: config
               mountPath: /etc/dagger-cache
@@ -37,6 +39,8 @@ spec:
             - name: tls
               mountPath: /etc/dagger-cache/tls
               readOnly: true
+            - name: db
+              mountPath: /var/lib/dagger-cache
           readinessProbe:
             httpGet:
               path: /readyz
@@ -63,6 +67,8 @@ spec:
         - name: tls
           secret:
             secretName: supervisor-tls
+        - name: db
+          emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

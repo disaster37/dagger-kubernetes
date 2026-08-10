@@ -17,17 +17,17 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY . .
-COPY --from=ui-builder /ui/dist ./internal/api/ui-dist/
+COPY --from=ui-builder /ui/dist ./internal/handler/ui-dist/
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags "-s -w" -o /out/supervisor ./cmd/supervisor/
+    go build -trimpath -ldflags "-s -w" -o /out/supervisor ./cmd/api/
 
 # ---------- dagger-cache-ci builder ----------
 FROM go-builder AS ci-builder
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
-    go build -trimpath -ldflags "-s -w" -o /out/dagger-cache-ci ./cmd/dagger-cache-ci/
+    go build -trimpath -ldflags "-s -w" -o /out/dagger-cache-ci ./cmd/ci/
 
 # ---------- Runtime ----------
 FROM alpine:3.20
@@ -36,7 +36,7 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S dagger && adduser -S -G dagger -u 10001 dagger
 COPY --from=go-builder /out/supervisor        /usr/local/bin/supervisor
 COPY --from=ci-builder /out/dagger-cache-ci   /usr/local/bin/dagger-cache-ci
-COPY config.app.yaml.sample                   /etc/dagger-cache/config.app.yaml.sample
+COPY config/config.app.yaml.sample             /etc/dagger-cache/config.app.yaml.sample
 
 USER dagger
 EXPOSE 8080 8443

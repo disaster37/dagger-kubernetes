@@ -14,8 +14,15 @@ data:
       public_url: {{ .Values.supervisor.config.server.publicUrl | quote }}
     auth:
       internal:
-        enabled: true
-        tokens_file: "/etc/dagger-cache/tokens"
+        enabled: {{ .Values.supervisor.config.auth.internal.enabled }}
+        tokens_file: {{ .Values.supervisor.config.auth.internal.tokensFile | quote }}
+      bootstrap_admin:
+        username: {{ .Values.supervisor.config.auth.bootstrapAdmin.username | quote }}
+        password: {{ .Values.supervisor.config.auth.bootstrapAdmin.password | quote }}
+      jwt:
+        secret: {{ .Values.supervisor.config.auth.jwt.secret | quote }}
+        access_ttl: {{ .Values.supervisor.config.auth.jwt.accessTtl | quote }}
+        refresh_ttl: {{ .Values.supervisor.config.auth.jwt.refreshTtl | quote }}
       oauth:
         enabled: {{ .Values.supervisor.config.auth.oauth.enabled }}
 {{- with .Values.supervisor.config.auth.oauth }}
@@ -25,7 +32,10 @@ data:
         redirect_url: {{ .redirectUrl | quote }}
         allowed_orgs:
 {{ toYaml .allowedOrgs | indent 10 }}
+        default_group: {{ .defaultGroup | quote }}
 {{- end }}
+    database:
+      path: {{ .Values.supervisor.config.database.path | quote }}
     telemetry:
       collector_url: {{ include "dagger-kubernetes.collectorUrl" . | quote }}
       tempo_url: {{ include "dagger-kubernetes.tempoUrl" . | quote }}
