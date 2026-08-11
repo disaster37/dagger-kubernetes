@@ -58,6 +58,6 @@ jobs:
             --registry-username "env:REGISTRY_USERNAME" \
             --registry-password "env:GITHUB_TOKEN" \
             --git-token "env:GITHUB_TOKEN" \
-            --git-repo-url "${{ github.repositoryUrl }}" \
+            --git-repo-url "${{ github.server_url }}/${{ github.repository }}.git" \
             --git-branch "${BRANCH_NAME}" \
             export --path .
