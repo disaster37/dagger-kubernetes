@@ -14,7 +14,7 @@ jobs:
       - uses: dagger/dagger-for-github@v7
         name: Publish Docker Image
         with:
-          args: dagger call -m './dagger' --src '.' publish --version ${{ github.ref_name }} --registry-username ${{ github.actor }} --registry-password 'env:REGISTRY_PASSWORD'
+          args: -m './dagger' --src '.' publish --version ${{ github.ref_name }} --registry-username ${{ github.actor }} --registry-password 'env:REGISTRY_PASSWORD'
           module: "./dagger"
           verb: call
           version: ""
