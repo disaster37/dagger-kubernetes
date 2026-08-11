@@ -317,7 +317,7 @@ tools:
 ## support storageClassName (empty = cluster default StorageClass).
 ## @descriptionEnd
 
-## @extra opentelemetry-collector OpenTelemetry Collector subchart overrides.
+## @skip opentelemetry-collector
 opentelemetry-collector:
   mode: deployment
   replicaCount: 1
@@ -366,7 +366,7 @@ opentelemetry-collector:
           processors: [batch]
           exporters: [prometheusremotewrite]
 
-## @extra registry Docker Registry subchart overrides.
+## @skip registry
 registry:
   replicaCount: 1
   persistence:
@@ -379,7 +379,7 @@ registry:
       cpu: 100m
       memory: 128Mi
 
-## @extra tempo Grafana Tempo subchart overrides.
+## @skip tempo
 tempo:
   persistence:
     enabled: true
@@ -397,7 +397,7 @@ tempo:
         cpu: 100m
         memory: 256Mi
 
-## @extra loki Grafana Loki subchart overrides.
+## @skip loki
 loki:
   deploymentMode: SingleBinary
   singleBinary:
@@ -423,7 +423,7 @@ loki:
         chunks: chunks
         ruler: ruler
 
-## @extra victoria VictoriaMetrics subchart overrides.
+## @skip victoria
 victoria:
   server:
     persistentVolume:
@@ -435,7 +435,7 @@ victoria:
         cpu: 100m
         memory: 256Mi
 
-## @extra grafana Grafana subchart overrides.
+## @skip grafana
 grafana:
   adminPassword: ""
   sidecar:
