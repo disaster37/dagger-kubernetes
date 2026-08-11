@@ -34,14 +34,30 @@ jobs:
       contents: write
       packages: write
     runs-on: ubuntu-latest
+    env:
+      DAGGER_VERSION: "0.21.8"
     steps:
       - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Install Dagger CLI
+        run: curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=${DAGGER_VERSION} BIN_DIR=/usr/local/bin sh
       - name: Publish Helm Chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ github.actor }}
         run: |
           VERSION="${{ github.ref_name }}"
-          echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io \
-            --username "${{ github.actor }}" \
-            --password-stdin
-          helm dependency update deploy/helm/dagger-kubernetes
-          helm package deploy/helm/dagger-kubernetes --version "${VERSION#v}" --app-version "${VERSION#v}"
-          helm push dagger-kubernetes-${VERSION#v}.tgz oci://ghcr.io/disaster/charts
+          BRANCH_NAME="${{ github.event.release.target_commitish }}"
+          dagger call -m github.com/disaster37/dagger-library-go/helm@2.0.10 \
+            --src deploy/helm/dagger-kubernetes ci \
+            --ci github \
+            --registry ghcr.io \
+            --repository disaster/charts/dagger-kubernetes \
+            --version "${VERSION}" \
+            --registry-username "env:REGISTRY_USERNAME" \
+            --registry-password "env:GITHUB_TOKEN" \
+            --git-token "env:GITHUB_TOKEN" \
+            --git-repo-url "${{ github.repositoryUrl }}" \
+            --git-branch "${BRANCH_NAME}" \
+            export --path .

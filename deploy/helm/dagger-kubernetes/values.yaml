@@ -3,22 +3,33 @@
 # Copy to your own values file and override as needed, e.g.:
 #   helm install dagger-kubernetes ./deploy/helm/dagger-kubernetes -f my-values.yaml
 
-# --- Naming / namespace (chart-level) -------------------------------------
+## @section Chart metadata
+
+## @param nameOverride [string] Override the chart name used in resource labels.
 nameOverride: ""
+## @param fullnameOverride [string] Override the full name of the release.
 fullnameOverride: ""
-# Namespace for the supervisor and its subchart dependencies.
-# Defaults to the release namespace when empty.
+## @param namespace [string] Namespace for the supervisor and subchart dependencies. Defaults to the release namespace when empty.
 namespace: ""
 
-# --- Supervisor (control-plane pod) ---------------------------------------
-# Pod-level keys live under `supervisor:`; config under `supervisor.config.*`.
+## @section Supervisor (control-plane pod)
+
+## @param supervisor.image.repository Supervisor container image repository.
+## @param supervisor.image.tag Image tag (empty defaults to Chart.appVersion).
+## @param supervisor.image.pullPolicy Image pull policy.
+## @param supervisor.image.pullSecrets [array] Image pull secrets for private registries.
 supervisor:
   image:
     repository: ghcr.io/disaster/dagger-kubernetes
-    tag: ""                # defaults to Chart.appVersion when empty
+    tag: ""
     pullPolicy: IfNotPresent
-    pullSecrets: []        # e.g. [{ name: ghcr-pull-secret }]
+    pullSecrets: []
+## @param supervisor.replicaCount Number of supervisor replicas.
   replicaCount: 2
+## @param supervisor.resources.requests.cpu Supervisor CPU request.
+## @param supervisor.resources.requests.memory Supervisor memory request.
+## @param supervisor.resources.limits.cpu Supervisor CPU limit.
+## @param supervisor.resources.limits.memory Supervisor memory limit.
   resources:
     requests:
       cpu: 100m
@@ -26,54 +37,91 @@ supervisor:
     limits:
       cpu: 500m
       memory: 512Mi
-  # SQLite database PVC. disabled → emptyDir (all users/tokens lost on
-  # pod restart — dev only). storageClass="" uses the cluster default.
+## @param supervisor.persistence.enabled Enable PVC for SQLite database. disabled = emptyDir (dev only).
+## @param supervisor.persistence.storageClass StorageClass for the supervisor PVC (empty = cluster default).
+## @param supervisor.persistence.size PVC size for the supervisor database.
   persistence:
     enabled: false
     storageClass: ""
     size: 1Gi
+## @param supervisor.podAnnotations [object] Annotations added to the supervisor pod.
   podAnnotations: {}
+## @param supervisor.podSecurityContext.runAsNonRoot Run supervisor container as non-root.
+## @param supervisor.podSecurityContext.runAsUser User ID for the supervisor container.
+## @param supervisor.podSecurityContext.runAsGroup Group ID for the supervisor container.
+## @param supervisor.podSecurityContext.fsGroup Filesystem group for mounted volumes.
   podSecurityContext:
     runAsNonRoot: true
     runAsUser: 10001
     runAsGroup: 10001
     fsGroup: 10001
+## @param supervisor.securityContext.allowPrivilegeEscalation Allow privilege escalation.
+## @param supervisor.securityContext.readOnlyRootFilesystem Mount root filesystem as read-only.
+## @param supervisor.securityContext.capabilities.drop [array] Linux capabilities to drop.
   securityContext:
     allowPrivilegeEscalation: false
     readOnlyRootFilesystem: true
     capabilities:
       drop: ["ALL"]
+## @param supervisor.nodeSelector [object] Node selector for supervisor pod scheduling.
   nodeSelector: {}
+## @param supervisor.tolerations [array] Tolerations for supervisor pod scheduling.
   tolerations: []
+## @param supervisor.affinity [object] Affinity rules for supervisor pod scheduling.
   affinity: {}
+## @param supervisor.autoscaling.enabled Enable HPA for supervisor.
+## @param supervisor.autoscaling.minReplicas Minimum replicas for HPA.
+## @param supervisor.autoscaling.maxReplicas Maximum replicas for HPA.
+## @param supervisor.autoscaling.targetCPUUtilizationPercentage Target CPU utilization for HPA.
+## @param supervisor.autoscaling.targetMemoryUtilizationPercentage Target memory utilization for HPA.
   autoscaling:
     enabled: false
     minReplicas: 2
     maxReplicas: 6
     targetCPUUtilizationPercentage: 80
     targetMemoryUtilizationPercentage: ""
+## @param supervisor.serviceAccount.annotations [object] Annotations for the supervisor ServiceAccount.
+## @param supervisor.serviceAccount.clusterScope Use ClusterRole instead of namespaced Role/RoleBinding (cluster-wide access - security-sensitive).
   serviceAccount:
     annotations: {}
-    # clusterScope: false (default) → namespaced Role/RoleBinding limited to
-    # the release namespace. Set true only if engine fleets span multiple
-    # namespaces (grants cluster-wide access — security-sensitive).
     clusterScope: false
+## @param supervisor.extraEnv [array] Extra environment variables for the supervisor container.
   extraEnv: []
+
+## @section Supervisor configuration
+
+## @param supervisor.config.server.dataHostname Data-plane hostname for engine fleets.
+## @param supervisor.config.server.publicUrl Public URL of the supervisor.
   config:
     server:
       dataHostname: "data.supv.example.com"
       publicUrl: "https://supv.example.com"
+## @param supervisor.config.database.path Filesystem path for the SQLite database.
     database:
       path: "/var/lib/dagger-cache/dagger-cache.db"
+## @param supervisor.config.auth.internal.enabled Enable internal token authentication.
+## @param supervisor.config.auth.internal.tokensFile Path to the static tokens file.
+## @param supervisor.config.auth.bootstrapAdmin.username Bootstrap admin username.
+## @param supervisor.config.auth.bootstrapAdmin.password Bootstrap admin password (empty = random password logged once at first boot).
+## @param supervisor.config.auth.jwt.secret JWT signing secret (empty = auto-generated and persisted in DB).
+## @param supervisor.config.auth.jwt.accessTtl JWT access token TTL.
+## @param supervisor.config.auth.jwt.refreshTtl JWT refresh token TTL.
+## @param supervisor.config.auth.oauth.enabled Enable OAuth2 authentication.
+## @param supervisor.config.auth.oauth.provider OAuth2 provider (e.g. github).
+## @param supervisor.config.auth.oauth.clientId OAuth2 client ID.
+## @param supervisor.config.auth.oauth.clientSecret OAuth2 client secret.
+## @param supervisor.config.auth.oauth.redirectUrl OAuth2 redirect URL.
+## @param supervisor.config.auth.oauth.allowedOrgs [array] Allowed OAuth organizations.
+## @param supervisor.config.auth.oauth.defaultGroup Default group for OAuth users.
     auth:
       internal:
         enabled: true
         tokensFile: "/etc/dagger-cache/tokens"
       bootstrapAdmin:
         username: "admin"
-        password: ""    # empty = random password logged once at first boot
+        password: ""
       jwt:
-        secret: ""      # empty = auto-generated and persisted in the DB
+        secret: ""
         accessTtl: "15m"
         refreshTtl: "168h"
       oauth:
@@ -84,20 +132,52 @@ supervisor:
         redirectUrl: "https://supv.example.com/api/v1/auth/oauth/github/callback"
         allowedOrgs: ["acme"]
         defaultGroup: ""
+## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired when otelCollector enabled).
+## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries.
+## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries.
+## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries.
     telemetry:
-      # collectorUrl is derived from the otel-collector dependency when enabled.
       collectorUrl: ""
       tempoUrl: "http://tempo:3200"
       lokiUrl: "http://loki:3100"
       victoriaUrl: "http://victoria:8428"
+## @param supervisor.config.cache.backend Cache backend type: registry (OCI) or s3.
+## @param supervisor.config.cache.registry Cache registry URL (auto-wired when registry enabled).
+## @param supervisor.config.cache.refPerVersion Enable per-version cache references.
+## @param supervisor.config.cache.s3.bucket S3 bucket name (when backend=s3).
+## @param supervisor.config.cache.s3.region S3 region (when backend=s3).
     cache:
-      backend: "registry"            # "registry" (OCI) or "s3"
-      # registry is derived from the docker-registry dependency when enabled.
+      backend: "registry"
       registry: ""
       refPerVersion: true
       s3:
         bucket: ""
         region: ""
+## @param supervisor.config.fleet.minReplicasPerVersion Minimum warm engine replicas per Dagger version.
+## @param supervisor.config.fleet.maxReplicasPerVersion Maximum engine replicas per Dagger version.
+## @param supervisor.config.fleet.maxSessionsPerReplica Maximum concurrent sessions per engine replica.
+## @param supervisor.config.fleet.replicaIdleTtl Idle TTL before scaling down an engine replica.
+## @param supervisor.config.fleet.versionRetention Duration to retain engine versions after last use.
+## @param supervisor.config.fleet.engineImageRegistry Engine container image registry.
+## @param supervisor.config.fleet.engineStorageClass StorageClass for engine PVCs (empty = cluster default).
+## @param supervisor.config.fleet.engineStorageSize PVC size for each engine.
+## @param supervisor.config.fleet.engineCPURequest Engine CPU request.
+## @param supervisor.config.fleet.engineCPULimit Engine CPU limit.
+## @param supervisor.config.fleet.engineMemoryRequest Engine memory request.
+## @param supervisor.config.fleet.engineMemoryLimit Engine memory limit.
+## @param supervisor.config.fleet.engineTerminationGraceSeconds Engine pod termination grace period.
+## @param supervisor.config.fleet.enginePullPolicy Engine image pull policy.
+## @param supervisor.config.fleet.enginePrivileged Run engine container in privileged mode.
+## @param supervisor.config.fleet.engineNodeSelector [object] Node selector for engine pods.
+## @param supervisor.config.fleet.engineTolerations [array] Tolerations for engine pods.
+## @param supervisor.config.fleet.engineExtraArgs [array] Additional CLI args passed to the engine.
+## @param supervisor.config.fleet.engineExtraEnv [object] Extra env vars on engine pods.
+## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods.
+## @param supervisor.config.fleet.engineCaSecret Secret with custom CA PEM bundle for engines (empty = disabled).
+## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
+## @param supervisor.config.fleet.engineDebug Enable engine.toml [debug].
+## @param supervisor.config.fleet.engineLogFormat Engine log format (json, text; empty omits).
+## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}).
     fleet:
       minReplicasPerVersion: 0
       maxReplicasPerVersion: 3
@@ -117,44 +197,59 @@ supervisor:
       engineNodeSelector: {}
       engineTolerations: []
       engineExtraArgs: []
-      engineExtraEnv: {}            # env vars on engine pods (e.g. proxy vars)
-      engineExtraEnvFrom: {}        # env vars sourced from Secret keys
-      engineCaSecret: ""            # Secret with custom CA PEM bundle; empty = disabled
-      engineCaSecretKey: "ca.crt"   # key inside engineCaSecret
-      engineDebug: false            # enable engine.toml [debug]
-      engineLogFormat: "json"       # engine.toml [log] format; "" omits
-      engineRegistryMirrors: {}     # e.g. {"docker.io": ["mirror.gcr.io"]}
+      engineExtraEnv: {}
+      engineExtraEnvFrom: {}
+      engineCaSecret: ""
+      engineCaSecretKey: "ca.crt"
+      engineDebug: false
+      engineLogFormat: "json"
+      engineRegistryMirrors: {}
+## @param supervisor.config.ca.clientCertTtl Client certificate TTL.
     ca:
       clientCertTtl: "2h"
+## @param supervisor.config.leaseTtl Engine session lease TTL.
     leaseTtl: "2m"
+## @param supervisor.config.version.floor Minimum supported Dagger engine version.
+## @param supervisor.config.version.allowlist [array] Allowed Dagger versions (segments).
     version:
       floor: "v0.19.0"
       allowlist: ["0.19", "0.20", "0.21"]
+## @param supervisor.config.logLevel Supervisor log level.
     logLevel: "info"
-    logFormat: "json"               # supervisor log format: json | text
+## @param supervisor.config.logFormat Supervisor log format (json, text).
+    logFormat: "json"
+## @param supervisor.config.otel.otlpEndpoint Supervisor OTLP export endpoint (empty disables).
     otel:
-      otlpEndpoint: ""               # empty disables the supervisor's own OTLP export
+      otlpEndpoint: ""
 
-# --- Authentication secrets (chart-level) ----------------------------------
+## @section Authentication
+
+## @param auth.tokens [array] Static bearer tokens (DEPRECATED: legacy fallback, migrate with supervisor migrate-tokens).
 auth:
-  # Static bearer tokens, one per line (newline-separated at runtime).
-  # DEPRECATED: legacy fallback only. Migrate with `supervisor migrate-tokens`
-  # then remove. See ADR-010.
   tokens: []
-  # - "super-secret-token-1"
-  # Optional JWT signing secret (HS256). When empty, the supervisor
-  # auto-generates one on first boot and persists it in the SQLite DB.
+## @param auth.jwtSecret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
   jwtSecret: ""
 
-# --- Minting CA & TLS (chart-level, provide your own) ----------------------
-ca:
-  crt: ""    # PEM-encoded CA certificate
-  key: ""    # PEM-encoded CA private key
-tls:
-  crt: ""    # PEM-encoded server certificate
-  key: ""    # PEM-encoded server private key
+## @section Minting CA and TLS
 
-# --- Services (chart-level) -----------------------------------------------
+## @param ca.crt PEM-encoded CA certificate for engine mTLS.
+## @param ca.key PEM-encoded CA private key for engine mTLS.
+ca:
+  crt: ""
+  key: ""
+## @param tls.crt PEM-encoded data-plane server certificate.
+## @param tls.key PEM-encoded data-plane server private key.
+tls:
+  crt: ""
+  key: ""
+
+## @section Services
+
+## @param service.control.type Control-plane service type.
+## @param service.control.port Control-plane service port.
+## @param service.control.nodePort Control-plane service node port (when type=NodePort).
+## @param service.data.type Data-plane service type.
+## @param service.data.port Data-plane service port.
 service:
   control:
     type: ClusterIP
@@ -164,7 +259,13 @@ service:
     type: LoadBalancer
     port: 443
 
-# --- Ingress (chart-level) -------------------------------------------------
+## @section Ingress
+
+## @param ingress.enabled Enable control-plane Ingress.
+## @param ingress.className Ingress class name (empty = default ingress controller).
+## @param ingress.annotations [object] Ingress annotations.
+## @param ingress.hosts [array] Ingress host rules.
+## @param ingress.tls [array] Ingress TLS configuration.
 ingress:
   enabled: true
   className: ""
@@ -175,43 +276,48 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
-  #  - secretName: supv-tls
-  #    hosts:
-  #      - supv.example.com
 
-# --- Prometheus ServiceMonitor (chart-level) -------------------------------
+## @section Prometheus ServiceMonitor
+
+## @param serviceMonitor.enabled Enable Prometheus ServiceMonitor.
+## @param serviceMonitor.labels [object] Labels applied to the ServiceMonitor.
+## @param serviceMonitor.interval Scrape interval.
+## @param serviceMonitor.scrapeTimeout Scrape timeout.
 serviceMonitor:
   enabled: false
   labels: {}
   interval: 30s
   scrapeTimeout: 10s
 
-# --- Observability tools (enabled = install subchart) ----------------------
-# Chart dependencies. Disable any tool and point the supervisor elsewhere.
+## @section Observability tools
+
+## @param tools.otelCollector.enabled Install OpenTelemetry Collector subchart.
+## @param tools.registry.enabled Install Docker Registry subchart (cache backend).
+## @param tools.tempo.enabled Install Grafana Tempo subchart (traces).
+## @param tools.loki.enabled Install Grafana Loki subchart (logs).
+## @param tools.victoria.enabled Install VictoriaMetrics subchart (metrics).
+## @param tools.grafana.enabled Install Grafana subchart (dashboards).
 tools:
-  # OpenTelemetry Collector — receives OTLP from Dagger CLI & supervisor,
-  # fans out to Tempo / Loki / Prometheus backends.
   otelCollector:
     enabled: true
-  # Docker registry (OCI) — backs the remote shared cache (BuildKit blobs).
   registry:
     enabled: true
-  # Grafana Tempo — distributed tracing backend, stores OTLP traces.
   tempo:
     enabled: true
-  # Grafana Loki — log aggregation backend, stores OTLP logs.
   loki:
     enabled: true
-  # VictoriaMetrics — PromQL-compatible metrics backend, stores OTLP metrics.
   victoria:
     enabled: true
-  # Grafana — unified dashboards for Tempo, Loki, and VictoriaMetrics data.
   grafana:
     enabled: true
 
-# --- Subchart overrides ----------------------------------------------------
-# Forwarded to each dependency. All PVC-bearing subcharts support
-# `storageClassName` (empty = cluster default StorageClass).
+## @section Subchart overrides
+## @descriptionStart
+## Subchart defaults forwarded to each dependency. All PVC-bearing subcharts
+## support storageClassName (empty = cluster default StorageClass).
+## @descriptionEnd
+
+## @extra opentelemetry-collector OpenTelemetry Collector subchart overrides.
 opentelemetry-collector:
   mode: deployment
   replicaCount: 1
@@ -224,8 +330,6 @@ opentelemetry-collector:
       memory: 256Mi
   service:
     type: ClusterIP
-  # The collector subchart uses tpl() on config, so Go template expressions
-  # like {{ .Release.Name }} are resolved correctly at install time.
   config:
     receivers:
       otlp:
@@ -262,25 +366,25 @@ opentelemetry-collector:
           processors: [batch]
           exporters: [prometheusremotewrite]
 
-# docker-registry subchart (stable/docker-registry, aliased as registry).
+## @extra registry Docker Registry subchart overrides.
 registry:
   replicaCount: 1
   persistence:
     enabled: true
     size: 50Gi
-    storageClass: ""    # empty = cluster default StorageClass
+    storageClass: ""
   storage: filesystem
   resources:
     requests:
       cpu: 100m
       memory: 128Mi
 
-# Tempo — distributed tracing backend. Receives OTLP traces from the collector.
+## @extra tempo Grafana Tempo subchart overrides.
 tempo:
   persistence:
     enabled: true
     size: 20Gi
-    storageClassName: ""    # empty = cluster default StorageClass
+    storageClassName: ""
   tempo:
     retention: 48h
     storage:
@@ -293,8 +397,7 @@ tempo:
         cpu: 100m
         memory: 256Mi
 
-# Loki — log aggregation backend (SingleBinary with PVC persistence).
-# For S3/GCS object storage, see `loki.loki.storage`.
+## @extra loki Grafana Loki subchart overrides.
 loki:
   deploymentMode: SingleBinary
   singleBinary:
@@ -302,7 +405,7 @@ loki:
     persistence:
       enabled: true
       size: 20Gi
-      storageClass: ""    # empty = cluster default StorageClass
+      storageClass: ""
     resources:
       requests:
         cpu: 100m
@@ -320,25 +423,19 @@ loki:
         chunks: chunks
         ruler: ruler
 
-# VictoriaMetrics single-server — metrics backend. Receives OTLP metrics from the collector.
+## @extra victoria VictoriaMetrics subchart overrides.
 victoria:
   server:
     persistentVolume:
       enabled: true
       size: 20Gi
-      storageClassName: ""    # empty = cluster default StorageClass
+      storageClassName: ""
     resources:
       requests:
         cpu: 100m
         memory: 256Mi
 
-# Grafana — unified dashboards (auto-provisioned datasources).
-# adminPassword empty (default) → the Grafana subchart generates a random
-# 40-char password and stores it in a Secret named <release>-grafana.
-# Retrieve it with:
-#   kubectl get secret -n <ns> <release>-grafana -o jsonpath="{.data.admin-password}" | base64 -d ; echo
-# Set an explicit password only in non-production or when you have a secret
-# management workflow that rotates it.
+## @extra grafana Grafana subchart overrides.
 grafana:
   adminPassword: ""
   sidecar:
