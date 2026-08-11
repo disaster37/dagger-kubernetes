@@ -45,6 +45,7 @@ jobs:
       - name: Publish Helm Chart
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USERNAME: ${{ github.actor }}
         run: |
           VERSION="${{ github.ref_name }}"
           BRANCH_NAME="${{ github.event.release.target_commitish }}"
@@ -52,8 +53,9 @@ jobs:
             --src deploy/helm/dagger-kubernetes ci \
             --ci github \
             --registry ghcr.io \
+            --repository disaster/charts/dagger-kubernetes \
             --version "${VERSION}" \
-            --registry-username "${{ github.actor }}" \
+            --registry-username "env:REGISTRY_USERNAME" \
             --registry-password "env:GITHUB_TOKEN" \
             --git-token "env:GITHUB_TOKEN" \
             --git-repo-url "${{ github.repositoryUrl }}" \
