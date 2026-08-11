@@ -15,14 +15,20 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install Dagger CLI
         run: curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=${DAGGER_VERSION} BIN_DIR=/usr/local/bin sh
-      - name: Publish Docker Image
-        env:
-          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          dagger call -m ./dagger --src . publish \
-            --version "${{ github.ref_name }}" \
-            --registry-username "${{ github.actor }}" \
-            --registry-password "env:REGISTRY_PASSWORD"
+      - name: CI gate
+        run: dagger call -m ./dagger --src . ci export --path out
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: true
+          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
   publish-helm:
     permissions:
       contents: write
@@ -45,6 +51,7 @@ jobs:
           dagger call -m github.com/disaster37/dagger-library-go/helm@2.0.10 \
             --src deploy/helm/dagger-kubernetes ci \
             --ci github \
+            --registry ghcr.io \
             --version "${VERSION}" \
             --registry-username "${{ github.actor }}" \
             --registry-password "env:GITHUB_TOKEN" \
