@@ -2,6 +2,9 @@
 
 Self-hosted, Dagger-Cloud-compatible platform: remote shared cache, auto-scaling
 engine fleets, live pipeline UI, and drop-in CI integration.
+<!-- version-marker -->
+[^1]: Latest released version: `0.0.1-alpha4`
+
 
 The chart deploys the Supervisor control plane and all required infrastructure
 as Helm subchart dependencies, each toggleable independently.
@@ -27,7 +30,7 @@ EOF
 
 # Install directly from GHCR (no local clone needed)
 helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
-  --version 0.1.0 -f my-values.yaml \
+  --version 0.0.1-alpha4 -f my-values.yaml \
   --namespace dagger-stack --create-namespace \
   --set ca.crt="$(cat ca.crt)" \
   --set ca.key="$(cat ca.key)" \
@@ -336,7 +339,7 @@ From the OCI repository (recommended):
 
 ```bash
 helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
-  --version 0.1.0 -f my-values.yaml --namespace dagger-stack
+  --version 0.0.1-alpha4 -f my-values.yaml --namespace dagger-stack
 ```
 
 From source:
