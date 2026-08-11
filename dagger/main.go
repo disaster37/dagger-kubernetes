@@ -189,6 +189,52 @@ func (m *DaggerCache) Helm(ctx context.Context) error {
 	return nil
 }
 
+// Publish builds the Docker image and pushes it to GHCR with the given
+// version tag. Registry credentials are required for authentication.
+//
+// Returns the fully-qualified image reference with digest on success.
+func (m *DaggerCache) Publish(
+	ctx context.Context,
+	// semver release tag (e.g. "v0.0.1-alpha4")
+	// +required
+	version string,
+	// registry address for authentication (e.g. "ghcr.io")
+	// +optional
+	registry string,
+	// registry username for authentication
+	// +required
+	registryUsername string,
+	// registry password for authentication
+	// +required
+	registryPassword *dagger.Secret,
+) (string, error) {
+	const defaultRegistry = "ghcr.io"
+	if registry == "" {
+		registry = defaultRegistry
+	}
+	tag := strings.TrimPrefix(version, "v")
+	addr := fmt.Sprintf("%s/%s:%s", registry, "disaster/dagger-kubernetes", tag)
+
+	if _, err := m.Lint(ctx); err != nil {
+		return "", fmt.Errorf("lint: %w", err)
+	}
+	if _, err := m.Test(ctx); err != nil {
+		return "", fmt.Errorf("test: %w", err)
+	}
+	if _, err := m.Ui(ctx); err != nil {
+		return "", fmt.Errorf("ui: %w", err)
+	}
+
+	ctr := m.Src.DockerBuild().
+		WithRegistryAuth(defaultRegistry, registryUsername, registryPassword)
+
+	digest, err := ctr.Publish(ctx, addr)
+	if err != nil {
+		return "", fmt.Errorf("docker publish: %w", err)
+	}
+	return digest, nil
+}
+
 // Ci runs the full pipeline: Lint, Test, Ui, Build, Docker, Helm.
 //
 // Returns a directory containing bin/supervisor, bin/dagger-cache-ci, and

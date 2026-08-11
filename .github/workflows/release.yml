@@ -1,34 +1,22 @@
-name: Release
-
-on:
+name: release
+"on":
   release:
-    types: [created]
-
+    types:
+      - created
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  publish-docker:
     permissions:
-      contents: write
+      contents: read
       packages: write
+    runs-on: ubuntu-latest
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v2
+      - uses: dagger/dagger-for-github@v7
+        name: Publish Docker Image
         with:
-          fetch-depth: 0
-
-      - name: Update Helm README version
+          args: dagger call -m './dagger' --src '.' publish --version ${{ github.ref_name }} --registry-username ${{ github.actor }} --registry-password 'env:REGISTRY_PASSWORD'
+          module: "./dagger"
+          verb: call
+          version: ""
         env:
-          REGISTRY: ghcr.io
-          VERSION: ${{ github.event.release.tag_name }}
-        shell: bash
-        run: |
-          bash scripts/update-helm-docs.sh "${VERSION}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add deploy/helm/dagger-kubernetes/README.md
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          git commit -m "docs: bump Helm README version to ${VERSION}"
-          git push origin HEAD:refs/heads/main
+          REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
