@@ -265,6 +265,9 @@ service:
 ## @param ingress.className Ingress class name (empty = default ingress controller).
 ## @param ingress.annotations [object] Ingress annotations.
 ## @param ingress.hosts [array] Ingress host rules.
+## @param ingress.hosts[].host Hostname for the ingress rule.
+## @param ingress.hosts[].paths[].path URL path for the ingress rule.
+## @param ingress.hosts[].paths[].pathType Path matching type (Prefix, Exact, ImplementationSpecific).
 ## @param ingress.tls [array] Ingress TLS configuration.
 ingress:
   enabled: true

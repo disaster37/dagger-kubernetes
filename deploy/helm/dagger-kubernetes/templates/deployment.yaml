@@ -65,12 +65,14 @@ spec:
             httpGet:
               path: /readyz
               port: control
+              scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: control
+              scheme: HTTPS
             initialDelaySeconds: 10
             periodSeconds: 10
           resources:
