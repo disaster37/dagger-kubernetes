@@ -29,7 +29,7 @@ supervisor:
 EOF
 
 # Install directly from GHCR (no local clone needed)
-helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.0.1-alpha4 -f my-values.yaml \
   --namespace dagger-stack --create-namespace \
   --set ca.crt="$(cat ca.crt)" \
@@ -42,7 +42,7 @@ helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
 List available versions:
 
 ```bash
-helm show chart oci://ghcr.io/disaster/charts/dagger-kubernetes | grep version
+helm show chart oci://ghcr.io/disaster37/charts/dagger-kubernetes | grep version
 ```
 
 ## Required tools (chart dependencies)
@@ -90,7 +90,7 @@ Use this approach when customizing the chart or developing locally:
 
 ```bash
 # 0. Clone the repository
-git clone https://github.com/disaster/dagger-kubernetes.git
+git clone https://github.com/disaster37/dagger-kubernetes.git
 cd dagger-kubernetes
 
 # 1. Fetch dependencies (downloads subcharts to charts/)
@@ -254,7 +254,7 @@ grafana:
 
 | Key | Description | Default |
 |---|---|---|
-| `supervisor.image.repository` | Supervisor image | `ghcr.io/disaster/dagger-kubernetes` |
+| `supervisor.image.repository` | Supervisor image | `ghcr.io/disaster37/dagger-kubernetes` |
 | `supervisor.image.tag` | Image tag (defaults to `Chart.appVersion`) | `""` |
 | `supervisor.replicaCount` | Supervisor replicas | `2` |
 | `supervisor.persistence.enabled` | Enable PVC for SQLite database | `false` |
@@ -340,7 +340,7 @@ Loki now enables PVC persistence by default (`loki.singleBinary.persistence.enab
 From the OCI repository (recommended):
 
 ```bash
-helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+helm upgrade dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.0.1-alpha4 -f my-values.yaml --namespace dagger-stack
 ```
 

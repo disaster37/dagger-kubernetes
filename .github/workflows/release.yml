@@ -53,7 +53,7 @@ jobs:
             --src deploy/helm/dagger-kubernetes ci \
             --ci github \
             --registry ghcr.io \
-            --repository disaster/charts/dagger-kubernetes \
+            --repository ${{ github.repository_owner }}/charts/dagger-kubernetes \
             --version "${VERSION}" \
             --registry-username "env:REGISTRY_USERNAME" \
             --registry-password "env:GITHUB_TOKEN" \

@@ -20,7 +20,7 @@ namespace: ""
 ## @param supervisor.image.pullSecrets [array] Image pull secrets for private registries.
 supervisor:
   image:
-    repository: ghcr.io/disaster/dagger-kubernetes
+    repository: ghcr.io/disaster37/dagger-kubernetes
     tag: ""
     pullPolicy: IfNotPresent
     pullSecrets: []

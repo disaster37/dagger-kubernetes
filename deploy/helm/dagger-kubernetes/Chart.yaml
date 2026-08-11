@@ -4,9 +4,9 @@ description: Self-hosted, Dagger-Cloud-compatible platform — remote shared cac
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
-home: https://github.com/disaster/dagger-kubernetes
+home: https://github.com/disaster37/dagger-kubernetes
 sources:
-  - https://github.com/disaster/dagger-kubernetes
+  - https://github.com/disaster37/dagger-kubernetes
 maintainers:
   - name: disaster
 keywords:
