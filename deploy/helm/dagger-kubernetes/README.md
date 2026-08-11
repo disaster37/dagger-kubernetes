@@ -299,6 +299,8 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
 
+## Parameters
+
 ## Upgrading
 
 ### Breaking: supervisor pod values moved under `supervisor:` (v0.2.0)
