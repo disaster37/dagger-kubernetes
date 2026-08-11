@@ -6,17 +6,49 @@ name: release
 jobs:
   publish-docker:
     permissions:
-      contents: read
+      contents: write
       packages: write
     runs-on: ubuntu-latest
+    env:
+      DAGGER_VERSION: "0.21.8"
     steps:
       - uses: actions/checkout@v2
-      - uses: dagger/dagger-for-github@v7
-        name: Publish Docker Image
-        with:
-          args: -m './dagger' --src '.' publish --version ${{ github.ref_name }} --registry-username ${{ github.actor }} --registry-password 'env:REGISTRY_PASSWORD'
-          module: "./dagger"
-          verb: call
-          version: ""
+      - name: Install Dagger CLI
+        run: curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=${DAGGER_VERSION} BIN_DIR=/usr/local/bin sh
+      - name: Publish Docker Image
         env:
           REGISTRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dagger call -m ./dagger --src . publish \
+            --version "${{ github.ref_name }}" \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "env:REGISTRY_PASSWORD"
+  publish-helm:
+    permissions:
+      contents: write
+      packages: write
+    runs-on: ubuntu-latest
+    env:
+      DAGGER_VERSION: "0.21.8"
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          fetch-depth: 0
+      - name: Install Dagger CLI
+        run: curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=${DAGGER_VERSION} BIN_DIR=/usr/local/bin sh
+      - name: Publish Helm Chart
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ github.ref_name }}"
+          BRANCH_NAME="${{ github.event.release.target_commitish }}"
+          dagger call -m github.com/disaster37/dagger-library-go/helm@2.0.10 \
+            --src deploy/helm/dagger-kubernetes ci \
+            --ci github \
+            --version "${VERSION}" \
+            --registry-username "${{ github.actor }}" \
+            --registry-password "env:GITHUB_TOKEN" \
+            --git-token "env:GITHUB_TOKEN" \
+            --git-repo-url "${{ github.repositoryUrl }}" \
+            --git-branch "${BRANCH_NAME}" \
+            export --path .
