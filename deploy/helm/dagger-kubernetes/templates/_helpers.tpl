@@ -70,8 +70,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Resolve the data-plane hostname from the configured access method. */}}
 {{- define "dagger-kubernetes.dataHostname" -}}
-{{- if .Values.service.data.ingress.enabled -}}
-{{- printf "%s:%d" .Values.supervisor.config.server.dataHostname (int .Values.service.data.ingress.port) -}}
+{{- if .Values.dataIngress.enabled -}}
+{{- .Values.dataIngress.host -}}
 {{- else if eq .Values.service.data.type "NodePort" -}}
 {{- printf "%s:%s" .Values.supervisor.config.server.dataHostname (.Values.service.data.nodePort | default "30443") -}}
 {{- else -}}

@@ -400,11 +400,11 @@ func runMigrateTokens(c *cli.Context) error {
 func selectTLSProvider(cfg *domain.Config) (domain.CAProvider, error) {
 	switch cfg.TLS.Provider {
 	case "embedded":
-		return repository.NewEmbeddedProvider(cfg.TLS.CAPath, cfg.CA.ClientCertTTL), nil
+		return repository.NewEmbeddedProvider(cfg.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost), nil
 	case "cert-manager":
-		return repository.NewCertManagerProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath), nil
+		return repository.NewCertManagerProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, cfg.TLS.CAPath), nil
 	case "external":
-		return repository.NewExternalProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath), nil
+		return repository.NewExternalProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, cfg.TLS.CAPath), nil
 	default:
 		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.TLS.Provider)
 	}

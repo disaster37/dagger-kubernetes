@@ -1,0 +1,16 @@
+{{- if .Values.dataCert.enabled }}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}-data-cert
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  secretName: {{ .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
+  issuerRef:
+    name: {{ .Values.dataCert.issuerName }}
+    kind: {{ .Values.dataCert.issuerKind }}
+  dnsNames:
+    - {{ required "dataIngress.host is required when dataCert is enabled" .Values.dataIngress.host | quote }}
+{{- end }}

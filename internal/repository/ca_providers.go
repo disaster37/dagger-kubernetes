@@ -15,14 +15,16 @@ import (
 type EmbeddedProvider struct {
 	caPath        string
 	clientCertTTL time.Duration
+	extraSANs     []string
 }
 
 var _ domain.CAProvider = (*EmbeddedProvider)(nil)
 
-func NewEmbeddedProvider(caPath string, clientCertTTL time.Duration) *EmbeddedProvider {
+func NewEmbeddedProvider(caPath string, clientCertTTL time.Duration, extraSANs ...string) *EmbeddedProvider {
 	return &EmbeddedProvider{
 		caPath:        caPath,
 		clientCertTTL: clientCertTTL,
+		extraSANs:     extraSANs,
 	}
 }
 
@@ -100,9 +102,11 @@ func (p *EmbeddedProvider) loadCA(certPath, keyPath string) (*MintingCA, error) 
 }
 
 func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
+	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-cache.svc"}
+	sans = append(sans, p.extraSANs...)
 	certPEM, keyPEM, err := ca.IssueServerCertificate(
 		"supervisor-server", "dagger-cache",
-		[]string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-cache.svc"},
+		sans,
 		5*365*24*time.Hour)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("issue server cert: %w", err)
@@ -118,52 +122,47 @@ func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath stri
 
 // fileCAProvider serves a minting CA and server TLS certificate from PEM
 // files managed outside of dagger-cache (cert-manager or external tooling).
+// The minting CA is loaded from the embedded CA path; the server certificate
+// is loaded from the cert-manager or external PEM files.
 type fileCAProvider struct {
 	label    string
 	certPath string
 	keyPath  string
+	caPath   string
 }
 
 var _ domain.CAProvider = (*fileCAProvider)(nil)
 
 func (p *fileCAProvider) MintingCA() (domain.MintingCA, error) {
-	certPEM, keyPEM, err := p.readPEM()
+	caCertPath := filepath.Join(p.caPath, "ca.crt")
+	caKeyPath := filepath.Join(p.caPath, "ca.key")
+	certPEM, err := os.ReadFile(caCertPath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read CA cert from %s: %w", caCertPath, err)
+	}
+	keyPEM, err := os.ReadFile(caKeyPath)
+	if err != nil {
+		return nil, fmt.Errorf("read CA key from %s: %w", caKeyPath, err)
 	}
 	return NewMintingCAFromPEM(certPEM, keyPEM, 2*time.Hour)
 }
 
 func (p *fileCAProvider) ServerTLSCert() (tls.Certificate, error) {
-	certPEM, keyPEM, err := p.readPEM()
-	if err != nil {
-		return tls.Certificate{}, err
-	}
-	return tls.X509KeyPair(certPEM, keyPEM)
-}
-
-func (p *fileCAProvider) readPEM() (certPEM, keyPEM []byte, err error) {
-	certPEM, err = os.ReadFile(p.certPath) //nolint:gosec // paths from config
-	if err != nil {
-		return nil, nil, fmt.Errorf("read %s cert: %w", p.label, err)
-	}
-	keyPEM, err = os.ReadFile(p.keyPath) //nolint:gosec // paths from config
-	if err != nil {
-		return nil, nil, fmt.Errorf("read %s key: %w", p.label, err)
-	}
-	return certPEM, keyPEM, nil
+	return loadTLSKeyPair(p.certPath, p.keyPath)
 }
 
 // NewCertManagerProvider returns a CA provider backed by cert-manager
-// mounted PEM files.
-func NewCertManagerProvider(certPath, keyPath string) domain.CAProvider {
-	return &fileCAProvider{label: "cert-manager", certPath: certPath, keyPath: keyPath}
+// mounted PEM files for the server certificate. The minting CA is loaded
+// from the embedded CA path.
+func NewCertManagerProvider(certPath, keyPath, caPath string) domain.CAProvider {
+	return &fileCAProvider{label: "cert-manager", certPath: certPath, keyPath: keyPath, caPath: caPath}
 }
 
 // NewExternalProvider returns a CA provider backed by externally managed PEM
-// files.
-func NewExternalProvider(certPath, keyPath string) domain.CAProvider {
-	return &fileCAProvider{label: "external", certPath: certPath, keyPath: keyPath}
+// files for the server certificate. The minting CA is loaded from the
+// embedded CA path.
+func NewExternalProvider(certPath, keyPath, caPath string) domain.CAProvider {
+	return &fileCAProvider{label: "external", certPath: certPath, keyPath: keyPath, caPath: caPath}
 }
 
 // loadTLSKeyPair reads a PEM certificate/key pair and returns the TLS

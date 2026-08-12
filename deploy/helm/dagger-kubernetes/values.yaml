@@ -259,27 +259,17 @@ service:
     type: ClusterIP
     port: 80
     nodePort: ""
-## @param service.data.type Data-plane service type. ClusterIP when using ingress passthrough.
+## @param service.data.type Data-plane service type. ClusterIP when using ingress.
 ## @param service.data.port Data-plane service port (maps to supervisor :8443).
-## @param service.data.nodePort Data-plane node port (when type=NodePort).
-## @param service.data.ingress.enabled Expose data plane via nginx TCP passthrough.
-##   Requires manual configuration of nginx-ingress TCP services ConfigMap.
-## @param service.data.ingress.port External port for data plane TCP passthrough.
-##   Must be exposed on the ingress controller's Service.
+## @param service.data.nodePort Data-plane node port (when type=NodePort and no ingress).
   data:
     type: ClusterIP
     port: 443
     nodePort: ""
-## @param service.data.ingress.namespace Namespace where the nginx-ingress controller
-##   TCP services ConfigMap lives. Default: "nginx-ingress".
-    ingress:
-      enabled: false
-      port: 8443
-      namespace: ""
 
 ## @section Ingress
 
-## @param ingress.enabled Enable control-plane Ingress.
+## @param ingress.enabled Enable control-plane Ingress (web UI + API).
 ## @param ingress.className Ingress class name (empty = default ingress controller).
 ## @param ingress.annotations [object] Ingress annotations.
 ## @param ingress.hosts [array] Ingress host rules.
@@ -297,6 +287,37 @@ ingress:
         - path: /
           pathType: Prefix
   tls: []
+
+## @section Data-plane Ingress (mTLS passthrough)
+
+## @param dataIngress.enabled Expose data plane via TLS passthrough on a dedicated host.
+##   Creates an ingress with nginx.ingress.kubernetes.io/ssl-passthrough: "true".
+##   The data plane cert must include this hostname (embedded provider adds it
+##   automatically; for external/cert-manager providers, ensure the cert has it).
+## @param dataIngress.host Hostname for the data plane (e.g. data.supv.example.com).
+##   Must resolve to the same IP as the control plane ingress.
+## @param dataIngress.className Ingress class name.
+## @param dataIngress.annotations [object] Additional ingress annotations.
+dataIngress:
+  enabled: false
+  host: "data.supv.example.com"
+  className: ""
+  annotations: {}
+
+## @section Data-plane certificate (cert-manager)
+
+## @param dataCert.enabled Provision a Let's Encrypt certificate for the data
+##   plane via cert-manager. Requires cert-manager to be installed. The
+##   resulting Secret is mounted as the supervisor's TLS server certificate.
+##   When enabled, tls.provider must be set to "cert-manager".
+## @param dataCert.issuerName cert-manager ClusterIssuer name (e.g. letsencrypt-prod).
+## @param dataCert.issuerKind cert-manager issuer kind: ClusterIssuer or Issuer.
+## @param dataCert.secretName Secret name where cert-manager stores the certificate.
+dataCert:
+  enabled: false
+  issuerName: "letsencrypt-prod"
+  issuerKind: "ClusterIssuer"
+  secretName: ""
 
 ## @section Prometheus ServiceMonitor
 

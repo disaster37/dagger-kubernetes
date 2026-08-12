@@ -1,0 +1,32 @@
+{{- if .Values.dataIngress.enabled }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}-data
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+    {{- with .Values.dataIngress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.dataIngress.className }}
+  ingressClassName: {{ .Values.dataIngress.className }}
+  {{- end }}
+  tls:
+    - hosts:
+        - {{ .Values.dataIngress.host | quote }}
+  rules:
+    - host: {{ .Values.dataIngress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dagger-kubernetes.fullname" . }}-data
+                port:
+                  number: {{ .Values.service.data.port }}
+{{- end }}
