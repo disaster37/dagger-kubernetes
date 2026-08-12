@@ -38,15 +38,16 @@ const (
 	otelErrorKey  = "otel_error"  // set when the OTel proxy hit a transport error (B1).
 )
 
-// EngineRequest is the body of POST /v1/engines.
+// EngineRequest is the body of POST /v1/engines. Must match the Dagger
+// CLI's cloud.EngineRequest shape exactly (see dagger/dagger internal/cloud/client.go).
 type EngineRequest struct {
-	Image                string `json:"image"`
-	Module               string `json:"module"`
-	Function             string `json:"function"`
-	ExecCmd              string `json:"exec_cmd"`
-	ClientID             string `json:"client_id"`
-	MinimumEngineVersion string `json:"minimum_engine_version"`
-	TraceID              string `json:"trace_id"`
+	Image                string   `json:"image"`
+	Module               string   `json:"module"`
+	Function             string   `json:"function"`
+	ExecCmd              []string `json:"exec_cmd"`
+	ClientID             string   `json:"client_id"`
+	MinimumEngineVersion string   `json:"minimum_engine_version"`
+	TraceID              string   `json:"trace_id"`
 }
 
 // EngineSpecResponse is the body of a successful POST /v1/engines response.
@@ -454,7 +455,7 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 
 	var req EngineRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		writeError(c, consts.StatusBadRequest, "invalid request")
+		writeError(c, consts.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
 	// Bound and sanitize the client-supplied trace ID before it is persisted
