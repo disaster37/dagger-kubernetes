@@ -194,9 +194,9 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 		MinVersion:   tls.VersionTLS12,
 	}
 
-	tlsLn, err := tls.Listen("tcp", s.cfg.DataAddr, tlsConfig)
+	tlsLn, err := net.Listen("tcp", s.cfg.DataAddr)
 	if err != nil {
-		return fmt.Errorf("tls listen: %w", err)
+		return fmt.Errorf("tcp listen: %w", err)
 	}
 
 	s.tlsListener = tlsLn
@@ -204,12 +204,18 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 	go func() {
 		s.logger.WithField("addr", s.cfg.DataAddr).Info("data plane listening")
 		for {
-			conn, err := s.tlsListener.Accept()
+			raw, err := s.tlsListener.Accept()
 			if err != nil {
 				if strings.Contains(err.Error(), "use of closed network connection") {
 					return
 				}
-				s.logger.WithError(err).Error("tls accept error")
+				s.logger.WithError(err).Error("tcp accept error")
+				continue
+			}
+			conn := tls.Server(raw, tlsConfig)
+			if err := conn.Handshake(); err != nil {
+				s.logger.WithError(err).Debug("tls handshake failed")
+				_ = raw.Close()
 				continue
 			}
 			select {

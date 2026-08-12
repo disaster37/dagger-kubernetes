@@ -87,6 +87,9 @@ data:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
       client_cert_ttl: {{ .Values.supervisor.config.ca.clientCertTtl | quote }}
     tls:
+      provider: {{ .Values.supervisor.config.tls.provider | default "embedded" | quote }}
+      cert_path: {{ .Values.supervisor.config.tls.certPath | default "" | quote }}
+      key_path: {{ .Values.supervisor.config.tls.keyPath | default "" | quote }}
       server_cert_secret: {{ include "dagger-kubernetes.fullname" . }}-tls
     lease_ttl: {{ .Values.supervisor.config.leaseTtl | quote }}
     version:
