@@ -524,9 +524,14 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	// identities that have no users-table row).
 	s.attribution.Provision(ctx, req.TraceID, attributionUserID(id))
 
+	engineURL := s.cfg.DataHost
+	if _, _, err := net.SplitHostPort(engineURL); err != nil {
+		engineURL = fmt.Sprintf("%s:443", engineURL)
+	}
+
 	resp := EngineSpecResponse{
 		Image:      result.Image,
-		URL:        s.cfg.DataHost,
+		URL:        engineURL,
 		Cert:       clientCert,
 		InstanceID: instanceID,
 		Location:   "k8s",
