@@ -225,9 +225,15 @@ supervisor:
 ## @section Authentication
 
 ## @param auth.tokens [array] Static bearer tokens (DEPRECATED: legacy fallback, migrate with supervisor migrate-tokens).
+## @param auth.adminPassword Bootstrap admin password. When empty, a random password is generated and logged once at first boot.
+## @param auth.engineToken Token for engine cache registry auth (engine-registry-auth secret). Empty = "placeholder".
+## @param auth.engineDockerConfig Base64-encoded Docker config.json for engine image pulls (private registries).
+## @param auth.jwtSecret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
 auth:
   tokens: []
-## @param auth.jwtSecret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
+  adminPassword: ""
+  engineToken: ""
+  engineDockerConfig: ""
   jwtSecret: ""
 
 ## @section Minting CA and TLS

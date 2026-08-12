@@ -29,7 +29,7 @@ const (
 
 	engineConfigMapName  = "dagger-engine-config"
 	engineTOMLKey        = "engine.toml"
-	engineTOMLPath       = "/etc/dagger/engine.toml"
+	engineTOMLPath       = "/etc/dagger-config/engine.toml"
 	engineCAMountPath    = "/etc/ssl/certs/custom-ca.pem"
 	engineAuthSecretName = "engine-registry-auth" // holds the cache token; mounted as /etc/dagger
 	caCertFileName       = "ca.crt"               // normalized file name of the CA bundle in engine pods

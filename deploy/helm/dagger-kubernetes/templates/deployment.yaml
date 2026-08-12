@@ -38,6 +38,13 @@ spec:
               value: {{ .Values.supervisor.config.logLevel | quote }}
             - name: DAGGER_CACHE_DATABASE_PATH
               value: {{ .Values.supervisor.config.database.path | quote }}
+            {{- if .Values.auth.adminPassword }}
+            - name: DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "dagger-kubernetes.fullname" . }}-admin-password
+                  key: password
+            {{- end }}
             {{- with .Values.supervisor.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
