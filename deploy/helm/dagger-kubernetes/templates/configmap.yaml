@@ -10,7 +10,7 @@ data:
     server:
       control_addr: ":8080"
       data_addr: ":8443"
-      data_hostname: {{ .Values.supervisor.config.server.dataHostname | quote }}
+      data_hostname: {{ include "dagger-kubernetes.dataHostname" . | quote }}
       public_url: {{ .Values.supervisor.config.server.publicUrl | quote }}
     auth:
       internal:

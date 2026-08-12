@@ -32,3 +32,6 @@ spec:
     - name: tls
       port: {{ .Values.service.data.port }}
       targetPort: data
+      {{- if and (eq .Values.service.data.type "NodePort") .Values.service.data.nodePort }}
+      nodePort: {{ .Values.service.data.nodePort }}
+      {{- end }}

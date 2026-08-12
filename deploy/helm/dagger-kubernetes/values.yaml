@@ -254,16 +254,28 @@ tls:
 ## @param service.control.type Control-plane service type.
 ## @param service.control.port Control-plane service port.
 ## @param service.control.nodePort Control-plane service node port (when type=NodePort).
-## @param service.data.type Data-plane service type.
-## @param service.data.port Data-plane service port.
 service:
   control:
     type: ClusterIP
     port: 80
     nodePort: ""
+## @param service.data.type Data-plane service type. ClusterIP when using ingress passthrough.
+## @param service.data.port Data-plane service port (maps to supervisor :8443).
+## @param service.data.nodePort Data-plane node port (when type=NodePort).
+## @param service.data.ingress.enabled Expose data plane via nginx TCP passthrough.
+##   Requires manual configuration of nginx-ingress TCP services ConfigMap.
+## @param service.data.ingress.port External port for data plane TCP passthrough.
+##   Must be exposed on the ingress controller's Service.
   data:
-    type: LoadBalancer
+    type: ClusterIP
     port: 443
+    nodePort: ""
+## @param service.data.ingress.namespace Namespace where the nginx-ingress controller
+##   TCP services ConfigMap lives. Default: "nginx-ingress".
+    ingress:
+      enabled: false
+      port: 8443
+      namespace: ""
 
 ## @section Ingress
 
