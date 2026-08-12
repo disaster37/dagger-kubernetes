@@ -520,7 +520,7 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 
 	resp := EngineSpecResponse{
 		Image:      result.Image,
-		URL:        fmt.Sprintf("%s:443", s.cfg.DataHost),
+		URL:        s.cfg.DataHost,
 		Cert:       clientCert,
 		InstanceID: instanceID,
 		Location:   "k8s",
