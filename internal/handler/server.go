@@ -339,19 +339,27 @@ func (s *Server) configure() (*server.Hertz, error) {
 // per request.
 func (s *Server) buildProxies() {
 	if s.cfg.CollectorURL != "" {
-		p := s.newHertzProxy(s.cfg.CollectorURL, func(req *protocol.Request) {
-			req.Header.Del("Authorization")
-		}, "collector")
-		if p != nil {
-			p.SetErrorHandler(func(c *app.RequestContext, err error) {
-				sig, _ := c.Get(otelSignalKey)
-				signal, _ := sig.(string)
-				s.metrics.OTelIngestTotal.WithLabelValues(signal, "error").Inc()
-				s.logger.WithError(err).Error("otel proxy error")
-				c.Set(otelErrorKey, true)
-				writeError(c, consts.StatusBadGateway, "collector unreachable")
-			})
-			s.otelProxy = p
+		target, err := url.Parse(s.cfg.CollectorURL)
+		if err != nil {
+			s.logger.WithError(err).Error("invalid collector url")
+		} else {
+			p := s.newHertzProxy(s.cfg.CollectorURL, func(req *protocol.Request) {
+				req.Header.Del("Authorization")
+				req.URI().SetScheme(target.Scheme)
+				req.URI().SetHost(target.Host)
+				req.Header.SetHostBytes([]byte(target.Host))
+			}, "collector")
+			if p != nil {
+				p.SetErrorHandler(func(c *app.RequestContext, err error) {
+					sig, _ := c.Get(otelSignalKey)
+					signal, _ := sig.(string)
+					s.metrics.OTelIngestTotal.WithLabelValues(signal, "error").Inc()
+					s.logger.WithError(err).Error("otel proxy error")
+					c.Set(otelErrorKey, true)
+					writeError(c, consts.StatusBadGateway, "collector unreachable")
+				})
+				s.otelProxy = p
+			}
 		}
 	}
 
@@ -383,18 +391,26 @@ func (s *Server) buildProxies() {
 
 	if s.cfg.CacheHost != "" && s.cfg.InternalReg != "" {
 		target := fmt.Sprintf("http://%s", s.cfg.InternalReg)
-		p := s.newHertzProxy(target, func(req *protocol.Request) {
-			// The internal registry must never receive the client's
-			// supervisor credentials (CWE-522); mirrors the collector and
-			// victoria proxies.
-			req.Header.Del("Authorization")
-		}, "cache")
-		if p != nil {
-			p.SetErrorHandler(func(c *app.RequestContext, err error) {
-				s.logger.WithError(err).Error("cache proxy error")
-				writeError(c, consts.StatusBadGateway, "cache backend unreachable")
-			})
-			s.cacheProxy = p
+		u, err := url.Parse(target)
+		if err != nil {
+			s.logger.WithError(err).Error("invalid cache proxy URL")
+		} else {
+			p := s.newHertzProxy(target, func(req *protocol.Request) {
+				// The internal registry must never receive the client's
+				// supervisor credentials (CWE-522); mirrors the collector and
+				// victoria proxies.
+				req.Header.Del("Authorization")
+				req.URI().SetScheme(u.Scheme)
+				req.URI().SetHost(u.Host)
+				req.Header.SetHostBytes([]byte(u.Host))
+			}, "cache")
+			if p != nil {
+				p.SetErrorHandler(func(c *app.RequestContext, err error) {
+					s.logger.WithError(err).Error("cache proxy error")
+					writeError(c, consts.StatusBadGateway, "cache backend unreachable")
+				})
+				s.cacheProxy = p
+			}
 		}
 	}
 }
@@ -467,6 +483,7 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 
 	s.logger.WithFields(logrus.Fields{
 		"image":    req.Image,
+		"module":   req.Module,
 		"trace_id": req.TraceID,
 		"user_id":  id.UserID,
 	}).Info("engine provision request")
@@ -576,7 +593,7 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 		if signal == "traces" {
 			if body, err := c.Body(); err == nil && len(body) > 0 {
 				for _, sum := range service.ExtractTraceSummaries(body) {
-					s.attribution.Ingest(ctx, sum.TraceID, attributionUserID(id), sum.CIRepo, sum.CIProvider, sum.Version, sum.Status, sum.DurationMS, sum.StartedAt)
+					s.attribution.Ingest(ctx, sum.TraceID, attributionUserID(id), sum.CIRepo, sum.GitRemote, sum.CIProvider, sum.Version, sum.Status, sum.DurationMS, sum.StartedAt)
 				}
 			}
 		}
@@ -613,6 +630,7 @@ func (s *Server) handleFleetInfo(_ context.Context, c *app.RequestContext) {
 
 	infos, err := s.fleetManager.AllFleetInfo()
 	if err != nil {
+		s.logger.WithError(err).Error("fleet info unavailable")
 		writeError(c, consts.StatusInternalServerError, "fleet unavailable")
 		return
 	}
@@ -764,7 +782,7 @@ func writeError(c *app.RequestContext, status int, message string) {
 	c.JSON(status, ErrorResponse{Message: message})
 }
 
-func writeJSON(c *app.RequestContext, v interface{}) {
+func writeJSON(c *app.RequestContext, v any) {
 	c.JSON(consts.StatusOK, v)
 }
 
@@ -786,7 +804,7 @@ func (s *Server) adminOnly(h app.HandlerFunc) app.HandlerFunc {
 
 // decodeBody unmarshals the request body into v. On read/decode failure it
 // writes a 400 and returns false.
-func decodeBody(c *app.RequestContext, v interface{}) bool {
+func decodeBody(c *app.RequestContext, v any) bool {
 	body, err := c.Body()
 	if err != nil {
 		writeError(c, consts.StatusBadRequest, "invalid body")

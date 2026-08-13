@@ -41,17 +41,24 @@ func (a *AttributionService) Provision(ctx context.Context, traceID, userID stri
 // unbounded values (CWE-770).
 const maxIngestFieldLen = 256
 
-// Ingest enriches trace_meta from an OTLP-derived summary. When ciRepo is
+// Ingest enriches trace_meta from an OTLP-derived summary. When repo is
 // non-empty it upserts the project, resolves the group (explicit assignment
 // wins; otherwise regex auto-assign by group id order), and writes the row.
-func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo, ciProvider, version, status string, durationMS int64, startedAt time.Time) {
+func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo, gitRemote, ciProvider, version, status string, durationMS int64, startedAt time.Time) {
 	if traceID == "" || len(traceID) > maxIngestFieldLen {
 		return
 	}
+	// The pipeline identity is the CI repo slug when the run happens in CI,
+	// otherwise the git remote reported by the Dagger CLI (local runs emit
+	// "dagger.io/git.remote" but not "dagger.io/ci.repo").
+	repo := ciRepo
+	if repo == "" {
+		repo = gitRemote
+	}
 	// All fields below come from client-supplied OTLP span data; bound them
 	// before persistence.
-	if len(ciRepo) > maxIngestFieldLen {
-		ciRepo = ""
+	if len(repo) > maxIngestFieldLen {
+		repo = ""
 	}
 	if len(ciProvider) > maxIngestFieldLen {
 		ciProvider = ""
@@ -64,10 +71,10 @@ func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo
 	}
 
 	var groupID string
-	if ciRepo != "" {
-		proj, err := a.projects.GetOrCreateByName(ctx, ciRepo)
+	if repo != "" {
+		proj, err := a.projects.GetOrCreateByName(ctx, repo)
 		if err != nil {
-			a.logger.WithError(err).WithField("ci_repo", ciRepo).Warn("attribution: project upsert failed")
+			a.logger.WithError(err).WithField("ci_repo", repo).Warn("attribution: project upsert failed")
 		} else {
 			groupID = proj.GroupID
 			if groupID == "" {
@@ -80,11 +87,11 @@ func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo
 		TraceID:     traceID,
 		UserID:      userID,
 		GroupID:     groupID,
-		ProjectName: ciRepo,
+		ProjectName: repo,
 		Status:      status,
 		Version:     version,
 		CIProvider:  ciProvider,
-		CIRepo:      ciRepo,
+		CIRepo:      repo,
 		DurationMS:  durationMS,
 		StartedAt:   startedAt,
 		UpdatedAt:   time.Now().UTC(),

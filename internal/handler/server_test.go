@@ -1,17 +1,20 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/common/ut"
 	"github.com/cloudwego/hertz/pkg/route"
+	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
@@ -114,16 +117,6 @@ func TestHandleEnginesBadVersion(t *testing.T) {
 
 	if resp.Result().StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
-	}
-}
-
-func TestHandleFleetInfo(t *testing.T) {
-	s := newTestServer(t)
-	e := newTestEngine(s)
-
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
 }
 
@@ -322,3 +315,141 @@ var (
 	_ domain.SessionStore = (*service.Store)(nil)
 	_ *observ.Metrics     = (*observ.Metrics)(nil)
 )
+
+func TestHandleFleetInfoEmpty(t *testing.T) {
+	s := newTestServer(t)
+	e := newTestEngine(s)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
+	}
+
+	body := resp.Result().Body()
+	if string(body) != "[]" {
+		t.Fatalf("expected '[]', got %s", string(body))
+	}
+}
+
+func TestHandleFleetInfoJSONShape(t *testing.T) {
+	s := newTestServer(t)
+	e := newTestEngine(s)
+
+	// Seed a replica via the engines endpoint.
+	body := `{"image":"registry.dagger.io/engine:v0.21.4","trace_id":"test-fleet"}`
+	respEng := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
+		Body: strings.NewReader(body),
+		Len:  len(body),
+	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	if respEng.Result().StatusCode() != http.StatusCreated {
+		t.Fatalf("expected 201 from engines endpoint, got %d", respEng.Result().StatusCode())
+	}
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(resp.Result().Body(), &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("expected 1 fleet entry, got %d", len(decoded))
+	}
+
+	info := decoded[0]
+	for _, key := range []string{"version", "stsName", "replicas", "readyReplicas", "ordinals"} {
+		if _, ok := info[key]; !ok {
+			t.Errorf("missing camelCase key %q in response", key)
+		}
+	}
+	for _, key := range []string{"Version", "STSName", "Replicas", "ReadyReplicas", "Ordinals"} {
+		if _, ok := info[key]; ok {
+			t.Errorf("PascalCase key %q must not appear in response", key)
+		}
+	}
+
+	ordinals, ok := info["ordinals"].([]any)
+	if !ok || len(ordinals) == 0 {
+		t.Fatal("expected non-empty ordinals array")
+	}
+	replica := ordinals[0].(map[string]any)
+	for _, key := range []string{"name", "ordinal", "podIP", "ready", "startedAt", "pinnedSessions"} {
+		if _, ok := replica[key]; !ok {
+			t.Errorf("missing replica camelCase key %q", key)
+		}
+	}
+}
+
+// faultyProvider wraps StubProvider and fails AllVersions to simulate k8s errors.
+type faultyProvider struct {
+	*repository.StubProvider
+}
+
+func (p *faultyProvider) AllVersions() ([]string, error) {
+	return nil, fmt.Errorf("simulated k8s failure")
+}
+
+func TestHandleFleetInfoError(t *testing.T) {
+	buf := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buf)
+	logger.SetFormatter(&logrus.JSONFormatter{})
+
+	authSvc := service.NewAuthService(
+		service.AuthServiceConfig{Disabled: true},
+		nil, nil, nil, nil, nil, logger,
+	)
+
+	provider := &faultyProvider{StubProvider: repository.NewStubProvider()}
+	sessions := service.NewStore(2 * time.Minute)
+	mintingCA, err := repository.NewMintingCA(2 * time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+	vr, err := service.NewResolver("v0.19.0", nil, nil)
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+
+	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
+		MaxReplicasPerVersion: 3,
+		MaxSessionsPerReplica: 8,
+		ReplicaIdleTTL:        5 * time.Minute,
+	}, logger, observ.NewMetrics(nil))
+
+	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
+	traces := repository.NewSpanTreeReconstructor("")
+	logsClient := repository.NewLogsClient("")
+
+	srv := NewServer(&ServerConfig{
+		ControlAddr: ":0",
+		DataAddr:    ":0",
+		DataHost:    "localhost",
+	}, &Deps{
+		Logger:          logger,
+		Metrics:         observ.NewMetrics(nil),
+		MintingCA:       mintingCA,
+		FleetManager:    fleetManager,
+		Sessions:        sessions,
+		CacheBackend:    cacheBackend,
+		VersionResolver: vr,
+		Auth:            authSvc,
+		AuthDisabled:    true,
+		Traces:          traces,
+		Logs:            logsClient,
+	})
+
+	e := newTestEngine(srv)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
+	if resp.Result().StatusCode() != http.StatusInternalServerError {
+		t.Fatalf("expected 500, got %d", resp.Result().StatusCode())
+	}
+
+	logOutput := buf.String()
+	if !strings.Contains(logOutput, "fleet info unavailable") {
+		t.Errorf("expected log message 'fleet info unavailable', got: %s", logOutput)
+	}
+}

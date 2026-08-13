@@ -416,7 +416,9 @@ func createProvider(cfg *domain.Config, logger *logrus.Logger) (domain.FleetProv
 	}
 	clientset, err := newK8sClientset()
 	if err != nil {
-		logger.WithError(err).Warn("failed to create k8s clientset, using stub provider")
+		logger.WithError(err).WithField("fleet_provider", "stub").Error(
+			"k8s clientset unavailable; falling back to in-memory stub provider — " +
+				"engine fleet will be empty and provisioning will not persist")
 		return repository.NewStubProvider(), nil
 	}
 

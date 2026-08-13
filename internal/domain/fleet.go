@@ -7,21 +7,21 @@ import (
 )
 
 type Replica struct {
-	Name           string
-	Ordinal        int
-	Version        string
-	PodIP          string
-	Ready          bool
-	StartedAt      time.Time
-	PinnedSessions int
+	Name           string    `json:"name"`
+	Ordinal        int       `json:"ordinal"`
+	Version        string    `json:"version"`
+	PodIP          string    `json:"podIP"`
+	Ready          bool      `json:"ready"`
+	StartedAt      time.Time `json:"startedAt"`
+	PinnedSessions int       `json:"pinnedSessions"`
 }
 
 type FleetInfo struct {
-	Version       string
-	STSName       string
-	Replicas      int
-	ReadyReplicas int
-	Ordinals      []Replica
+	Version       string    `json:"version"`
+	STSName       string    `json:"stsName"`
+	Replicas      int       `json:"replicas"`
+	ReadyReplicas int       `json:"readyReplicas"`
+	Ordinals      []Replica `json:"ordinals"`
 }
 
 type AcquireResult struct {

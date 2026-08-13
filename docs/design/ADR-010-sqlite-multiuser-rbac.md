@@ -43,7 +43,10 @@ Introduce a persistent multi-user store backed by SQLite
    `trace_id → user_id`; `POST /v1/traces` OTLP ingest parses root-span attrs
    best-effort, upserts the project, resolves the group (explicit assignment
    wins; otherwise regex auto-assign by group id order), and enriches
-   `trace_meta`. Group is set once (first resolution wins).
+   `trace_meta`. Group is set once (first resolution wins). The pipeline
+   identity (`project_name`/`ci_repo`) is the CI repo slug
+   (`dagger.io/ci.repo`) when present, otherwise the git remote
+   (`dagger.io/git.remote`) reported by the Dagger CLI for local runs.
 8. **Zero-breakage migration**: legacy flat-file tokens still authenticate
    (running as a synthetic `legacy` admin identity) until
    `auth.internal.tokens_file` is removed. `supervisor migrate-tokens` imports

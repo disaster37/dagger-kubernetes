@@ -58,13 +58,13 @@ spec:
               mountPath: /etc/dagger-kubernetes
               readOnly: true
             - name: tokens
-              mountPath: /etc/dagger-kubernetes/tokens
+              mountPath: /etc/dagger-cache/tokens
               subPath: tokens
               readOnly: true
             - name: tls
               mountPath: /etc/dagger-kubernetes/tls
               readOnly: true
-            {{- if .Values.dataCert.enabled }}
+            {{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName }}
             - name: data-tls
               mountPath: /etc/dagger-kubernetes/data-tls
               readOnly: true
@@ -102,10 +102,10 @@ spec:
         - name: tls
           secret:
             secretName: {{ include "dagger-kubernetes.fullname" . }}-tls
-        {{- if .Values.dataCert.enabled }}
+        {{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName }}
         - name: data-tls
           secret:
-            secretName: {{ .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
+            secretName: {{ .Values.dataIngress.tls.secretName | default .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
         {{- end }}
         - name: tmp
           emptyDir: {}

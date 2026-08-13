@@ -634,7 +634,10 @@ It is always served by the control plane at `/` and trace links like
 `/traces/<id>`. No separate configuration is needed.
 
 Features:
-- **Pipeline list** — all CI runs with status, duration, engine version
+- **Pipeline list** — every run identified by a friendly name (`@username · org/repo`,
+  or the root-folder/module name when there is no git repo) with status,
+  duration, and engine version; the raw trace ID is shown as a secondary
+  reference under the name
 - **Trace viewer** — waterfall view of spans, with child/parent relationships
 - **Live view** — SSE-streamed trace updates during execution
 - **Log viewer** — log lines correlated by trace ID, queried from Loki

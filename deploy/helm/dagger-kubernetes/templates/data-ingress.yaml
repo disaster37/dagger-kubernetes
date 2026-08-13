@@ -18,6 +18,9 @@ spec:
   tls:
     - hosts:
         - {{ .Values.dataIngress.host | quote }}
+      {{- if .Values.dataIngress.tls.secretName }}
+      secretName: {{ .Values.dataIngress.tls.secretName | quote }}
+      {{- end }}
   rules:
     - host: {{ .Values.dataIngress.host | quote }}
       http:

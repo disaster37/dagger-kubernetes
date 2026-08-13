@@ -1,183 +1,171 @@
 package service
 
 import (
-	"encoding/json"
-	"strconv"
+	"encoding/hex"
 	"time"
+
+	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 )
 
 // TraceIngestSummary is the parsed root-span metadata extracted from an OTLP
-// HTTP/JSON body, used to enrich trace_meta during ingest.
+// HTTP/protobuf body, used to enrich trace_meta during ingest.
 type TraceIngestSummary struct {
 	TraceID    string
-	CIRepo     string // from root span attr "dagger.io/ci.repo"
-	CIProvider string // "dagger.io/ci"
-	Version    string // "dagger.io/engine.version"
+	CIRepo     string // resource attr "dagger.io/ci.repo"
+	GitRemote  string // resource attr "dagger.io/git.remote" (org/repo, no scheme)
+	CIProvider string // resource attr "dagger.io/ci"
+	Version    string // resource attr "dagger.io/engine.version"
 	Status     string // root span status code mapping
 	DurationMS int64  // root span end-start when both present
 	StartedAt  time.Time
 }
 
-// otlpSpan is a minimal subset of the OTLP/HTTP JSON span shape.
-type otlpSpan struct {
-	TraceID        string     `json:"traceId"`
-	SpanID         string     `json:"spanId"`
-	ParentSpanID   string     `json:"parentSpanId"`
-	Name           string     `json:"name"`
-	StartTimeUnixN string     `json:"startTimeUnixNano"`
-	EndTimeUnixN   string     `json:"endTimeUnixNano"`
-	Status         otlpStatus `json:"status"`
-	Attributes     []otlpAttr `json:"attributes"`
+// spanWithResource pairs a span with the resource attributes of the batch that
+// produced it (resource attributes are inherited by every span in the batch).
+type spanWithResource struct {
+	span     *tracepb.Span
+	resource map[string]string
 }
 
-type otlpStatus struct {
-	Code float64 `json:"code"`
-}
-
-type otlpAttr struct {
-	Key   string          `json:"key"`
-	Value json.RawMessage `json:"value"`
-}
-
-// ExtractTraceSummaries parses an OTLP/HTTP JSON body and returns one summary
-// per distinct root trace (root = span whose parentSpanID is absent among the
-// payload's span IDs). Malformed JSON yields nil (caller proceeds without
-// metadata). Tolerates both the resourceSpans and the batches (Tempo) shapes.
+// ExtractTraceSummaries parses an OTLP/HTTP protobuf body (ExportTraceServiceRequest)
+// and returns one summary per distinct root trace (root = span whose parent is
+// absent among the payload's span IDs). Malformed bodies yield nil (caller
+// proceeds without metadata).
+//
+// The top-level ExportTraceServiceRequest message only wraps
+// "repeated ResourceSpans resource_spans = 1"; its envelope is walked with
+// protowire so the collector package (which drags in the gRPC gateway) is not
+// imported, then each ResourceSpans is decoded with the typed trace proto.
 func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
 	if len(body) == 0 {
 		return nil
 	}
-	var raw map[string]json.RawMessage
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil
+
+	var spans []spanWithResource
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			return nil
+		}
+		body = body[n:]
+		if num == 1 && typ == protowire.BytesType {
+			rsBytes, n := protowire.ConsumeBytes(body)
+			if n < 0 {
+				return nil
+			}
+			body = body[n:]
+
+			var rs tracepb.ResourceSpans
+			if err := proto.Unmarshal(rsBytes, &rs); err != nil {
+				return nil
+			}
+			resource := stringAttrs(rs.GetResource().GetAttributes())
+			for _, ss := range rs.GetScopeSpans() {
+				for _, sp := range ss.GetSpans() {
+					spans = append(spans, spanWithResource{span: sp, resource: resource})
+				}
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, body)
+			if n < 0 {
+				return nil
+			}
+			body = body[n:]
+		}
 	}
 
-	spans := extractAllSpans(raw)
 	if len(spans) == 0 {
 		return nil
 	}
 
-	// Index span IDs present in this payload.
+	// Index span IDs present in this payload (raw bytes as map keys).
 	present := make(map[string]bool, len(spans))
 	for i := range spans {
-		present[spans[i].SpanID] = true
+		present[string(spans[i].span.GetSpanId())] = true
 	}
 
-	// Root = span whose parent is absent in this payload.
-	byTrace := make(map[string]*otlpSpan)
+	// Root = span whose parent is absent in this payload. First root per
+	// trace wins.
+	byTrace := make(map[string]*spanWithResource)
 	for i := range spans {
 		s := &spans[i]
-		if s.ParentSpanID == "" || !present[s.ParentSpanID] {
-			// First root per trace wins.
-			if _, ok := byTrace[s.TraceID]; !ok {
-				byTrace[s.TraceID] = s
+		if pid := string(s.span.GetParentSpanId()); pid == "" || !present[pid] {
+			tid := string(s.span.GetTraceId())
+			if _, ok := byTrace[tid]; !ok {
+				byTrace[tid] = s
 			}
 		}
 	}
 
 	out := make([]TraceIngestSummary, 0, len(byTrace))
-	for traceID, root := range byTrace {
-		out = append(out, buildSummary(traceID, root))
+	for _, root := range byTrace {
+		out = append(out, buildSummary(root))
 	}
 	return out
 }
 
-func extractAllSpans(raw map[string]json.RawMessage) []otlpSpan {
-	var spans []otlpSpan
-
-	// OTLP/HTTP shape: {resourceSpans:[{scopeSpans:[{spans:[...]}]}]}
-	for _, b := range unmarshalBatches(raw["resourceSpans"]) {
-		spans = append(spans, spansFromScopeSpans(b["scopeSpans"])...)
-	}
-
-	// Tempo shape: {batches:[{scopeSpans:[{spans:[...]}]}]} (or spans directly).
-	for _, b := range unmarshalBatches(raw["batches"]) {
-		spans = append(spans, spansFromScopeSpans(b["scopeSpans"])...)
-		// Some Tempo payloads put spans directly under the batch.
-		if direct, ok := b["spans"]; ok {
-			var s []otlpSpan
-			if err := json.Unmarshal(direct, &s); err == nil {
-				spans = append(spans, s...)
-			}
-		}
-	}
-
-	return spans
-}
-
-// unmarshalBatches decodes a top-level batch array (resourceSpans/batches).
-// A missing key or malformed array yields nil.
-func unmarshalBatches(raw json.RawMessage) []map[string]json.RawMessage {
-	if raw == nil {
-		return nil
-	}
-	var batches []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &batches); err != nil {
-		return nil
-	}
-	return batches
-}
-
-func spansFromScopeSpans(raw json.RawMessage) []otlpSpan {
-	var scopes []map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &scopes); err != nil {
-		return nil
-	}
-	var out []otlpSpan
-	for _, sc := range scopes {
-		var s []otlpSpan
-		if err := json.Unmarshal(sc["spans"], &s); err == nil {
-			out = append(out, s...)
+// stringAttrs extracts string-valued attributes from OTLP KeyValue pairs.
+// Non-string values (bools, ints, arrays) are ignored.
+func stringAttrs(kvs []*commonpb.KeyValue) map[string]string {
+	out := make(map[string]string, len(kvs))
+	for _, kv := range kvs {
+		if v, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue); ok {
+			out[kv.GetKey()] = v.StringValue
 		}
 	}
 	return out
 }
 
-func buildSummary(traceID string, root *otlpSpan) TraceIngestSummary {
-	sum := TraceIngestSummary{TraceID: traceID}
+func buildSummary(s *spanWithResource) TraceIngestSummary {
+	root := s.span
+	// The Dagger CLI's trace IDs are 16 bytes (32 hex chars); hex-encode to
+	// match the trace_id persisted at engine-provision time.
+	sum := TraceIngestSummary{TraceID: hex.EncodeToString(root.GetTraceId())}
 
 	// Status code mapping (reuse trace_store semantics).
-	switch int(root.Status.Code) {
-	case 1:
+	switch root.GetStatus().GetCode() {
+	case tracepb.Status_STATUS_CODE_OK:
 		sum.Status = "success"
-	case 2:
+	case tracepb.Status_STATUS_CODE_ERROR:
 		sum.Status = "failed"
 	default:
 		sum.Status = "unset"
 	}
 
 	// Start time + duration.
-	if startNS, err := strconv.ParseInt(root.StartTimeUnixN, 10, 64); err == nil && startNS > 0 {
+	if startNS := int64(root.GetStartTimeUnixNano()); startNS > 0 {
 		sum.StartedAt = time.Unix(0, startNS).UTC()
-		if endNS, err := strconv.ParseInt(root.EndTimeUnixN, 10, 64); err == nil && endNS > 0 {
+		if endNS := int64(root.GetEndTimeUnixNano()); endNS > 0 {
 			sum.DurationMS = (endNS - startNS) / int64(time.Millisecond)
 		}
 	}
 
-	// Attributes.
-	for _, a := range root.Attributes {
-		sv := attrStringValue(a.Value)
-		switch a.Key {
+	// Resource attributes (repo/CI metadata reported by the Dagger CLI).
+	sum.CIRepo = s.resource["dagger.io/ci.repo"]
+	sum.GitRemote = s.resource["dagger.io/git.remote"]
+	sum.CIProvider = s.resource["dagger.io/ci"]
+	sum.Version = s.resource["dagger.io/engine.version"]
+
+	// Span attributes take precedence (some engines emit these at span level).
+	for _, kv := range root.GetAttributes() {
+		sv, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue)
+		if !ok {
+			continue
+		}
+		switch kv.GetKey() {
 		case "dagger.io/ci.repo":
-			sum.CIRepo = sv
+			sum.CIRepo = sv.StringValue
+		case "dagger.io/git.remote":
+			sum.GitRemote = sv.StringValue
 		case "dagger.io/ci":
-			sum.CIProvider = sv
+			sum.CIProvider = sv.StringValue
 		case "dagger.io/engine.version":
-			sum.Version = sv
+			sum.Version = sv.StringValue
 		}
 	}
 
 	return sum
-}
-
-// attrStringValue extracts the stringValue from an OTLP attribute value, which
-// is encoded as {"stringValue":"..."} (or other typed variants we ignore).
-func attrStringValue(v json.RawMessage) string {
-	var typed struct {
-		StringValue string `json:"stringValue"`
-	}
-	if err := json.Unmarshal(v, &typed); err != nil {
-		return ""
-	}
-	return typed.StringValue
 }

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"testing"
 	"time"
@@ -169,5 +170,106 @@ func TestSweepScaleDown(t *testing.T) {
 	replicas, _ = provider.GetReplicas("v0.21.4")
 	if len(replicas) != 0 {
 		t.Fatalf("expected 0 replicas after second sweep, got %d", len(replicas))
+	}
+}
+
+func TestAllFleetInfoEmptyReturnsEmptySlice(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := NewManager(provider, sessions, ManagerConfig{
+		MaxReplicasPerVersion: 3,
+		MaxSessionsPerReplica: 8,
+		ReplicaIdleTTL:        5 * time.Minute,
+	}, observ.NewTestLogger(), observ.NewMetrics(nil))
+
+	infos, err := m.AllFleetInfo()
+	if err != nil {
+		t.Fatalf("AllFleetInfo: %v", err)
+	}
+	if infos == nil {
+		t.Fatal("infos must not be nil (JSON must marshal to [], not null)")
+	}
+	if len(infos) != 0 {
+		t.Fatalf("expected empty slice, got %d entries", len(infos))
+	}
+
+	raw, err := json.Marshal(infos)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if string(raw) != "[]" {
+		t.Fatalf("empty fleet must marshal to [], got %s", string(raw))
+	}
+}
+
+func TestAllFleetInfoJSONTags(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := NewManager(provider, sessions, ManagerConfig{
+		MaxReplicasPerVersion: 3,
+		MaxSessionsPerReplica: 8,
+		ReplicaIdleTTL:        5 * time.Minute,
+	}, observ.NewTestLogger(), observ.NewMetrics(nil))
+
+	ctx := context.Background()
+	_, err := m.Acquire(ctx, "v0.21.4")
+	if err != nil {
+		t.Fatalf("Acquire: %v", err)
+	}
+
+	infos, err := m.AllFleetInfo()
+	if err != nil {
+		t.Fatalf("AllFleetInfo: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("expected 1 version, got %d", len(infos))
+	}
+
+	raw, err := json.Marshal(infos)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+
+	var decoded []map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(decoded) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(decoded))
+	}
+
+	info := decoded[0]
+
+	// Assert camelCase keys exist.
+	for _, key := range []string{"version", "stsName", "replicas", "readyReplicas", "ordinals"} {
+		if _, ok := info[key]; !ok {
+			t.Errorf("missing key %q in %s", key, string(raw))
+		}
+	}
+
+	// Assert PascalCase keys are absent.
+	for _, key := range []string{"Version", "STSName", "Replicas", "ReadyReplicas", "Ordinals"} {
+		if _, ok := info[key]; ok {
+			t.Errorf("PascalCase key %q should be absent in %s", key, string(raw))
+		}
+	}
+
+	// Assert nested replica keys.
+	ordinals, ok := info["ordinals"].([]any)
+	if !ok || len(ordinals) == 0 {
+		t.Fatal("expected non-empty ordinals array")
+	}
+	replica := ordinals[0].(map[string]any)
+	for _, key := range []string{"name", "ordinal", "version", "podIP", "ready", "startedAt", "pinnedSessions"} {
+		if _, ok := replica[key]; !ok {
+			t.Errorf("missing replica key %q in %s", key, string(raw))
+		}
+	}
+	for _, key := range []string{"Name", "Ordinal", "PodIP", "Ready", "StartedAt", "PinnedSessions"} {
+		if _, ok := replica[key]; ok {
+			t.Errorf("PascalCase replica key %q should be absent in %s", key, string(raw))
+		}
 	}
 }

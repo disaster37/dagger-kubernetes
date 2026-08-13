@@ -44,16 +44,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* Resolve the OCI cache registry: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.cacheRegistry" -}}
 {{- if .Values.tools.registry.enabled -}}
-{{- printf "%s-docker-registry:5000/dagger-cache" .Release.Name -}}
+{{- printf "%s-registry:5000/dagger-cache" .Release.Name -}}
 {{- else -}}
-{{- default (printf "%s-docker-registry:5000/dagger-cache" .Release.Name) .Values.supervisor.config.cache.registry -}}
+{{- default (printf "%s-registry:5000/dagger-cache" .Release.Name) .Values.supervisor.config.cache.registry -}}
 {{- end -}}
 {{- end -}}
 
 {{/* Resolve the Tempo URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.tempoUrl" -}}
 {{- if .Values.tools.tempo.enabled -}}
-{{- printf "http://%s-tempo:3100" .Release.Name -}}
+{{- printf "http://%s-tempo:3200" .Release.Name -}}
 {{- else -}}
 {{- default "http://tempo:3200" .Values.supervisor.config.telemetry.tempoUrl -}}
 {{- end -}}
@@ -82,7 +82,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.victoriaUrl" -}}
 {{- if .Values.tools.victoria.enabled -}}
-{{- printf "http://%s-victoria-metrics-single:8428" .Release.Name -}}
+{{- printf "http://%s-victoria-server:8428" .Release.Name -}}
 {{- else -}}
 {{- default "http://victoria:8428" .Values.supervisor.config.telemetry.victoriaUrl -}}
 {{- end -}}

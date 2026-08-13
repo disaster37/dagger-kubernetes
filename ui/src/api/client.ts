@@ -2,6 +2,7 @@ import axios, { type AxiosError, type AxiosRequestConfig } from 'axios'
 import { useAuthStore } from '@/stores/auth'
 import type {
   AuthUser,
+  FleetInfo,
   Group,
   GroupSummary,
   LoginResponse,
@@ -173,9 +174,9 @@ export async function fetchTrace(id: string): Promise<TraceRow> {
   const { data } = await api.get(`/api/v1/traces/${id}`)
   return data
 }
-export async function fetchFleetInfo(): Promise<any[]> {
+export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')
-  return data as any[]
+  return (data as FleetInfo[] | null) ?? []
 }
 export async function fetchCacheInfo(): Promise<{ backend: string; registry: string }> {
   const { data } = await api.get('/api/v1/cache')

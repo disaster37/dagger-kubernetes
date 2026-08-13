@@ -207,6 +207,13 @@ supervisor:
 ## @param supervisor.config.ca.clientCertTtl Client certificate TTL.
     ca:
       clientCertTtl: "2h"
+## @param supervisor.config.tls.provider TLS provider for the control plane ("embedded" or "cert-manager").
+## @param supervisor.config.tls.certPath Control-plane certificate path (empty = TLS disabled).
+## @param supervisor.config.tls.keyPath Control-plane key path (empty = TLS disabled).
+    tls:
+      provider: "embedded"
+      certPath: ""
+      keyPath: ""
 ## @param supervisor.config.leaseTtl Engine session lease TTL.
     leaseTtl: "2m"
 ## @param supervisor.config.version.floor Minimum supported Dagger engine version.
@@ -298,11 +305,18 @@ ingress:
 ##   Must resolve to the same IP as the control plane ingress.
 ## @param dataIngress.className Ingress class name.
 ## @param dataIngress.annotations [object] Additional ingress annotations.
+## @param dataIngress.tls.secretName [string] Secret name for the data-plane TLS cert.
+##   When set, cert-manager issues a Let's Encrypt certificate from this Ingress
+##   (add the annotation `cert-manager.io/cluster-issuer: <issuer>` to dataIngress.annotations).
+##   The secret is mounted into the supervisor, which serves it over ssl-passthrough.
+##   Takes precedence over dataCert.secretName.
 dataIngress:
   enabled: false
   host: "data.supv.example.com"
   className: ""
   annotations: {}
+  tls:
+    secretName: ""
 
 ## @section Data-plane certificate (cert-manager)
 
@@ -380,6 +394,12 @@ opentelemetry-collector:
             endpoint: 0.0.0.0:4318
     processors:
       batch: {}
+      transform/logs:
+        log_statements:
+          - context: log
+            statements:
+              - set(attributes["trace_id"], trace_id.string)
+              - set(attributes["loki.attribute.labels"], "trace_id")
     exporters:
       otlphttp/tempo:
         endpoint: http://{{ .Release.Name }}-tempo:4318
@@ -390,7 +410,7 @@ opentelemetry-collector:
         tls:
           insecure: true
       prometheusremotewrite:
-        endpoint: http://{{ .Release.Name }}-victoria-metrics-single:8428/prometheus/api/v1/write
+        endpoint: http://{{ .Release.Name }}-victoria-server:8428/prometheus/api/v1/write
         tls:
           insecure: true
     service:
@@ -401,7 +421,7 @@ opentelemetry-collector:
           exporters: [otlphttp/tempo]
         logs:
           receivers: [otlp]
-          processors: [batch]
+          processors: [transform/logs, batch]
           exporters: [loki]
         metrics:
           receivers: [otlp]
@@ -459,6 +479,14 @@ loki:
   write:
     replicas: 0
   loki:
+    ## @param loki.auth_enabled Enable Loki multi-tenancy/auth. Disabled because
+    ## the supervisor and OTel collector talk to Loki without an X-Scope-OrgID.
+    auth_enabled: false
+    ## @param loki.commonConfig.replication_factor Loki replication factor.
+    ## Must be 1 for SingleBinary mode (single replica), otherwise writes fail
+    ## with "at least 2 live replicas required".
+    commonConfig:
+      replication_factor: 1
     useTestSchema: true
     storage:
       bucketNames:

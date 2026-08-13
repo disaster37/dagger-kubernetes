@@ -13,7 +13,7 @@ data:
     datasources:
       - name: Tempo
         type: tempo
-        url: "http://{{ .Release.Name }}-tempo:3100"
+        url: "http://{{ .Release.Name }}-tempo:3200"
         access: proxy
         jsonData:
           tracesToLogsV2:
@@ -29,7 +29,7 @@ data:
         access: proxy
       - name: VictoriaMetrics
         type: prometheus
-        url: "http://{{ .Release.Name }}-victoria-metrics-single:8428"
+        url: "http://{{ .Release.Name }}-victoria-server:8428"
         access: proxy
         isDefault: true
         jsonData:

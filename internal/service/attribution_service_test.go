@@ -53,7 +53,7 @@ func TestAttributionIngestExplicitAssignment(t *testing.T) {
 	g, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true})
 	proj, _ := asvc.projects.Create(ctx, "github.com/acme/api", g.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "github", "v0.21.4", "success", 1000, time.Now().UTC())
+	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 1000, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != g.ID {
@@ -79,7 +79,7 @@ func TestAttributionIngestRegexAutoAssign(t *testing.T) {
 	// re-create so g1 has the lower id by insertion order — but ids are random.
 	// Instead, verify the assigned group is one of the two and the project is
 	// assigned.)
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "github", "v0.21.4", "success", 1000, time.Now().UTC())
+	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 1000, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID == "" {
@@ -111,7 +111,7 @@ func TestAttributionIngestInvalidRegexSkipped(t *testing.T) {
 	_ = asvc.groups.Create(ctx, gBad)
 	gGood, _ := gsvc.Create(ctx, GroupInput{Name: "GoodPat", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID == "" {
 		t.Fatal("expected auto-assign via good pattern")
@@ -128,7 +128,7 @@ func TestAttributionIngestGroupSetOnce(t *testing.T) {
 	g1, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true})
 	asvc.projects.Create(ctx, "github.com/acme/api", g1.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "github", "v0.21.4", "success", 100, time.Now().UTC())
+	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 100, time.Now().UTC())
 
 	// Reassign the project to a different group; the existing trace's group
 	// must NOT change (set-once).
@@ -136,7 +136,7 @@ func TestAttributionIngestGroupSetOnce(t *testing.T) {
 	proj, _ := r.projects.GetByName(ctx, "github.com/acme/api")
 	asvc.projects.Assign(ctx, proj.ID, g2.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "github", "v0.21.4", "failed", 200, time.Now().UTC())
+	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "failed", 200, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != g1.ID {
 		t.Fatalf("group_id = %q, want %s (set-once)", meta.GroupID, g1.ID)
@@ -150,13 +150,54 @@ func TestAttributionIngestNoCIRepo(t *testing.T) {
 	asvc, _, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	asvc.Ingest(ctx, "t1", u.ID, "", "", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "t1", u.ID, "", "", "", "v0.21.4", "success", 0, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != "" {
 		t.Fatalf("group_id = %q, want empty (no ci_repo)", meta.GroupID)
 	}
 	if meta.UserID != u.ID {
 		t.Fatalf("user_id = %q", meta.UserID)
+	}
+}
+
+// TestAttributionIngestGitRemoteFallback verifies that a local (non-CI) run,
+// which emits "dagger.io/git.remote" but not "dagger.io/ci.repo", still gets
+// an identity persisted (project_name + ci_repo) and can auto-assign a group.
+func TestAttributionIngestGitRemoteFallback(t *testing.T) {
+	asvc, gsvc, usvc, _ := newAttributionForTest(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+	g, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+
+	asvc.Ingest(ctx, "t1", u.ID, "", "github.com/acme/api", "", "v0.21.4", "success", 0, time.Now().UTC())
+
+	meta, _ := asvc.traceMeta.Get(ctx, "t1")
+	if meta.ProjectName != "github.com/acme/api" {
+		t.Fatalf("project_name = %q, want github.com/acme/api", meta.ProjectName)
+	}
+	if meta.CIRepo != "github.com/acme/api" {
+		t.Fatalf("ci_repo = %q, want github.com/acme/api", meta.CIRepo)
+	}
+	if meta.GroupID != g.ID {
+		t.Fatalf("group_id = %q, want %s (auto-assigned via git remote)", meta.GroupID, g.ID)
+	}
+}
+
+// TestAttributionIngestCIRepoPrecedence verifies the CI repo slug wins over
+// the git remote when both are present (existing behavior preserved).
+func TestAttributionIngestCIRepoPrecedence(t *testing.T) {
+	asvc, _, usvc, _ := newAttributionForTest(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+
+	asvc.Ingest(ctx, "t1", u.ID, "github.com/ci/slug", "github.com/git/remote", "github", "v0.21.4", "success", 0, time.Now().UTC())
+
+	meta, _ := asvc.traceMeta.Get(ctx, "t1")
+	if meta.ProjectName != "github.com/ci/slug" {
+		t.Fatalf("project_name = %q, want github.com/ci/slug (ci.repo wins)", meta.ProjectName)
+	}
+	if meta.CIRepo != "github.com/ci/slug" {
+		t.Fatalf("ci_repo = %q, want github.com/ci/slug", meta.CIRepo)
 	}
 }
 
@@ -169,13 +210,13 @@ func TestAttributionIngestBoundsFields(t *testing.T) {
 	u := seedUserSvc(t, usvc, "u1")
 
 	// Oversized trace ID: dropped entirely.
-	asvc.Ingest(ctx, strings.Repeat("t", maxIngestFieldLen+1), u.ID, "github.com/acme/api", "", "", "", 0, time.Time{})
+	asvc.Ingest(ctx, strings.Repeat("t", maxIngestFieldLen+1), u.ID, "github.com/acme/api", "", "", "", "", 0, time.Time{})
 	if _, err := asvc.traceMeta.Get(ctx, strings.Repeat("t", maxIngestFieldLen+1)); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("oversized trace_id should not be persisted: %v", err)
 	}
 
 	// Oversized ci_repo: treated as absent (no project row created).
-	asvc.Ingest(ctx, "t-big-repo", u.ID, strings.Repeat("r", maxIngestFieldLen+1), "github", "v0.21.4", "success", 0, time.Time{})
+	asvc.Ingest(ctx, "t-big-repo", u.ID, strings.Repeat("r", maxIngestFieldLen+1), "", "github", "v0.21.4", "success", 0, time.Time{})
 	meta, err := asvc.traceMeta.Get(ctx, "t-big-repo")
 	if err != nil {
 		t.Fatalf("Get: %v", err)

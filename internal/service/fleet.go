@@ -235,7 +235,7 @@ func (m *Manager) AllFleetInfo() ([]domain.FleetInfo, error) {
 		return nil, fmt.Errorf("all versions: %w", err)
 	}
 
-	var infos []domain.FleetInfo
+	infos := make([]domain.FleetInfo, 0, len(versions))
 	for _, v := range versions {
 		info, err := m.GetVersionFleet(v)
 		if err != nil {

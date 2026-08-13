@@ -15,27 +15,28 @@
       <table>
         <thead>
           <tr>
-            <th>Trace ID</th>
+            <th>Pipeline</th>
             <th>Status</th>
             <th>Version</th>
             <th>Duration</th>
             <th>CI</th>
             <th>Group</th>
-            <th>Project</th>
             <th></th>
           </tr>
         </thead>
         <tbody>
           <tr v-for="trace in traces" :key="trace.trace_id">
-            <td><code>{{ trace.trace_id }}</code></td>
+            <td>
+              <div class="pipeline-identity">{{ identity(trace) }}</div>
+              <code class="pipeline-trace-id">{{ trace.trace_id }}</code>
+            </td>
             <td>
               <span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span>
             </td>
             <td>{{ trace.version || '-' }}</td>
             <td>{{ formatDuration(trace.duration_ms) }}</td>
-            <td>{{ trace.ci_provider || '-' }}</td>
+            <td>{{ ciLabel(trace.ci_provider) }}</td>
             <td>{{ trace.group_name || '-' }}</td>
-            <td>{{ trace.project_name || trace.ci_repo || '-' }}</td>
             <td>
               <router-link :to="`/pipelines/${trace.trace_id}`" class="btn">View DAG</router-link>
             </td>
@@ -84,4 +85,59 @@ function formatDuration(ms: number): string {
   const m = Math.floor(s / 60)
   return `${m}m ${(s % 60).toFixed(0)}s`
 }
+
+// Derive a short, human-friendly name from the repo/project identity:
+//   https://github.com/org/repo.git -> org/repo
+//   github.com/org/repo            -> org/repo
+//   /path/to/folder                -> folder
+//   nogit-proj                     -> nogit-proj
+function shortDisplayName(v: string): string {
+  let s = (v || '').trim()
+  if (!s) return ''
+  s = s.replace(/^[a-z][a-z0-9+.-]*:\/\//i, '') // strip scheme (https://, git://, ...)
+  const scp = s.match(/^[^@\s]+@[^:\s]+:(.+)$/)  // scp-style git@host:org/repo
+  if (scp) s = scp[1]
+  s = s.replace(/\.git$/, '')                    // strip .git suffix
+  s = s.replace(/[@#].*$/, '')                   // strip @ref / #ref
+  s = s.replace(/\/+$/, '')                      // strip trailing slashes
+  const seg = s.split('/').filter(Boolean)
+  if (seg.length === 0) return ''
+  // host/org/repo -> org/repo
+  if (seg.length >= 3 && seg[0].includes('.')) {
+    return `${seg[seg.length - 2]}/${seg[seg.length - 1]}`
+  }
+  // filesystem path or bare name -> basename
+  return seg[seg.length - 1]
+}
+
+function identity(trace: TraceRow): string {
+  const name = shortDisplayName(trace.ci_repo || trace.project_name)
+  const user = trace.username ? `@${trace.username}` : ''
+  if (user && name) return `${user} · ${name}`
+  if (user) return user
+  if (name) return name
+  return '-'
+}
+
+// The CLI reports "dagger.io/ci" as "true"/"false" (whether a CI is detected),
+// not a provider name. Render a human-friendly label for the CI column.
+function ciLabel(ci: string): string {
+  if (!ci || ci === 'false') return '-'
+  if (ci === 'true') return 'CI'
+  return ci
+}
 </script>
+
+<style scoped>
+.pipeline-identity {
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.pipeline-trace-id {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8b949e;
+}
+</style>
