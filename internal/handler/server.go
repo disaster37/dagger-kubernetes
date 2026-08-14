@@ -539,8 +539,9 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "success").Inc()
 
 	// Attribution: record trace_id -> user_id (best-effort; "" for synthetic
-	// identities that have no users-table row).
-	s.attribution.Provision(ctx, req.TraceID, attributionUserID(id))
+	// identities that have no users-table row). The engine version is persisted
+	// here too because the Dagger CLI never emits dagger.io/engine.version.
+	s.attribution.Provision(ctx, req.TraceID, attributionUserID(id), verStr)
 
 	engineURL := s.cfg.DataHost
 	if _, _, err := net.SplitHostPort(engineURL); err != nil {
@@ -589,12 +590,15 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 		}
 
 		// Best-effort attribution for traces (Hertz buffers the body, so
-		// reading it does not consume it for the reverse proxy).
-		if signal == "traces" {
-			if body, err := c.Body(); err == nil && len(body) > 0 {
-				for _, sum := range service.ExtractTraceSummaries(body) {
-					s.attribution.Ingest(ctx, sum.TraceID, attributionUserID(id), sum.CIRepo, sum.GitRemote, sum.CIProvider, sum.Version, sum.Status, sum.DurationMS, sum.StartedAt)
-				}
+		// reading it does not consume it for the reverse proxy). The same
+		// bytes are reused below to fan out live SSE re-fetch events.
+		var body []byte
+		if signal == "traces" || signal == "logs" {
+			body, _ = c.Body()
+		}
+		if signal == "traces" && len(body) > 0 {
+			for _, sum := range service.ExtractTraceSummaries(body) {
+				s.attribution.Ingest(ctx, sum.TraceID, attributionUserID(id), sum.CIRepo, sum.GitRemote, sum.CIProvider, sum.Version, sum.Status, sum.DurationMS, sum.StartedAt)
 			}
 		}
 
@@ -606,6 +610,33 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 		// Only count success when the error handler did not fire (B1).
 		if _, errored := c.Get(otelErrorKey); !errored {
 			s.metrics.OTelIngestTotal.WithLabelValues(signal, "success").Inc()
+		}
+
+		// Broadcast a lightweight re-fetch signal to live SSE subscribers,
+		// independent of proxy success.
+		s.broadcastOTelUpdate(signal, body)
+	}
+}
+
+// broadcastOTelUpdate fans out a lightweight re-fetch event to live SSE
+// subscribers for every trace ID present in the ingested OTLP body so clients
+// re-fetch steps/logs without waiting for the next poll.
+func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
+	if s.liveHub == nil || len(body) == 0 {
+		return
+	}
+	switch signal {
+	case "traces":
+		for _, traceID := range service.ExtractTraceIDs(body) {
+			if len(traceID) > 0 {
+				s.liveHub.Broadcast(traceID, map[string]string{"type": "trace_update"})
+			}
+		}
+	case "logs":
+		for _, traceID := range service.ExtractLogTraceIDs(body) {
+			if len(traceID) > 0 {
+				s.liveHub.Broadcast(traceID, map[string]string{"type": "logs_update"})
+			}
 		}
 	}
 }

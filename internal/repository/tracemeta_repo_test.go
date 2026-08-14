@@ -17,16 +17,20 @@ func TestTraceMetaRepoProvisionSetOnce(t *testing.T) {
 	u1 := seedUser(t, db, "u1")
 	u2 := seedUser(t, db, "u2")
 
-	if err := repo.UpsertProvision(ctx, "t1", u1.ID); err != nil {
+	if err := repo.UpsertProvision(ctx, "t1", u1.ID, "v0.21.4"); err != nil {
 		t.Fatalf("UpsertProvision: %v", err)
 	}
-	// Second provision by a different user must not steal the trace.
-	if err := repo.UpsertProvision(ctx, "t1", u2.ID); err != nil {
+	// Second provision by a different user must not steal the trace, and an
+	// empty version must not wipe the previously recorded one.
+	if err := repo.UpsertProvision(ctx, "t1", u2.ID, ""); err != nil {
 		t.Fatalf("UpsertProvision 2: %v", err)
 	}
 	got, _ := repo.Get(ctx, "t1")
 	if got.UserID != u1.ID {
 		t.Fatalf("user_id = %q, want %s (first writer wins)", got.UserID, u1.ID)
+	}
+	if got.Version != "v0.21.4" {
+		t.Fatalf("version = %q, want v0.21.4 (set-once)", got.Version)
 	}
 }
 

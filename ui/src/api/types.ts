@@ -59,6 +59,54 @@ export interface TraceRow {
   started_at: string
 }
 
+export interface SpanNode {
+  span_id: string
+  parent_span_id: string
+  trace_id: string
+  name: string
+  status: string
+  start_time: string
+  duration_ns: number
+  duration_ms: number
+  attributes: Record<string, string>
+  children: SpanNode[]
+}
+
+export interface TraceDetail {
+  trace_id: string
+  root_span: SpanNode | null
+  status: string
+  start_time: string
+  duration_ns: number
+  duration_ms: number
+  version: string
+  ci_provider?: string
+  ci_repo?: string
+}
+
+export interface TraceLogEntry {
+  timestamp: string
+  line: string
+  span_id?: string
+}
+
+// Frontend-only view model derived from span + logs; not part of any API contract.
+export interface ServiceInfo {
+  span: SpanNode
+  /** true while the up span has no end time (status === 'running') */
+  running: boolean
+  /** exposed host:port URL from the "tunnel started" log attributes, if present */
+  url: string | null
+  /** exposed port number, if present */
+  port: number | null
+  /** protocol string e.g. "tcp", if present */
+  protocol: string | null
+  /** tunnel description, if present */
+  description: string | null
+  /** all logs for the service subtree, sorted ascending by timestamp */
+  logs: TraceLogEntry[]
+}
+
 export interface Providers {
   internal: boolean
   oauth_github: boolean

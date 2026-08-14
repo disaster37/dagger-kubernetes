@@ -25,7 +25,7 @@ func TestAttributionProvision(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
 
-	asvc.Provision(ctx, "t1", u.ID)
+	asvc.Provision(ctx, "t1", u.ID, "v0.21.4")
 	meta, err := asvc.traceMeta.Get(ctx, "t1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -33,17 +33,24 @@ func TestAttributionProvision(t *testing.T) {
 	if meta.UserID != u.ID {
 		t.Fatalf("user_id = %q, want %s", meta.UserID, u.ID)
 	}
+	if meta.Version != "v0.21.4" {
+		t.Fatalf("version = %q, want v0.21.4", meta.Version)
+	}
 
-	// Second provision by a different user does not steal.
+	// Second provision by a different user does not steal, and an empty
+	// version does not wipe the previously recorded one.
 	u2 := seedUserSvc(t, usvc, "u2")
-	asvc.Provision(ctx, "t1", u2.ID)
+	asvc.Provision(ctx, "t1", u2.ID, "")
 	meta, _ = asvc.traceMeta.Get(ctx, "t1")
 	if meta.UserID != u.ID {
 		t.Fatalf("user_id = %q, want %s (first writer wins)", meta.UserID, u.ID)
 	}
+	if meta.Version != "v0.21.4" {
+		t.Fatalf("version = %q, want v0.21.4 (set-once)", meta.Version)
+	}
 
 	// Empty traceID is a no-op.
-	asvc.Provision(ctx, "", u.ID)
+	asvc.Provision(ctx, "", u.ID, "v0.21.4")
 }
 
 func TestAttributionIngestExplicitAssignment(t *testing.T) {

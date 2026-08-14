@@ -6,6 +6,7 @@ import (
 	"time"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	resourcepb "go.opentelemetry.io/proto/otlp/resource/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protowire"
@@ -39,6 +40,158 @@ func mustMarshalRequest(t *testing.T, rs *tracepb.ResourceSpans) []byte {
 	body := protowire.AppendTag(nil, 1, protowire.BytesType)
 	body = protowire.AppendBytes(body, rsBytes)
 	return body
+}
+
+// mustMarshalLogsRequest serializes a ResourceLogs and wraps it in the
+// ExportLogsServiceRequest envelope (repeated ResourceLogs = field 1).
+func mustMarshalLogsRequest(t *testing.T, rl *logspb.ResourceLogs) []byte {
+	t.Helper()
+	rlBytes, err := proto.Marshal(rl)
+	if err != nil {
+		t.Fatalf("marshal resource logs: %v", err)
+	}
+	body := protowire.AppendTag(nil, 1, protowire.BytesType)
+	body = protowire.AppendBytes(body, rlBytes)
+	return body
+}
+
+func TestExtractTraceIDs(t *testing.T) {
+	tests := []struct {
+		name string
+		rs   *tracepb.ResourceSpans
+		want []string
+	}{
+		{
+			name: "distinct-across-spans",
+			rs: &tracepb.ResourceSpans{
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{
+						Spans: []*tracepb.Span{
+							{TraceId: tid(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), SpanId: tid(t, "1111111111111111")},
+							{TraceId: tid(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"), SpanId: tid(t, "2222222222222222"), ParentSpanId: tid(t, "1111111111111111")},
+							{TraceId: tid(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"), SpanId: tid(t, "3333333333333333")},
+						},
+					},
+				},
+			},
+			want: []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+		},
+		{
+			name: "skips-empty-trace-id",
+			rs: &tracepb.ResourceSpans{
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{
+						Spans: []*tracepb.Span{
+							{SpanId: tid(t, "4444444444444444")},
+							{TraceId: tid(t, "cccccccccccccccccccccccccccccccc"), SpanId: tid(t, "5555555555555555")},
+						},
+					},
+				},
+			},
+			want: []string{"cccccccccccccccccccccccccccccccc"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ExtractTraceIDs(mustMarshalRequest(t, tt.rs))
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+			for i := range tt.want {
+				if got[i] != tt.want[i] {
+					t.Fatalf("got %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestExtractTraceIDsMalformed(t *testing.T) {
+	if got := ExtractTraceIDs([]byte("not protobuf")); got != nil {
+		t.Fatalf("malformed should yield nil, got %v", got)
+	}
+	if got := ExtractTraceIDs(nil); got != nil {
+		t.Fatalf("nil should yield nil, got %v", got)
+	}
+	if got := ExtractTraceIDs([]byte{}); got != nil {
+		t.Fatalf("empty should yield nil, got %v", got)
+	}
+}
+
+func TestExtractLogTraceIDs(t *testing.T) {
+	body := mustMarshalLogsRequest(t, &logspb.ResourceLogs{
+		ScopeLogs: []*logspb.ScopeLogs{
+			{
+				LogRecords: []*logspb.LogRecord{
+					{TraceId: tid(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")},
+					{TraceId: tid(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")}, // duplicate
+					{TraceId: tid(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")},
+					{}, // empty trace ID, must be skipped
+				},
+			},
+		},
+	})
+
+	got := ExtractLogTraceIDs(body)
+	want := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestExtractLogTraceIDsMultipleResourceLogs(t *testing.T) {
+	rl1 := &logspb.ResourceLogs{
+		ScopeLogs: []*logspb.ScopeLogs{
+			{LogRecords: []*logspb.LogRecord{{TraceId: tid(t, "cccccccccccccccccccccccccccccccc")}}},
+		},
+	}
+	rl2 := &logspb.ResourceLogs{
+		ScopeLogs: []*logspb.ScopeLogs{
+			{LogRecords: []*logspb.LogRecord{{TraceId: tid(t, "dddddddddddddddddddddddddddddddd")}}},
+		},
+	}
+
+	rl1Bytes, err := proto.Marshal(rl1)
+	if err != nil {
+		t.Fatalf("marshal rl1: %v", err)
+	}
+	rl2Bytes, err := proto.Marshal(rl2)
+	if err != nil {
+		t.Fatalf("marshal rl2: %v", err)
+	}
+	body := protowire.AppendTag(nil, 1, protowire.BytesType)
+	body = protowire.AppendBytes(body, rl1Bytes)
+	body = protowire.AppendTag(body, 1, protowire.BytesType)
+	body = protowire.AppendBytes(body, rl2Bytes)
+
+	got := ExtractLogTraceIDs(body)
+	want := []string{"cccccccccccccccccccccccccccccccc", "dddddddddddddddddddddddddddddddd"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v, want %v", got, want)
+		}
+	}
+}
+
+func TestExtractLogTraceIDsMalformed(t *testing.T) {
+	if got := ExtractLogTraceIDs([]byte("not protobuf")); got != nil {
+		t.Fatalf("malformed should yield nil, got %v", got)
+	}
+	if got := ExtractLogTraceIDs(nil); got != nil {
+		t.Fatalf("nil should yield nil, got %v", got)
+	}
+	if got := ExtractLogTraceIDs([]byte{}); got != nil {
+		t.Fatalf("empty should yield nil, got %v", got)
+	}
 }
 
 func TestExtractTraceSummariesResourceSpans(t *testing.T) {
@@ -229,5 +382,71 @@ func TestExtractTraceSummariesMalformed(t *testing.T) {
 	}
 	if sums := ExtractTraceSummaries([]byte{}); sums != nil {
 		t.Fatalf("empty should yield nil, got %v", sums)
+	}
+}
+
+func TestExtractTraceSummariesCIProvider(t *testing.T) {
+	tests := []struct {
+		name      string
+		resource  []*commonpb.KeyValue
+		spanAttrs []*commonpb.KeyValue
+		want      string
+	}{
+		{
+			name:     "ci-true-with-vendor",
+			resource: []*commonpb.KeyValue{strAttr("dagger.io/ci", "true"), strAttr("dagger.io/ci.vendor", "github")},
+			want:     "github",
+		},
+		{
+			name:     "ci-true-no-vendor",
+			resource: []*commonpb.KeyValue{strAttr("dagger.io/ci", "true")},
+			want:     "ci",
+		},
+		{
+			name:     "ci-false-manual",
+			resource: []*commonpb.KeyValue{strAttr("dagger.io/ci", "false")},
+			want:     "",
+		},
+		{
+			name: "ci-absent-manual",
+			want: "",
+		},
+		{
+			name:     "ci-vendor-name-direct",
+			resource: []*commonpb.KeyValue{strAttr("dagger.io/ci", "gitlab")},
+			want:     "gitlab",
+		},
+		{
+			name:      "span-level-ci-provider",
+			resource:  []*commonpb.KeyValue{strAttr("dagger.io/ci", "true")},
+			spanAttrs: []*commonpb.KeyValue{strAttr("dagger.io/ci.provider", "circleci")},
+			want:      "circleci",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := mustMarshalRequest(t, &tracepb.ResourceSpans{
+				Resource: &resourcepb.Resource{Attributes: tt.resource},
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{
+						Spans: []*tracepb.Span{
+							{
+								TraceId:    tid(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+								SpanId:     tid(t, "1111111111111111"),
+								Attributes: tt.spanAttrs,
+							},
+						},
+					},
+				},
+			})
+			sums := ExtractTraceSummaries(body)
+			if len(sums) != 1 {
+				t.Fatalf("got %d summaries, want 1", len(sums))
+			}
+			if sums[0].CIProvider != tt.want {
+				t.Fatalf("ci_provider = %q, want %q", sums[0].CIProvider, tt.want)
+			}
+		})
 	}
 }

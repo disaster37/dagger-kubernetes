@@ -10,6 +10,8 @@ import type {
   Providers,
   RefreshResponse,
   TokenMeta,
+  TraceDetail,
+  TraceLogEntry,
   TraceRow,
   UserRow,
 } from '@/api/types'
@@ -170,9 +172,14 @@ export async function fetchTraces(groupId?: string): Promise<TraceRow[]> {
   const { data } = await api.get('/api/v1/traces', { params })
   return data
 }
-export async function fetchTrace(id: string): Promise<TraceRow> {
+export async function fetchTrace(id: string): Promise<TraceDetail> {
   const { data } = await api.get(`/api/v1/traces/${id}`)
   return data
+}
+export async function fetchTraceLogs(id: string): Promise<TraceLogEntry[]> {
+  const { data } = await api.get(`/api/v1/traces/${id}/logs`)
+  const entries = data?.entries ?? []
+  return entries as TraceLogEntry[]
 }
 export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')

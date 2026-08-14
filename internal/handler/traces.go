@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -46,8 +47,9 @@ func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, res)
 }
 
-// handleTracesDetail returns a single trace's span tree (Tempo). Gated by
-// authorizeTrace (owner/member/admin; unknown meta -> admin-only).
+// handleTracesDetail returns a single trace's span tree (Tempo), enriched with
+// the persisted trace_meta row. Gated by authorizeTrace (owner/member/admin;
+// unknown meta -> admin-only).
 func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 	traceID, ok := s.authorizeTraceRequest(c)
 	if !ok {
@@ -58,6 +60,36 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 		writeError(c, consts.StatusNotFound, "trace not found")
 		return
 	}
+
+	// The Tempo reconstruction derives Version/CIProvider/CIRepo from the root
+	// span's span-level attributes, which the Dagger CLI leaves empty (those are
+	// resource-level attributes dropped during reconstruction). The SQLite
+	// trace_meta row populated at provision/ingest time is authoritative, so
+	// merge it in best-effort and only fill fields Tempo left empty.
+	if meta, err := s.traceMeta.Get(context.Background(), traceID); err == nil {
+		if trace.Version == "" {
+			trace.Version = meta.Version
+		}
+		if trace.CIProvider == "" {
+			trace.CIProvider = meta.CIProvider
+		}
+		if trace.CIRepo == "" {
+			trace.CIRepo = meta.CIRepo
+			if trace.CIRepo == "" {
+				trace.CIRepo = meta.ProjectName
+			}
+		}
+		if (trace.Status == "running" || trace.Status == "") && meta.Status != "" {
+			trace.Status = meta.Status
+		}
+		if trace.DurationMS == 0 && meta.DurationMS != 0 {
+			trace.DurationMS = meta.DurationMS
+			trace.Duration = time.Duration(meta.DurationMS) * time.Millisecond
+		}
+	} else {
+		s.logger.WithError(err).WithField("trace_id", traceID).Debug("trace_meta enrichment failed")
+	}
+
 	writeJSON(c, trace)
 }
 

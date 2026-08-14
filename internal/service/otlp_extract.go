@@ -5,6 +5,7 @@ import (
 	"time"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
+	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
@@ -30,16 +31,10 @@ type spanWithResource struct {
 	resource map[string]string
 }
 
-// ExtractTraceSummaries parses an OTLP/HTTP protobuf body (ExportTraceServiceRequest)
-// and returns one summary per distinct root trace (root = span whose parent is
-// absent among the payload's span IDs). Malformed bodies yield nil (caller
-// proceeds without metadata).
-//
-// The top-level ExportTraceServiceRequest message only wraps
-// "repeated ResourceSpans resource_spans = 1"; its envelope is walked with
-// protowire so the collector package (which drags in the gRPC gateway) is not
-// imported, then each ResourceSpans is decoded with the typed trace proto.
-func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
+// extractTraceSpans walks an ExportTraceServiceRequest envelope and returns
+// every span paired with its batch's resource attributes. Malformed bodies
+// yield nil. Shared by ExtractTraceSummaries and ExtractTraceIDs.
+func extractTraceSpans(body []byte) []spanWithResource {
 	if len(body) == 0 {
 		return nil
 	}
@@ -77,6 +72,96 @@ func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
 		}
 	}
 
+	return spans
+}
+
+// ExtractTraceIDs parses an OTLP/HTTP protobuf body (ExportTraceServiceRequest)
+// and returns the distinct hex-encoded trace IDs of every span in the payload
+// (not just roots). Malformed bodies yield nil; spans without a trace ID are
+// skipped.
+func ExtractTraceIDs(body []byte) []string {
+	spans := extractTraceSpans(body)
+	if len(spans) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool, len(spans))
+	out := make([]string, 0, len(spans))
+	for i := range spans {
+		tid := hex.EncodeToString(spans[i].span.GetTraceId())
+		if tid == "" || seen[tid] {
+			continue
+		}
+		seen[tid] = true
+		out = append(out, tid)
+	}
+	return out
+}
+
+// ExtractLogTraceIDs parses an OTLP/HTTP protobuf body
+// (ExportLogsServiceRequest) and returns the distinct hex-encoded trace IDs of
+// every log record. The top-level "repeated ResourceLogs resource_logs = 1"
+// envelope is walked with protowire (same as the trace path), then each
+// ResourceLogs is decoded with the typed logs proto. Records without a trace
+// ID are skipped; malformed bodies yield nil.
+func ExtractLogTraceIDs(body []byte) []string {
+	if len(body) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]bool)
+	var out []string
+
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			return nil
+		}
+		body = body[n:]
+		if num == 1 && typ == protowire.BytesType {
+			rlBytes, n := protowire.ConsumeBytes(body)
+			if n < 0 {
+				return nil
+			}
+			body = body[n:]
+
+			var rl logspb.ResourceLogs
+			if err := proto.Unmarshal(rlBytes, &rl); err != nil {
+				return nil
+			}
+			for _, sl := range rl.GetScopeLogs() {
+				for _, lr := range sl.GetLogRecords() {
+					tid := hex.EncodeToString(lr.GetTraceId())
+					if tid == "" || seen[tid] {
+						continue
+					}
+					seen[tid] = true
+					out = append(out, tid)
+				}
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, body)
+			if n < 0 {
+				return nil
+			}
+			body = body[n:]
+		}
+	}
+
+	return out
+}
+
+// ExtractTraceSummaries parses an OTLP/HTTP protobuf body (ExportTraceServiceRequest)
+// and returns one summary per distinct root trace (root = span whose parent is
+// absent among the payload's span IDs). Malformed bodies yield nil (caller
+// proceeds without metadata).
+//
+// The top-level ExportTraceServiceRequest message only wraps
+// "repeated ResourceSpans resource_spans = 1"; its envelope is walked with
+// protowire so the collector package (which drags in the gRPC gateway) is not
+// imported, then each ResourceSpans is decoded with the typed trace proto.
+func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
+	spans := extractTraceSpans(body)
 	if len(spans) == 0 {
 		return nil
 	}
@@ -146,8 +231,12 @@ func buildSummary(s *spanWithResource) TraceIngestSummary {
 	// Resource attributes (repo/CI metadata reported by the Dagger CLI).
 	sum.CIRepo = s.resource["dagger.io/ci.repo"]
 	sum.GitRemote = s.resource["dagger.io/git.remote"]
-	sum.CIProvider = s.resource["dagger.io/ci"]
 	sum.Version = s.resource["dagger.io/engine.version"]
+	ci := s.resource["dagger.io/ci"]
+	ciVendor := s.resource["dagger.io/ci.vendor"]
+	if ciVendor == "" {
+		ciVendor = s.resource["dagger.io/ci.provider"]
+	}
 
 	// Span attributes take precedence (some engines emit these at span level).
 	for _, kv := range root.GetAttributes() {
@@ -161,10 +250,32 @@ func buildSummary(s *spanWithResource) TraceIngestSummary {
 		case "dagger.io/git.remote":
 			sum.GitRemote = sv.StringValue
 		case "dagger.io/ci":
-			sum.CIProvider = sv.StringValue
+			ci = sv.StringValue
+		case "dagger.io/ci.vendor", "dagger.io/ci.provider":
+			if ciVendor == "" {
+				ciVendor = sv.StringValue
+			}
 		case "dagger.io/engine.version":
 			sum.Version = sv.StringValue
 		}
+	}
+
+	// The Dagger CLI reports "dagger.io/ci" as a boolean string ("true"/"false").
+	// A real provider name may arrive via "dagger.io/ci.vendor" (or the legacy
+	// "dagger.io/ci.provider"); when only "true" is present we label it "ci".
+	// Absent or "false" means a manual (local) run, so no provider is recorded
+	// and the frontend renders "manual".
+	switch ci {
+	case "true":
+		if ciVendor != "" {
+			sum.CIProvider = ciVendor
+		} else {
+			sum.CIProvider = "ci"
+		}
+	case "", "false":
+		sum.CIProvider = ""
+	default:
+		sum.CIProvider = ci
 	}
 
 	return sum

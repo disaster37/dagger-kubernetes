@@ -57,7 +57,9 @@ func (h *LiveHub) Unsubscribe(traceID string, client *LiveClient) {
 	}
 }
 
-func (h *LiveHub) BroadcastSpanUpdate(traceID string, update interface{}) {
+// Broadcast marshals event to JSON and pushes it to every subscriber for the
+// given trace ID. Subscribers with a full send buffer are skipped (non-blocking).
+func (h *LiveHub) Broadcast(traceID string, event interface{}) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
 
@@ -66,7 +68,7 @@ func (h *LiveHub) BroadcastSpanUpdate(traceID string, update interface{}) {
 		return
 	}
 
-	data, err := json.Marshal(update)
+	data, err := json.Marshal(event)
 	if err != nil {
 		return
 	}
@@ -77,6 +79,11 @@ func (h *LiveHub) BroadcastSpanUpdate(traceID string, update interface{}) {
 		default:
 		}
 	}
+}
+
+// BroadcastSpanUpdate delegates to Broadcast; kept for existing callers/tests.
+func (h *LiveHub) BroadcastSpanUpdate(traceID string, update interface{}) {
+	h.Broadcast(traceID, update)
 }
 
 func (h *LiveHub) writePump(client *LiveClient) {

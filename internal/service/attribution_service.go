@@ -26,12 +26,13 @@ func NewAttributionService(projects *ProjectService, groups domain.GroupReposito
 	return &AttributionService{projects: projects, groups: groups, traceMeta: traceMeta, logger: logger}
 }
 
-// Provision records trace_id -> user_id at engine provision time.
-func (a *AttributionService) Provision(ctx context.Context, traceID, userID string) {
+// Provision records trace_id -> user_id (plus the engine version) at engine
+// provision time.
+func (a *AttributionService) Provision(ctx context.Context, traceID, userID, version string) {
 	if traceID == "" {
 		return
 	}
-	if err := a.traceMeta.UpsertProvision(ctx, traceID, userID); err != nil {
+	if err := a.traceMeta.UpsertProvision(ctx, traceID, userID, version); err != nil {
 		a.logger.WithError(err).WithField("trace_id", traceID).Warn("attribution provision failed")
 	}
 }

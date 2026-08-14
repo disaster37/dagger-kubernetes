@@ -1,6 +1,8 @@
 package repository
 
 import (
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -64,7 +66,8 @@ func (c *LogsClient) QueryTraceLogs(traceID string, start, end time.Time, limit 
 	var result struct {
 		Data struct {
 			Result []struct {
-				Values [][]string `json:"values"`
+				Stream map[string]string `json:"stream"`
+				Values [][]string        `json:"values"`
 			} `json:"result"`
 		} `json:"data"`
 	}
@@ -75,6 +78,10 @@ func (c *LogsClient) QueryTraceLogs(traceID string, start, end time.Time, limit 
 
 	var entries []domain.LogEntry
 	for _, stream := range result.Data.Result {
+		// The collector promotes the span ID to a Loki stream label as a hex
+		// string; Tempo exposes span IDs as base64, so normalise here so the
+		// frontend can match logs to spans by string equality.
+		spanID := normalizeSpanID(stream.Stream["span_id"])
 		for _, v := range stream.Values {
 			if len(v) < 2 {
 				continue
@@ -86,11 +93,37 @@ func (c *LogsClient) QueryTraceLogs(traceID string, start, end time.Time, limit 
 			entries = append(entries, domain.LogEntry{
 				Timestamp: ts,
 				Line:      v[1],
+				SpanID:    spanID,
 			})
 		}
 	}
 
 	return entries, nil
+}
+
+// normalizeSpanID converts a span ID label into the base64 form used by the
+// Tempo trace API. The collector promotes span IDs as 16-char hex strings
+// (OTTL `span_id.string`); Tempo returns 8-byte span IDs base64-encoded, so a
+// hex label is re-encoded as base64. Any other value (already-base64, or a
+// non-span value) is passed through unchanged.
+func normalizeSpanID(label string) string {
+	if len(label) != 16 || !isHexString(label) {
+		return label
+	}
+	raw, err := hex.DecodeString(label)
+	if err != nil {
+		return label
+	}
+	return base64.StdEncoding.EncodeToString(raw)
+}
+
+func isHexString(s string) bool {
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func parseNanos(s string) (time.Time, error) {

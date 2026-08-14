@@ -9,7 +9,8 @@ type SpanNode struct {
 	Name         string            `json:"name"`
 	Status       string            `json:"status"`
 	StartTime    time.Time         `json:"start_time"`
-	Duration     time.Duration     `json:"duration_ms"`
+	Duration     time.Duration     `json:"duration_ns"`
+	DurationMS   int64             `json:"duration_ms"`
 	Attributes   map[string]string `json:"attributes"`
 	Children     []*SpanNode       `json:"children"`
 	Logs         []SpanLog         `json:"logs,omitempty"`
@@ -25,7 +26,8 @@ type TraceInfo struct {
 	RootSpan   *SpanNode     `json:"root_span"`
 	Status     string        `json:"status"`
 	StartTime  time.Time     `json:"start_time"`
-	Duration   time.Duration `json:"duration_ms"`
+	Duration   time.Duration `json:"duration_ns"`
+	DurationMS int64         `json:"duration_ms"`
 	Version    string        `json:"version"`
 	CIProvider string        `json:"ci_provider,omitempty"`
 	CIRepo     string        `json:"ci_repo,omitempty"`
@@ -34,6 +36,7 @@ type TraceInfo struct {
 type LogEntry struct {
 	Timestamp time.Time `json:"timestamp"`
 	Line      string    `json:"line"`
+	SpanID    string    `json:"span_id,omitempty"`
 }
 
 type MetricResult struct {

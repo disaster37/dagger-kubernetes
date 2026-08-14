@@ -96,7 +96,7 @@ func TestAuthorizeTraceOwnerSeesOwn(t *testing.T) {
 
 	bearer, u := env.createUserAndToken(t)
 	// Seed a trace owned by alice (unassigned).
-	if err := env.server.traceMeta.UpsertProvision(ctx, "trace-own", u.ID); err != nil {
+	if err := env.server.traceMeta.UpsertProvision(ctx, "trace-own", u.ID, ""); err != nil {
 		t.Fatalf("upsert provision: %v", err)
 	}
 
@@ -123,7 +123,7 @@ func TestAuthorizeTraceNonMember404(t *testing.T) {
 	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
 	admin, _ := env.users.GetByUsername(ctx, "admin")
 	env.groups.SetMembers(ctx, g.ID, []string{admin.ID})
-	env.server.traceMeta.UpsertProvision(ctx, "trace-group", admin.ID)
+	env.server.traceMeta.UpsertProvision(ctx, "trace-group", admin.ID, "")
 	env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "trace-group", GroupID: g.ID, UserID: admin.ID})
 
 	// Non-member user gets 404 on detail.
@@ -139,7 +139,7 @@ func TestAuthorizeTraceAdminSeesAll(t *testing.T) {
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
-	env.server.traceMeta.UpsertProvision(ctx, "trace-x", "admin")
+	env.server.traceMeta.UpsertProvision(ctx, "trace-x", "admin", "")
 	// Admin sees unknown traces too (Tempo-only).
 	bearer := env.loginAsAdmin(t)
 	resp := ut.PerformRequest(e, "GET", "/api/v1/traces/unknown-trace", nil, ut.Header{Key: "Authorization", Value: bearer})

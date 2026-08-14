@@ -150,6 +150,11 @@ func (p *K8sProvider) EnsureStatefulSet(version, image string) error {
 			return fmt.Errorf("get existing statefulset %s: %w", name, getErr)
 		}
 		sts.ResourceVersion = existing.ResourceVersion
+		// buildStatefulSet always starts at 0 replicas; on update, preserve the
+		// live replica count so we don't scale down (kill) the running engine pod.
+		if existing.Spec.Replicas != nil {
+			sts.Spec.Replicas = existing.Spec.Replicas
+		}
 		_, err = p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Update(ctx, sts, metav1.UpdateOptions{})
 	}
 	if err != nil {
@@ -488,6 +493,9 @@ func (p *K8sProvider) GetReplicas(version string) ([]domain.Replica, error) {
 	var replicas []domain.Replica
 	for i := range pods.Items {
 		pod := &pods.Items[i]
+		if pod.DeletionTimestamp != nil {
+			continue
+		}
 		ordinal := p.extractOrdinal(pod.Name, version)
 		startedAt := time.Now()
 		if pod.Status.StartTime != nil {

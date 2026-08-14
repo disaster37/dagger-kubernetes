@@ -46,7 +46,7 @@ type TraceFilter struct {
 
 // TraceMetaRepository is the persistence interface for trace metadata.
 type TraceMetaRepository interface {
-	UpsertProvision(ctx context.Context, traceID, userID string) error
+	UpsertProvision(ctx context.Context, traceID, userID, version string) error
 	UpsertIngest(ctx context.Context, m *TraceMeta) error
 	Get(ctx context.Context, traceID string) (*TraceMeta, error)
 	List(ctx context.Context, f TraceFilter) ([]*TraceListResult, error)

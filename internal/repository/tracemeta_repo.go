@@ -26,13 +26,19 @@ func NewTraceMetaRepo(db *sql.DB) *TraceMetaRepo {
 	return &TraceMetaRepo{db: db}
 }
 
-// UpsertProvision records trace_id -> user_id at engine provision time. The
-// user_id is set only when the existing row's user_id is empty (first writer
-// wins), so a later re-provision by a different user does not steal the trace.
-func (r *TraceMetaRepo) UpsertProvision(ctx context.Context, traceID, userID string) error {
-	_, err := r.db.ExecContext(ctx, `INSERT INTO trace_meta(trace_id, user_id, updated_at) VALUES(?, ?, ?)
-		ON CONFLICT(trace_id) DO UPDATE SET user_id = COALESCE(NULLIF(trace_meta.user_id, ''), excluded.user_id), updated_at = excluded.updated_at`,
-		traceID, nullString(userID), time.Now().UTC())
+// UpsertProvision records trace_id -> user_id (and the engine version) at
+// provision time. The user_id is set only when the existing row's user_id is
+// empty (first writer wins), so a later re-provision by a different user does
+// not steal the trace. The version follows the same first-non-empty-wins rule,
+// so the Dagger CLI's missing "dagger.io/engine.version" attribute never wipes
+// a version recorded at provision time.
+func (r *TraceMetaRepo) UpsertProvision(ctx context.Context, traceID, userID, version string) error {
+	_, err := r.db.ExecContext(ctx, `INSERT INTO trace_meta(trace_id, user_id, version, updated_at) VALUES(?, ?, ?, ?)
+		ON CONFLICT(trace_id) DO UPDATE SET
+			user_id = COALESCE(NULLIF(trace_meta.user_id, ''), excluded.user_id),
+			version = COALESCE(NULLIF(excluded.version, ''), trace_meta.version),
+			updated_at = excluded.updated_at`,
+		traceID, nullString(userID), version, time.Now().UTC())
 	if err != nil {
 		return fmt.Errorf("upsert provision %s: %w", traceID, err)
 	}

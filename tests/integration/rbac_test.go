@@ -167,7 +167,7 @@ func TestRBACQuotaAndVisibility(t *testing.T) {
 	}
 
 	// Attribute a trace to the user (simulating OTLP ingest).
-	env.traceMeta.UpsertProvision(ctx, "trace-attr", u.ID)
+	env.traceMeta.UpsertProvision(ctx, "trace-attr", u.ID, "v0.21.4")
 	env.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{
 		TraceID: "trace-attr", UserID: u.ID, CIRepo: "github.com/acme/api",
 	})

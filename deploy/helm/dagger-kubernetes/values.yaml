@@ -399,7 +399,8 @@ opentelemetry-collector:
           - context: log
             statements:
               - set(attributes["trace_id"], trace_id.string)
-              - set(attributes["loki.attribute.labels"], "trace_id")
+              - set(attributes["span_id"], span_id.string)
+              - set(attributes["loki.attribute.labels"], "trace_id,span_id")
     exporters:
       otlphttp/tempo:
         endpoint: http://{{ .Release.Name }}-tempo:4318

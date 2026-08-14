@@ -638,9 +638,28 @@ Features:
   or the root-folder/module name when there is no git repo) with status,
   duration, and engine version; the raw trace ID is shown as a secondary
   reference under the name
-- **Trace viewer** — waterfall view of spans, with child/parent relationships
-- **Live view** — SSE-streamed trace updates during execution
-- **Log viewer** — log lines correlated by trace ID, queried from Loki
+- **Trace viewer** — compact step view: one row per high-level step (direct
+  children of the root span, with Dagger `dagger.io/ui.passthrough` spans
+  promoted) showing status and wall-clock duration. Sub-spans are collapsed
+  and summarised as a hidden count; click a step to expand. `dagger.io/ui.*`
+  boolean span attributes drive the collapse/passthrough grouping.
+- **Live updates** — the viewer subscribes to the `/api/v1/traces/:id/live`
+  SSE stream. As the supervisor ingests each OTLP trace/log batch it extracts
+  the affected trace IDs and broadcasts a lightweight `trace_update` or
+  `logs_update` event; the viewer debounces these into an immediate re-fetch
+  of steps/logs so new spans and log lines appear as the pipeline runs. A 5s
+  polling fallback remains for resilience.
+- **Duration** — shown prominently in the viewer header next to the status and
+  in the details table; the `/api/v1/traces/:id` response returns `duration_ms`
+  in milliseconds (matching the list endpoint), with the raw value available
+  as `duration_ns`
+- **Log viewer** — log lines correlated by span ID (the collector promotes
+  `trace_id` and `span_id` to Loki labels) and rendered inline under the step
+  or sub-span that produced them (`GET /api/v1/traces/:id/logs`); logs with no
+  recognisable span are grouped under a collapsed "unmatched" section. Logs
+  load on open and auto-refresh every few seconds while the pipeline is still
+  running. Dagger engine verbose progress payloads (base64 protobufs) are
+  collapsed to a placeholder rather than rendered as base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
 - **Cache status** — registry health, cache hit rates
 

@@ -675,6 +675,35 @@ func TestK8sProviderDefaults(t *testing.T) {
 	}
 }
 
+func TestK8sEnsureStatefulSetPreservesReplicaCountOnUpdate(t *testing.T) {
+	p, cs := defaultK8sProvider()
+
+	err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0")
+	if err != nil {
+		t.Fatalf("first EnsureStatefulSet: %v", err)
+	}
+
+	// Simulate Acquire scaling the set up to 1 replica.
+	if err := p.ScaleUp("v0.20.0", 1); err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+
+	// Second EnsureStatefulSet takes the update path and must NOT reset
+	// replicas back to 0.
+	if err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
+		t.Fatalf("second EnsureStatefulSet: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+
+	if sts.Spec.Replicas == nil || *sts.Spec.Replicas != 1 {
+		t.Errorf("expected 1 replica preserved on update, got %v", sts.Spec.Replicas)
+	}
+}
+
 func TestK8sEnsureStatefulSetIdempotent(t *testing.T) {
 	p, _ := defaultK8sProvider()
 
@@ -739,6 +768,69 @@ func TestK8sExtractOrdinal(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("extractOrdinal(%q, v0.20.0) = %d, want %d", tc.podName, got, tc.want)
 		}
+	}
+}
+
+func TestK8sGetReplicasSkipsTerminatingPods(t *testing.T) {
+	p, cs := defaultK8sProvider()
+
+	labels := p.engineLabels("v0.20.0")
+	now := metav1.Now()
+	terminating := metav1.Now()
+
+	pods := []*corev1.Pod{
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "dagger-engine-v0-20-0-0",
+				Namespace: "dagger-cache",
+				Labels:    labels,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "e"}}},
+			Status: corev1.PodStatus{
+				PodIP:     "10.0.0.1",
+				Phase:     corev1.PodRunning,
+				StartTime: &now,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		},
+		{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:              "dagger-engine-v0-20-0-1",
+				Namespace:         "dagger-cache",
+				Labels:            labels,
+				DeletionTimestamp: &terminating,
+			},
+			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "e"}}},
+			Status: corev1.PodStatus{
+				PodIP:     "10.0.0.2",
+				Phase:     corev1.PodRunning,
+				StartTime: &now,
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+		},
+	}
+
+	for _, pod := range pods {
+		_, err := cs.CoreV1().Pods("dagger-cache").Create(context.Background(), pod, metav1.CreateOptions{})
+		if err != nil {
+			t.Fatalf("create pod: %v", err)
+		}
+	}
+
+	replicas, err := p.GetReplicas("v0.20.0")
+	if err != nil {
+		t.Fatalf("GetReplicas: %v", err)
+	}
+
+	if len(replicas) != 1 {
+		t.Fatalf("expected 1 replica (terminating pod excluded), got %d", len(replicas))
+	}
+	if replicas[0].Name != "dagger-engine-v0-20-0-0" {
+		t.Errorf("expected pod 'dagger-engine-v0-20-0-0', got %q", replicas[0].Name)
 	}
 }
 
