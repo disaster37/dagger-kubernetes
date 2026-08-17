@@ -18,3 +18,4 @@ the decision.
 | 009  | [Clean architecture layering](ADR-009-clean-architecture-layering.md) |
 | 010  | [SQLite-backed multi-user RBAC](ADR-010-sqlite-multiuser-rbac.md) |
 | 011  | [Engine proxy, CA, and engine.toml config injection](ADR-011-engine-env-ca-config-injection.md) |
+| 012  | [MagicCache dashboard — cache stats, services status, GC, and purge](ADR-012-magiccache-dashboard.md) |

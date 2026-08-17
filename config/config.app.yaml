@@ -45,6 +45,12 @@ database:
 cache:
   backend: "registry"               # "registry" (OCI) or "s3"
   registry: "cache.reg/dagger-cache" # OCI repository for BuildKit cache blobs
+  gc:                                # auto-clean (GC) sweeper for cache blobs.
+    enabled: false                   # master switch; disabled by default.
+    max_age: "168h"                  # purge tags older than this (7d).
+    schedule: "1h"                   # background sweeper ticker interval.
+    min_refs_to_keep: 3              # always keep at least this many most-recent tags per version.
+    protect_active_versions: true    # never purge tags for versions with active fleet replicas.
 
 # --- Allowed Dagger engine versions ------------------------------------------
 version:

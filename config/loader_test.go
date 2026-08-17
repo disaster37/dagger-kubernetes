@@ -94,6 +94,21 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Fleet.EngineRegistryMirrors == nil || len(cfg.Fleet.EngineRegistryMirrors) != 0 {
 		t.Fatalf("fleet.engine_registry_mirrors default should be non-nil and empty, got %v", cfg.Fleet.EngineRegistryMirrors)
 	}
+	if cfg.Cache.GC.Enabled {
+		t.Fatal("cache.gc.enabled default should be false")
+	}
+	if cfg.Cache.GC.MaxAge != 168*time.Hour {
+		t.Fatalf("cache.gc.max_age default = %v, want 168h", cfg.Cache.GC.MaxAge)
+	}
+	if cfg.Cache.GC.Schedule != time.Hour {
+		t.Fatalf("cache.gc.schedule default = %v, want 1h", cfg.Cache.GC.Schedule)
+	}
+	if cfg.Cache.GC.MinRefsToKeep != 3 {
+		t.Fatalf("cache.gc.min_refs_to_keep default = %d, want 3", cfg.Cache.GC.MinRefsToKeep)
+	}
+	if !cfg.Cache.GC.ProtectActiveVersions {
+		t.Fatal("cache.gc.protect_active_versions default should be true")
+	}
 }
 
 func TestLoadFile(t *testing.T) {
@@ -181,6 +196,7 @@ log_format: "text"
 func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("DAGGER_CACHE_SERVER_CONTROL_ADDR", ":7070")
 	t.Setenv("DAGGER_CACHE_LOG_LEVEL", "error")
+	t.Setenv("DAGGER_CACHE_CACHE_GC_ENABLED", "true")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
@@ -192,5 +208,8 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.LogLevel != "error" {
 		t.Fatalf("env override log_level = %q, want error", cfg.LogLevel)
+	}
+	if !cfg.Cache.GC.Enabled {
+		t.Fatal("env override cache.gc.enabled = false, want true")
 	}
 }

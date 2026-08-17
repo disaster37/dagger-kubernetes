@@ -2,12 +2,16 @@ import axios, { type AxiosError, type AxiosRequestConfig } from 'axios'
 import { useAuthStore } from '@/stores/auth'
 import type {
   AuthUser,
+  CacheInfo,
   FleetInfo,
   Group,
   GroupSummary,
   LoginResponse,
+  PlatformStatus,
   Project,
   Providers,
+  PurgeRequest,
+  PurgeResult,
   RefreshResponse,
   TokenMeta,
   TraceDetail,
@@ -185,9 +189,21 @@ export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')
   return (data as FleetInfo[] | null) ?? []
 }
-export async function fetchCacheInfo(): Promise<{ backend: string; registry: string }> {
+export async function fetchCacheInfo(): Promise<CacheInfo> {
   const { data } = await api.get('/api/v1/cache')
-  return data as { backend: string; registry: string }
+  return data as CacheInfo
+}
+export async function purgeCache(payload: PurgeRequest): Promise<PurgeResult> {
+  const { data } = await api.post('/api/v1/cache/purge', payload)
+  return data as PurgeResult
+}
+export async function purgeAllCache(): Promise<PurgeResult> {
+  const { data } = await api.post('/api/v1/cache/purge-all')
+  return data as PurgeResult
+}
+export async function fetchPlatformStatus(): Promise<PlatformStatus> {
+  const { data } = await api.get('/api/v1/status')
+  return data as PlatformStatus
 }
 
 // SSE live trace stream (EventSource cannot set headers; use ?token= query param).

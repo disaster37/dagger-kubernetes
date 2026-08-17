@@ -40,6 +40,9 @@ func newTestEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/logs/:traceID", s.handleLogsRoutes)
 	e.GET("/api/v1/fleet", s.handleFleetInfo)
 	e.GET("/api/v1/cache", s.handleCacheInfo)
+	e.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
+	e.POST("/api/v1/cache/purge-all", s.adminOnly(s.handleCachePurgeAll))
+	e.GET("/api/v1/status", s.handlePlatformStatus)
 	e.GET("/api/v1/versions", s.handleAdminVersions)
 	return e
 }
@@ -52,6 +55,14 @@ func TestHandleHealthz(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
+
+	var body map[string]domain.ServiceState
+	if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["state"] != domain.ServiceOK {
+		t.Fatalf("state = %q, want ok", body["state"])
+	}
 }
 
 func TestHandleReadyz(t *testing.T) {
@@ -61,6 +72,14 @@ func TestHandleReadyz(t *testing.T) {
 	resp := ut.PerformRequest(e, "GET", "/readyz", nil)
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
+	}
+
+	var body map[string]domain.ServiceState
+	if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["state"] != domain.ServiceOK {
+		t.Fatalf("state = %q, want ok", body["state"])
 	}
 }
 
@@ -129,12 +148,15 @@ func TestHandleCacheInfo(t *testing.T) {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
 
-	var info map[string]string
+	var info domain.CacheStats
 	if err := json.Unmarshal(resp.Result().Body(), &info); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if info["backend"] != "registry" {
-		t.Fatalf("backend = %q", info["backend"])
+	if info.Backend != "registry" {
+		t.Fatalf("backend = %q", info.Backend)
+	}
+	if !info.Running {
+		t.Fatal("running should be true from stub provider")
 	}
 }
 

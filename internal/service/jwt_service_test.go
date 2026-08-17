@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -71,8 +72,12 @@ func TestJWTTamperedSignature(t *testing.T) {
 	s := newJWTService()
 	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser}
 	access, _, _ := s.IssuePair(u, nil)
-	// Tamper: flip the last char of the signature.
-	tampered := access[:len(access)-1] + string(flip(access[len(access)-1]))
+	// Tamper: flip the first character of the signature segment. The *last*
+	// base64url character of a 32-byte HS256 signature only carries 4
+	// significant bits, so flipping it occasionally decodes to the identical
+	// signature and the token still validates (flaky test).
+	sigStart := strings.LastIndexByte(access, '.') + 1
+	tampered := access[:sigStart] + string(flip(access[sigStart])) + access[sigStart+1:]
 	if _, err := s.ParseAccess(tampered); err == nil {
 		t.Fatal("tampered token should fail")
 	}

@@ -69,26 +69,29 @@ type ErrorResponse struct {
 // Deps bundles the collaborators injected into the Server. Replacing the old
 // 11-param constructor, this is far easier to maintain and construct in tests.
 type Deps struct {
-	Logger          *logrus.Logger
-	Metrics         *observ.Metrics
-	MintingCA       domain.MintingCA
-	FleetManager    *service.Manager
-	Sessions        domain.SessionStore
-	CacheBackend    domain.CacheBackend
-	VersionResolver domain.VersionResolver
-	Auth            *service.AuthService
-	AuthDisabled    bool // mirrors cfg.Auth.Internal.Enabled == false
-	Users           *service.UserService
-	Groups          *service.GroupService
-	Projects        *service.ProjectService
-	Tokens          *service.TokenService
-	Quota           *service.QuotaService
-	Attribution     *service.AttributionService
-	TraceMeta       domain.TraceMetaRepository
-	Traces          domain.TraceRepository
-	Logs            domain.LogRepository
-	OAuth           *service.GitHubOAuthService // nil when disabled
-	JWT             *service.JWTService
+	Logger             *logrus.Logger
+	Metrics            *observ.Metrics
+	MintingCA          domain.MintingCA
+	FleetManager       *service.Manager
+	Sessions           domain.SessionStore
+	CacheBackend       domain.CacheBackend
+	VersionResolver    domain.VersionResolver
+	Auth               *service.AuthService
+	AuthDisabled       bool // mirrors cfg.Auth.Internal.Enabled == false
+	Users              *service.UserService
+	Groups             *service.GroupService
+	Projects           *service.ProjectService
+	Tokens             *service.TokenService
+	Quota              *service.QuotaService
+	Attribution        *service.AttributionService
+	TraceMeta          domain.TraceMetaRepository
+	Traces             domain.TraceRepository
+	Logs               domain.LogRepository
+	OAuth              *service.GitHubOAuthService // nil when disabled
+	JWT                *service.JWTService
+	CacheStatsProvider domain.CacheStatsProvider
+	CachePurger        domain.CachePurger
+	StatusProvider     domain.StatusProvider
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -138,6 +141,10 @@ type Server struct {
 	otelProxy     *reverseproxy.ReverseProxy
 	victoriaProxy *reverseproxy.ReverseProxy
 	cacheProxy    *reverseproxy.ReverseProxy
+
+	cacheStats  domain.CacheStatsProvider
+	cachePurger domain.CachePurger
+	status      domain.StatusProvider
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -168,6 +175,10 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		jwt:          deps.JWT,
 		oauth:        deps.OAuth,
 		limiter:      newAttemptLimiter(),
+
+		cacheStats:  deps.CacheStatsProvider,
+		cachePurger: deps.CachePurger,
+		status:      deps.StatusProvider,
 	}
 }
 
@@ -273,6 +284,9 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/v1/versions", s.handleAdminVersions)
 	h.GET("/api/v1/fleet", s.handleFleetInfo)
 	h.GET("/api/v1/cache", s.handleCacheInfo)
+	h.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
+	h.POST("/api/v1/cache/purge-all", s.adminOnly(s.handleCachePurgeAll))
+	h.GET("/api/v1/status", s.handlePlatformStatus)
 
 	// Auth (public + self).
 	h.POST("/api/v1/auth/login", s.handleLogin)
@@ -440,19 +454,6 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-func (s *Server) handleHealthz(_ context.Context, c *app.RequestContext) {
-	c.SetStatusCode(consts.StatusOK)
-	_, _ = c.WriteString("ok")
-}
-
-func (s *Server) handleReadyz(_ context.Context, c *app.RequestContext) {
-	c.SetStatusCode(consts.StatusOK)
-	_, _ = c.WriteString("ready")
-}
-
-// handleEngines provisions an engine pod for the requested Dagger version.
-// Identity-aware: quota check, lease records the user, attribution records
-// the trace owner.
 func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	id, ok := s.resolveIdentity(c)
 	if !ok {
@@ -666,17 +667,6 @@ func (s *Server) handleFleetInfo(_ context.Context, c *app.RequestContext) {
 		return
 	}
 	writeJSON(c, infos)
-}
-
-func (s *Server) handleCacheInfo(_ context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
-		return
-	}
-
-	writeJSON(c, map[string]string{
-		"backend":  s.cacheBackend.BackendType(),
-		"registry": s.cacheBackend.RegistryHost(),
-	})
 }
 
 func (s *Server) handleDataConn(conn net.Conn) {

@@ -197,6 +197,21 @@ func run(c *cli.Context) error {
 	traces := repository.NewSpanTreeReconstructor(cfg.Telemetry.TempoURL)
 	logsClient := repository.NewLogsClient(cfg.Telemetry.LokiURL)
 
+	// --- Cache stats / status / GC wiring ---
+	metricsClient := repository.NewMetricsClient(cfg.Telemetry.VictoriaURL)
+
+	registryHost := cfg.Cache.InternalAddr
+	if registryHost == "" {
+		registryHost = registryHostFrom(cfg.Cache.Registry)
+	}
+	var registryClient *repository.RegistryStatsClient
+	if cfg.Cache.Backend == "registry" && registryHost != "" {
+		registryClient = repository.NewRegistryStatsClient(registryHost)
+	}
+
+	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, registryClient, metricsClient, provider, cfg.Cache.GC, logger, metrics)
+	statusSvc := service.NewStatusService(cfg, cacheBackend, registryClient, fleetManager, logger)
+
 	server := handler.NewServer(&handler.ServerConfig{
 		ControlAddr:  cfg.Server.ControlAddr,
 		DataAddr:     cfg.Server.DataAddr,
@@ -208,31 +223,37 @@ func run(c *cli.Context) error {
 		CertPath:     controlTLSCertPath,
 		KeyPath:      controlTLSKeyPath,
 	}, &handler.Deps{
-		Logger:          logger,
-		Metrics:         metrics,
-		MintingCA:       serverMintingCA,
-		FleetManager:    fleetManager,
-		Sessions:        sessions,
-		CacheBackend:    cacheBackend,
-		VersionResolver: versionResolver,
-		Auth:            authSvc,
-		AuthDisabled:    !cfg.Auth.Internal.Enabled,
-		Users:           usersSvc,
-		Groups:          groupsSvc,
-		Projects:        projectsSvc,
-		Tokens:          tokensSvc,
-		Quota:           quotaSvc,
-		Attribution:     attributionSvc,
-		TraceMeta:       traceMetaRepo,
-		Traces:          traces,
-		Logs:            logsClient,
-		OAuth:           oauthSvc,
-		JWT:             jwtSvc,
+		Logger:             logger,
+		Metrics:            metrics,
+		MintingCA:          serverMintingCA,
+		FleetManager:       fleetManager,
+		Sessions:           sessions,
+		CacheBackend:       cacheBackend,
+		VersionResolver:    versionResolver,
+		Auth:               authSvc,
+		AuthDisabled:       !cfg.Auth.Internal.Enabled,
+		Users:              usersSvc,
+		Groups:             groupsSvc,
+		Projects:           projectsSvc,
+		Tokens:             tokensSvc,
+		Quota:              quotaSvc,
+		Attribution:        attributionSvc,
+		TraceMeta:          traceMetaRepo,
+		Traces:             traces,
+		Logs:               logsClient,
+		OAuth:              oauthSvc,
+		JWT:                jwtSvc,
+		CacheStatsProvider: cacheStatsSvc,
+		CachePurger:        cacheStatsSvc,
+		StatusProvider:     statusSvc,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+
+	stopGC := cacheStatsSvc.StartGCSweeper(ctx)
+	defer stopGC()
 
 	sweepTicker := time.NewTicker(30 * time.Second)
 	defer sweepTicker.Stop()
@@ -514,6 +535,16 @@ func newK8sClientset() (kubernetes.Interface, error) {
 		return nil, fmt.Errorf("create clientset: %w", err)
 	}
 	return clientset, nil
+}
+
+// registryHostFrom strips the repository path from an OCI registry ref
+// ("cache.reg/dagger-cache" -> "cache.reg").
+func registryHostFrom(registry string) string {
+	host, _, ok := strings.Cut(registry, "/")
+	if !ok {
+		return registry
+	}
+	return host
 }
 
 // parseTolerations parses tolerations in the key[:value[:effect]] format.

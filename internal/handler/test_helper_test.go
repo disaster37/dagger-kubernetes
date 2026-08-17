@@ -109,6 +109,11 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 		Traces:          traces,
 		Logs:            logsClient,
 		JWT:             jwtSvc,
+		CacheStatsProvider: &stubCacheStatsProvider{
+			stats: &domain.CacheStats{Backend: "registry", Registry: "cache.reg/dagger-cache", Running: true, Reachable: true},
+		},
+		CachePurger:    &stubCachePurger{result: &domain.PurgeResult{}},
+		StatusProvider: &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
 	})
 
 	return &testEnv{
@@ -147,4 +152,37 @@ func (e *testEnv) createUserAndToken(t *testing.T) (string, *domain.User) {
 		t.Fatalf("generate token: %v", err)
 	}
 	return "Bearer " + plaintext, u
+}
+
+// --- stub collaborators for cache stats / purge / status handlers ---
+
+type stubCacheStatsProvider struct {
+	stats *domain.CacheStats
+	err   error
+}
+
+func (s *stubCacheStatsProvider) Stats(context.Context) (*domain.CacheStats, error) {
+	return s.stats, s.err
+}
+func (s *stubCacheStatsProvider) GCRules() domain.GCRules { return domain.GCRules{} }
+
+type stubCachePurger struct {
+	result *domain.PurgeResult
+	err    error
+}
+
+func (p *stubCachePurger) Purge(context.Context, domain.PurgeRequest) (*domain.PurgeResult, error) {
+	return p.result, p.err
+}
+func (p *stubCachePurger) PurgeAll(context.Context) (*domain.PurgeResult, error) {
+	return p.result, p.err
+}
+
+type stubStatusProvider struct {
+	status *domain.PlatformStatus
+	err    error
+}
+
+func (p *stubStatusProvider) Status(context.Context) (*domain.PlatformStatus, error) {
+	return p.status, p.err
 }

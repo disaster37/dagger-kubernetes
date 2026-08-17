@@ -27,6 +27,9 @@ go.work.sum
 # env file
 .env
 
+# Local agent deployment notes (machine-specific; contains cluster hostnames)
+AGENTS.local.md
+
 # Helm: vendored dependency archives (rebuilt via `helm dependency update`)
 deploy/helm/**/charts/*.tgz
 

@@ -300,6 +300,11 @@ inline comments. The sections below summarise the most important ones.
 |              | `registry`                  | `cache.reg/dagger-cache`          | OCI repository.                                   |
 |              | `s3.bucket` / `s3.region`    | —                                | Used only when `backend=s3`.                      |
 |              | `ref_per_version`           | `true`                           | Tag cache refs `:V<maj>-<min>-<patch>`.           |
+|              | `gc.enabled`                | `false`                          | Master switch for the cache auto-clean sweeper.   |
+|              | `gc.max_age`                | `168h`                           | Purge tags older than this (7d).                  |
+|              | `gc.schedule`               | `1h`                             | Sweeper ticker interval.                          |
+|              | `gc.min_refs_to_keep`       | `3`                              | Keep at least this many most-recent tags per minor version. |
+|              | `gc.protect_active_versions`| `true`                           | Never purge tags for versions with active replicas. |
 | `fleet`      | `namespace`                 | `dagger-cache`                   | K8s namespace for engine pods.                    |
 |              | `min_replicas_per_version`  | `0`                              | Autoscaler floor per version.                     |
 |              | `max_replicas_per_version`  | `3`                              | Autoscaler ceiling per version.                   |
@@ -456,6 +461,39 @@ cache:
     bucket: "my-dagger-cache"
     region: "us-east-1"
 ```
+
+> **Note:** cache size/object stats are only implemented for the registry
+> backend in this release; an s3-backed cache reports `total_size:-1` and an
+> "s3 cache stats not supported" note (see ADR-012).
+
+### Cache auto-clean (GC)
+
+A background sweeper can purge stale cache tags. It is **disabled by default**:
+
+```yaml
+cache:
+  gc:
+    enabled: true                 # master switch
+    max_age: "168h"               # purge tags older than 7d
+    schedule: "1h"                # sweeper interval
+    min_refs_to_keep: 3           # keep the newest N tags per minor version
+    protect_active_versions: true # never purge tags for versions with running engines
+```
+
+Age is taken from the manifest's `org.opencontainers.image.created` annotation;
+tags without it are never purged (conservative). GC never purges cache refs for
+versions that still have active engine replicas when
+`protect_active_versions` is set, even if `fleet.version_retention` would
+otherwise allow their StatefulSets to be deleted.
+
+### Purging cache (admin)
+
+The registry must be started with delete enabled
+(`REGISTRY_STORAGE_DELETE_ENABLED=true`) for purge to work. From the MagicCache
+page, admins can purge a single version's cache ref or all tags. The underlying
+endpoints are `POST /api/v1/cache/purge` and `POST /api/v1/cache/purge-all`
+(admin-only); a delete-disabled registry returns `409 "registry delete not
+enabled"`.
 
 ---
 
@@ -661,6 +699,15 @@ Features:
   running. Dagger engine verbose progress payloads (base64 protobufs) are
   collapsed to a placeholder rather than rendered as base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
+- **MagicCache dashboard** (`/cache`) — cache running state, total size,
+  object (layer) count, hit rate (from VictoriaMetrics BuildKit counters),
+  per-version cache refs (size, layers, digest, protected flag), auto-clean
+  (GC) rules with last/next run, and admin-only purge buttons
+- **Services status page** (`/services`) — every platform service
+  (supervisor, cache, collector, tempo, loki, victoria, fleet) with a
+  `ok`/`degraded`/`down`/`unknown` state and a rolled-up overall state
+- **Header status indicator** — a colored dot in the navbar (green/amber/red/
+  grey) polling `/api/v1/status` every 10s; clicking navigates to `/services`
 - **Cache status** — registry health, cache hit rates
 
 ---

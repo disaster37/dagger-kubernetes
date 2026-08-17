@@ -9,6 +9,7 @@ const router = createRouter({
     { path: '/pipelines/:id', name: 'pipeline-detail', component: () => import('@/pipeline/PipelineView.vue') },
     { path: '/cache', name: 'cache', component: () => import('@/magiccache/MagicCache.vue') },
     { path: '/fleet', name: 'fleet', component: () => import('@/fleet/Runners.vue') },
+    { path: '/services', name: 'services', component: () => import('@/views/Services.vue') },
     { path: '/settings', name: 'settings', component: () => import('@/views/Settings.vue') },
     { path: '/auth/login', name: 'login', component: () => import('@/auth/Login.vue'), meta: { public: true } },
     { path: '/auth/callback', name: 'auth-callback', component: () => import('@/auth/Callback.vue'), meta: { public: true } },

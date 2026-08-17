@@ -140,3 +140,81 @@ export interface FleetInfo {
   readyReplicas: number
   ordinals: FleetReplica[]
 }
+
+export interface CacheVersionRef {
+  version: string
+  tag: string
+  ref: string
+  size: number
+  layer_count: number
+  digest: string
+  protected: boolean
+  last_used_at?: string
+}
+
+export interface GCRunSummary {
+  started_at: string
+  finished_at: string
+  purged_tags: number
+  freed_bytes: number
+  skipped: number
+  errors: number
+  message?: string
+}
+
+export interface GCRules {
+  enabled: boolean
+  max_age: string
+  schedule: string
+  min_refs_to_keep: number
+  protect_active_versions: boolean
+  last_run_at?: string
+  last_run_summary?: GCRunSummary
+  next_run_at?: string
+}
+
+export interface CacheInfo {
+  backend: string
+  registry: string
+  running: boolean
+  reachable: boolean
+  total_size: number
+  object_count: number
+  versions: CacheVersionRef[]
+  hit_rate: number | null
+  hit_count: number
+  miss_count: number
+  collected_at: string
+  message?: string
+  gc: GCRules
+}
+
+export interface PurgeRequest {
+  version: string
+  tag?: string
+}
+
+export interface PurgeResult {
+  purged: number
+  freed_bytes: number
+  versions: string[]
+  already_purged: number
+  message?: string
+}
+
+export type ServiceState = 'ok' | 'degraded' | 'down' | 'unknown'
+
+export interface ServiceStatus {
+  name: string
+  category: string
+  state: ServiceState
+  message?: string
+  configured: boolean
+  checked_at: string
+}
+
+export interface PlatformStatus {
+  state: ServiceState
+  services: ServiceStatus[]
+  checked_at: string
+}

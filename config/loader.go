@@ -58,6 +58,12 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cache.s3.region", "")
 	v.SetDefault("cache.ref_per_version", true)
 
+	v.SetDefault("cache.gc.enabled", false)
+	v.SetDefault("cache.gc.max_age", "168h") // 7d
+	v.SetDefault("cache.gc.schedule", "1h")
+	v.SetDefault("cache.gc.min_refs_to_keep", 3)
+	v.SetDefault("cache.gc.protect_active_versions", true)
+
 	v.SetDefault("fleet.namespace", "dagger-cache")
 	v.SetDefault("fleet.max_replicas_per_version", 3)
 	v.SetDefault("fleet.max_sessions_per_replica", 8)

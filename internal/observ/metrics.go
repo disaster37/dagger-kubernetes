@@ -13,6 +13,10 @@ type Metrics struct {
 	ActiveLeases          prometheus.Gauge
 	ActiveReplicas        *prometheus.GaugeVec
 	OTelIngestTotal       *prometheus.CounterVec
+	CacheSizeBytes        prometheus.Gauge
+	CacheObjectCount      prometheus.Gauge
+	CachePurgeTotal       prometheus.Counter
+	GCRunTotal            *prometheus.CounterVec
 }
 
 // NewMetrics builds the Metrics collectors and registers them on reg when
@@ -45,6 +49,26 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_cache_otel_ingest_total",
 			Help: "Total OTLP ingest requests",
 		}, []string{"signal", "status"}),
+
+		CacheSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "dagger_cache_cache_size_bytes",
+			Help: "Total size of cache blobs observed in the OCI registry",
+		}),
+
+		CacheObjectCount: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "dagger_cache_cache_object_count",
+			Help: "Total number of cache layers/blobs observed in the OCI registry",
+		}),
+
+		CachePurgeTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "dagger_cache_cache_purge_total",
+			Help: "Total number of cache tags purged (manual + GC)",
+		}),
+
+		GCRunTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_cache_gc_run_total",
+			Help: "Total number of cache GC sweeper runs",
+		}, []string{"status"}),
 	}
 
 	if reg != nil {
@@ -54,6 +78,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.ActiveLeases,
 			m.ActiveReplicas,
 			m.OTelIngestTotal,
+			m.CacheSizeBytes,
+			m.CacheObjectCount,
+			m.CachePurgeTotal,
+			m.GCRunTotal,
 		)
 	}
 

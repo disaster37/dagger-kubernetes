@@ -80,11 +80,21 @@ type CacheConfig struct {
 	InternalAddr  string   `mapstructure:"internal_addr"`
 	S3            S3Config `mapstructure:"s3"`
 	RefPerVersion bool     `mapstructure:"ref_per_version"`
+	GC            GCConfig `mapstructure:"gc"`
 }
 
 type S3Config struct {
 	Bucket string `mapstructure:"bucket"`
 	Region string `mapstructure:"region"`
+}
+
+// GCConfig governs the cache auto-clean background sweeper.
+type GCConfig struct {
+	Enabled               bool          `mapstructure:"enabled"`
+	MaxAge                time.Duration `mapstructure:"max_age"`
+	Schedule              time.Duration `mapstructure:"schedule"`
+	MinRefsToKeep         int           `mapstructure:"min_refs_to_keep"`
+	ProtectActiveVersions bool          `mapstructure:"protect_active_versions"`
 }
 
 // EnvVarSource selects one key of a Kubernetes Secret as the value of an
