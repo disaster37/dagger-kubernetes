@@ -88,10 +88,74 @@ func Migrate(ctx context.Context, db *sql.DB) error {
 		}
 	}
 
+	// v2: add token_ciphertext column to api_tokens. Fresh v1 installs already
+	// include the column (schema.sql), so gate the ALTER on PRAGMA table_info
+	// (SQLite does not support ADD COLUMN IF NOT EXISTS).
+	var v2Count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 2").Scan(&v2Count); err != nil {
+		return fmt.Errorf("check schema_migrations v2: %w", err)
+	}
+	if v2Count == 0 {
+		hasColumn, err := apiTokensHasColumn(ctx, tx, "token_ciphertext")
+		if err != nil {
+			return err
+		}
+		if !hasColumn {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE api_tokens ADD COLUMN token_ciphertext TEXT NOT NULL DEFAULT ''`); err != nil {
+				return fmt.Errorf("alter api_tokens v2: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version, applied_at) VALUES (2, ?)", time.Now().UTC()); err != nil {
+			return fmt.Errorf("record migration v2: %w", err)
+		}
+	}
+
+	// v3: add the routing-table tables (cache_object_routes, cache_blob_routes,
+	// cache_upload_sessions). schema.sql is IF NOT EXISTS, so re-applying it
+	// creates the new tables on existing databases.
+	var v3Count int
+	if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 3").Scan(&v3Count); err != nil {
+		return fmt.Errorf("check schema_migrations v3: %w", err)
+	}
+	if v3Count == 0 {
+		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
+			return fmt.Errorf("apply schema v3: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, "INSERT INTO schema_migrations (version, applied_at) VALUES (3, ?)", time.Now().UTC()); err != nil {
+			return fmt.Errorf("record migration v3: %w", err)
+		}
+	}
+
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
 	}
 	return nil
+}
+
+// apiTokensHasColumn reports whether the api_tokens table has the given
+// column, using PRAGMA table_info (used by the v2 migration).
+func apiTokensHasColumn(ctx context.Context, tx *sql.Tx, column string) (bool, error) {
+	rows, err := tx.QueryContext(ctx, "PRAGMA table_info(api_tokens)")
+	if err != nil {
+		return false, fmt.Errorf("inspect api_tokens columns: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return false, fmt.Errorf("scan api_tokens column: %w", err)
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, fmt.Errorf("iterate api_tokens columns: %w", err)
+	}
+	return false, nil
 }
 
 // scanner is implemented by both *sql.Row and *sql.Rows.

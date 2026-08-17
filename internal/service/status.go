@@ -2,15 +2,16 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
-	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 const (
@@ -25,8 +26,8 @@ const (
 type StatusService struct {
 	cfg          *domain.Config
 	cache        *Cache
-	registry     *repository.RegistryStatsClient // may be nil (s3 backend)
-	fleetManager *Manager                        // may be nil
+	router       *RegistryRouter // may be nil (s3 backend)
+	fleetManager *Manager        // may be nil
 	logger       *logrus.Logger
 
 	mu       sync.Mutex
@@ -34,11 +35,11 @@ type StatusService struct {
 	cachedAt time.Time
 }
 
-func NewStatusService(cfg *domain.Config, cache *Cache, registry *repository.RegistryStatsClient, fleet *Manager, logger *logrus.Logger) *StatusService {
+func NewStatusService(cfg *domain.Config, cache *Cache, router *RegistryRouter, fleet *Manager, logger *logrus.Logger) *StatusService {
 	return &StatusService{
 		cfg:          cfg,
 		cache:        cache,
-		registry:     registry,
+		router:       router,
 		fleetManager: fleet,
 		logger:       logger,
 	}
@@ -101,17 +102,31 @@ func (s *StatusService) probeCache(ctx context.Context) domain.ServiceStatus {
 	}
 	switch s.cache.Type {
 	case "registry":
-		if s.registry == nil {
+		if s.router == nil || len(s.router.Backends()) == 0 {
 			st.State = domain.ServiceDown
 			st.Message = "registry not configured"
 			return st
 		}
-		if err := s.registry.Ping(ctx); err != nil {
+		var down []string
+		up := 0
+		for _, b := range s.router.Backends() {
+			client, ok := s.router.ClientByID(b.ID)
+			if !ok || client.Ping(ctx) != nil {
+				down = append(down, b.ID)
+				continue
+			}
+			up++
+		}
+		switch {
+		case up == 0:
 			st.State = domain.ServiceDown
 			st.Message = "registry unreachable"
-			return st
+		case len(down) > 0:
+			st.State = domain.ServiceDegraded
+			st.Message = fmt.Sprintf("registry backend unreachable: %s", strings.Join(down, ", "))
+		default:
+			st.State = domain.ServiceOK
 		}
-		st.State = domain.ServiceOK
 		return st
 	case "s3":
 		if s.cache.S3.Bucket == "" {

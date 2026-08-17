@@ -50,7 +50,7 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, testTokenEncKey())
 	jwtSvc := service.NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
 
 	// Bootstrap an admin user so admin routes work in tests.
@@ -85,6 +85,12 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
+	connectSvc := service.NewConnectService(&domain.Config{
+		Server:  domain.ServerConfig{PublicURL: "https://supv.example.com", DataHost: "data.example.com"},
+		Cache:   domain.CacheConfig{Backend: "registry"},
+		Version: domain.VersionConfig{Floor: "v0.19.0"},
+	}, cacheBackend, versionResolver, tokensSvc, logger)
+
 	srv := NewServer(&ServerConfig{
 		ControlAddr: ":0",
 		DataAddr:    ":0",
@@ -114,6 +120,7 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 		},
 		CachePurger:    &stubCachePurger{result: &domain.PurgeResult{}},
 		StatusProvider: &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
+		Connect:        connectSvc,
 	})
 
 	return &testEnv{
@@ -152,6 +159,12 @@ func (e *testEnv) createUserAndToken(t *testing.T) (string, *domain.User) {
 		t.Fatalf("generate token: %v", err)
 	}
 	return "Bearer " + plaintext, u
+}
+
+// testTokenEncKey returns a fixed 32-byte AES key for handler tests so tokens
+// are recoverable via the Connect-env flow.
+func testTokenEncKey() []byte {
+	return []byte("0123456789abcdef0123456789abcdef")
 }
 
 // --- stub collaborators for cache stats / purge / status handlers ---

@@ -40,6 +40,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)
 	v.SetDefault("auth.jwt.refresh_ttl", 168*time.Hour) // 7d
 
+	v.SetDefault("auth.token.encryption_key", "")
+
 	v.SetDefault("auth.bootstrap_admin.username", "admin")
 	v.SetDefault("auth.bootstrap_admin.password", "")
 
@@ -54,6 +56,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cache.registry", "cache.reg/dagger-cache")
 	v.SetDefault("cache.public_host", "")
 	v.SetDefault("cache.internal_addr", "")
+	v.SetDefault("cache.auth_token", "")
+	v.SetDefault("cache.registries", []domain.RegistryBackend{})
 	v.SetDefault("cache.s3.bucket", "")
 	v.SetDefault("cache.s3.region", "")
 	v.SetDefault("cache.ref_per_version", true)

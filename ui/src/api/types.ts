@@ -218,3 +218,28 @@ export interface PlatformStatus {
   services: ServiceStatus[]
   checked_at: string
 }
+
+export interface ConnectEnvVar {
+  name: string
+  value: string
+  required: boolean
+  secret: boolean
+  description: string
+}
+
+export interface ConnectTokenMeta {
+  exists: boolean
+  prefix: string
+  recoverable: boolean
+}
+
+export interface ConnectEnvSnapshot {
+  server_url: string
+  data_hostname: string
+  cache_backend: string
+  version_floor: string
+  allowed_versions: string[]
+  selected_version?: string
+  token: ConnectTokenMeta
+  env_vars: ConnectEnvVar[]
+}

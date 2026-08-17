@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"testing"
+	"time"
 )
 
 func TestOpenSQLiteAndMigrate(t *testing.T) {
@@ -28,16 +30,87 @@ func TestOpenSQLiteAndMigrate(t *testing.T) {
 
 func TestMigrateIdempotent(t *testing.T) {
 	db := newTestDB(t)
-	// Running migrate again must not error (v1 already recorded).
+	var before int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&before); err != nil {
+		t.Fatalf("count migrations: %v", err)
+	}
+	// Running migrate again must not error (v1 + v2 already recorded).
 	if err := Migrate(context.Background(), db); err != nil {
 		t.Fatalf("second Migrate: %v", err)
 	}
-	var n int
-	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&n); err != nil {
+	var after int
+	if err := db.QueryRow("SELECT COUNT(*) FROM schema_migrations").Scan(&after); err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
+	if after != before {
+		t.Fatalf("migrations after second run = %d, want %d", after, before)
+	}
+}
+
+// TestMigrateV2AddsColumn starts from a v1-only DB (no token_ciphertext) and
+// asserts the v2 migration adds the column and records version 2.
+func TestMigrateV2AddsColumn(t *testing.T) {
+	path := t.TempDir() + "/v1.db"
+	db, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	ctx := context.Background()
+	// Simulate a pre-v2 install: api_tokens without token_ciphertext + v1
+	// already recorded in schema_migrations.
+	if _, err := db.ExecContext(ctx, `CREATE TABLE api_tokens (
+		id           TEXT PRIMARY KEY,
+		user_id      TEXT NOT NULL UNIQUE,
+		token_hash   TEXT NOT NULL UNIQUE,
+		prefix       TEXT NOT NULL DEFAULT '',
+		created_at   DATETIME NOT NULL,
+		last_used_at DATETIME
+	)`); err != nil {
+		t.Fatalf("create v1 api_tokens: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, `CREATE TABLE schema_migrations (
+		version    INTEGER PRIMARY KEY,
+		applied_at DATETIME NOT NULL
+	)`); err != nil {
+		t.Fatalf("create schema_migrations: %v", err)
+	}
+	if _, err := db.ExecContext(ctx, "INSERT INTO schema_migrations (version, applied_at) VALUES (1, ?)", time.Now().UTC()); err != nil {
+		t.Fatalf("record v1: %v", err)
+	}
+
+	if err := Migrate(ctx, db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+
+	hasColumn := false
+	rows, err := db.QueryContext(ctx, "PRAGMA table_info(api_tokens)")
+	if err != nil {
+		t.Fatalf("pragma table_info: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var cid, notnull, pk int
+		var name, ctype string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			t.Fatalf("scan column: %v", err)
+		}
+		if name == "token_ciphertext" {
+			hasColumn = true
+		}
+	}
+	if !hasColumn {
+		t.Fatal("token_ciphertext column missing after v2 migration")
+	}
+
+	var n int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM schema_migrations WHERE version = 2").Scan(&n); err != nil {
+		t.Fatalf("count v2: %v", err)
+	}
 	if n != 1 {
-		t.Fatalf("migrations = %d, want 1", n)
+		t.Fatalf("v2 migration rows = %d, want 1", n)
 	}
 }
 

@@ -16,7 +16,7 @@ func newAuthForTest(t *testing.T, cfg AuthServiceConfig, legacy domain.TokenVali
 	trepo := newStubTokenRepo()
 	logger := testLogger()
 	usvc := NewUserService(urepo, grepo, logger)
-	tsvc := NewTokenService(trepo, logger)
+	tsvc := NewTokenService(trepo, logger, nil)
 	jwtSvc := NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
 	asvc := NewAuthService(cfg, usvc, grepo, tsvc, jwtSvc, legacy, logger)
 	return asvc, usvc, urepo, grepo

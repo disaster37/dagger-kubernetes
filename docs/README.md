@@ -150,6 +150,17 @@ Every tool is toggleable individually (`tools.<name>.enabled: false`). When
 disabled, you provide your own endpoint in `supervisor.config.telemetry` and
 `supervisor.config.cache`.
 
+The chart also wires the **cache vhost**: when `ingress.enabled`, the Ingress
+adds a host rule for `supervisor.config.cache.publicHost` (or the derived
+`cache.<server.publicUrl host>`, overridable via `ingress.cacheHost`) routing
+to the `-control` Service, and appends it to `ingress.tls[].hosts`. Set
+`supervisor.config.cache.authToken` (or leave it empty to read the
+`engine-registry-auth` Secret key `token`); the same token is injected into
+engine pods as `DAGGER_CACHE_TOKEN`. The control-plane TLS certificate must
+include the cache vhost as a SAN. For multiple backend registries, set
+`supervisor.config.cache.registries` (list of
+`{id, internalAddr, username, password}`).
+
 See [`deploy/helm/dagger-kubernetes/README.md`](../deploy/helm/dagger-kubernetes/README.md)
 for full Helm documentation, production sizing, and upgrade instructions.
 
@@ -165,9 +176,10 @@ export _EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self
 # Optional: pin an engine version (recommended for cache locality).
 export _EXPERIMENTAL_DAGGER_TAG=v0.21.4
 
-# Remote shared cache ref. With ref_per_version=true the Supervisor
-# tags cache refs per version (V0-21-4 here).
-export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=cache.reg/dagger-cache:V0-21-4,mode=max"
+# Remote shared cache ref. The Supervisor rewrites the ref to its dedicated
+# cache vhost (cache.public_host), so the CLI/engine never talks to the raw
+# registry. With ref_per_version=true the tag is per version (V0-21-4 here).
+export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=cache.supv.example.com/dagger-cache:V0-21-4,mode=max"
 
 dagger call github.com/your-org/ci@v1.0.0 build
 ```
@@ -177,6 +189,37 @@ Or skip the env-var juggling and use the wrapper:
 ```bash
 ./scripts/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
 ```
+
+### Connect your environment (UI)
+
+Instead of hand-assembling the variables above, use the **Connect** page in
+the web UI (log in, then click **Connect** in the nav):
+
+The Connect page **always** includes the remote shared cache ("MagicCache")
+env var `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, targeting the client's effective
+engine version (the latest allowed release, or the version floor when no
+release list is available). `_EXPERIMENTAL_DAGGER_TAG` is only added when you
+explicitly pin a version.
+
+1. Pick an engine version from the dropdown (optional — leave "No pin" to use
+   the CLI default).
+2. Check **"Show token plaintext"** to include your API token in the snippets.
+3. Click the copy button for your target:
+   - **Bash/zsh exports** or **.bashrc snippet** for interactive shells
+     (these include the token plaintext directly).
+   - **GitHub Actions env** or **GitLab CI variables** for CI (these use a
+     secret reference by default; enable "Include plaintext token" only if you
+     accept the risk, and paste the token into your CI secret store once).
+4. Source the environment and run Dagger:
+
+```bash
+# 1. On the Connect page, check "Show token plaintext", click "Copy .bashrc snippet", paste into a shell.
+# 2. Reload your shell (or: source ~/.dagger-cache.env).
+dagger call github.com/your-org/ci@v1.0.0 build
+```
+
+Tokens created before this feature cannot be revealed by the Connect page —
+regenerate them on the **Settings** page to enable full-snippet copy.
 
 ---
 
@@ -196,6 +239,7 @@ Or skip the env-var juggling and use the wrapper:
                                      │  ─ Hertz API      ─ L4 TLS proxy    │
                                      │  ─ UI (SPA)       ─ pins to pod IP   │
                                      │  ─ OTLP forward                       │
+                                     │  ─ cache proxy (Host=cache vhost)    │
                                      └───┬─────────────┬─────────────┬─────┘
                                          │             │             │
                           mints client   │             │             │ forwards OTLP
@@ -203,12 +247,17 @@ Or skip the env-var juggling and use the wrapper:
                   ┌──────────────────────┘             │             └──► OTel Collector ─► Tempo/Loki/Victoria
                   │                                    │                        │
                   ▼                                    ▼                        ▼
-   ┌─────────────────────────────┐      ┌────────────────────────────────┐  ┌───────────┐
-   │  Engine fleet (K8s)         │      │  Cache (OCI registry / S3)      │  │  Grafana   │
-   │  per-version StatefulSet    │◄─────│  registry:2 or S3 bucket        │  │ dashboards │
-   │  dagger-engine-v0-21-4      │push/│  ref: cache.reg/...:V0-21-4    │  └───────────┘
-   │  autoscaled 0..N            │pull │                                │
-   └─────────────────────────────┘      └────────────────────────────────┘
+   ┌─────────────────────────────┐      ┌──────────────────────────────┐  ┌───────────┐
+   │  Engine fleet (K8s)         │      │  Cache proxy                  │  │  Grafana   │
+   │  per-version StatefulSet    │      │  holds creds, routes across   │  │ dashboards │
+   │  dagger-engine-v0-21-4      │      │  N registries (least-charged) │  └───────────┘
+   │  autoscaled 0..N            │      └──────┬──────────┬────────────┘
+   └─────────────────────────────┘             │          │
+                                   push/pull   ▼          ▼
+                                         ┌──────────┐ ┌──────────┐
+                                         │ registry │ │ registry │  (or S3)
+                                         │  reg-1   │ │  reg-2   │
+                                         └──────────┘ └──────────┘
 ```
 
 **Flow for a `dagger call`:**
@@ -222,8 +271,9 @@ Or skip the env-var juggling and use the wrapper:
 3. CLI opens a TLS connection to `data_hostname` using the minted cert.
    The Supervisor's L4 proxy inspects SNI/cert, looks up the lease, and
    pipes bytes to the live engine pod.
-4. CLI pushes/pulls BuildKit cache blobs from the configured registry ref
-   (`_EXPERIMENTAL_DAGGER_CACHE_CONFIG`).
+4. Engines push/pull BuildKit cache blobs through the Supervisor's cache
+   proxy (Host = `cache.public_host`); the Supervisor validates the engine
+   token, injects backend credentials, and routes to the right registry.
 5. CLI emits OTLP telemetry; the Supervisor forwards it to the local
    collector, which fans out to Tempo (traces), Loki (logs) and
    VictoriaMetrics (metrics). The pipeline UI reads those backends directly.
@@ -294,10 +344,15 @@ inline comments. The sections below summarise the most important ones.
 | `auth.oauth` | `enabled`                   | `false`                          | OAuth (GitHub) for UI login.                      |
 |              | `provider`                  | `github`                         |                                                   |
 |              | `allowed_orgs`              | —                                | Restrict login to members of these orgs.          |
+| `auth.token` | `encryption_key`            | `""` (auto-generated)            | AES-256-GCM key (≥32 bytes) for token plaintext recovery (Connect page). |
 | `telemetry`  | `collector_url`             | `http://otel-collector:4318`     | OTLP/HTTP.                                         |
 |              | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc. | Backend query APIs (auto-wired by Helm).          |
 | `cache`      | `backend`                   | `registry`                       | `registry` (OCI) or `s3`.                         |
-|              | `registry`                  | `cache.reg/dagger-cache`          | OCI repository.                                   |
+|              | `registry`                  | `cache.reg/dagger-cache`          | OCI repository (legacy single-backend mode).      |
+|              | `internal_addr`             | `""`                             | Legacy single backend address (used when `registries` empty). |
+|              | `public_host`               | `cache.<public_url host>`         | Dedicated cache vhost (Supervisor proxy).         |
+|              | `auth_token`                | `""`                             | Engine→proxy bearer; empty reads `engine-registry-auth` secret. |
+|              | `registries`                | `[]`                             | Multi-backend list for load balancing.            |
 |              | `s3.bucket` / `s3.region`    | —                                | Used only when `backend=s3`.                      |
 |              | `ref_per_version`           | `true`                           | Tag cache refs `:V<maj>-<min>-<patch>`.           |
 |              | `gc.enabled`                | `false`                          | Master switch for the cache auto-clean sweeper.   |
@@ -439,18 +494,73 @@ full rationale and alternatives considered.
 
 ## Remote shared cache
 
-Self-hosted OCI registry (`registry:2`) storing BuildKit cache blobs.
-Engines push/pull cache layers per solve; the client picks the cache ref
-via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`:
+Self-hosted OCI registry (`registry:2`) storing BuildKit cache blobs. The
+Supervisor acts as a reverse proxy in front of the registry(ies): it holds the
+registry credentials, validates the engine's cache token, and load-balances
+across one or more backend registries. Engines push/pull cache layers per
+solve; the client picks the cache ref via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`:
 
 ```
-type=registry,ref=cache.reg/dagger-cache:V0-21-4,mode=max
+type=registry,ref=cache.supv.example.com/dagger-cache:V0-21-4,mode=max
 ```
+
+The emitted ref always points at the **Supervisor's cache vhost**
+(`cache.public_host`), never the raw registry. `cache.public_host` defaults to
+`cache.<host-of-server.public_url>` and must differ from the control-plane host.
+
+In single-backend mode (the default), the Supervisor proxies to
+`cache.internal_addr` (or the backend host derived from `cache.registry` when
+`cache.internal_addr` is empty). With `cache.registries[]` configured, it
+load-balances across all of them instead.
 
 With `cache.ref_per_version: true` (default), the wrapper script
 automatically derives the `:V<maj>-<min>-<patch>` tag from
 `_EXPERIMENTAL_DAGGER_TAG`, giving each engine version its own cache
 namespace and avoiding cross-version cache poisoning.
+
+### Multi-registry cache
+
+To spread cache "charge" across several registries, configure
+`cache.registries[]`:
+
+```yaml
+cache:
+  backend: "registry"
+  public_host: "cache.supv.example.com"
+  auth_token: ""                       # or set DAGGER_CACHE_CACHE_AUTH_TOKEN
+  registries:
+    - id: "reg-1"
+      internal_addr: "registry-1:5000"
+      username: ""
+      password: ""
+    - id: "reg-2"
+      internal_addr: "registry-2:5000"
+      username: ""
+      password: ""
+```
+
+Routing strategy (see ADR-014):
+
+- **Push** (new manifest or blob upload) goes to the **least-charged** healthy
+  backend, where charge is the Supervisor's own per-backend manifest-size sum
+  from periodic catalog walks.
+- **Pull** first consults the persisted SQLite routing table
+  (`cache_object_routes` / `cache_blob_routes`). On a miss it probes healthy
+  backends (least-charged first) and self-heals the table on a hit.
+- **Upload sessions** are pinned to one backend for the whole
+  `POST → PATCH → PUT` upload lifecycle.
+
+Backend credentials (`username`/`password`) are injected by the Supervisor and
+never reach the engine. The engine authenticates to the Supervisor cache proxy
+with `DAGGER_CACHE_TOKEN`, which must equal `cache.auth_token` (or, when
+`cache.auth_token` is empty, the Supervisor reads the `engine-registry-auth`
+K8s secret key `token` — the same secret already mounted into engine pods).
+
+> **TLS SAN requirement:** the control-plane certificate must include
+> `cache.public_host` as a SAN (the cache vhost shares the control-plane TLS
+> listener). The Supervisor disables the global HTTP read timeout so multi-GB
+> blob uploads are not killed; control-API request bodies remain capped
+> per-handler (`POST /v1/engines` 1 MiB).
 
 For S3-backed cache instead of OCI:
 
@@ -513,9 +623,12 @@ more **groups**; groups carry engine-session quotas and project visibility.
   log in (empty = allow all); `default_group` auto-joins new OAuth users to a
   group.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
-  at most one token; the plaintext is shown once at creation/regeneration;
-  only the SHA-256 hash is stored. Use it as `DAGGER_CLOUD_TOKEN`. This is the
-  recommended path for CI.
+  at most one token; the plaintext is shown once at creation/regeneration.
+  Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext
+  so the **Connect** page can reveal them on demand. Use it as
+  `DAGGER_CLOUD_TOKEN`. This is the recommended path for CI. Tokens created
+  before the ciphertext column was added are not recoverable — regenerate to
+  enable reveal.
 - **Legacy flat-file tokens** (`auth.internal.tokens_file`) — DEPRECATED.
   When configured, tokens in the file still authenticate as a synthetic
   `legacy` admin identity (full access, quota bypass) for zero-breakage
@@ -557,6 +670,17 @@ logged). Set the password explicitly in production.
 random secret on first boot and persists it in the SQLite `meta` table. Set it
 explicitly in secret storage (Helm Secret / env) for production before
 dropping the auto-generated one.
+
+### API-token encryption key
+
+`auth.token.encryption_key` (at least 32 bytes) encrypts token plaintexts at
+rest so the Connect page can reveal them. The value is SHA-256-derived into a
+fixed 32-byte AES-256-GCM key before use, so any secret ≥ 32 bytes works. When
+empty, the supervisor auto-generates a 32-byte key on first boot and persists
+it in the SQLite `meta` table (dev mode, with a startup warning). Set it
+explicitly via env (`DAGGER_CACHE_AUTH_TOKEN_ENCRYPTION_KEY`) or a K8s Secret
+in production so DB compromise alone does not yield token plaintexts — exactly
+as with the JWT secret.
 
 ### Configuration
 
@@ -706,6 +830,15 @@ Features:
 - **Services status page** (`/services`) — every platform service
   (supervisor, cache, collector, tempo, loki, victoria, fleet) with a
   `ok`/`degraded`/`down`/`unknown` state and a rolled-up overall state
+- **Connect page** (`/connect`) — ready-to-copy Dagger CLI environment:
+  every required env var (`DAGGER_CLOUD_URL`, `DAGGER_CLOUD_TOKEN`,
+  `_EXPERIMENTAL_DAGGER_RUNNER_HOST`, and the always-present
+  `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, plus `_EXPERIMENTAL_DAGGER_TAG` only
+  when you pin a version) with one-click copy of bash/zsh exports,
+  a `.bashrc` snippet, GitHub Actions `env:`, GitLab CI `variables:`, and a
+  "Copy token value" button. The token is masked by default; checking "Show
+  token plaintext" reveals it on demand (CI snippets use secret references by
+  default).
 - **Header status indicator** — a colored dot in the navbar (green/amber/red/
   grey) polling `/api/v1/status` every 10s; clicking navigates to `/services`
 - **Cache status** — registry health, cache hit rates
@@ -781,7 +914,7 @@ export DAGGER_TAG=v0.21.4          # optional
 ./scripts/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
-It derives the cache ref (`cache.reg/dagger-cache:V0-21-4`) from
+It derives the cache ref (`cache.<public_host>/dagger-cache:V0-21-4`) from
 `DAGGER_TAG`, sets `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, runs `dagger "$@"`,
 then greps the run log for the trace ID and prints a boxed link to
 `$DAGGER_CACHE_UI/traces/<id>`. The GHA, Jenkins, and Drone integrations

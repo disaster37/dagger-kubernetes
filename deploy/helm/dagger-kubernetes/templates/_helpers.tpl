@@ -41,12 +41,35 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the OCI cache registry: use the dependency Service when enabled. */}}
-{{- define "dagger-kubernetes.cacheRegistry" -}}
-{{- if .Values.tools.registry.enabled -}}
-{{- printf "%s-registry:5000/dagger-cache" .Release.Name -}}
+{{/* Resolve the cache public vhost (the host engines push/pull through the
+Supervisor proxy). Explicit value wins; otherwise derive `cache.<host>` from
+supervisor.config.server.publicUrl by stripping the scheme and any trailing
+path. Assumes publicUrl has no explicit port (the cache vhost must match the
+ingress Host header / TLS SAN, which never carry a port). */}}
+{{- define "dagger-kubernetes.cachePublicHost" -}}
+{{- if .Values.supervisor.config.cache.publicHost -}}
+{{- .Values.supervisor.config.cache.publicHost -}}
 {{- else -}}
-{{- default (printf "%s-registry:5000/dagger-cache" .Release.Name) .Values.supervisor.config.cache.registry -}}
+{{- $u := trimPrefix "https://" .Values.supervisor.config.server.publicUrl -}}
+{{- $u = trimPrefix "http://" $u -}}
+{{- $u = regexReplaceAll "/.*$" $u "" -}}
+{{- printf "cache.%s" $u -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the public OCI cache ref used in _EXPERIMENTAL_DAGGER_CACHE_CONFIG:
+<cachePublicHost>/dagger-cache. The repo path is fixed to `dagger-cache`. */}}
+{{- define "dagger-kubernetes.cacheRegistry" -}}
+{{- printf "%s/dagger-cache" (include "dagger-kubernetes.cachePublicHost" .) -}}
+{{- end -}}
+
+{{/* Resolve the internal cache backend address (host[:port], no scheme): the
+explicit legacy value, else the in-cluster registry Service when enabled. */}}
+{{- define "dagger-kubernetes.cacheInternalAddr" -}}
+{{- if .Values.supervisor.config.cache.internalAddr -}}
+{{- .Values.supervisor.config.cache.internalAddr -}}
+{{- else if .Values.tools.registry.enabled -}}
+{{- printf "%s-registry:5000" .Release.Name -}}
 {{- end -}}
 {{- end -}}
 

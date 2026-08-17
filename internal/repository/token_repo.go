@@ -11,7 +11,7 @@ import (
 )
 
 // tokenCols is the canonical column list shared by all api_tokens queries.
-const tokenCols = `id, user_id, token_hash, prefix, created_at, last_used_at` //nolint:gosec // G101: column name, not a credential.
+const tokenCols = `id, user_id, token_hash, token_ciphertext, prefix, created_at, last_used_at` //nolint:gosec // G101: column name, not a credential.
 
 // TokenRepo is the SQLite implementation of domain.APITokenRepository.
 type TokenRepo struct {
@@ -31,9 +31,9 @@ func (r *TokenRepo) Upsert(ctx context.Context, t *domain.APIToken) error {
 		t.CreatedAt = time.Now().UTC()
 	}
 	_, err := r.db.ExecContext(ctx, fmt.Sprintf(`INSERT INTO api_tokens(%s)
-		VALUES(?, ?, ?, ?, ?, ?)
-		ON CONFLICT(user_id) DO UPDATE SET token_hash = excluded.token_hash, prefix = excluded.prefix, created_at = excluded.created_at, last_used_at = excluded.last_used_at`, tokenCols),
-		t.ID, t.UserID, t.TokenHash, t.Prefix, t.CreatedAt, nullTime(t.LastUsedAt))
+		VALUES(?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(user_id) DO UPDATE SET token_hash = excluded.token_hash, token_ciphertext = excluded.token_ciphertext, prefix = excluded.prefix, created_at = excluded.created_at, last_used_at = excluded.last_used_at`, tokenCols),
+		t.ID, t.UserID, t.TokenHash, t.TokenCiphertext, t.Prefix, t.CreatedAt, nullTime(t.LastUsedAt))
 	if err != nil {
 		return fmt.Errorf("upsert api token for user %s: %w", t.UserID, err)
 	}
@@ -75,7 +75,7 @@ func (r *TokenRepo) TouchLastUsed(ctx context.Context, id string, at time.Time) 
 func scanToken(row scanner) (*domain.APIToken, error) {
 	t := &domain.APIToken{}
 	var lastUsed sql.NullTime
-	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.Prefix, &t.CreatedAt, &lastUsed)
+	err := row.Scan(&t.ID, &t.UserID, &t.TokenHash, &t.TokenCiphertext, &t.Prefix, &t.CreatedAt, &lastUsed)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("api token: %w", domain.ErrNotFound)
 	}

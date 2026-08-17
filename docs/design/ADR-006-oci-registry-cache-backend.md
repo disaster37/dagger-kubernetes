@@ -39,3 +39,8 @@ registry. The `cache.ref_per_version` flag (default `true`) appends a
 - When `cache.public_host` is set, the registry host in the cache ref is
   replaced with the public hostname (for external access through the
   Supervisor).
+
+> **Superseded in part by ADR-014:** the cache ref now targets the
+> Supervisor proxy vhost by default; `cache.public_host` is the dedicated
+> cache vhost, and the Supervisor controls registry credentials and
+> load-balances across backend registries.

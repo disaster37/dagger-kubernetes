@@ -10,6 +10,11 @@ import (
 // HTTP handler can map it to a 409 without importing the repository layer.
 var ErrRegistryDeleteDisabled = errors.New("registry delete not enabled")
 
+// ErrRegistryCatalogDisabled indicates the OCI registry does not expose the
+// /v2/_catalog endpoint, so tags cannot be enumerated (purge-all / GC can't
+// list what exists). Lives in domain so the handler can map it to a 409.
+var ErrRegistryCatalogDisabled = errors.New("registry catalog disabled")
+
 type S3Ref struct {
 	Bucket string
 	Region string
@@ -18,6 +23,25 @@ type S3Ref struct {
 type CacheBackend interface {
 	BackendType() string
 	RegistryHost() string
+}
+
+// CacheRoute is one persisted manifest→backend mapping.
+type CacheRoute struct {
+	Repo        string
+	Tag         string
+	Digest      string
+	BackendID   string
+	StoredBytes int64
+	CreatedAt   string // RFC3339
+	LastSeenAt  string // RFC3339
+}
+
+// CacheUploadSession is one in-flight OCI blob upload session.
+type CacheUploadSession struct {
+	UploadUUID string
+	Repo       string
+	BackendID  string
+	CreatedAt  string // RFC3339
 }
 
 // CacheStats is the rich cache payload returned by GET /api/v1/cache.

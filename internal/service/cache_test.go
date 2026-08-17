@@ -1,7 +1,7 @@
 package service
 
 import (
-	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -42,6 +42,21 @@ func TestBuildCacheConfigRegistryPublicHost(t *testing.T) {
 	}
 }
 
+// TestBuildCacheConfigRegistryRewritesByDefault pins the production path: when
+// PublicHost is set (always true in production wiring), the emitted ref points
+// at the Supervisor cache vhost, never the raw registry host.
+func TestBuildCacheConfigRegistryRewritesByDefault(t *testing.T) {
+	b := &Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"}
+	got := b.BuildCacheConfig(mustVersion(t), "max")
+	want := "type=registry,ref=cache.supv.example.com/dagger-cache:v0-21-4,mode=max"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+	if strings.Contains(got, "cache.reg") {
+		t.Fatalf("emitted ref must not expose the raw registry host: %q", got)
+	}
+}
+
 func TestBuildCacheConfigS3(t *testing.T) {
 	b := &Cache{Type: "s3", S3: domain.S3Ref{Bucket: "bkt", Region: "us-east-1"}}
 	got := b.BuildCacheConfig(mustVersion(t), "max")
@@ -55,37 +70,5 @@ func TestBuildCacheConfigUnknown(t *testing.T) {
 	b := &Cache{Type: "unknown"}
 	if got := b.BuildCacheConfig(mustVersion(t), "max"); got != "" {
 		t.Fatalf("expected empty for unknown backend, got %q", got)
-	}
-}
-
-func TestBuildEngineJSON(t *testing.T) {
-	b := &Cache{Registry: "cache.reg/dagger-cache"}
-	data, err := b.BuildEngineJSON("tok")
-	if err != nil {
-		t.Fatalf("BuildEngineJSON: %v", err)
-	}
-
-	var ej EngineJSON
-	if err := json.Unmarshal(data, &ej); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if ej.Registries["cache.reg/dagger-cache"].Auth != "tok" {
-		t.Fatalf("auth = %q", ej.Registries["cache.reg/dagger-cache"].Auth)
-	}
-}
-
-func TestBuildEngineJSONPublicHost(t *testing.T) {
-	b := &Cache{Registry: "cache.reg/dagger-cache", PublicHost: "cache.example.com"}
-	data, err := b.BuildEngineJSON("tok")
-	if err != nil {
-		t.Fatalf("BuildEngineJSON: %v", err)
-	}
-
-	var ej EngineJSON
-	if err := json.Unmarshal(data, &ej); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := ej.Registries["cache.example.com"]; !ok {
-		t.Fatalf("expected registry key cache.example.com, got %v", ej.Registries)
 	}
 }

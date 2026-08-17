@@ -36,7 +36,7 @@ func TestProvisionEngineWithAPIToken(t *testing.T) {
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("integration-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
 
 	admin, err := usersSvc.Create(context.Background(), "admin", "password123", domain.RoleAdmin)
@@ -131,7 +131,7 @@ func TestHealthEndpoint(t *testing.T) {
 	traceMetaRepo := repository.NewTraceMetaRepo(db)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("health-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
 	authSvc := service.NewAuthService(service.AuthServiceConfig{Disabled: true}, usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)

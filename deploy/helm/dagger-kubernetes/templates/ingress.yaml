@@ -1,4 +1,11 @@
 {{- if .Values.ingress.enabled }}
+{{- $cacheHost := trim (.Values.ingress.cacheHost | default (include "dagger-kubernetes.cachePublicHost" .)) }}
+{{- $cacheHostInRules := false }}
+{{- range .Values.ingress.hosts }}
+{{- if eq .host $cacheHost }}
+{{- $cacheHostInRules = true }}
+{{- end }}
+{{- end }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
@@ -16,7 +23,26 @@ spec:
   {{- end }}
   {{- if .Values.ingress.tls }}
   tls:
-    {{- toYaml .Values.ingress.tls | nindent 4 }}
+    {{- range .Values.ingress.tls }}
+    - hosts:
+        {{- range .hosts }}
+        - {{ . | quote }}
+        {{- end }}
+        {{- if $cacheHost }}
+        {{- $inTLS := false }}
+        {{- range .hosts }}
+        {{- if eq . $cacheHost }}
+        {{- $inTLS = true }}
+        {{- end }}
+        {{- end }}
+        {{- if not $inTLS }}
+        - {{ $cacheHost | quote }}
+        {{- end }}
+        {{- end }}
+      {{- if .secretName }}
+      secretName: {{ .secretName }}
+      {{- end }}
+    {{- end }}
   {{- end }}
   rules:
     {{- range .Values.ingress.hosts }}
@@ -32,5 +58,17 @@ spec:
                 port:
                   number: {{ $.Values.service.control.port }}
           {{- end }}
+    {{- end }}
+    {{- if and $cacheHost (not $cacheHostInRules) }}
+    - host: {{ $cacheHost | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ include "dagger-kubernetes.fullname" $ }}-control
+                port:
+                  number: {{ $.Values.service.control.port }}
     {{- end }}
 {{- end }}

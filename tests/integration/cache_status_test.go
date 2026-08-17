@@ -38,6 +38,9 @@ func registryStub(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/dagger-cache/manifests/v0-21-4":
 			w.Header().Set("Docker-Content-Digest", dgst)
 			_, _ = w.Write([]byte(manifest))
+		case r.Method == http.MethodHead && r.URL.Path == "/v2/dagger-cache/manifests/v0-21-4":
+			w.Header().Set("Docker-Content-Digest", dgst)
+			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodDelete && r.URL.Path == "/v2/dagger-cache/manifests/"+dgst:
 			w.WriteHeader(http.StatusAccepted)
 		default:
@@ -67,7 +70,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("integration-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
 
 	admin, err := usersSvc.Create(context.Background(), "admin", "password123", domain.RoleAdmin)
@@ -95,11 +98,15 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 
 	// Stub registry + status/stats services.
 	ts := registryStub(t)
-	registryClient := repository.NewRegistryStatsClient(ts.Listener.Addr().String())
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, registryClient, nil, provider, domain.GCConfig{
+	router := service.NewRegistryRouter(
+		[]domain.RegistryBackend{{ID: "default", InternalAddr: ts.Listener.Addr().String()}},
+		repository.NewCacheRoutesRepo(db),
+		logger,
+	)
+	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{
 		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour, MinRefsToKeep: 3, ProtectActiveVersions: true,
 	}, logger, observ.NewMetrics(nil))
-	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, registryClient, fleetManager, logger)
+	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger)
 
 	srv := handler.NewServer(&handler.ServerConfig{
 		ControlAddr: ":18092",

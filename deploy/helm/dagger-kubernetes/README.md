@@ -270,6 +270,7 @@ grafana:
 | `ca.crt` / `ca.key` | Minting CA (PEM) | `""` |
 | `tls.crt` / `tls.key` | Data-plane TLS (PEM) | `""` |
 | `ingress.enabled` | Enable control-plane Ingress | `true` |
+| `ingress.cacheHost` | Cache vhost hostname (empty = derived from `cachePublicHost`) | `""` |
 | `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 
 ### Tool toggles
@@ -294,7 +295,29 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 | `telemetry.tempoUrl` | `dagger-kubernetes.tempoUrl` | `<release>-tempo:3100` |
 | `telemetry.lokiUrl` | `dagger-kubernetes.lokiUrl` | `<release>-loki:3100` |
 | `telemetry.victoriaUrl` | `dagger-kubernetes.victoriaUrl` | `<release>-victoria-metrics-single:8428` |
-| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<release>-docker-registry:5000/dagger-cache` |
+| `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<server.publicUrl host>` |
+| `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `supervisor.config.cache.internalAddr`, else `<release>-registry:5000` (when `tools.registry.enabled`) |
+| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (public ref emitted to clients) |
+
+### Cache proxy (engine → Supervisor → registry)
+
+The Supervisor acts as an OCI Distribution v2 reverse proxy in front of the
+cache registry(ies). Configure it under `supervisor.config.cache`:
+
+| Value | Default | Description |
+|---|---|---|
+| `supervisor.config.cache.backend` | `registry` | `registry` (OCI) or `s3`. |
+| `supervisor.config.cache.registry` | `""` | Public cache ref; auto-wired to `<cachePublicHost>/dagger-cache`. |
+| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<server.publicUrl host>`. Must differ from the control-plane host. |
+| `supervisor.config.cache.internalAddr` | `""` | Legacy single backend address. Empty ⇒ `<release>-registry:5000` when `tools.registry.enabled`. |
+| `supervisor.config.cache.authToken` | `""` | Engine→proxy bearer. Empty ⇒ read from the `engine-registry-auth` Secret key `token`. |
+| `supervisor.config.cache.registries` | `[]` | Multi-backend list of `{id, internalAddr, username, password}`. Empty ⇒ single-backend mode. |
+| `supervisor.config.cache.refPerVersion` | `true` | Tag cache refs per engine version. |
+
+When `ingress.enabled`, the chart adds a second Ingress host rule for the cache
+vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts`.
+Override the vhost with `ingress.cacheHost` (empty = derived). The control-plane
+TLS certificate must include the cache vhost as a SAN.
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.

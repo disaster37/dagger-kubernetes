@@ -4,6 +4,20 @@
 Module: `github.com/disaster/dagger-kubernetes`
 A self-hosted, Dagger-Cloud-compatible platform: remote shared cache, auto-scaling engine fleets, live pipeline UI, and drop-in CI integration.
 
+## Local test environment
+
+Before deploying or updating this application on the local Kubernetes
+cluster, read `AGENTS.local.md`. It is the machine-specific source of truth for:
+
+- cluster access (kubeconfig `/home/user/.kube/home`, context `home`),
+- the live release (`dagger-cache-test`) and its image
+  (`docker.io/disaster/dagger-kubernetes:dev`),
+- the build → push → helm-upgrade → rollout workflow,
+- the mandatory agent + human verification steps.
+
+Every new feature or bug fix MUST be redeployed and validated on that cluster
+(see the mandate in `AGENTS.local.md` §6).
+
 ## Required libraries (do not deviate)
 | Purpose        | Import                                |
 |----------------|---------------------------------------|

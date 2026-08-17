@@ -8,6 +8,7 @@
         <router-link to="/fleet">Runners</router-link>
         <router-link to="/services">Services</router-link>
         <router-link to="/settings">Settings</router-link>
+        <router-link to="/connect">Connect</router-link>
         <template v-if="auth.isAdmin">
           <router-link to="/admin/users">Users</router-link>
           <router-link to="/admin/groups">Groups</router-link>

@@ -11,6 +11,7 @@ const router = createRouter({
     { path: '/fleet', name: 'fleet', component: () => import('@/fleet/Runners.vue') },
     { path: '/services', name: 'services', component: () => import('@/views/Services.vue') },
     { path: '/settings', name: 'settings', component: () => import('@/views/Settings.vue') },
+    { path: '/connect', name: 'connect', component: () => import('@/views/Connect.vue') },
     { path: '/auth/login', name: 'login', component: () => import('@/auth/Login.vue'), meta: { public: true } },
     { path: '/auth/callback', name: 'auth-callback', component: () => import('@/auth/Callback.vue'), meta: { public: true } },
     { path: '/admin/users', name: 'admin-users', component: () => import('@/views/admin/Users.vue'), meta: { admin: true } },

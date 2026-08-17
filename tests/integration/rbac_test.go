@@ -50,7 +50,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("rbac-integration-secret-32-bytes!"), 15*time.Minute, 168*time.Hour)
 
 	// Bootstrap admin + API token.
@@ -251,7 +251,7 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 	tokenRepo := repository.NewTokenRepo(db)
 	traceMetaRepo := repository.NewTraceMetaRepo(db)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("legacy-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
 	legacyValidator := service.NewTokenValidator(tokensPath, true, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)

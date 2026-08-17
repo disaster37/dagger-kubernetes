@@ -19,3 +19,5 @@ the decision.
 | 010  | [SQLite-backed multi-user RBAC](ADR-010-sqlite-multiuser-rbac.md) |
 | 011  | [Engine proxy, CA, and engine.toml config injection](ADR-011-engine-env-ca-config-injection.md) |
 | 012  | [MagicCache dashboard — cache stats, services status, GC, and purge](ADR-012-magiccache-dashboard.md) |
+| 013  | [Connect-env UI menu](ADR-013-connect-env-menu.md) |
+| 014  | [Registry proxy — token control + multi-registry load balancing](ADR-014-registry-proxy-token-loadbalancing.md) |

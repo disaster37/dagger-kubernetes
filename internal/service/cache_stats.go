@@ -37,7 +37,7 @@ var tagRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 // manual purge + background GC sweeper.
 type CacheStatsService struct {
 	cache      *Cache
-	registry   *repository.RegistryStatsClient
+	router     *RegistryRouter           // may be nil (s3 backend)
 	metrics    *repository.MetricsClient // may be nil
 	fleet      domain.FleetProvider      // may be nil
 	gcCfg      domain.GCConfig
@@ -57,7 +57,7 @@ type CacheStatsService struct {
 
 func NewCacheStatsService(
 	cache *Cache,
-	registry *repository.RegistryStatsClient,
+	router *RegistryRouter,
 	metricsClient *repository.MetricsClient,
 	fleet domain.FleetProvider,
 	gcCfg domain.GCConfig,
@@ -66,7 +66,7 @@ func NewCacheStatsService(
 ) *CacheStatsService {
 	return &CacheStatsService{
 		cache:      cache,
-		registry:   registry,
+		router:     router,
 		metrics:    metricsClient,
 		fleet:      fleet,
 		gcCfg:      gcCfg,
@@ -77,25 +77,16 @@ func NewCacheStatsService(
 
 // cacheEntry is one manifest discovered in the registry catalog.
 type cacheEntry struct {
-	repo   string
-	tag    string
-	digest string
-	size   int64
-	layers int64
+	repo      string
+	tag       string
+	digest    string
+	size      int64
+	layers    int64
+	backendID string
 }
 
 func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
-}
-
-// registryHost returns the host portion of cache.Registry ("cache.reg" for
-// "cache.reg/dagger-cache").
-func (s *CacheStatsService) registryHost() string {
-	host, _, ok := strings.Cut(s.cache.Registry, "/")
-	if !ok {
-		return s.cache.Registry
-	}
-	return host
 }
 
 // repo returns the repository portion of cache.Registry ("dagger-cache" for
@@ -106,6 +97,15 @@ func (s *CacheStatsService) repo() string {
 		return s.cache.Registry
 	}
 	return rest
+}
+
+// deleteManifestRoute removes a repo+tag routing row. It no-ops when the
+// router (s3 backend) or its routing table is unavailable.
+func (s *CacheStatsService) deleteManifestRoute(ctx context.Context, repo, tag string) {
+	if s.router == nil || s.router.routes == nil {
+		return
+	}
+	_ = s.router.routes.DeleteManifestRoute(ctx, repo, tag)
 }
 
 // parseVersionTag reverses a version slug into a *Version ("v0-21-4" ->
@@ -196,35 +196,71 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 		return stats
 	}
 
-	if s.registry == nil {
+	if s.router == nil || len(s.router.Backends()) == 0 {
 		stats.Message = registryDownMessage
 		return stats
 	}
 
-	if err := s.registry.Ping(ctx); err != nil {
-		stats.Message = registryDownMessage
-		return stats
-	}
-	stats.Running = true
-	stats.Reachable = true
+	var entries []cacheEntry
+	charges := make(map[string]int64)
+	anyReachable := false
+	catalogDisabled := 0
+	timedOut := false
 
-	repos, err := s.registry.Catalog(ctx)
-	if err != nil {
-		if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
-			stats.Message = catalogDisabledMsg
-			return stats
+	for _, b := range s.router.Backends() {
+		client, ok := s.router.ClientByID(b.ID)
+		if !ok {
+			s.router.MarkDown(b.ID)
+			continue
 		}
+		if err := client.Ping(ctx); err != nil {
+			s.router.MarkDown(b.ID)
+			continue
+		}
+		s.router.MarkUp(b.ID)
+		anyReachable = true
+
+		repos, err := client.Catalog(ctx)
+		if err != nil {
+			if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
+				catalogDisabled++
+			}
+			continue
+		}
+
+		es, partial := s.collectEntries(ctx, client, repos)
+		if partial {
+			timedOut = true
+		}
+		var backendCharge int64
+		for _, e := range es {
+			if e.size >= 0 {
+				backendCharge += e.size
+			}
+			e.backendID = b.ID
+			entries = append(entries, e)
+		}
+		charges[b.ID] = backendCharge
+	}
+	s.router.SetCharges(charges)
+
+	stats.Running = anyReachable
+	stats.Reachable = anyReachable
+	if !anyReachable {
 		stats.Message = registryDownMessage
 		return stats
 	}
-
-	entries, timedOut := s.collectEntries(ctx, repos)
+	if len(entries) == 0 && catalogDisabled > 0 {
+		stats.Message = catalogDisabledMsg
+		return stats
+	}
 
 	active, unknown := s.activeVersions()
 
 	var totalSize int64
 	var objectCount int64
 	refs := make([]domain.CacheVersionRef, 0, len(entries))
+	seen := make(map[string]bool)
 	for _, e := range entries {
 		if e.size >= 0 {
 			totalSize += e.size
@@ -235,10 +271,15 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 		if !ok {
 			continue
 		}
+		key := fmt.Sprintf("%s:%s", e.repo, e.tag)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
 		refs = append(refs, domain.CacheVersionRef{
 			Version:    v.String(),
 			Tag:        e.tag,
-			Ref:        fmt.Sprintf("%s/%s:%s", s.registryHost(), e.repo, e.tag),
+			Ref:        fmt.Sprintf("%s/%s:%s", s.cache.PublicHost, e.repo, e.tag),
 			Size:       e.size,
 			LayerCount: e.layers,
 			Digest:     e.digest,
@@ -277,13 +318,13 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 
 // collectEntries walks every repo's tags and collects manifest metadata.
 // Returns entries plus a timedOut flag for partial (context-cancelled) walks.
-func (s *CacheStatsService) collectEntries(ctx context.Context, repos []string) ([]cacheEntry, bool) {
+func (s *CacheStatsService) collectEntries(ctx context.Context, client *repository.RegistryStatsClient, repos []string) ([]cacheEntry, bool) {
 	var out []cacheEntry
 	for _, repo := range repos {
 		if ctx.Err() != nil {
 			return out, true
 		}
-		tags, err := s.registry.Tags(ctx, repo)
+		tags, err := client.Tags(ctx, repo)
 		if err != nil {
 			if ctx.Err() != nil {
 				return out, true
@@ -295,7 +336,7 @@ func (s *CacheStatsService) collectEntries(ctx context.Context, repos []string) 
 			if ctx.Err() != nil {
 				return out, true
 			}
-			digest, size, layers, err := s.registry.ManifestSize(ctx, repo, tag)
+			digest, size, layers, err := client.ManifestSize(ctx, repo, tag)
 			if err != nil {
 				if errors.Is(err, repository.ErrManifestNotFound) {
 					continue
@@ -386,31 +427,63 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 	s.purgeMu.Lock()
 	defer s.purgeMu.Unlock()
 
-	if s.registry == nil {
+	if s.router == nil || len(s.router.Backends()) == 0 {
 		return nil, fmt.Errorf("registry not configured")
 	}
 
 	repo := s.repo()
-	digest, size, _, err := s.registry.ManifestSize(ctx, repo, tag)
+	alreadyPurged := func() (*domain.PurgeResult, error) {
+		return &domain.PurgeResult{AlreadyPurged: 1, Versions: []string{parsed.String()}}, nil
+	}
+
+	// Route-table hit: purge from the recorded backend.
+	var targetClient *repository.RegistryStatsClient
+	if s.router.routes != nil {
+		if route, ok, err := s.router.routes.LookupManifest(ctx, repo, tag); err == nil && ok {
+			targetClient, _ = s.router.ClientByID(route.BackendID)
+		}
+	}
+
+	// Route-table miss: probe healthy backends (self-heal) and delete from the
+	// first that has it.
+	if targetClient == nil {
+		for _, b := range s.router.HealthyBackends() {
+			c, ok := s.router.ClientByID(b.ID)
+			if !ok {
+				continue
+			}
+			exists, err := c.ProbeManifest(ctx, repo, tag)
+			if err != nil {
+				s.router.MarkDown(b.ID)
+				continue
+			}
+			if exists {
+				targetClient = c
+				break
+			}
+		}
+	}
+
+	if targetClient == nil {
+		return alreadyPurged()
+	}
+
+	digest, size, _, err := targetClient.ManifestSize(ctx, repo, tag)
 	if errors.Is(err, repository.ErrManifestNotFound) {
-		return &domain.PurgeResult{
-			AlreadyPurged: 1,
-			Versions:      []string{parsed.String()},
-		}, nil
+		return alreadyPurged()
 	}
 	if err != nil {
 		return nil, fmt.Errorf("manifest lookup: %w", err)
 	}
 
-	if err := s.registry.DeleteManifest(ctx, repo, digest); err != nil {
+	if err := targetClient.DeleteManifest(ctx, repo, digest); err != nil {
 		if errors.Is(err, repository.ErrManifestNotFound) {
-			return &domain.PurgeResult{
-				AlreadyPurged: 1,
-				Versions:      []string{parsed.String()},
-			}, nil
+			return alreadyPurged()
 		}
 		return nil, fmt.Errorf("delete manifest: %w", err)
 	}
+
+	s.deleteManifestRoute(ctx, repo, tag)
 
 	s.invalidateCache()
 	if s.metricsObs != nil {
@@ -424,54 +497,69 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 }
 
 // PurgeAll implements domain.CachePurger. It purges every tag in every catalog
-// repo, capped at maxPurgeAllTags entries.
+// repo across all backends, capped at maxPurgeAllTags entries.
 func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, error) {
 	s.purgeMu.Lock()
 	defer s.purgeMu.Unlock()
 
-	if s.registry == nil {
+	if s.router == nil || len(s.router.Backends()) == 0 {
 		return nil, fmt.Errorf("registry not configured")
-	}
-
-	repos, err := s.registry.Catalog(ctx)
-	if err != nil {
-		if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
-			return nil, fmt.Errorf("%w", domain.ErrRegistryDeleteDisabled)
-		}
-		return nil, fmt.Errorf("catalog: %w", err)
 	}
 
 	result := &domain.PurgeResult{}
 	truncated := false
-	for _, repo := range repos {
-		tags, err := s.registry.Tags(ctx, repo)
-		if err != nil {
-			return nil, fmt.Errorf("tags: %w", err)
+	catalogOK := false
+	catalogDisabled := false
+	for _, b := range s.router.Backends() {
+		client, ok := s.router.ClientByID(b.ID)
+		if !ok {
+			continue
 		}
-		for _, tag := range tags {
-			if result.Purged+result.AlreadyPurged >= maxPurgeAllTags {
-				truncated = true
-				break
-			}
-			digest, size, _, err := s.registry.ManifestSize(ctx, repo, tag)
-			if errors.Is(err, repository.ErrManifestNotFound) {
-				result.AlreadyPurged++
+		repos, err := client.Catalog(ctx)
+		if err != nil {
+			if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
+				catalogDisabled = true
 				continue
 			}
+			return nil, fmt.Errorf("catalog: %w", err)
+		}
+		catalogOK = true
+		for _, repo := range repos {
+			tags, err := client.Tags(ctx, repo)
 			if err != nil {
-				return nil, fmt.Errorf("manifest lookup: %w", err)
+				return nil, fmt.Errorf("tags: %w", err)
 			}
-			if err := s.registry.DeleteManifest(ctx, repo, digest); err != nil {
+			for _, tag := range tags {
+				if result.Purged+result.AlreadyPurged >= maxPurgeAllTags {
+					truncated = true
+					break
+				}
+				digest, size, _, err := client.ManifestSize(ctx, repo, tag)
 				if errors.Is(err, repository.ErrManifestNotFound) {
 					result.AlreadyPurged++
+					s.deleteManifestRoute(ctx, repo, tag)
 					continue
 				}
-				return nil, fmt.Errorf("delete manifest: %w", err)
+				if err != nil {
+					return nil, fmt.Errorf("manifest lookup: %w", err)
+				}
+				if err := client.DeleteManifest(ctx, repo, digest); err != nil {
+					if errors.Is(err, repository.ErrManifestNotFound) {
+						result.AlreadyPurged++
+						s.deleteManifestRoute(ctx, repo, tag)
+						continue
+					}
+					return nil, fmt.Errorf("delete manifest: %w", err)
+				}
+				result.Purged++
+				result.FreedBytes += size
+				s.deleteManifestRoute(ctx, repo, tag)
+				if s.metricsObs != nil {
+					s.metricsObs.CachePurgeTotal.Inc()
+				}
 			}
-			result.Purged++
-			result.FreedBytes += size
-			if s.metricsObs != nil {
-				s.metricsObs.CachePurgeTotal.Inc()
+			if truncated {
+				break
 			}
 		}
 		if truncated {
@@ -481,6 +569,9 @@ func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, 
 
 	if truncated {
 		result.Message = "truncated at 1000 tags"
+	}
+	if !catalogOK && catalogDisabled {
+		return nil, fmt.Errorf("%w: catalog disabled; cannot enumerate tags for purge", domain.ErrRegistryCatalogDisabled)
 	}
 	s.invalidateCache()
 	return result, nil
@@ -501,22 +592,33 @@ func (s *CacheStatsService) RunGC(ctx context.Context) (*domain.GCRunSummary, er
 		return summary, err
 	}
 
-	if s.registry == nil {
+	if s.router == nil || len(s.router.Backends()) == 0 {
 		return finish("registry not configured", fmt.Errorf("registry not configured"))
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, cacheProbeBudget)
 	defer cancel()
 
-	repos, err := s.registry.Catalog(probeCtx)
-	if err != nil {
-		if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
-			return finish("catalog disabled", err)
+	var entries []cacheEntry
+	for _, b := range s.router.Backends() {
+		client, ok := s.router.ClientByID(b.ID)
+		if !ok {
+			continue
 		}
-		return finish("catalog failed", err)
+		repos, err := client.Catalog(probeCtx)
+		if err != nil {
+			if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
+				continue
+			}
+			s.logger.WithField("backend", b.ID).WithError(err).Warn("gc catalog failed")
+			continue
+		}
+		es, _ := s.collectEntries(probeCtx, client, repos)
+		for _, e := range es {
+			e.backendID = b.ID
+			entries = append(entries, e)
+		}
 	}
-
-	entries, _ := s.collectEntries(probeCtx, repos)
 
 	active, unknown := s.activeVersions()
 
@@ -554,7 +656,12 @@ func (s *CacheStatsService) RunGC(ctx context.Context) (*domain.GCRunSummary, er
 				summary.Skipped++
 				continue
 			}
-			created, err := s.registry.ManifestCreated(probeCtx, e.repo, e.tag)
+			client, ok := s.router.ClientByID(e.backendID)
+			if !ok {
+				summary.Skipped++
+				continue
+			}
+			created, err := client.ManifestCreated(probeCtx, e.repo, e.tag)
 			if err != nil || created.IsZero() {
 				// Unknown age: never purge (conservative).
 				summary.Skipped++
@@ -564,7 +671,7 @@ func (s *CacheStatsService) RunGC(ctx context.Context) (*domain.GCRunSummary, er
 				summary.Skipped++
 				continue
 			}
-			if err := s.registry.DeleteManifest(probeCtx, e.repo, e.digest); err != nil {
+			if err := client.DeleteManifest(probeCtx, e.repo, e.digest); err != nil {
 				if errors.Is(err, domain.ErrRegistryDeleteDisabled) {
 					return finish("registry delete not enabled", err)
 				}
@@ -573,6 +680,7 @@ func (s *CacheStatsService) RunGC(ctx context.Context) (*domain.GCRunSummary, er
 			}
 			summary.PurgedTags++
 			summary.FreedBytes += e.size
+			s.deleteManifestRoute(ctx, e.repo, e.tag)
 			if s.metricsObs != nil {
 				s.metricsObs.CachePurgeTotal.Inc()
 			}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -52,7 +53,7 @@ func (f *fakeRegistry) handler() http.HandlerFunc {
 				return
 			}
 			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":%q,"tags":[%s]}`, repo, strings.Join(quoteEach(f.tags[repo]), ","))))
-		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/manifests/"):
+		case (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.Contains(r.URL.Path, "/manifests/"):
 			key := manifestKey(r.URL.Path)
 			body, ok := f.manifestBody[key]
 			if !ok {
@@ -61,6 +62,10 @@ func (f *fakeRegistry) handler() http.HandlerFunc {
 			}
 			if d := f.manifestDigest[key]; d != "" {
 				w.Header().Set("Docker-Content-Digest", d)
+			}
+			if r.Method == http.MethodHead {
+				w.WriteHeader(http.StatusOK)
+				return
 			}
 			_, _ = w.Write([]byte(body))
 		case r.Method == http.MethodDelete && strings.Contains(r.URL.Path, "/manifests/"):
@@ -127,6 +132,19 @@ func digestStr(c string) string {
 	return "sha256:" + strings.Repeat(c, 64)
 }
 
+func newTestRouter(t *testing.T, backends ...domain.RegistryBackend) *RegistryRouter {
+	t.Helper()
+	db, err := repository.OpenSQLite(t.TempDir() + "/routes.db")
+	if err != nil {
+		t.Fatalf("OpenSQLite: %v", err)
+	}
+	if err := repository.Migrate(context.Background(), db); err != nil {
+		t.Fatalf("Migrate: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	return NewRegistryRouter(backends, repository.NewCacheRoutesRepo(db), observ.NewTestLogger())
+}
+
 func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet domain.FleetProvider, gc domain.GCConfig) (*CacheStatsService, *httptest.Server) {
 	t.Helper()
 	ts := httptest.NewServer(reg.handler())
@@ -136,9 +154,10 @@ func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet d
 	if metricsURL != "" {
 		mc = repository.NewMetricsClient(metricsURL)
 	}
+	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
 	return NewCacheStatsService(
-		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		repository.NewRegistryStatsClient(ts.Listener.Addr().String()),
+		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
+		router,
 		mc,
 		fleet,
 		gc,
@@ -211,7 +230,7 @@ func TestCacheStatsRegistryOK(t *testing.T) {
 	if stats.Versions[0].Version != "v0.21.4" {
 		t.Fatalf("versions[0].version = %q (want newest first)", stats.Versions[0].Version)
 	}
-	if stats.Versions[0].Ref != "cache.reg/dagger-cache:v0-21-4" {
+	if stats.Versions[0].Ref != "cache.supv.example.com/dagger-cache:v0-21-4" {
 		t.Fatalf("ref = %q", stats.Versions[0].Ref)
 	}
 	if stats.HitRate != nil {
@@ -685,8 +704,8 @@ func TestPurgeAllCatalogDisabled(t *testing.T) {
 
 	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
 	_, err := svc.PurgeAll(context.Background())
-	if !errors.Is(err, domain.ErrRegistryDeleteDisabled) {
-		t.Fatalf("err = %v, want ErrRegistryDeleteDisabled", err)
+	if !errors.Is(err, domain.ErrRegistryCatalogDisabled) {
+		t.Fatalf("err = %v, want ErrRegistryCatalogDisabled", err)
 	}
 }
 
@@ -755,9 +774,13 @@ func TestStatsPurgeNoDeadlock(t *testing.T) {
 	}))
 	defer ts.Close()
 
+	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
+	if err := router.RecordManifest(context.Background(), "dagger-cache", "v0-21-4", digestStr("a"), "default", 0); err != nil {
+		t.Fatalf("seed route: %v", err)
+	}
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		repository.NewRegistryStatsClient(ts.Listener.Addr().String()),
+		router,
 		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
@@ -834,5 +857,101 @@ func TestFleetErrorTreatsAllProtected(t *testing.T) {
 	}
 	if summary.PurgedTags != 0 {
 		t.Fatalf("purged_tags = %d, want 0 (unknown fleet → all protected)", summary.PurgedTags)
+	}
+}
+
+func TestCacheStatsMultiBackend(t *testing.T) {
+	reg1 := newFakeRegistry()
+	reg1.tags["dagger-cache"] = []string{"v0-21-4"}
+	reg1.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 120, 3, "")
+	reg1.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+
+	reg2 := newFakeRegistry()
+	reg2.tags["dagger-cache"] = []string{"v0-20-0"}
+	reg2.manifestBody["dagger-cache:v0-20-0"] = manifestJSON("sha256:b", 60, 2, "")
+	reg2.manifestDigest["dagger-cache:v0-20-0"] = digestStr("b")
+
+	ts1 := httptest.NewServer(reg1.handler())
+	t.Cleanup(ts1.Close)
+	ts2 := httptest.NewServer(reg2.handler())
+	t.Cleanup(ts2.Close)
+
+	router := newTestRouter(t,
+		domain.RegistryBackend{ID: "reg-1", InternalAddr: ts1.Listener.Addr().String()},
+		domain.RegistryBackend{ID: "reg-2", InternalAddr: ts2.Listener.Addr().String()},
+	)
+	svc := NewCacheStatsService(
+		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
+		router, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+	)
+
+	stats, err := svc.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if !stats.Running || !stats.Reachable {
+		t.Fatalf("running=%v reachable=%v", stats.Running, stats.Reachable)
+	}
+	if stats.TotalSize != 180 {
+		t.Fatalf("total_size = %d, want 180", stats.TotalSize)
+	}
+	if stats.ObjectCount != 5 {
+		t.Fatalf("object_count = %d, want 5", stats.ObjectCount)
+	}
+	if len(stats.Versions) != 2 {
+		t.Fatalf("versions = %d, want 2", len(stats.Versions))
+	}
+
+	router.mu.RLock()
+	charge1 := router.charges["reg-1"]
+	charge2 := router.charges["reg-2"]
+	router.mu.RUnlock()
+	if charge1 != 120 || charge2 != 60 {
+		t.Fatalf("charges = reg-1:%d reg-2:%d, want 120/60", charge1, charge2)
+	}
+}
+
+func TestCacheStatsMarkDownFailingBackend(t *testing.T) {
+	reg := newFakeRegistry()
+	reg.tags["dagger-cache"] = []string{"v0-21-4"}
+	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+
+	ts := httptest.NewServer(reg.handler())
+	t.Cleanup(ts.Close)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	badAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	router := newTestRouter(t,
+		domain.RegistryBackend{ID: "good", InternalAddr: ts.Listener.Addr().String()},
+		domain.RegistryBackend{ID: "bad", InternalAddr: badAddr},
+	)
+	svc := NewCacheStatsService(
+		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
+		router, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+	)
+
+	stats, err := svc.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if !stats.Running || !stats.Reachable {
+		t.Fatal("running should be true when at least one backend is reachable")
+	}
+
+	router.mu.RLock()
+	down := router.down["bad"]
+	up := !router.down["good"]
+	router.mu.RUnlock()
+	if !down {
+		t.Fatal("failing backend should be marked down")
+	}
+	if !up {
+		t.Fatal("healthy backend should not be marked down")
 	}
 }

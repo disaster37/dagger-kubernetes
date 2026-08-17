@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +21,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -87,6 +91,24 @@ func run(c *cli.Context) error {
 		"tls_provider": cfg.TLS.Provider,
 	}).Info("dagger-cache supervisor starting")
 
+	cacheHost, cacheBackends, err := validateCacheConfig(cfg)
+	if err != nil {
+		return fmt.Errorf("validate cache config: %w", err)
+	}
+	if cfg.Cache.Backend == "registry" {
+		// Always resolve the public cache vhost so the emitted cache ref points
+		// at the Supervisor proxy, never the raw registry.
+		cfg.Cache.PublicHost = cacheHost
+	}
+
+	// The cache vhost is served on the same listener as the control plane, so
+	// its rewritten upload Locations must use the same scheme as server.public_url.
+	// Empty (parse failure / no scheme) means the handler falls back to https.
+	cacheScheme := ""
+	if u, err := url.Parse(cfg.Server.PublicURL); err == nil {
+		cacheScheme = u.Scheme
+	}
+
 	tlsProvider, err := selectTLSProvider(cfg)
 	if err != nil {
 		return fmt.Errorf("create TLS provider: %w", err)
@@ -120,7 +142,7 @@ func run(c *cli.Context) error {
 	cacheBackend := &service.Cache{
 		Type:       cfg.Cache.Backend,
 		Registry:   cfg.Cache.Registry,
-		PublicHost: cfg.Cache.PublicHost,
+		PublicHost: cacheHost,
 		S3:         domain.S3Ref{Bucket: cfg.Cache.S3.Bucket, Region: cfg.Cache.S3.Region},
 	}
 
@@ -145,6 +167,10 @@ func run(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("load jwt secret: %w", err)
 	}
+	tokenEncKey, err := loadOrCreateTokenEncryptionKey(ctx, metaStore, cfg.Auth.Token.EncryptionKey, logger)
+	if err != nil {
+		return fmt.Errorf("load token encryption key: %w", err)
+	}
 	jwtSvc := service.NewJWTService(jwtSecret, cfg.Auth.JWT.AccessTTL, cfg.Auth.JWT.RefreshTTL)
 
 	userRepo := repository.NewUserRepo(db)
@@ -156,7 +182,7 @@ func run(c *cli.Context) error {
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, tokenEncKey)
 
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
@@ -182,7 +208,11 @@ func run(c *cli.Context) error {
 	}
 
 	// --- Fleet + telemetry wiring ---
-	provider, err := createProvider(cfg, logger)
+	clientset, err := newK8sClientset()
+	if err != nil {
+		logger.WithError(err).Warn("k8s clientset unavailable; fleet provider and cache-token secret loading will fall back")
+	}
+	provider, err := createProvider(cfg, clientset, logger)
 	if err != nil {
 		return fmt.Errorf("create fleet provider: %w", err)
 	}
@@ -200,24 +230,35 @@ func run(c *cli.Context) error {
 	// --- Cache stats / status / GC wiring ---
 	metricsClient := repository.NewMetricsClient(cfg.Telemetry.VictoriaURL)
 
-	registryHost := cfg.Cache.InternalAddr
-	if registryHost == "" {
-		registryHost = registryHostFrom(cfg.Cache.Registry)
-	}
-	var registryClient *repository.RegistryStatsClient
-	if cfg.Cache.Backend == "registry" && registryHost != "" {
-		registryClient = repository.NewRegistryStatsClient(registryHost)
+	var router *service.RegistryRouter
+	var routesRepo *repository.CacheRoutesRepo
+	if cfg.Cache.Backend == "registry" {
+		routesRepo = repository.NewCacheRoutesRepo(db)
+		router = service.NewRegistryRouter(cacheBackends, routesRepo, logger)
+		if err := router.RefreshCharges(ctx); err != nil {
+			logger.WithError(err).Warn("refresh cache charges failed")
+		}
 	}
 
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, registryClient, metricsClient, provider, cfg.Cache.GC, logger, metrics)
-	statusSvc := service.NewStatusService(cfg, cacheBackend, registryClient, fleetManager, logger)
+	cacheToken := cfg.Cache.AuthToken
+	if cacheToken == "" {
+		cacheToken = loadCacheTokenFromSecret(ctx, clientset, cfg.Fleet.Namespace, logger)
+	}
+	if cfg.Cache.Backend == "registry" && cacheToken == "" {
+		logger.Warn("cache proxy auth disabled (no cache.auth_token and no engine-registry-auth secret token): dev mode only")
+	}
+
+	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, metricsClient, provider, cfg.Cache.GC, logger, metrics)
+	statusSvc := service.NewStatusService(cfg, cacheBackend, router, fleetManager, logger)
+	connectSvc := service.NewConnectService(cfg, cacheBackend, versionResolver, tokensSvc, logger)
 
 	server := handler.NewServer(&handler.ServerConfig{
 		ControlAddr:  cfg.Server.ControlAddr,
 		DataAddr:     cfg.Server.DataAddr,
 		DataHost:     cfg.Server.DataHost,
-		CacheHost:    cfg.Cache.PublicHost,
-		InternalReg:  cfg.Cache.InternalAddr,
+		CacheHost:    cacheHost,
+		CacheScheme:  cacheScheme,
+		CacheToken:   cacheToken,
 		CollectorURL: cfg.Telemetry.CollectorURL,
 		VictoriaURL:  cfg.Telemetry.VictoriaURL,
 		CertPath:     controlTLSCertPath,
@@ -246,6 +287,8 @@ func run(c *cli.Context) error {
 		CacheStatsProvider: cacheStatsSvc,
 		CachePurger:        cacheStatsSvc,
 		StatusProvider:     statusSvc,
+		Connect:            connectSvc,
+		Router:             router,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
@@ -270,6 +313,13 @@ func run(c *cli.Context) error {
 				expired := sessions.ReapOrphans()
 				if len(expired) > 0 {
 					metrics.ActiveLeases.Sub(float64(len(expired)))
+				}
+				if routesRepo != nil {
+					if n, err := routesRepo.ReapUploadSessions(ctx, time.Hour); err != nil {
+						logger.WithError(err).Error("reap upload sessions error")
+					} else if n > 0 {
+						logger.WithField("reaped", n).Debug("reaped stale upload sessions")
+					}
 				}
 			}
 		}
@@ -310,22 +360,69 @@ func loadOrCreateJWTSecret(ctx context.Context, ms *repository.MetaStore, config
 		}
 		return []byte(configured), nil
 	}
-	const key = "jwt_secret"
-	if existing, err := ms.Get(ctx, key); err == nil {
+	return loadOrCreateMetaSecret(ctx, ms, "jwt_secret", "jwt secret", "generated and persisted JWT secret", logger, false)
+}
+
+// minTokenEncKeyLen is the minimum accepted AES-256-GCM encryption key length
+// (32 bytes = 256 bits). Mirrors the JWT secret rule (minJWTSecretLen).
+const minTokenEncKeyLen = 32
+
+// loadOrCreateTokenEncryptionKey returns the configured token encryption key,
+// or generates and persists a 32-byte random key in the DB meta table on first
+// boot (mirroring loadOrCreateJWTSecret). A configured key shorter than 32
+// bytes is rejected.
+//
+// AES-256-GCM requires a key of exactly 32 bytes, but operators may configure
+// secrets of any length >= 32 bytes (and the auto-generated meta value is a
+// 64-char hex string), so the raw secret material is always SHA-256-derived
+// into a fixed 32-byte AES key rather than used directly.
+func loadOrCreateTokenEncryptionKey(ctx context.Context, ms *repository.MetaStore, configured string, logger *logrus.Logger) ([]byte, error) {
+	if configured != "" {
+		if len(configured) < minTokenEncKeyLen {
+			return nil, fmt.Errorf("auth.token.encryption_key too short (%d bytes): requires at least %d bytes", len(configured), minTokenEncKeyLen)
+		}
+		return deriveAESKey([]byte(configured)), nil
+	}
+	raw, err := loadOrCreateMetaSecret(ctx, ms, "token_encryption_key", "token encryption key",
+		"generated and persisted token encryption key (configure auth.token.encryption_key in production)", logger, true)
+	if err != nil {
+		return nil, err
+	}
+	return deriveAESKey(raw), nil
+}
+
+// deriveAESKey returns a fixed 32-byte AES-256 key derived from arbitrary
+// secret material via SHA-256 (HKDF-style single-step). Deterministic across
+// restarts and safe for any input length.
+func deriveAESKey(raw []byte) []byte {
+	sum := sha256.Sum256(raw)
+	return sum[:]
+}
+
+// loadOrCreateMetaSecret returns the persisted value for metaKey, or generates
+// and persists a fresh 32-byte hex secret in the DB meta table on first boot.
+// errLabel names the secret in error messages; logMsg is logged (INFO, or WARN
+// when warn=true) only when a new secret is generated.
+func loadOrCreateMetaSecret(ctx context.Context, ms *repository.MetaStore, metaKey, errLabel, logMsg string, logger *logrus.Logger, warn bool) ([]byte, error) {
+	if existing, err := ms.Get(ctx, metaKey); err == nil {
 		return []byte(existing), nil
 	} else if !errors.Is(err, domain.ErrNotFound) {
-		return nil, fmt.Errorf("get jwt secret: %w", err)
+		return nil, fmt.Errorf("get %s: %w", errLabel, err)
 	}
 
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
-		return nil, fmt.Errorf("generate jwt secret: %w", err)
+		return nil, fmt.Errorf("generate %s: %w", errLabel, err)
 	}
 	secret := hex.EncodeToString(b)
-	if err := ms.Set(ctx, key, secret); err != nil {
-		return nil, fmt.Errorf("persist jwt secret: %w", err)
+	if err := ms.Set(ctx, metaKey, secret); err != nil {
+		return nil, fmt.Errorf("persist %s: %w", errLabel, err)
 	}
-	logger.Info("generated and persisted JWT secret")
+	if warn {
+		logger.Warn(logMsg)
+	} else {
+		logger.Info(logMsg)
+	}
 	return []byte(secret), nil
 }
 
@@ -404,8 +501,13 @@ func runMigrateTokens(c *cli.Context) error {
 	groupRepo := repository.NewGroupRepo(db)
 	tokenRepo := repository.NewTokenRepo(db)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
+	metaStore := repository.NewMetaStore(db)
+	tokenEncKey, err := loadOrCreateTokenEncryptionKey(ctx, metaStore, cfg.Auth.Token.EncryptionKey, logger)
+	if err != nil {
+		return fmt.Errorf("load token encryption key: %w", err)
+	}
+	tokensSvc := service.NewTokenService(tokenRepo, logger, tokenEncKey)
 
 	res, err := service.ImportTokensFile(ctx, tokensFile, usersSvc, tokensSvc, groupsSvc, logger, c.Bool("dry-run"))
 	if err != nil {
@@ -431,15 +533,13 @@ func selectTLSProvider(cfg *domain.Config) (domain.CAProvider, error) {
 	}
 }
 
-func createProvider(cfg *domain.Config, logger *logrus.Logger) (domain.FleetProvider, error) {
+func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (domain.FleetProvider, error) {
 	if err := validateFleetEnv(&cfg.Fleet); err != nil {
 		return nil, err
 	}
-	clientset, err := newK8sClientset()
-	if err != nil {
-		logger.WithError(err).WithField("fleet_provider", "stub").Error(
-			"k8s clientset unavailable; falling back to in-memory stub provider — " +
-				"engine fleet will be empty and provisioning will not persist")
+	if clientset == nil {
+		logger.Warn("k8s clientset unavailable; falling back to in-memory stub provider — " +
+			"engine fleet will be empty and provisioning will not persist")
 		return repository.NewStubProvider(), nil
 	}
 
@@ -545,6 +645,104 @@ func registryHostFrom(registry string) string {
 		return registry
 	}
 	return host
+}
+
+// cacheAddrRe constrains backend internal_addr to host[:port] with no
+// scheme/path (defense against SSRF via config, CWE-918).
+var cacheAddrRe = regexp.MustCompile(`^[A-Za-z0-9._:-]+(:[0-9]+)?$`)
+
+// validateCacheConfig resolves the cache vhost and effective backend list, and
+// fails fast on configuration that would break the proxy (vhost collision,
+// empty backends, duplicate IDs, scheme/path in internal_addr).
+func validateCacheConfig(cfg *domain.Config) (string, []domain.RegistryBackend, error) {
+	if cfg.Cache.Backend != "registry" {
+		return "", nil, nil
+	}
+
+	controlHost := hostOf(cfg.Server.PublicURL)
+	if controlHost == "" {
+		return "", nil, fmt.Errorf("server.public_url must be an absolute URL (scheme://host) so the cache vhost can be derived")
+	}
+	cacheHost := cfg.Cache.PublicHost
+	if cacheHost == "" {
+		cacheHost = fmt.Sprintf("cache.%s", controlHost)
+	}
+	if cacheHost == controlHost {
+		return "", nil, fmt.Errorf("cache.public_host (%s) must differ from the control-plane host (%s); set a dedicated cache vhost", cacheHost, controlHost)
+	}
+
+	var backends []domain.RegistryBackend
+	if len(cfg.Cache.Registries) > 0 {
+		seen := make(map[string]bool, len(cfg.Cache.Registries))
+		for _, b := range cfg.Cache.Registries {
+			if b.ID == "" {
+				return "", nil, fmt.Errorf("cache.registries entry with empty id")
+			}
+			if seen[b.ID] {
+				return "", nil, fmt.Errorf("duplicate cache backend id: %s", b.ID)
+			}
+			seen[b.ID] = true
+			if b.InternalAddr == "" {
+				return "", nil, fmt.Errorf("cache.registries entry %s: internal_addr must not be empty", b.ID)
+			}
+			if !cacheAddrRe.MatchString(b.InternalAddr) {
+				return "", nil, fmt.Errorf("cache backend internal_addr must be host[:port] (no scheme/path): %s", b.InternalAddr)
+			}
+			backends = append(backends, b)
+		}
+	} else {
+		addr := cfg.Cache.InternalAddr
+		if addr == "" {
+			addr = registryHostFrom(cfg.Cache.Registry)
+		}
+		if addr == "" {
+			return "", nil, fmt.Errorf("cache: no backend registry configured")
+		}
+		if !cacheAddrRe.MatchString(addr) {
+			return "", nil, fmt.Errorf("cache backend internal_addr must be host[:port] (no scheme/path): %s", addr)
+		}
+		backends = []domain.RegistryBackend{{ID: "default", InternalAddr: addr}}
+	}
+
+	if len(backends) == 0 {
+		return "", nil, fmt.Errorf("cache: no backend registry configured")
+	}
+	return cacheHost, backends, nil
+}
+
+// hostOf strips scheme, port and path from a URL, returning its hostname.
+// (An explicit port is dropped so the derived cache vhost matches the
+// ingress Host header / TLS SAN, which never carry a port.)
+func hostOf(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return rawURL
+	}
+	return u.Hostname()
+}
+
+// loadCacheTokenFromSecret reads the engine→Supervisor-proxy bearer token from
+// the engine-registry-auth K8s secret. Returns "" (with a WARN) when K8s is
+// unavailable or the secret/key is missing.
+func loadCacheTokenFromSecret(ctx context.Context, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) string {
+	if clientset == nil {
+		logger.Warn("cache auth token: k8s clientset unavailable; cannot read engine-registry-auth secret")
+		return ""
+	}
+	if namespace == "" {
+		namespace = "dagger-cache"
+	}
+	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "engine-registry-auth", metav1.GetOptions{})
+	if err != nil {
+		logger.WithError(err).Warn("cache auth token: engine-registry-auth secret unavailable")
+		return ""
+	}
+	token := string(secret.Data["token"])
+	if token == "" {
+		logger.Warn("cache auth token: engine-registry-auth secret has no token key")
+		return ""
+	}
+	return token
 }
 
 // parseTolerations parses tolerations in the key[:value[:effect]] format.

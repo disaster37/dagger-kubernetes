@@ -1,7 +1,6 @@
 package service
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -13,14 +12,6 @@ type Cache struct {
 	Registry   string
 	PublicHost string
 	S3         domain.S3Ref
-}
-
-type RegistryAuthEntry struct {
-	Auth string `json:"auth"`
-}
-
-type EngineJSON struct {
-	Registries map[string]RegistryAuthEntry `json:"registries"`
 }
 
 var _ domain.CacheBackend = (*Cache)(nil)
@@ -55,18 +46,4 @@ func (b *Cache) BuildCacheConfig(v *domain.Version, mode string) string {
 	default:
 		return ""
 	}
-}
-
-func (b *Cache) BuildEngineJSON(authToken string) ([]byte, error) {
-	registryHost := b.Registry
-	if b.PublicHost != "" {
-		registryHost = b.PublicHost
-	}
-
-	engineJSON := EngineJSON{
-		Registries: map[string]RegistryAuthEntry{
-			registryHost: {Auth: authToken},
-		},
-	}
-	return json.Marshal(engineJSON)
 }

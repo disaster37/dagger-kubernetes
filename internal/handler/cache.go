@@ -80,6 +80,8 @@ func (s *Server) handleCachePurgeAll(ctx context.Context, c *app.RequestContext)
 // writePurgeError maps purge sentinel errors to HTTP responses.
 func (s *Server) writePurgeError(c *app.RequestContext, err error) {
 	switch {
+	case errors.Is(err, domain.ErrRegistryCatalogDisabled):
+		writeError(c, consts.StatusConflict, "registry catalog disabled; cannot purge")
 	case errors.Is(err, domain.ErrRegistryDeleteDisabled):
 		writeError(c, consts.StatusConflict, "registry delete not enabled")
 	case errors.Is(err, domain.ErrValidation):

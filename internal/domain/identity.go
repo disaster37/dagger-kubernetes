@@ -43,13 +43,14 @@ func (i *Identity) HasGroup(groupID string) bool {
 
 // Sentinel errors matched with errors.Is in handlers/services.
 var (
-	ErrUnauthenticated   = errors.New("unauthenticated")
-	ErrForbidden         = errors.New("forbidden")
-	ErrNoGroups          = errors.New("user is not a member of any group")
-	ErrAgentUnavailable  = errors.New("engines not available for any of the user's groups")
-	ErrQuotaExhausted    = errors.New("group runner session quota exhausted")
-	ErrTokenExists       = errors.New("api token already exists")
-	ErrNotFound          = errors.New("not found")
-	ErrInvalidCredential = errors.New("invalid credentials")
-	ErrValidation        = errors.New("validation error")
+	ErrUnauthenticated     = errors.New("unauthenticated")
+	ErrForbidden           = errors.New("forbidden")
+	ErrNoGroups            = errors.New("user is not a member of any group")
+	ErrAgentUnavailable    = errors.New("engines not available for any of the user's groups")
+	ErrQuotaExhausted      = errors.New("group runner session quota exhausted")
+	ErrTokenExists         = errors.New("api token already exists")
+	ErrNotFound            = errors.New("not found")
+	ErrInvalidCredential   = errors.New("invalid credentials")
+	ErrValidation          = errors.New("validation error")
+	ErrTokenNotRecoverable = errors.New("api token not recoverable")
 )

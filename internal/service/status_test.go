@@ -5,12 +5,12 @@ import (
 	"errors"
 	"net"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
-	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 func openTCP(t *testing.T) string {
@@ -48,7 +48,8 @@ func newStatusServiceWithRegistry(t *testing.T, cfg *domain.Config, cache *Cache
 	reg := newFakeRegistry()
 	ts := httptest.NewServer(reg.handler())
 	t.Cleanup(ts.Close)
-	svc := NewStatusService(cfg, cache, repository.NewRegistryStatsClient(ts.Listener.Addr().String()), fleet, observ.NewTestLogger())
+	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
+	svc := NewStatusService(cfg, cache, router, fleet, observ.NewTestLogger())
 	return svc, ts
 }
 
@@ -189,16 +190,53 @@ func TestStatusCacheDown(t *testing.T) {
 	cfg := &domain.Config{}
 	reg := newFakeRegistry()
 	ts := httptest.NewServer(reg.handler())
-	registry := repository.NewRegistryStatsClient(ts.Listener.Addr().String())
+	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
 	ts.Close()
 
-	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, registry, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger())
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if status.State != domain.ServiceDown {
 		t.Fatalf("rollup = %q, want down", status.State)
+	}
+}
+
+func TestStatusCacheDegraded(t *testing.T) {
+	cfg := &domain.Config{}
+	reg := newFakeRegistry()
+	ts := httptest.NewServer(reg.handler())
+	t.Cleanup(ts.Close)
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	badAddr := ln.Addr().String()
+	_ = ln.Close()
+
+	router := newTestRouter(t,
+		domain.RegistryBackend{ID: "good", InternalAddr: ts.Listener.Addr().String()},
+		domain.RegistryBackend{ID: "bad", InternalAddr: badAddr},
+	)
+	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger())
+	status, err := svc.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.State != domain.ServiceDegraded {
+		t.Fatalf("rollup = %q, want degraded", status.State)
+	}
+	for _, svc := range status.Services {
+		if svc.Name == "cache" {
+			if svc.State != domain.ServiceDegraded {
+				t.Fatalf("cache state = %q, want degraded", svc.State)
+			}
+			if !strings.Contains(svc.Message, "bad") {
+				t.Fatalf("cache message = %q, want down backend id listed", svc.Message)
+			}
+		}
 	}
 }
 

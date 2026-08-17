@@ -49,6 +49,7 @@ func newAuthEngine(s *Server) *route.Engine {
 	e.POST("/api/v1/tokens/me", s.handleMyTokenCreate)
 	e.PUT("/api/v1/tokens/me/regenerate", s.handleMyTokenRegenerate)
 	e.DELETE("/api/v1/tokens/me", s.handleMyTokenRevoke)
+	e.GET("/api/v1/connect/env", s.handleConnectEnv)
 	e.GET("/api/v1/traces", s.handleTracesList)
 	e.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	e.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)

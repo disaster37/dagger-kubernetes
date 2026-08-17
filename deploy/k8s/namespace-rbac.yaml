@@ -57,14 +57,20 @@ data:
   tls.crt: ""
   tls.key: ""
 ---
+# engine-registry-auth: the `token` key is the engine→Supervisor cache-proxy
+# bearer. It MUST match `cache.auth_token` in the Supervisor config (or be
+# absent, in which case the Supervisor reads this secret's `token` key). The
+# optional `.dockerconfigjson` key is only for engine image-pull auth against a
+# private registry and is unrelated to the cache-proxy token.
 apiVersion: v1
 kind: Secret
 metadata:
   name: engine-registry-auth
   namespace: dagger-cache
-type: kubernetes.io/dockerconfigjson
+type: Opaque
 data:
-  .dockerconfigjson: ""
+  token: "cGxhY2Vob2xkZXI="  # base64("placeholder"); engine→proxy bearer, must match cache.auth_token
+  .dockerconfigjson: ""       # optional: engine image-pull auth (dockerconfigjson)
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -89,7 +95,10 @@ data:
       victoria_url: "http://victoria:8428"
     cache:
       backend: "registry"
-      registry: "cache.reg/dagger-cache"
+      registry: "cache-registry:5000/dagger-cache"   # internal backend ref (repo path)
+      public_host: "cache.supv.example.com"          # dedicated cache vhost (engine pushes/pulls through Supervisor)
+      internal_addr: "cache-registry:5000"           # internal registry Service (backend)
+      auth_token: "change-me"                        # engine→proxy bearer; must match engine-registry-auth secret token
       ref_per_version: true
     fleet:
       namespace: "dagger-cache"

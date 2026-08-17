@@ -114,3 +114,17 @@ spec:
                 name: supervisor-control
                 port:
                   number: 80
+    # Cache vhost: engines push/pull cache blobs through the Supervisor proxy
+    # on this hostname. The control-plane TLS certificate MUST include
+    # `cache.supv.example.com` as a SAN (the cache vhost shares the control-plane
+    # TLS listener).
+    - host: cache.supv.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: supervisor-control
+                port:
+                  number: 80

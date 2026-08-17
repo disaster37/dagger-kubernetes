@@ -142,13 +142,21 @@ supervisor:
       lokiUrl: "http://loki:3100"
       victoriaUrl: "http://victoria:8428"
 ## @param supervisor.config.cache.backend Cache backend type: registry (OCI) or s3.
-## @param supervisor.config.cache.registry Cache registry URL (auto-wired when registry enabled).
+## @param supervisor.config.cache.registry Cache registry ref (auto-wired public ref `<cachePublicHost>/dagger-cache`).
+## @param supervisor.config.cache.publicHost Dedicated cache vhost engines push/pull through (empty = derived `cache.<server.publicUrl host>`). Must differ from the control-plane host.
+## @param supervisor.config.cache.internalAddr Legacy single backend address (empty = auto-wired `<release>-registry:5000` when tools.registry enabled).
+## @param supervisor.config.cache.authToken Engine→proxy bearer (empty = read from the engine-registry-auth secret key `token`).
+## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password} (empty = single-backend mode).
 ## @param supervisor.config.cache.refPerVersion Enable per-version cache references.
 ## @param supervisor.config.cache.s3.bucket S3 bucket name (when backend=s3).
 ## @param supervisor.config.cache.s3.region S3 region (when backend=s3).
     cache:
       backend: "registry"
       registry: ""
+      publicHost: ""
+      internalAddr: ""
+      authToken: ""
+      registries: []
       refPerVersion: true
       s3:
         bucket: ""
@@ -283,6 +291,7 @@ service:
 ## @param ingress.hosts[].host Hostname for the ingress rule.
 ## @param ingress.hosts[].paths[].path URL path for the ingress rule.
 ## @param ingress.hosts[].paths[].pathType Path matching type (Prefix, Exact, ImplementationSpecific).
+## @param ingress.cacheHost Cache vhost hostname (empty = derived from the cachePublicHost helper). A second host rule + TLS SAN entry is added for it.
 ## @param ingress.tls [array] Ingress TLS configuration.
 ingress:
   enabled: true
@@ -293,6 +302,7 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
+  cacheHost: ""
   tls: []
 
 ## @section Data-plane Ingress (mTLS passthrough)

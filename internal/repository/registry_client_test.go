@@ -239,6 +239,72 @@ func TestRegistryPing(t *testing.T) {
 	}
 }
 
+func TestRegistryProbeManifest(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		wantOK  bool
+		wantErr error
+	}{
+		{"ok-200", http.StatusOK, true, nil},
+		{"not-found-404", http.StatusNotFound, false, nil},
+		{"method-not-allowed-405", http.StatusMethodNotAllowed, false, nil},
+		{"unauthorized-401", http.StatusUnauthorized, false, ErrRegistryUnreachable},
+		{"forbidden-403", http.StatusForbidden, false, ErrRegistryUnreachable},
+		{"server-error-500", http.StatusInternalServerError, false, ErrRegistryUnreachable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodHead {
+					t.Errorf("method = %q", r.Method)
+				}
+				w.WriteHeader(tc.status)
+			})
+			got, err := c.ProbeManifest(context.Background(), "dagger-cache", "v0-21-4")
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if got != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", got, tc.wantOK)
+			}
+		})
+	}
+}
+
+func TestRegistryProbeBlob(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  int
+		wantOK  bool
+		wantErr error
+	}{
+		{"ok-200", http.StatusOK, true, nil},
+		{"not-found-404", http.StatusNotFound, false, nil},
+		{"method-not-allowed-405", http.StatusMethodNotAllowed, false, nil},
+		{"unauthorized-401", http.StatusUnauthorized, false, ErrRegistryUnreachable},
+		{"forbidden-403", http.StatusForbidden, false, ErrRegistryUnreachable},
+		{"server-error-500", http.StatusInternalServerError, false, ErrRegistryUnreachable},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodHead {
+					t.Errorf("method = %q", r.Method)
+				}
+				w.WriteHeader(tc.status)
+			})
+			got, err := c.ProbeBlob(context.Background(), "dagger-cache", digestRepeat("a"))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if got != tc.wantOK {
+				t.Fatalf("ok = %v, want %v", got, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestRegistryHost(t *testing.T) {
 	c := NewRegistryStatsClient("localhost:5000")
 	if c.Host() != "localhost:5000" {
@@ -246,6 +312,37 @@ func TestRegistryHost(t *testing.T) {
 	}
 	if got := c.baseURL(); got != "http://localhost:5000" {
 		t.Fatalf("baseURL = %q", got)
+	}
+}
+
+func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
+	tests := []struct {
+		name     string
+		username string
+		password string
+		wantAuth string
+	}{
+		{"both", "user", "pass", "Basic dXNlcjpwYXNz"},
+		{"username-only", "user", "", "Basic dXNlcjo="},
+		{"empty-creds", "", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotAuth string
+			ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotAuth = r.Header.Get("Authorization")
+				w.WriteHeader(http.StatusOK)
+			}))
+			defer ts.Close()
+
+			c := NewRegistryStatsClientWithAuth(ts.Listener.Addr().String(), tc.username, tc.password)
+			if err := c.Ping(context.Background()); err != nil {
+				t.Fatalf("Ping: %v", err)
+			}
+			if gotAuth != tc.wantAuth {
+				t.Fatalf("Authorization = %q, want %q", gotAuth, tc.wantAuth)
+			}
+		})
 	}
 }
 

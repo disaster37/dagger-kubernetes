@@ -3,6 +3,7 @@ import { useAuthStore } from '@/stores/auth'
 import type {
   AuthUser,
   CacheInfo,
+  ConnectEnvSnapshot,
   FleetInfo,
   Group,
   GroupSummary,
@@ -204,6 +205,15 @@ export async function purgeAllCache(): Promise<PurgeResult> {
 export async function fetchPlatformStatus(): Promise<PlatformStatus> {
   const { data } = await api.get('/api/v1/status')
   return data as PlatformStatus
+}
+
+// --- Connect-env snapshot ---
+export async function fetchConnectEnv(version?: string, reveal?: boolean): Promise<ConnectEnvSnapshot> {
+  const params: Record<string, string> = {}
+  if (version) params.version = version
+  if (reveal) params.reveal = 'true'
+  const { data } = await api.get('/api/v1/connect/env', { params })
+  return data as ConnectEnvSnapshot
 }
 
 // SSE live trace stream (EventSource cannot set headers; use ?token= query param).

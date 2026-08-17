@@ -46,6 +46,13 @@ auth:
     access_ttl: "15m"
     refresh_ttl: "168h"                             # 7d; refresh rotated on use.
 
+  # API-token plaintext recovery (Connect-env UI). AES-256-GCM key (>= 32 bytes).
+  # Empty = auto-generated and persisted in the DB meta table (dev mode).
+  # Configure via env (DAGGER_CACHE_AUTH_TOKEN_ENCRYPTION_KEY) in production
+  # so DB compromise alone does not yield token plaintexts.
+  token:
+    encryption_key: ""
+
   # Optional OAuth (e.g. GitHub) for human/UI login.
   oauth:
     enabled: false
@@ -74,9 +81,21 @@ telemetry:
 # --- Remote shared cache -----------------------------------------------------
 cache:
   backend: "registry"               # "registry" (OCI) or "s3".
-  registry: "cache.reg/dagger-cache" # OCI repository for BuildKit cache blobs.
-  public_host: ""                   # public vhost for cache (engines push/pull through Supervisor).
-  internal_addr: ""                 # internal address:port of the OCI registry (e.g. localhost:5000).
+  registry: "cache.reg/dagger-cache" # legacy single-registry ref (used when registries: [] is empty).
+  public_host: ""                   # dedicated cache vhost engines push/pull through (Supervisor proxy).
+                                    # Defaults to cache.<server.public_url host>. Must differ from the control-plane host.
+  internal_addr: ""                 # legacy single backend address (used when registries: [] is empty).
+  auth_token: ""                    # bearer the Supervisor accepts from engines on the cache proxy.
+                                    # Empty = read from the engine-registry-auth K8s secret (key "token"). Never logged.
+  registries: []                    # multi-backend list for load balancing. Empty = single-backend mode (legacy).
+    # - id: "reg-1"
+    #   internal_addr: "registry-1:5000"
+    #   username: ""
+    #   password: ""
+    # - id: "reg-2"
+    #   internal_addr: "registry-2:5000"
+    #   username: ""
+    #   password: ""
   s3:                                # used only when backend == "s3".
     bucket: ""
     region: ""

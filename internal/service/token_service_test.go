@@ -2,16 +2,27 @@ package service
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+func testEncKey() []byte {
+	return []byte("0123456789abcdef0123456789abcdef")
+}
+
 func newTokenService(t *testing.T) (*TokenService, *UserService) {
 	t.Helper()
+	return newTokenServiceWithKey(t, testEncKey())
+}
+
+func newTokenServiceWithKey(t *testing.T, key []byte) (*TokenService, *UserService) {
+	t.Helper()
 	r := newServiceDB(t)
-	tsvc := NewTokenService(r.tokens, testLogger())
+	tsvc := NewTokenService(r.tokens, testLogger(), key)
 	usvc := NewUserService(r.users, r.groups, testLogger())
 	return tsvc, usvc
 }
@@ -141,5 +152,196 @@ func TestHashAPIToken(t *testing.T) {
 	}
 	if h1 == h3 {
 		t.Fatal("different inputs should hash differently")
+	}
+}
+
+func TestRevealSuccess(t *testing.T) {
+	tsvc, usvc := newTokenService(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+
+	plaintext, _, err := tsvc.Generate(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	got, err := tsvc.Reveal(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("Reveal: %v", err)
+	}
+	if got != plaintext {
+		t.Fatalf("Reveal = %q, want %q", got, plaintext)
+	}
+}
+
+func TestRevealNotFound(t *testing.T) {
+	tsvc, usvc := newTokenService(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+
+	if _, err := tsvc.Reveal(ctx, u.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Reveal missing: %v, want ErrNotFound", err)
+	}
+}
+
+func TestRevealPreV2Token(t *testing.T) {
+	tsvc, usvc := newTokenService(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+
+	// Directly persist a token with no ciphertext (pre-v2 shape).
+	if err := tsvc.tokens.Upsert(ctx, &domain.APIToken{
+		ID:        newID(),
+		UserID:    u.ID,
+		TokenHash: HashAPIToken("dct_pre-v2"),
+		Prefix:    "dct_pre-v2",
+		CreatedAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if _, err := tsvc.Reveal(ctx, u.ID); !errors.Is(err, domain.ErrTokenNotRecoverable) {
+		t.Fatalf("Reveal pre-v2: %v, want ErrTokenNotRecoverable", err)
+	}
+}
+
+func TestRevealNoKey(t *testing.T) {
+	r := newServiceDB(t)
+	ctx := context.Background()
+	usvc := NewUserService(r.users, r.groups, testLogger())
+	u := seedUserSvc(t, usvc, "u1")
+
+	keyed := NewTokenService(r.tokens, testLogger(), testEncKey())
+	if _, _, err := keyed.Generate(ctx, u.ID); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	// Same repo, but no key: the ciphertext is present yet unrecoverable.
+	noKey := NewTokenService(r.tokens, testLogger(), nil)
+	if _, err := noKey.Reveal(ctx, u.ID); !errors.Is(err, domain.ErrTokenNotRecoverable) {
+		t.Fatalf("Reveal with no key: %v, want ErrTokenNotRecoverable", err)
+	}
+}
+
+func TestEncryptDecryptRoundTrip(t *testing.T) {
+	key := testEncKey()
+	ct, err := encryptToken(key, "dct_secret_value")
+	if err != nil {
+		t.Fatalf("encryptToken: %v", err)
+	}
+	pt, err := decryptToken(key, ct)
+	if err != nil {
+		t.Fatalf("decryptToken: %v", err)
+	}
+	if pt != "dct_secret_value" {
+		t.Fatalf("decryptToken = %q", pt)
+	}
+
+	// Wrong key must fail.
+	if _, err := decryptToken([]byte("11111111111111111111111111111111"), ct); err == nil {
+		t.Fatal("decrypt with wrong key: expected error")
+	}
+}
+
+func TestEncryptTokenDisabled(t *testing.T) {
+	if ct, err := encryptToken(nil, "dct_x"); err != nil || ct != "" {
+		t.Fatalf("encryptToken(nil) = (%q, %v), want empty/nil", ct, err)
+	}
+	if ct, err := encryptToken([]byte{}, "dct_x"); err != nil || ct != "" {
+		t.Fatalf("encryptToken(empty) = (%q, %v), want empty/nil", ct, err)
+	}
+}
+
+func TestDecryptTokenInvalid(t *testing.T) {
+	key := testEncKey()
+
+	if _, err := decryptToken(key, "!!!not-base64!!!"); err == nil {
+		t.Fatal("decryptToken bad base64: expected error")
+	}
+	if _, err := decryptToken(key, base64.StdEncoding.EncodeToString([]byte("short"))); err == nil {
+		t.Fatal("decryptToken short ciphertext: expected error")
+	}
+}
+
+func TestEncryptDecryptInvalidKey(t *testing.T) {
+	short := []byte("too-short")
+	if _, err := encryptToken(short, "dct_x"); err == nil {
+		t.Fatal("encryptToken with short key: expected error")
+	}
+	ct, err := encryptToken(testEncKey(), "dct_x")
+	if err != nil {
+		t.Fatalf("encryptToken: %v", err)
+	}
+	if _, err := decryptToken(short, ct); err == nil {
+		t.Fatal("decryptToken with short key: expected error")
+	}
+}
+
+func TestGenerateEncryptError(t *testing.T) {
+	r := newServiceDB(t)
+	usvc := NewUserService(r.users, r.groups, testLogger())
+	u := seedUserSvc(t, usvc, "u1")
+
+	// A short key makes encryption fail during Generate.
+	tsvc := NewTokenService(r.tokens, testLogger(), []byte("short"))
+	if _, _, err := tsvc.Generate(context.Background(), u.ID); err == nil {
+		t.Fatal("Generate with short key: expected error")
+	}
+}
+
+func TestGenerateRepoError(t *testing.T) {
+	tsvc := NewTokenService(errorTokenRepo{}, testLogger(), testEncKey())
+	if _, _, err := tsvc.Generate(context.Background(), "u1"); err == nil {
+		t.Fatal("Generate with repo error: expected error")
+	}
+}
+
+func TestImportRawEncryptError(t *testing.T) {
+	r := newServiceDB(t)
+	usvc := NewUserService(r.users, r.groups, testLogger())
+	u := seedUserSvc(t, usvc, "u1")
+
+	tsvc := NewTokenService(r.tokens, testLogger(), []byte("short"))
+	if err := tsvc.ImportRaw(context.Background(), u.ID, "dct_x"); err == nil {
+		t.Fatal("ImportRaw with short key: expected error")
+	}
+}
+
+func TestRevealDecryptError(t *testing.T) {
+	tsvc, usvc := newTokenService(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+
+	// Non-empty but corrupt ciphertext: recoverable flag is true, but decrypt
+	// fails.
+	if err := tsvc.tokens.Upsert(ctx, &domain.APIToken{
+		ID:              newID(),
+		UserID:          u.ID,
+		TokenHash:       HashAPIToken("dct_corrupt"),
+		TokenCiphertext: base64.StdEncoding.EncodeToString([]byte("corrupt-ciphertext-that-is-long-enough")),
+		Prefix:          "dct_corrupt",
+		CreatedAt:       time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	if _, err := tsvc.Reveal(ctx, u.ID); err == nil {
+		t.Fatal("Reveal with corrupt ciphertext: expected error")
+	}
+}
+
+func TestUpsertStoresCiphertext(t *testing.T) {
+	tsvc, usvc := newTokenService(t)
+	ctx := context.Background()
+	u := seedUserSvc(t, usvc, "u1")
+
+	if _, _, err := tsvc.Generate(ctx, u.ID); err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	meta, err := tsvc.Meta(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("Meta: %v", err)
+	}
+	if meta.TokenCiphertext == "" {
+		t.Fatal("expected non-empty TokenCiphertext after Generate")
 	}
 }

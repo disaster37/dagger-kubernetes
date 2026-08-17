@@ -240,6 +240,20 @@ func (r *stubTokenRepo) TouchLastUsed(_ context.Context, id string, at time.Time
 	return nil
 }
 
+// errorTokenRepo returns a non-NotFound error from GetByUser/GetByHash to
+// exercise the TokenService error paths.
+type errorTokenRepo struct{}
+
+func (errorTokenRepo) Upsert(context.Context, *domain.APIToken) error { return nil }
+func (errorTokenRepo) GetByHash(context.Context, string) (*domain.APIToken, error) {
+	return nil, errors.New("boom")
+}
+func (errorTokenRepo) GetByUser(context.Context, string) (*domain.APIToken, error) {
+	return nil, errors.New("boom")
+}
+func (errorTokenRepo) Delete(context.Context, string) error                   { return nil }
+func (errorTokenRepo) TouchLastUsed(context.Context, string, time.Time) error { return nil }
+
 // stubLegacyValidator is a flat-file-style TokenValidator stub.
 type stubLegacyValidator struct {
 	valid map[string]bool

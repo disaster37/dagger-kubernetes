@@ -69,6 +69,8 @@ func readBounded(r io.Reader, max int64) ([]byte, error) {
 // cache vhost.
 type RegistryStatsClient struct {
 	host       string // e.g. "localhost:5000" (cache.internal_addr) or derived from cache.registry
+	username   string
+	password   string
 	httpClient *http.Client
 }
 
@@ -79,6 +81,15 @@ func NewRegistryStatsClient(host string) *RegistryStatsClient {
 			Timeout: 10 * time.Second,
 		},
 	}
+}
+
+// NewRegistryStatsClientWithAuth returns a client that sends Basic auth on
+// every request (per-backend registry credentials).
+func NewRegistryStatsClientWithAuth(host, username, password string) *RegistryStatsClient {
+	c := NewRegistryStatsClient(host)
+	c.username = username
+	c.password = password
+	return c
 }
 
 // Host returns the registry host the client talks to.
@@ -99,6 +110,9 @@ func (c *RegistryStatsClient) do(ctx context.Context, method, rawURL, accept str
 	}
 	if accept != "" {
 		req.Header.Set("Accept", accept)
+	}
+	if c.username != "" || c.password != "" {
+		req.SetBasicAuth(c.username, c.password)
 	}
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
@@ -125,6 +139,51 @@ func (c *RegistryStatsClient) Ping(ctx context.Context) error {
 		return fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 	return nil
+}
+
+// ProbeManifest performs a HEAD request for repo:ref. It reports
+// (true, nil) when the manifest exists (200), (false, nil) when it is
+// definitively absent (404, or 405 which some registries return for HEAD),
+// and (false, ErrRegistryUnreachable) for transport errors or any other
+// non-2xx status (401/403/5xx) so the router marks the backend down.
+func (c *RegistryStatsClient) ProbeManifest(ctx context.Context, repo, ref string) (bool, error) {
+	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(ref)), manifestAccept)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	discard(resp)
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
+}
+
+// ProbeBlob performs a HEAD request for repo's blob digest. It reports
+// (true, nil) when the blob exists (200), (false, nil) when it is
+// definitively absent (404, or 405 which some registries return for HEAD),
+// and (false, ErrRegistryUnreachable) for transport errors or any other
+// non-2xx status (401/403/5xx) so the router marks the backend down.
+func (c *RegistryStatsClient) ProbeBlob(ctx context.Context, repo, digest string) (bool, error) {
+	if !validDigest(digest) {
+		return false, fmt.Errorf("invalid digest: must be sha256:<hex>")
+	}
+	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	discard(resp)
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
 }
 
 // Catalog returns the list of repositories. Returns ErrRegistryCatalogDisabled

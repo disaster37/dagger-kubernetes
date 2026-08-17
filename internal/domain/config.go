@@ -30,6 +30,7 @@ type AuthConfig struct {
 	Internal       InternalAuthConfig   `mapstructure:"internal"`
 	OAuth          OAuthConfig          `mapstructure:"oauth"`
 	JWT            JWTConfig            `mapstructure:"jwt"`
+	Token          TokenConfig          `mapstructure:"token"`
 	BootstrapAdmin BootstrapAdminConfig `mapstructure:"bootstrap_admin"`
 }
 
@@ -60,6 +61,11 @@ type JWTConfig struct {
 	RefreshTTL time.Duration `mapstructure:"refresh_ttl"`
 }
 
+// TokenConfig configures API-token plaintext recovery (Connect-env UI).
+type TokenConfig struct {
+	EncryptionKey string `mapstructure:"encryption_key"` // >= 32 bytes; empty = auto-generated + persisted in meta
+}
+
 // BootstrapAdminConfig configures the first-boot admin user creation.
 type BootstrapAdminConfig struct {
 	Username string `mapstructure:"username"`
@@ -73,14 +79,24 @@ type TelemetryConfig struct {
 	VictoriaURL  string `mapstructure:"victoria_url"`
 }
 
+// RegistryBackend is one backend OCI registry the Supervisor proxies to.
+type RegistryBackend struct {
+	ID           string `mapstructure:"id"`
+	InternalAddr string `mapstructure:"internal_addr"` // host[:port], no scheme
+	Username     string `mapstructure:"username"`
+	Password     string `mapstructure:"password"`
+}
+
 type CacheConfig struct {
-	Backend       string   `mapstructure:"backend"`
-	Registry      string   `mapstructure:"registry"`
-	PublicHost    string   `mapstructure:"public_host"`
-	InternalAddr  string   `mapstructure:"internal_addr"`
-	S3            S3Config `mapstructure:"s3"`
-	RefPerVersion bool     `mapstructure:"ref_per_version"`
-	GC            GCConfig `mapstructure:"gc"`
+	Backend       string            `mapstructure:"backend"`       // "registry" | "s3"
+	Registry      string            `mapstructure:"registry"`      // legacy single ref "host/repo"
+	PublicHost    string            `mapstructure:"public_host"`   // dedicated cache vhost
+	InternalAddr  string            `mapstructure:"internal_addr"` // legacy single backend addr
+	AuthToken     string            `mapstructure:"auth_token"`    // engine→proxy bearer
+	Registries    []RegistryBackend `mapstructure:"registries"`    // multi-backend list
+	S3            S3Config          `mapstructure:"s3"`
+	RefPerVersion bool              `mapstructure:"ref_per_version"`
+	GC            GCConfig          `mapstructure:"gc"`
 }
 
 type S3Config struct {

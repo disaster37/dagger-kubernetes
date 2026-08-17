@@ -32,12 +32,13 @@ CREATE TABLE IF NOT EXISTS user_groups (
 CREATE INDEX IF NOT EXISTS idx_user_groups_group ON user_groups(group_id);
 
 CREATE TABLE IF NOT EXISTS api_tokens (
-    id           TEXT PRIMARY KEY,
-    user_id      TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
-    token_hash   TEXT NOT NULL UNIQUE,
-    prefix       TEXT NOT NULL DEFAULT '',
-    created_at   DATETIME NOT NULL,
-    last_used_at DATETIME
+    id               TEXT PRIMARY KEY,
+    user_id          TEXT NOT NULL UNIQUE REFERENCES users(id) ON DELETE CASCADE,
+    token_hash       TEXT NOT NULL UNIQUE,
+    token_ciphertext TEXT NOT NULL DEFAULT '',  -- AES-256-GCM base64; "" for pre-v2 tokens
+    prefix           TEXT NOT NULL DEFAULT '',
+    created_at       DATETIME NOT NULL,
+    last_used_at     DATETIME
 );
 
 CREATE TABLE IF NOT EXISTS projects (
@@ -73,4 +74,31 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version    INTEGER PRIMARY KEY,
     applied_at DATETIME NOT NULL
+);
+
+-- v3: object→backend routing table for multi-registry load balancing.
+CREATE TABLE IF NOT EXISTS cache_object_routes (
+    repo         TEXT NOT NULL,
+    tag          TEXT NOT NULL,
+    digest       TEXT NOT NULL DEFAULT '',
+    backend_id   TEXT NOT NULL,
+    stored_bytes INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    last_seen_at TEXT NOT NULL,
+    PRIMARY KEY (repo, tag)
+);
+CREATE INDEX IF NOT EXISTS idx_cache_routes_backend ON cache_object_routes(backend_id);
+
+CREATE TABLE IF NOT EXISTS cache_blob_routes (
+    digest       TEXT NOT NULL,
+    backend_id   TEXT NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (digest, backend_id)
+);
+
+CREATE TABLE IF NOT EXISTS cache_upload_sessions (
+    upload_uuid TEXT PRIMARY KEY,
+    repo        TEXT NOT NULL,
+    backend_id  TEXT NOT NULL,
+    created_at  TEXT NOT NULL
 );

@@ -12,7 +12,7 @@ func newLegacyForTest(t *testing.T) (*UserService, *TokenService, *GroupService,
 	r := newServiceDB(t)
 	logger := testLogger()
 	usvc := NewUserService(r.users, r.groups, logger)
-	tsvc := NewTokenService(r.tokens, logger)
+	tsvc := NewTokenService(r.tokens, logger, nil)
 	gsvc := NewGroupService(r.groups, r.users, logger)
 	return usvc, tsvc, gsvc, r
 }

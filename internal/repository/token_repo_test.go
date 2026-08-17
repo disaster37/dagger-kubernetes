@@ -121,3 +121,50 @@ func TestTokenRepoDeleteUserCascadesToken(t *testing.T) {
 		t.Fatalf("token should cascade-delete with user, got %v", err)
 	}
 }
+
+func TestTokenRepoUpsertStoresCiphertext(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewTokenRepo(db)
+	ctx := context.Background()
+
+	u := seedUser(t, db, "u")
+	tok := &domain.APIToken{
+		ID:              newID(),
+		UserID:          u.ID,
+		TokenHash:       "hash1",
+		TokenCiphertext: "ciphertext-base64",
+		Prefix:          "dct_aaaaaaaa",
+	}
+	if err := repo.Upsert(ctx, tok); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, err := repo.GetByUser(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetByUser: %v", err)
+	}
+	if got.TokenCiphertext != "ciphertext-base64" {
+		t.Fatalf("ciphertext = %q, want ciphertext-base64", got.TokenCiphertext)
+	}
+}
+
+func TestTokenRepoGetByUserPreV2Column(t *testing.T) {
+	db := newTestDB(t)
+	repo := NewTokenRepo(db)
+	ctx := context.Background()
+
+	u := seedUser(t, db, "u")
+	// A pre-v2 row has no ciphertext (empty string).
+	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "hash1", Prefix: "dct_aaaaaaaa"}
+	if err := repo.Upsert(ctx, tok); err != nil {
+		t.Fatalf("Upsert: %v", err)
+	}
+
+	got, err := repo.GetByUser(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("GetByUser: %v", err)
+	}
+	if got.TokenCiphertext != "" {
+		t.Fatalf("ciphertext = %q, want empty", got.TokenCiphertext)
+	}
+}

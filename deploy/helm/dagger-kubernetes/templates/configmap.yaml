@@ -44,7 +44,19 @@ data:
     cache:
       backend: {{ .Values.supervisor.config.cache.backend | quote }}
       registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}
+      public_host: {{ include "dagger-kubernetes.cachePublicHost" . | quote }}
+      internal_addr: {{ include "dagger-kubernetes.cacheInternalAddr" . | quote }}
+      auth_token: {{ .Values.supervisor.config.cache.authToken | quote }}
       ref_per_version: {{ .Values.supervisor.config.cache.refPerVersion }}
+{{- if .Values.supervisor.config.cache.registries }}
+      registries:
+{{- range .Values.supervisor.config.cache.registries }}
+        - id: {{ .id | quote }}
+          internal_addr: {{ .internalAddr | quote }}
+          username: {{ .username | quote }}
+          password: {{ .password | quote }}
+{{- end }}
+{{- end }}
 {{- if eq .Values.supervisor.config.cache.backend "s3" }}
       s3:
         bucket: {{ .Values.supervisor.config.cache.s3.bucket | quote }}
