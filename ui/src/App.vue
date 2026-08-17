@@ -1,7 +1,7 @@
 <template>
   <div id="app">
     <nav class="navbar">
-      <router-link to="/" class="logo">Dagger Cache</router-link>
+      <router-link to="/" class="logo">Dagger Kubernetes</router-link>
       <div class="nav-links">
         <router-link to="/pipelines">Pipelines</router-link>
         <router-link to="/cache">MagicCache</router-link>

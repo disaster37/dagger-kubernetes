@@ -1,4 +1,4 @@
-# Dagger Cache (`dagger-kubernetes`)
+# Dagger Kubernetes
 
 A self-hosted, **Dagger-Cloud-compatible** platform that gives you remote
 shared cache, auto-scaling engine fleets, a live pipeline UI, and drop-in CI
