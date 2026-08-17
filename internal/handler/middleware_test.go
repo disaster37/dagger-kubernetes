@@ -210,7 +210,9 @@ func TestWriteServiceErrorMapping(t *testing.T) {
 		{"agent unavailable", domain.ErrAgentUnavailable, http.StatusForbidden},
 		{"quota exhausted", domain.ErrQuotaExhausted, http.StatusTooManyRequests},
 		{"unauthenticated", domain.ErrUnauthenticated, http.StatusUnauthorized},
-		{"unique violation", errors.New("UNIQUE constraint failed: users"), http.StatusConflict},
+		{"conflict", domain.ErrConflict, http.StatusConflict},
+		{"not leader", domain.ErrNotLeader, http.StatusServiceUnavailable},
+		{"raft timeout", domain.ErrRaftTimeout, http.StatusGatewayTimeout},
 		{"other", errors.New("boom"), http.StatusInternalServerError},
 	}
 	for _, tc := range cases {

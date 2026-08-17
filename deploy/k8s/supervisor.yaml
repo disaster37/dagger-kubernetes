@@ -25,13 +25,17 @@ spec:
               containerPort: 8080
             - name: data
               containerPort: 8443
+            - name: raft
+              containerPort: 8081
           args:
             - "--config=/etc/dagger-cache/config.app.yaml"
           env:
             - name: DAGGER_CACHE_LOG_LEVEL
               value: "info"
-            - name: DAGGER_CACHE_DATABASE_PATH
-              value: "/var/lib/dagger-cache/dagger-cache.db"
+            - name: DAGGER_CACHE_DATABASE_DIR
+              value: "/var/lib/dagger-cache"
+            - name: DAGGER_CACHE_RAFT_BIND_ADDR
+              value: ":8081"
           volumeMounts:
             - name: config
               mountPath: /etc/dagger-cache

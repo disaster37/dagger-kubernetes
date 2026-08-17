@@ -31,21 +31,13 @@ type rbacEnv struct {
 func newRBACEnv(t *testing.T) *rbacEnv {
 	t.Helper()
 	logger := observ.NewTestLogger()
-	dbPath := t.TempDir() + "/rbac.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	store := newIntegrationStore(t)
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	projectRepo := repository.NewProjectRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	projectRepo := repository.NewProjectRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -231,31 +223,23 @@ func TestRBACAdminBypassesQuota(t *testing.T) {
 // configured, running as the legacy admin identity (full access).
 func TestRBACLegacyTokenCompat(t *testing.T) {
 	logger := observ.NewTestLogger()
-	dbPath := t.TempDir() + "/legacy.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	defer db.Close()
+	store := newIntegrationStore(t)
 
 	tokensPath := t.TempDir() + "/tokens"
 	if err := os.WriteFile(tokensPath, []byte("legacy-token-123\n"), 0o600); err != nil {
 		t.Fatalf("write tokens: %v", err)
 	}
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("legacy-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
 	legacyValidator := service.NewTokenValidator(tokensPath, true, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
-	projectsSvc := service.NewProjectService(repository.NewProjectRepo(db), groupRepo, logger)
+	projectsSvc := service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger)
 	authSvc := service.NewAuthService(service.AuthServiceConfig{}, usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)

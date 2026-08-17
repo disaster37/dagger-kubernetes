@@ -120,21 +120,13 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	fb1, ts1 := newFakeRegistryBackend(t, "reg-1")
 	fb2, ts2 := newFakeRegistryBackend(t, "reg-2")
 
-	dbPath := t.TempDir() + "/routes.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	defer db.Close()
+	store := newIntegrationStore(t)
 
 	backends := []domain.RegistryBackend{
 		{ID: "reg-1", InternalAddr: strings.TrimPrefix(ts1.URL, "http://"), Username: "u1", Password: "p1"},
 		{ID: "reg-2", InternalAddr: strings.TrimPrefix(ts2.URL, "http://"), Username: "u2", Password: "p2"},
 	}
-	routes := repository.NewCacheRoutesRepo(db)
+	routes := repository.NewCacheRoutesRepo(store)
 	router := service.NewRegistryRouter(backends, routes, logger)
 
 	// Seed charge so reg-1 is heavier than reg-2; pushes must land on reg-2.

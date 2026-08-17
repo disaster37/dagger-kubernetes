@@ -345,6 +345,29 @@ inline comments. The sections below summarise the most important ones.
 |              | `provider`                  | `github`                         |                                                   |
 |              | `allowed_orgs`              | —                                | Restrict login to members of these orgs.          |
 | `auth.token` | `encryption_key`            | `""` (auto-generated)            | AES-256-GCM key (≥32 bytes) for token plaintext recovery (Connect page). |
+| `database`   | `dir`                       | `/var/lib/dagger-cache`          | Raft data dir: `raft.db`, `snapshots/`, `node-id`. Fresh-start store (no migration). |
+| `raft`       | `node_id`                   | `""` (auto-generated)            | Stable Raft node ID (persisted at `<dir>/node-id`). |
+|              | `bind_addr`                 | `:8081`                          | Dedicated Raft transport port. |
+|              | `advertise_addr`            | `""` (derived)                   | Routable `host:port`; empty = derived from `<hostname>.<headless_service>.<namespace>.svc.<cluster_domain>`. |
+|              | `peers`                     | `[]` (single-node)               | Explicit voter list `[{id, address}]`; empty = DNS discovery. |
+|              | `replicas`                  | `1`                              | Voter count for DNS peer discovery. |
+|              | `statefulset_name`          | `""`                             | StatefulSet name for DNS discovery. |
+|              | `headless_service`          | `""`                             | Headless Service name for stable pod DNS. |
+|              | `namespace`                 | `""` (fleet ns)                  | K8s namespace for pod DNS. |
+|              | `cluster_domain`            | `cluster.local`                  | K8s cluster DNS suffix. |
+|              | `apply_timeout`             | `5s`                             | `raft.Apply` enqueue timeout. |
+|              | `leader_wait_timeout`       | `30s`                            | Startup wait for leadership. |
+|              | `snapshot_threshold`        | `1000`                           | Raft log snapshot threshold. |
+|              | `snapshot_interval`         | `10m`                            | Raft snapshot interval. |
+|              | `trailing_logs`             | `256`                            | Raft trailing logs after snapshot. |
+|              | `tls.enabled`               | `false` (chart: `true`)          | mTLS for the Raft transport (recommended for multi-node). |
+|              | `tls.dir`                   | `<database.dir>/tls`             | Internal raft CA + per-pod leaf cert directory. |
+|              | `tls.validity`              | `8760h`                          | Leaf cert TTL. |
+|              | `tls.organization`          | `dagger-cache-raft`              | CA/leaf subject organization. |
+|              | `tls.ca_cert` / `tls.cert` / `tls.key` | `""`                   | Manual mode: pre-provisioned CA + leaf PEM paths (all three together). |
+|              | `tls.ca_secret`             | `""`                             | Auto/K8s mode: Secret name for sharing the internal CA. |
+|              | `tls.ca_bootstrap`          | `false`                          | Auto/K8s mode: force this node to generate + write the CA (auto-detects ordinal 0). |
+|              | `tls.client_auth`           | `true`                           | mTLS: require + verify peer client certs. |
 | `telemetry`  | `collector_url`             | `http://otel-collector:4318`     | OTLP/HTTP.                                         |
 |              | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc. | Backend query APIs (auto-wired by Helm).          |
 | `cache`      | `backend`                   | `registry`                       | `registry` (OCI) or `s3`.                         |
@@ -373,7 +396,7 @@ inline comments. The sections below summarise the most important ones.
 |              | `engine_debug`              | `false`                          | `engine.toml: debug = true`.                      |
 |              | `engine_log_format`         | `json`                           | `engine.toml: [log] format`; `""` omits.          |
 |              | `engine_registry_mirrors`   | `{}`                             | `engine.toml` registry mirrors.                   |
-| `ca`         | `minting_ca_secret`         | `supervisor-minting-ca`          | K8s Secret with the minting CA.                   |
+| `ca`         | `minting_ca_secret`         | `supervisor-minting-ca`          | K8s Secret with the minting CA (holds the CA private key; shared across pods in multi-node). |
 |              | `client_cert_ttl`           | `2h`                             | TTL of minted client certs.                       |
 | `tls`        | `server_cert_secret`        | `supervisor-tls`                 | K8s Secret with `tls.crt`/`tls.key`.              |
 |              | `lease_ttl`                 | `2m`                             | Lease TTL; clients renew before expiry.           |
@@ -544,7 +567,7 @@ Routing strategy (see ADR-014):
 - **Push** (new manifest or blob upload) goes to the **least-charged** healthy
   backend, where charge is the Supervisor's own per-backend manifest-size sum
   from periodic catalog walks.
-- **Pull** first consults the persisted SQLite routing table
+- **Pull** first consults the persisted Raft-backed routing table
   (`cache_object_routes` / `cache_blob_routes`). On a miss it probes healthy
   backends (least-charged first) and self-heals the table on a hit.
 - **Upload sessions** are pinned to one backend for the whole
@@ -667,7 +690,7 @@ logged). Set the password explicitly in production.
 ### JWT secret
 
 `auth.jwt.secret` (HS256). When empty, the supervisor auto-generates a 32-byte
-random secret on first boot and persists it in the SQLite `meta` table. Set it
+random secret on first boot and persists it in the Raft-backed `meta` store. Set it
 explicitly in secret storage (Helm Secret / env) for production before
 dropping the auto-generated one.
 
@@ -677,24 +700,71 @@ dropping the auto-generated one.
 rest so the Connect page can reveal them. The value is SHA-256-derived into a
 fixed 32-byte AES-256-GCM key before use, so any secret ≥ 32 bytes works. When
 empty, the supervisor auto-generates a 32-byte key on first boot and persists
-it in the SQLite `meta` table (dev mode, with a startup warning). Set it
+it in the Raft-backed `meta` store (dev mode, with a startup warning). Set it
 explicitly via env (`DAGGER_CACHE_AUTH_TOKEN_ENCRYPTION_KEY`) or a K8s Secret
 in production so DB compromise alone does not yield token plaintexts — exactly
 as with the JWT secret.
 
 ### Configuration
 
-See the [Full reference](#full-reference) for all `auth.*` and `database.*`
-keys. Key env overrides: `DAGGER_CACHE_AUTH_JWT_SECRET`,
-`DAGGER_CACHE_DATABASE_PATH`, `DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD`.
+See the [Full reference](#full-reference) for all `auth.*`, `database.*`, and
+`raft.*` keys. Key env overrides: `DAGGER_CACHE_AUTH_JWT_SECRET`,
+`DAGGER_CACHE_DATABASE_DIR`, `DAGGER_CACHE_RAFT_BIND_ADDR`,
+`DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD`.
 
-### Migration (flat-file → multi-user)
+### Storage (Raft) & multi-user migration
 
-Rollout is backward compatible; no big-bang.
+The supervisor persists all multi-user RBAC state, trace metadata, and the
+cache routing tables in a **Hashicorp Raft** replicated state machine (see
+ADR-015). Raft always runs — a single-node deployment is just a one-voter
+cluster. On first boot with an empty FSM the store starts **fresh**: there is
+**no migration path** from the legacy SQLite store, and the `modernc.org/sqlite`
+dependency has been removed from the project entirely.
 
-1. **Deploy new binary.** DB auto-created at `database.path`; bootstrap admin
-   created. Existing CI keeps working via the legacy fallback (runs as
-   `legacy` admin identity — exactly today's full-access behavior).
+- **Single-node (default):** leave `raft.peers` empty; the node bootstraps with
+  itself as the only voter and is always the leader.
+- **Multi-node:** the Helm chart ships a `StatefulSet` + headless Service.
+  Peers are discovered from the StatefulSet's stable pod DNS names
+  (`<sts>-<i>.<headless>.<ns>.svc.cluster.local:8081` for `i=0..replicas-1`) —
+  pure DNS arithmetic, no K8s API calls. Each pod advertises its pod FQDN, not
+  `127.0.0.1`. Set `raft.replicas` (and the chart's `supervisor.replicaCount`)
+  to an **odd number ≥ 3** for quorum fault tolerance; a 2-node cluster loses
+  quorum on a single failure.
+- **Transport TLS:** the Raft transport is **mTLS** when `raft.tls.enabled` is
+  true (the Helm chart default). A self-signed internal CA is generated with
+  `goca` and shared across pods via the `<release>-raft-ca` Kubernetes Secret;
+  each pod issues itself a per-node leaf certificate (SANs = pod DNS names +
+  `127.0.0.1`). Pod-0 writes the CA Secret; the others poll it before issuing
+  their leaf. TLS 1.2+, `RequireAndVerifyClientCert`. For non-Helm deploys you
+  can pre-provision CA + leaf PEM files via `raft.tls.ca_cert`/`cert`/`key`
+  (manual mode) — `raft.tls.enabled` must be set uniformly across all peers.
+  The `<release>-raft-ca` Secret contains the internal CA **private key** (any
+  pod may issue peer certs), and the engine-client minting CA is likewise
+  shared via the `<release>-minting-ca` Secret. Both Secrets hold CA private
+  keys and must be RBAC-restricted to the supervisor ServiceAccount.
+- **Follower reads:** every node waits until *a* leader exists, then serves
+  **stale local reads**. Writes are leader-only via `raft.Apply`; a follower
+  returns `ErrNotLeader` (HTTP 503) on writes — clients retry. The leader
+  provisions the JWT secret and token-encryption key; followers wait for those
+  meta keys to replicate to their local FSM before becoming Ready.
+- **Scale-up / scale-down:** the leader runs a `joinLoop` that reconciles the
+  cluster membership with the discovered voter list (`raft.AddVoter` /
+  `raft.RemoveServer`). Scale-up: bump `replicaCount` + `raft.replicas` and
+  rolling-restart. Scale-down: shrink both, rolling-restart, then delete the
+  removed pod. A pod that loses its PVC (`<dir>/node-id`) becomes a new node
+  that must re-join.
+- **Data directory** `database.dir` holds `raft.db` (bolt log + stable store),
+  `snapshots/`, `node-id`, and `tls/` (CA + leaf). Persist it on a per-pod PVC.
+- The bootstrap-admin flow provisions a fresh admin when the user count is 0,
+  so a fresh deployment is immediately usable.
+
+The legacy flat-file token fallback and the `supervisor migrate-tokens`
+subcommand remain (they import flat-file tokens, not SQLite data):
+
+1. **Deploy new binary.** The Raft store starts fresh at `database.dir`; the
+   bootstrap admin is created. Existing CI keeps working via the legacy
+   fallback (runs as `legacy` admin identity — exactly today's full-access
+   behavior).
 2. **Import tokens.** `supervisor migrate-tokens --config config.app.yaml`
    imports each token line as user `legacy-N` (role `user`) with that exact
    token as its API token, member of an auto-created `legacy` group. Idempotent
@@ -715,8 +785,11 @@ Rollout is backward compatible; no big-bang.
 - `auth.jwt.secret`, when set explicitly, must be at least 32 bytes (HS256,
   RFC 7518); shorter values are rejected at startup. When empty, a 32-byte
   random secret is generated and persisted in the database on first boot.
-- The SQLite database file (password hashes, token hashes, JWT secret) is
-  created with `0600` permissions.
+- The Raft data directory (`raft.db`, `snapshots/`, `node-id`) holds password
+  hashes, token hashes/ciphertexts, the JWT secret, and the token-encryption
+  key. `raft.db` and `node-id` are created with `0600` permissions; the
+  `snapshots/` directory is tightened to `0700` at startup. Persist the
+  directory on a volume owned by the supervisor user.
 - All responses carry `X-Content-Type-Options: nosniff`,
   `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`
   (clickjacking), and `Referrer-Policy: no-referrer` (keeps the SSE
@@ -737,7 +810,12 @@ The data plane is mTLS-only. The Supervisor:
 1. Holds a server cert in the `tls.server_cert_secret` K8s Secret
    (`tls.crt` + `tls.key`).
 2. Holds a minting CA in `ca.minting_ca_secret`; it signs short-lived
-   (`ca.client_cert_ttl`) client certs at lease grant.
+   (`ca.client_cert_ttl`) client certs at lease grant. In a multi-node
+   deployment the embedded provider shares this CA across pods through that
+   Secret (with a local cache under `tls.ca_path`), so engine mTLS client
+   certs minted by any pod are trusted by every pod's data-plane listener.
+   The Secret contains the CA **private key** and must be RBAC-restricted to
+   the supervisor ServiceAccount.
 3. Pins each minted cert's lease to a specific engine pod via the L4 proxy.
 
 For local dev (Docker compose) mTLS is relaxed; in Kubernetes you must

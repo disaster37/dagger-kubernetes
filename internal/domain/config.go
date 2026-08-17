@@ -17,6 +17,7 @@ type Config struct {
 	LogFormat string          `mapstructure:"log_format"` // "json" (default) | "text"
 	OTel      OTelConfig      `mapstructure:"otel"`
 	Database  DatabaseConfig  `mapstructure:"database"`
+	Raft      RaftConfig      `mapstructure:"raft"`
 }
 
 type ServerConfig struct {
@@ -49,9 +50,54 @@ type OAuthConfig struct {
 	DefaultGroup string   `mapstructure:"default_group"` // auto-membership for new OAuth users; empty = none
 }
 
-// DatabaseConfig configures the SQLite database backing the multi-user store.
+// DatabaseConfig configures the Raft data directory backing the multi-user
+// store (raft.db bolt log, snapshots/, node-id). The store starts fresh; there
+// is no migration from the legacy SQLite store.
 type DatabaseConfig struct {
-	Path string `mapstructure:"path"`
+	Dir string `mapstructure:"dir"`
+}
+
+// RaftConfig configures the always-on Hashicorp Raft replicated state machine
+// that replaced SQLite as the persistence engine (see ADR-015). Multi-node
+// discovery and transport TLS are covered by ADR-016.
+type RaftConfig struct {
+	NodeID            string        `mapstructure:"node_id"`
+	BindAddr          string        `mapstructure:"bind_addr"`
+	AdvertiseAddr     string        `mapstructure:"advertise_addr"`
+	Peers             []RaftPeer    `mapstructure:"peers"`
+	Replicas          int           `mapstructure:"replicas"`
+	StatefulSetName   string        `mapstructure:"statefulset_name"`
+	HeadlessService   string        `mapstructure:"headless_service"`
+	Namespace         string        `mapstructure:"namespace"`
+	ClusterDomain     string        `mapstructure:"cluster_domain"`
+	ApplyTimeout      time.Duration `mapstructure:"apply_timeout"`
+	LeaderWaitTimeout time.Duration `mapstructure:"leader_wait_timeout"`
+	SnapshotThreshold uint64        `mapstructure:"snapshot_threshold"`
+	SnapshotInterval  time.Duration `mapstructure:"snapshot_interval"`
+	TrailingLogs      uint64        `mapstructure:"trailing_logs"`
+	TLS               RaftTLSConfig `mapstructure:"tls"`
+}
+
+// RaftPeer is one voter in the Raft cluster.
+type RaftPeer struct {
+	ID      string `mapstructure:"id"`
+	Address string `mapstructure:"address"`
+}
+
+// RaftTLSConfig configures transport TLS for the Raft StreamLayer. Peers
+// present a per-node leaf certificate and verify each other against a shared
+// internal CA generated with goca (ADR-016).
+type RaftTLSConfig struct {
+	Enabled      bool          `mapstructure:"enabled"`
+	Dir          string        `mapstructure:"dir"`
+	Validity     time.Duration `mapstructure:"validity"`
+	Organization string        `mapstructure:"organization"`
+	CACertPath   string        `mapstructure:"ca_cert"`
+	CertPath     string        `mapstructure:"cert"`
+	KeyPath      string        `mapstructure:"key"`
+	CASecret     string        `mapstructure:"ca_secret"`
+	CABootstrap  bool          `mapstructure:"ca_bootstrap"`
+	ClientAuth   bool          `mapstructure:"client_auth"`
 }
 
 // JWTConfig configures HS256 JWT issuance (access + refresh).

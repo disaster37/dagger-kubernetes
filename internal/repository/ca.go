@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"math/big"
+	"net"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -162,9 +163,28 @@ func (ca *MintingCA) EncodePEM() (certPEM, keyPEM []byte, err error) {
 // IssueServerCertificate signs a TLS server certificate with this CA.
 // Pure crypto — the caller persists the returned PEM bytes.
 func (ca *MintingCA) IssueServerCertificate(commonName, organization string, dnsNames []string, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
-	serverKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	now := time.Now()
+	return ca.issueCertificate(commonName, organization, dnsNames, nil, ttl,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, now, now.Add(ttl), "server")
+}
+
+// IssuePeerCertificate signs a TLS certificate usable as both server and
+// client (mTLS) with the given DNS + IP SANs. Pure crypto — the caller persists
+// the returned PEM bytes.
+func (ca *MintingCA) IssuePeerCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
+	now := time.Now()
+	// Backdate 5 minutes for clock-skew tolerance across pods (ADR-016).
+	return ca.issueCertificate(commonName, organization, dnsNames, ipAddrs, ttl,
+		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		now.Add(-5*time.Minute), now.Add(ttl), "peer")
+}
+
+// issueCertificate generates a key + leaf certificate signed by the CA and
+// returns both as PEM. kind labels the key/cert in error messages.
+func (ca *MintingCA) issueCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, ttl time.Duration, extKeyUsage []x509.ExtKeyUsage, notBefore, notAfter time.Time, kind string) (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate server key: %w", err)
+		return nil, nil, fmt.Errorf("generate %s key: %w", kind, err)
 	}
 
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
@@ -172,32 +192,30 @@ func (ca *MintingCA) IssueServerCertificate(commonName, organization string, dns
 		return nil, nil, fmt.Errorf("generate serial: %w", err)
 	}
 
-	now := time.Now()
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject: pkix.Name{
 			CommonName:   commonName,
 			Organization: []string{organization},
 		},
-		NotBefore: now,
-		NotAfter:  now.Add(ttl),
-		KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageServerAuth,
-		},
-		DNSNames: dnsNames,
+		NotBefore:   notBefore,
+		NotAfter:    notAfter,
+		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage: extKeyUsage,
+		DNSNames:    dnsNames,
+		IPAddresses: ipAddrs,
 	}
 
-	serverCertDER, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &serverKey.PublicKey, ca.key)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create server cert: %w", err)
+		return nil, nil, fmt.Errorf("create %s cert: %w", kind, err)
 	}
 
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: serverCertDER})
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 
-	keyDER, err := x509.MarshalECPrivateKey(serverKey)
+	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return nil, nil, fmt.Errorf("marshal server key: %w", err)
+		return nil, nil, fmt.Errorf("marshal %s key: %w", kind, err)
 	}
 	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 

@@ -49,8 +49,29 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("log_level default = %q, want info", cfg.LogLevel)
 	}
-	if cfg.Database.Path != "/var/lib/dagger-cache/dagger-cache.db" {
-		t.Fatalf("database.path default = %q", cfg.Database.Path)
+	if cfg.Database.Dir != "/var/lib/dagger-cache" {
+		t.Fatalf("database.dir default = %q", cfg.Database.Dir)
+	}
+	if cfg.Raft.BindAddr != ":8081" {
+		t.Fatalf("raft.bind_addr default = %q, want :8081", cfg.Raft.BindAddr)
+	}
+	if cfg.Raft.ApplyTimeout != 5*time.Second {
+		t.Fatalf("raft.apply_timeout default = %v, want 5s", cfg.Raft.ApplyTimeout)
+	}
+	if cfg.Raft.LeaderWaitTimeout != 30*time.Second {
+		t.Fatalf("raft.leader_wait_timeout default = %v, want 30s", cfg.Raft.LeaderWaitTimeout)
+	}
+	if cfg.Raft.SnapshotThreshold != 1000 {
+		t.Fatalf("raft.snapshot_threshold default = %d, want 1000", cfg.Raft.SnapshotThreshold)
+	}
+	if cfg.Raft.SnapshotInterval != 10*time.Minute {
+		t.Fatalf("raft.snapshot_interval default = %v, want 10m", cfg.Raft.SnapshotInterval)
+	}
+	if cfg.Raft.TrailingLogs != 256 {
+		t.Fatalf("raft.trailing_logs default = %d, want 256", cfg.Raft.TrailingLogs)
+	}
+	if cfg.Raft.TLS.Enabled {
+		t.Fatal("raft.tls.enabled default should be false")
 	}
 	if cfg.Auth.JWT.Secret != "" {
 		t.Fatalf("auth.jwt.secret default should be empty, got %q", cfg.Auth.JWT.Secret)

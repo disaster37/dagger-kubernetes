@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -11,25 +12,33 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
-// newServiceDB opens a fresh SQLite DB and returns repos constructed from it.
-// The DB is cleaned up via t.Cleanup.
+// newServiceStore builds a single-node in-memory Raft store for service tests.
+func newServiceStore(t *testing.T) *repository.RaftStore {
+	t.Helper()
+	store, err := repository.NewInmemRaftStore("service-test", observ.NewTestLogger(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewInmemRaftStore: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// newServiceDB opens a fresh in-memory Raft store and returns repos constructed
+// from it. The store is cleaned up via t.Cleanup.
 func newServiceDB(t *testing.T) *repos {
 	t.Helper()
-	path := t.TempDir() + "/test.db"
-	db, err := repository.OpenSQLite(path)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	store := newServiceStore(t)
 	return &repos{
-		users:     repository.NewUserRepo(db),
-		groups:    repository.NewGroupRepo(db),
-		projects:  repository.NewProjectRepo(db),
-		tokens:    repository.NewTokenRepo(db),
-		traceMeta: repository.NewTraceMetaRepo(db),
+		users:     repository.NewUserRepo(store),
+		groups:    repository.NewGroupRepo(store),
+		projects:  repository.NewProjectRepo(store),
+		tokens:    repository.NewTokenRepo(store),
+		traceMeta: repository.NewTraceMetaRepo(store),
 	}
 }
 

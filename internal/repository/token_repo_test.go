@@ -10,11 +10,11 @@ import (
 )
 
 func TestTokenRepoUpsertReplaces(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTokenRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTokenRepo(store)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 
 	tok1 := &domain.APIToken{
 		ID:        newID(),
@@ -69,11 +69,11 @@ func TestTokenRepoUpsertReplaces(t *testing.T) {
 }
 
 func TestTokenRepoTouchLastUsed(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTokenRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTokenRepo(store)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 
@@ -88,11 +88,11 @@ func TestTokenRepoTouchLastUsed(t *testing.T) {
 }
 
 func TestTokenRepoDelete(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTokenRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTokenRepo(store)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 
@@ -105,12 +105,12 @@ func TestTokenRepoDelete(t *testing.T) {
 }
 
 func TestTokenRepoDeleteUserCascadesToken(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTokenRepo(db)
-	urepo := NewUserRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTokenRepo(store)
+	urepo := NewUserRepo(store)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 
@@ -123,11 +123,11 @@ func TestTokenRepoDeleteUserCascadesToken(t *testing.T) {
 }
 
 func TestTokenRepoUpsertStoresCiphertext(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTokenRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTokenRepo(store)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	tok := &domain.APIToken{
 		ID:              newID(),
 		UserID:          u.ID,
@@ -149,11 +149,11 @@ func TestTokenRepoUpsertStoresCiphertext(t *testing.T) {
 }
 
 func TestTokenRepoGetByUserPreV2Column(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTokenRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTokenRepo(store)
 	ctx := context.Background()
 
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	// A pre-v2 row has no ciphertext (empty string).
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "hash1", Prefix: "dct_aaaaaaaa"}
 	if err := repo.Upsert(ctx, tok); err != nil {

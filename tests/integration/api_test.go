@@ -19,20 +19,12 @@ import (
 // plain `Authorization: Bearer <token>` authenticates and provisions an engine.
 func TestProvisionEngineWithAPIToken(t *testing.T) {
 	logger := observ.NewTestLogger()
-	dbPath := t.TempDir() + "/test.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	defer db.Close()
+	store := newIntegrationStore(t)
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -58,7 +50,7 @@ func TestProvisionEngineWithAPIToken(t *testing.T) {
 	}, logger, observ.NewMetrics(nil))
 	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
-	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(db), groupRepo, logger), groupRepo, traceMetaRepo, logger)
+	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
@@ -115,27 +107,19 @@ func TestHealthEndpoint(t *testing.T) {
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{}, logger, observ.NewMetrics(nil))
 	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 
-	dbPath := t.TempDir() + "/test.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	defer db.Close()
+	store := newIntegrationStore(t)
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("health-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
 	authSvc := service.NewAuthService(service.AuthServiceConfig{Disabled: true}, usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
-	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(db), groupRepo, logger), groupRepo, traceMetaRepo, logger)
+	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 

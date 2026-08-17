@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/url"
 	"os"
 	"os/signal"
@@ -109,7 +111,15 @@ func run(c *cli.Context) error {
 		cacheScheme = u.Scheme
 	}
 
-	tlsProvider, err := selectTLSProvider(cfg)
+	// The k8s clientset is needed early: it selects the TLS provider
+	// (Secret-backed minting CA) and is reused for raft TLS auto-mode and the
+	// fleet provider below.
+	clientset, err := newK8sClientset()
+	if err != nil {
+		logger.WithError(err).Warn("k8s clientset unavailable; raft TLS auto-mode, minting CA sharing, and fleet provider will fall back")
+	}
+
+	tlsProvider, err := selectTLSProvider(cfg, clientset)
 	if err != nil {
 		return fmt.Errorf("create TLS provider: %w", err)
 	}
@@ -152,32 +162,18 @@ func run(c *cli.Context) error {
 	ctx, cancel := context.WithCancel(c.Context)
 	defer cancel()
 
-	db, err := repository.OpenSQLite(cfg.Database.Path)
+	raftStore, jwtSecret, tokenEncKey, err := initRaftStore(ctx, cfg, clientset, logger)
 	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+		return err
 	}
-	defer func() { _ = db.Close() }()
-
-	if err := repository.Migrate(ctx, db); err != nil {
-		return fmt.Errorf("migrate database: %w", err)
-	}
-
-	metaStore := repository.NewMetaStore(db)
-	jwtSecret, err := loadOrCreateJWTSecret(ctx, metaStore, cfg.Auth.JWT.Secret, logger)
-	if err != nil {
-		return fmt.Errorf("load jwt secret: %w", err)
-	}
-	tokenEncKey, err := loadOrCreateTokenEncryptionKey(ctx, metaStore, cfg.Auth.Token.EncryptionKey, logger)
-	if err != nil {
-		return fmt.Errorf("load token encryption key: %w", err)
-	}
+	defer func() { _ = raftStore.Close() }()
 	jwtSvc := service.NewJWTService(jwtSecret, cfg.Auth.JWT.AccessTTL, cfg.Auth.JWT.RefreshTTL)
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	projectRepo := repository.NewProjectRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(raftStore)
+	groupRepo := repository.NewGroupRepo(raftStore)
+	projectRepo := repository.NewProjectRepo(raftStore)
+	tokenRepo := repository.NewTokenRepo(raftStore)
+	traceMetaRepo := repository.NewTraceMetaRepo(raftStore)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -208,10 +204,6 @@ func run(c *cli.Context) error {
 	}
 
 	// --- Fleet + telemetry wiring ---
-	clientset, err := newK8sClientset()
-	if err != nil {
-		logger.WithError(err).Warn("k8s clientset unavailable; fleet provider and cache-token secret loading will fall back")
-	}
 	provider, err := createProvider(cfg, clientset, logger)
 	if err != nil {
 		return fmt.Errorf("create fleet provider: %w", err)
@@ -233,7 +225,7 @@ func run(c *cli.Context) error {
 	var router *service.RegistryRouter
 	var routesRepo *repository.CacheRoutesRepo
 	if cfg.Cache.Backend == "registry" {
-		routesRepo = repository.NewCacheRoutesRepo(db)
+		routesRepo = repository.NewCacheRoutesRepo(raftStore)
 		router = service.NewRegistryRouter(cacheBackends, routesRepo, logger)
 		if err := router.RefreshCharges(ctx); err != nil {
 			logger.WithError(err).Warn("refresh cache charges failed")
@@ -341,6 +333,112 @@ func run(c *cli.Context) error {
 
 	logger.Info("supervisor stopped")
 	return nil
+}
+
+// initRaftStore validates the raft config, builds the peer resolver + TLS
+// transport, opens the Raft store, waits for a leader, starts the
+// leadership/membership goroutines, and resolves the JWT secret +
+// token-encryption key (the leader provisions, followers wait for replication —
+// ADR-016 D5/D6). The caller owns closing the returned store.
+func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (*repository.RaftStore, []byte, []byte, error) {
+	if err := validateRaftConfig(cfg, clientset); err != nil {
+		return nil, nil, nil, fmt.Errorf("validate raft config: %w", err)
+	}
+
+	hostname, _ := os.Hostname()
+	discovery := raftDiscoveryConfig(cfg)
+	resolver := repository.NewPeerResolver(discovery)
+	advertise, err := repository.DeriveAdvertiseAddr(discovery, hostname)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("derive raft advertise addr: %w", err)
+	}
+
+	isMultiNode := cfg.Raft.Replicas > 1 || len(cfg.Raft.Peers) > 1
+	if isMultiNode && !cfg.Raft.TLS.Enabled {
+		logger.Warn("raft multi-node is configured but raft.tls.enabled is false: " +
+			"Raft replication traffic — including password hashes, token hashes/ciphertexts, " +
+			"the JWT secret, and the token-encryption key — will flow in CLEARTEXT over the " +
+			"network (CWE-319/CWE-311). Enable raft.tls.enabled for multi-node in production.")
+	}
+	if isMultiNode && !cfg.Raft.TLS.ClientAuth {
+		logger.Warn("raft multi-node is configured with raft.tls.client_auth=false: peers will not " +
+			"verify each other's certificates, so an unauthenticated peer could join the cluster " +
+			"(CWE-295). Keep raft.tls.client_auth=true (mTLS) for multi-node in production.")
+	}
+	if isMultiNode && cfg.TLS.Provider == "embedded" && (clientset == nil || cfg.CA.MintingCASecret == "") && isMintingCAOnPerPodStorage(cfg) {
+		logger.Warn("multi-node is configured with the embedded TLS provider but the minting CA " +
+			"cannot be shared across pods (no K8s clientset or ca.minting_ca_secret is empty), and " +
+			"tls.ca_path is stored under the per-pod database directory. Each pod will mint a " +
+			"DISTINCT engine-client CA, so engine mTLS client certs issued by one pod will be " +
+			"REJECTED by other pods' data-plane listeners (CWE-295). To fix: run with a K8s " +
+			"clientset and ca.minting_ca_secret set (the embedded provider then shares the CA via " +
+			"that Secret), mount a shared ReadWriteMany volume at tls.ca_path, or switch " +
+			"tls.provider to cert-manager/external with a shared CA.")
+	}
+
+	var raftTLS *tls.Config
+	if cfg.Raft.TLS.Enabled {
+		dnsNames, ipAddrs := repository.PodSANs(discovery, hostname)
+		raftTLS, err = buildRaftTLSConfig(cfg, isMultiNode, clientset, dnsNames, ipAddrs, raftNodeCommonName(cfg, resolver, hostname), hostname, logger)
+		if err != nil {
+			return nil, nil, nil, fmt.Errorf("build raft TLS: %w", err)
+		}
+	}
+
+	raftStore, err := repository.NewRaftStore(repository.RaftStoreConfig{
+		Dir:               cfg.Database.Dir,
+		NodeID:            cfg.Raft.NodeID,
+		BindAddr:          cfg.Raft.BindAddr,
+		AdvertiseAddr:     advertise,
+		Resolver:          resolver,
+		ApplyTimeout:      cfg.Raft.ApplyTimeout,
+		SnapshotThreshold: cfg.Raft.SnapshotThreshold,
+		SnapshotInterval:  cfg.Raft.SnapshotInterval,
+		TrailingLogs:      cfg.Raft.TrailingLogs,
+		TLS:               raftTLS,
+	}, logger)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("open database: %w", err)
+	}
+
+	// Wait until A leader exists (any node, not necessarily this one).
+	// Followers serve stale reads and return ErrNotLeader on writes (ADR-016 D6).
+	leaderCtx, leaderCancel := context.WithTimeout(ctx, cfg.Raft.LeaderWaitTimeout)
+	err = raftStore.WaitForLeader(leaderCtx)
+	leaderCancel()
+	if err != nil {
+		_ = raftStore.Close()
+		return nil, nil, nil, fmt.Errorf("wait for raft leader: %w", err)
+	}
+
+	go observeLeadership(ctx, raftStore, logger)
+	go joinLoop(ctx, raftStore, resolver, logger)
+
+	metaStore := repository.NewMetaStore(raftStore)
+	jwtSecret, err := resolveJWTSecret(ctx, raftStore, metaStore, cfg.Auth.JWT.Secret, cfg.Raft.LeaderWaitTimeout, logger)
+	if err != nil {
+		_ = raftStore.Close()
+		return nil, nil, nil, fmt.Errorf("load jwt secret: %w", err)
+	}
+	tokenEncKey, err := resolveTokenEncryptionKey(ctx, raftStore, metaStore, cfg.Auth.Token.EncryptionKey, cfg.Raft.LeaderWaitTimeout, logger)
+	if err != nil {
+		_ = raftStore.Close()
+		return nil, nil, nil, fmt.Errorf("load token encryption key: %w", err)
+	}
+	return raftStore, jwtSecret, tokenEncKey, nil
+}
+
+// raftNodeCommonName returns the leaf-certificate common name for this node:
+// the configured node_id, else the resolver's self ID (the StatefulSet pod
+// name), else the hostname.
+func raftNodeCommonName(cfg *domain.Config, resolver repository.PeerResolver, hostname string) string {
+	if cfg.Raft.NodeID != "" {
+		return cfg.Raft.NodeID
+	}
+	if self, err := resolver.Self(); err == nil && self.ID != "" {
+		return self.ID
+	}
+	return hostname
 }
 
 // minJWTSecretLen is the minimum accepted HS256 signing key length. HS256
@@ -479,6 +577,10 @@ func runMigrateTokens(c *cli.Context) error {
 	}
 	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
+	if err := validateMigrateTokensSingleNode(cfg); err != nil {
+		return err
+	}
+
 	tokensFile := c.String("tokens-file")
 	if tokensFile == "" {
 		tokensFile = cfg.Auth.Internal.TokensFile
@@ -488,21 +590,36 @@ func runMigrateTokens(c *cli.Context) error {
 	}
 
 	ctx := c.Context
-	db, err := repository.OpenSQLite(cfg.Database.Path)
+	raftStore, err := repository.NewRaftStore(repository.RaftStoreConfig{
+		Dir:               cfg.Database.Dir,
+		NodeID:            cfg.Raft.NodeID,
+		BindAddr:          cfg.Raft.BindAddr,
+		Peers:             toRaftPeers(cfg.Raft.Peers),
+		ApplyTimeout:      cfg.Raft.ApplyTimeout,
+		SnapshotThreshold: cfg.Raft.SnapshotThreshold,
+		SnapshotInterval:  cfg.Raft.SnapshotInterval,
+		TrailingLogs:      cfg.Raft.TrailingLogs,
+	}, logger)
 	if err != nil {
 		return fmt.Errorf("open database: %w", err)
 	}
-	defer func() { _ = db.Close() }()
-	if err := repository.Migrate(ctx, db); err != nil {
-		return fmt.Errorf("migrate database: %w", err)
-	}
+	defer func() { _ = raftStore.Close() }()
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
+	// migrate-tokens must write, so it requires THIS node to be the leader
+	// (single-node operation, or scale the cluster to 1 first).
+	leaderCtx, leaderCancel := context.WithTimeout(ctx, cfg.Raft.LeaderWaitTimeout)
+	if err := raftStore.WaitForSelfLeadership(leaderCtx); err != nil {
+		leaderCancel()
+		return fmt.Errorf("wait for self leadership: %w", err)
+	}
+	leaderCancel()
+
+	userRepo := repository.NewUserRepo(raftStore)
+	groupRepo := repository.NewGroupRepo(raftStore)
+	tokenRepo := repository.NewTokenRepo(raftStore)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
-	metaStore := repository.NewMetaStore(db)
+	metaStore := repository.NewMetaStore(raftStore)
 	tokenEncKey, err := loadOrCreateTokenEncryptionKey(ctx, metaStore, cfg.Auth.Token.EncryptionKey, logger)
 	if err != nil {
 		return fmt.Errorf("load token encryption key: %w", err)
@@ -520,9 +637,242 @@ func runMigrateTokens(c *cli.Context) error {
 	return nil
 }
 
-func selectTLSProvider(cfg *domain.Config) (domain.CAProvider, error) {
+// toRaftPeers converts domain.RaftPeer config entries into repository peers.
+func toRaftPeers(peers []domain.RaftPeer) []repository.RaftPeer {
+	out := make([]repository.RaftPeer, 0, len(peers))
+	for _, p := range peers {
+		out = append(out, repository.RaftPeer{ID: p.ID, Address: p.Address})
+	}
+	return out
+}
+
+// validateMigrateTokensSingleNode rejects migrate-tokens against a multi-node
+// cluster. migrate-tokens opens its own Raft node and must write; a lone node
+// cannot reach quorum against a multi-node cluster (and would risk
+// split-brain). Run it against a single-node cluster or via the running
+// leader's API instead.
+func validateMigrateTokensSingleNode(cfg *domain.Config) error {
+	if cfg.Raft.Replicas > 1 || len(cfg.Raft.Peers) > 1 {
+		return fmt.Errorf("migrate-tokens must run against a single-node cluster (raft.replicas=1 and raft.peers empty); " +
+			"for multi-node, run it via the running leader's API or scale the cluster to 1 first")
+	}
+	return nil
+}
+
+// observeLeadership logs Raft leadership changes until ctx is cancelled.
+func observeLeadership(ctx context.Context, store *repository.RaftStore, logger *logrus.Logger) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case isLeader, ok := <-store.LeaderCh():
+			if !ok {
+				return
+			}
+			logger.WithField("is_leader", isLeader).Info("raft leadership changed")
+		}
+	}
+}
+
+// joinLoop (leader only) periodically reconciles the running raft
+// configuration with the resolver's voter list: AddVoter for missing voters
+// and RemoveServer for removed voters (scale-up/scale-down, ADR-016 D7).
+func joinLoop(ctx context.Context, store *repository.RaftStore, resolver repository.PeerResolver, logger *logrus.Logger) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !store.IsLeader() {
+				continue
+			}
+			desired, err := resolver.Resolve()
+			if err != nil {
+				logger.WithError(err).Warn("joinLoop: resolve peers failed")
+				continue
+			}
+			added, removed, err := store.ReconcileMembership(desired, 10*time.Second)
+			if err != nil {
+				logger.WithError(err).Warn("joinLoop: reconcile membership failed")
+				continue
+			}
+			if len(added) > 0 || len(removed) > 0 {
+				logger.WithFields(logrus.Fields{
+					"added":   added,
+					"removed": removed,
+				}).Info("joinLoop: raft membership reconciled")
+			}
+		}
+	}
+}
+
+// waitForMetaSecret polls metaStore.Get(key) every 500ms until a value is
+// present or the timeout expires. Reads from the local FSM (stale reads are
+// fine here — the value, once replicated, is stable).
+func waitForMetaSecret(ctx context.Context, ms *repository.MetaStore, key string, timeout time.Duration) ([]byte, error) {
+	waitCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	ticker := time.NewTicker(500 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		if v, err := ms.Get(waitCtx, key); err == nil {
+			return []byte(v), nil
+		} else if !errors.Is(err, domain.ErrNotFound) {
+			return nil, fmt.Errorf("get %s: %w", key, err)
+		}
+		select {
+		case <-waitCtx.Done():
+			return nil, fmt.Errorf("wait for meta key %s: %w", key, waitCtx.Err())
+		case <-ticker.C:
+		}
+	}
+}
+
+// resolveJWTSecret returns the JWT secret: the leader provisions it, followers
+// wait for the leader's value to replicate, and a configured secret short-
+// circuits both (no write needed).
+func resolveJWTSecret(ctx context.Context, store *repository.RaftStore, ms *repository.MetaStore, configured string, timeout time.Duration, logger *logrus.Logger) ([]byte, error) {
+	if store.IsLeader() || configured != "" {
+		return loadOrCreateJWTSecret(ctx, ms, configured, logger)
+	}
+	return waitForMetaSecret(ctx, ms, "jwt_secret", timeout)
+}
+
+// resolveTokenEncryptionKey mirrors resolveJWTSecret for the token-encryption
+// key (SHA-256-derived to a fixed 32-byte AES-256 key).
+func resolveTokenEncryptionKey(ctx context.Context, store *repository.RaftStore, ms *repository.MetaStore, configured string, timeout time.Duration, logger *logrus.Logger) ([]byte, error) {
+	if store.IsLeader() || configured != "" {
+		return loadOrCreateTokenEncryptionKey(ctx, ms, configured, logger)
+	}
+	raw, err := waitForMetaSecret(ctx, ms, "token_encryption_key", timeout)
+	if err != nil {
+		return nil, err
+	}
+	return deriveAESKey(raw), nil
+}
+
+// raftDiscoveryConfig maps the domain raft config to the repository discovery
+// config. The raft port is left unset here; the repository derives it from
+// bind_addr (raftDiscoveryConfig's BindAddr) via raftPort.
+func raftDiscoveryConfig(cfg *domain.Config) repository.RaftDiscoveryConfig {
+	namespace := cfg.Raft.Namespace
+	if namespace == "" {
+		namespace = cfg.Fleet.Namespace
+	}
+	return repository.RaftDiscoveryConfig{
+		NodeID:          cfg.Raft.NodeID,
+		AdvertiseAddr:   cfg.Raft.AdvertiseAddr,
+		BindAddr:        cfg.Raft.BindAddr,
+		Peers:           toRaftPeers(cfg.Raft.Peers),
+		Replicas:        cfg.Raft.Replicas,
+		StatefulSetName: cfg.Raft.StatefulSetName,
+		HeadlessService: cfg.Raft.HeadlessService,
+		Namespace:       namespace,
+		ClusterDomain:   cfg.Raft.ClusterDomain,
+	}
+}
+
+// validateRaftConfig fails fast on config that would break multi-node raft or
+// TLS (ADR-016 §5).
+func validateRaftConfig(cfg *domain.Config, clientset kubernetes.Interface) error {
+	tlsCfg := cfg.Raft.TLS
+	if tlsCfg.Enabled {
+		manual := tlsCfg.CACertPath != "" || tlsCfg.CertPath != "" || tlsCfg.KeyPath != ""
+		if manual && (tlsCfg.CACertPath == "" || tlsCfg.CertPath == "" || tlsCfg.KeyPath == "") {
+			return fmt.Errorf("raft.tls: ca_cert/cert/key must all be set together")
+		}
+		if !manual && cfg.Raft.Replicas > 1 && tlsCfg.CASecret == "" && clientset == nil {
+			return fmt.Errorf("raft TLS auto-mode for multi-node requires K8s or manual CA files")
+		}
+	}
+	if cfg.Raft.Replicas > 1 && cfg.Raft.StatefulSetName == "" && len(cfg.Raft.Peers) == 0 {
+		return fmt.Errorf("raft multi-node requires statefulset_name or explicit peers")
+	}
+	if cfg.Raft.AdvertiseAddr != "" && cfg.Raft.Replicas > 1 {
+		if host, _, err := net.SplitHostPort(cfg.Raft.AdvertiseAddr); err == nil {
+			if host == "127.0.0.1" || host == "0.0.0.0" || host == "::" {
+				return fmt.Errorf("raft.advertise_addr must be routable for multi-node")
+			}
+		}
+	}
+	return nil
+}
+
+// buildRaftTLSConfig builds the raft transport tls.Config from config,
+// issuing/reusing this node's leaf certificate (ADR-016 D1/D2/D3).
+func buildRaftTLSConfig(cfg *domain.Config, isMultiNode bool, clientset kubernetes.Interface, dnsNames []string, ipAddrs []net.IP, commonName, hostname string, logger *logrus.Logger) (*tls.Config, error) {
+	dir := cfg.Raft.TLS.Dir
+	if dir == "" {
+		dir = filepath.Join(cfg.Database.Dir, "tls")
+	}
+	namespace := cfg.Raft.Namespace
+	if namespace == "" {
+		namespace = cfg.Fleet.Namespace
+	}
+	// The internal CA bootstrap node is ordinal 0 of the StatefulSet. It is
+	// auto-detected from the pod hostname (<sts>-0); raft.tls.ca_bootstrap
+	// forces it explicitly (ADR-016 §1.2).
+	caBootstrap := raftCABootstrap(cfg, hostname)
+	_, tlsCfg, err := repository.LoadOrBuildRaftTLS(repository.RaftTLSConfig{
+		Enabled:           true,
+		Dir:               dir,
+		Validity:          cfg.Raft.TLS.Validity,
+		Organization:      cfg.Raft.TLS.Organization,
+		CACertPath:        cfg.Raft.TLS.CACertPath,
+		CertPath:          cfg.Raft.TLS.CertPath,
+		KeyPath:           cfg.Raft.TLS.KeyPath,
+		CASecret:          cfg.Raft.TLS.CASecret,
+		CABootstrap:       caBootstrap,
+		ClientAuth:        cfg.Raft.TLS.ClientAuth,
+		SecretPollTimeout: cfg.Raft.LeaderWaitTimeout,
+	}, isMultiNode, clientset, namespace, dnsNames, ipAddrs, commonName, logger)
+	if err != nil {
+		return nil, err
+	}
+	return tlsCfg, nil
+}
+
+// raftCABootstrap reports whether this node should generate + share the
+// internal raft CA: raft.tls.ca_bootstrap forces it, else ordinal 0 of the
+// StatefulSet (pod hostname "<sts>-0") is auto-detected (ADR-016 §1.2).
+// A single-node deployment always bootstraps: its pod hostname may not end in
+// "-0" (e.g. a plain Deployment), and there is no other node to share with.
+func raftCABootstrap(cfg *domain.Config, hostname string) bool {
+	if cfg.Raft.TLS.CABootstrap {
+		return true
+	}
+	if cfg.Raft.Replicas <= 1 && len(cfg.Raft.Peers) <= 1 {
+		return true
+	}
+	return strings.HasSuffix(hostname, "-0")
+}
+
+func selectTLSProvider(cfg *domain.Config, clientset kubernetes.Interface) (domain.CAProvider, error) {
 	switch cfg.TLS.Provider {
 	case "embedded":
+		// Share the minting CA across pods via ca.minting_ca_secret when a
+		// K8s clientset is available (multi-node). Otherwise fall back to the
+		// local-file behavior (single-node dev/test or a shared RWX volume).
+		if clientset != nil && cfg.CA.MintingCASecret != "" {
+			namespace := cfg.Raft.Namespace
+			if namespace == "" {
+				namespace = cfg.Fleet.Namespace
+			}
+			hostname, _ := os.Hostname()
+			return repository.NewEmbeddedProviderWithSecret(
+				cfg.TLS.CAPath,
+				cfg.CA.ClientCertTTL,
+				cfg.CA.MintingCASecret,
+				namespace,
+				clientset,
+				mintingCABootstrap(cfg, hostname),
+				cfg.Raft.LeaderWaitTimeout,
+				cfg.Server.DataHost,
+			), nil
+		}
 		return repository.NewEmbeddedProvider(cfg.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost), nil
 	case "cert-manager":
 		return repository.NewCertManagerProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, cfg.TLS.CAPath), nil
@@ -531,6 +881,37 @@ func selectTLSProvider(cfg *domain.Config) (domain.CAProvider, error) {
 	default:
 		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.TLS.Provider)
 	}
+}
+
+// mintingCABootstrap reports whether this node should generate + share the
+// minting CA: ordinal 0 of the StatefulSet (pod name "<sts>-0") auto-detected
+// from the hostname, mirroring the raft CA bootstrap rule (ADR-016 D3). A
+// single-node deployment always bootstraps: its pod hostname may not end in
+// "-0" (e.g. a plain Deployment), and there is no other node to share with.
+func mintingCABootstrap(cfg *domain.Config, hostname string) bool {
+	if cfg.Raft.Replicas <= 1 && len(cfg.Raft.Peers) <= 1 {
+		return true
+	}
+	return strings.HasSuffix(hostname, "-0")
+}
+
+// isMintingCAOnPerPodStorage reports whether the embedded minting CA path
+// (tls.ca_path) is stored under the per-pod Raft data directory. With the
+// StatefulSet conversion, each pod has its own PVC at database.dir, so a
+// minting CA under that path is per-pod and breaks engine mTLS trust across
+// pods (CWE-295).
+func isMintingCAOnPerPodStorage(cfg *domain.Config) bool {
+	caPath := cfg.TLS.CAPath
+	dbDir := cfg.Database.Dir
+	if caPath == "" || dbDir == "" {
+		return false
+	}
+	rel, err := filepath.Rel(dbDir, caPath)
+	if err != nil {
+		return false
+	}
+	// caPath is under dbDir (e.g. /var/lib/dagger-cache/ca under /var/lib/dagger-cache).
+	return rel != "." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (domain.FleetProvider, error) {

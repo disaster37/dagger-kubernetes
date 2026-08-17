@@ -24,8 +24,10 @@ supervisor:
     tag: ""
     pullPolicy: IfNotPresent
     pullSecrets: []
-## @param supervisor.replicaCount Number of supervisor replicas.
-  replicaCount: 2
+## @param supervisor.replicaCount Number of supervisor replicas. Multi-node Raft
+## requires an odd number >= 3 for quorum fault tolerance (a 2-node cluster has
+## no failure tolerance). Keep in sync with supervisor.config.raft.replicas.
+  replicaCount: 3
 ## @param supervisor.resources.requests.cpu Supervisor CPU request.
 ## @param supervisor.resources.requests.memory Supervisor memory request.
 ## @param supervisor.resources.limits.cpu Supervisor CPU limit.
@@ -37,13 +39,13 @@ supervisor:
     limits:
       cpu: 500m
       memory: 512Mi
-## @param supervisor.persistence.enabled Enable PVC for SQLite database. disabled = emptyDir (dev only).
+## @param supervisor.persistence.enabled Enable a per-pod PVC for the Raft data directory (StatefulSet volumeClaimTemplate). disabled = emptyDir (dev only).
 ## @param supervisor.persistence.storageClass StorageClass for the supervisor PVC (empty = cluster default).
-## @param supervisor.persistence.size PVC size for the supervisor database.
+## @param supervisor.persistence.size PVC size for each supervisor pod's Raft data directory.
   persistence:
-    enabled: false
+    enabled: true
     storageClass: ""
-    size: 1Gi
+    size: 2Gi
 ## @param supervisor.podAnnotations [object] Annotations added to the supervisor pod.
   podAnnotations: {}
 ## @param supervisor.podSecurityContext.runAsNonRoot Run supervisor container as non-root.
@@ -96,9 +98,63 @@ supervisor:
     server:
       dataHostname: "data.supv.example.com"
       publicUrl: "https://supv.example.com"
-## @param supervisor.config.database.path Filesystem path for the SQLite database.
+## @param supervisor.config.database.dir Raft data directory (raft.db, snapshots/, node-id). Fresh-start store; no migration from legacy SQLite.
     database:
-      path: "/var/lib/dagger-cache/dagger-cache.db"
+      dir: "/var/lib/dagger-cache"
+## @param supervisor.config.raft.nodeId Raft node ID ("" = derive from the StatefulSet pod name).
+## @param supervisor.config.raft.bindAddr Dedicated Raft transport bind address.
+## @param supervisor.config.raft.advertiseAddr Routable advertise host:port ("" = derive from <hostname>.<headless_service>.<namespace>.svc.<cluster_domain>).
+## @param supervisor.config.raft.peers [array] Explicit Raft voter override (empty = DNS discovery from the StatefulSet). Each entry is {id, address}.
+## @param supervisor.config.raft.replicas Voter count for DNS peer discovery. Keep in sync with supervisor.replicaCount.
+## @param supervisor.config.raft.statefulsetName StatefulSet name for DNS discovery ("" = the chart's StatefulSet name).
+## @param supervisor.config.raft.headlessService Headless Service name for stable pod DNS ("" = <release>-headless).
+## @param supervisor.config.raft.namespace K8s namespace for pod DNS ("" = release namespace).
+## @param supervisor.config.raft.clusterDomain K8s cluster DNS suffix.
+## @param supervisor.config.raft.applyTimeout Raft apply timeout.
+## @param supervisor.config.raft.leaderWaitTimeout Startup wait for Raft leadership.
+## @param supervisor.config.raft.snapshotThreshold Raft snapshot log threshold.
+## @param supervisor.config.raft.snapshotInterval Raft snapshot interval.
+## @param supervisor.config.raft.trailingLogs Raft trailing logs after snapshot.
+## @param supervisor.config.raft.tls.enabled Enable mTLS for the Raft transport (recommended for multi-node).
+## @param supervisor.config.raft.tls.dir Directory for the internal raft CA + per-pod leaf cert ("" = <database.dir>/tls).
+## @param supervisor.config.raft.tls.validity Leaf cert TTL.
+## @param supervisor.config.raft.tls.organization Organization in the internal CA/leaf subjects.
+## @param supervisor.config.raft.tls.caCert Manual mode: path to a pre-provisioned CA cert PEM.
+## @param supervisor.config.raft.tls.cert Manual mode: path to a pre-provisioned leaf cert PEM.
+## @param supervisor.config.raft.tls.key Manual mode: path to a pre-provisioned leaf key PEM.
+## @param supervisor.config.raft.tls.caSecret K8s Secret name for sharing the internal raft CA ("" = <release>-raft-ca).
+##   SECURITY: this Secret holds the raft CA PRIVATE KEY (any pod may issue peer certs) and the
+##   <release>-minting-ca Secret holds the engine-client minting CA private key. Both are written
+##   by the supervisor ServiceAccount; the RBAC in rbac.yaml already restricts `secrets` to the
+##   release namespace, so do NOT broaden it or grant other workloads access to these Secrets.
+## @param supervisor.config.raft.tls.caBootstrap Force this node to generate + write the CA Secret (auto-detects ordinal 0 otherwise).
+## @param supervisor.config.raft.tls.clientAuth Require and verify peer client certs (mTLS).
+    raft:
+      nodeId: ""
+      bindAddr: ":8081"
+      advertiseAddr: ""
+      peers: []
+      replicas: 3
+      statefulsetName: ""
+      headlessService: ""
+      namespace: ""
+      clusterDomain: "cluster.local"
+      applyTimeout: "5s"
+      leaderWaitTimeout: "30s"
+      snapshotThreshold: 1000
+      snapshotInterval: "10m"
+      trailingLogs: 256
+      tls:
+        enabled: true
+        dir: ""
+        validity: "8760h"
+        organization: "dagger-cache-raft"
+        caCert: ""
+        cert: ""
+        key: ""
+        caSecret: ""
+        caBootstrap: false
+        clientAuth: true
 ## @param supervisor.config.auth.internal.enabled Enable internal token authentication.
 ## @param supervisor.config.auth.internal.tokensFile Path to the static tokens file.
 ## @param supervisor.config.auth.bootstrapAdmin.username Bootstrap admin username.
@@ -213,6 +269,9 @@ supervisor:
       engineLogFormat: "json"
       engineRegistryMirrors: {}
 ## @param supervisor.config.ca.clientCertTtl Client certificate TTL.
+##   The engine-client minting CA is shared across supervisor pods via the
+##   <release>-minting-ca Secret (ca.minting_ca_secret), which holds the CA
+##   private key — RBAC-restrict it to the supervisor ServiceAccount.
     ca:
       clientCertTtl: "2h"
 ## @param supervisor.config.tls.provider TLS provider for the control plane ("embedded" or "cert-manager").

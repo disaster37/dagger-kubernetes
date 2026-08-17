@@ -10,12 +10,12 @@ import (
 )
 
 func TestTraceMetaRepoProvisionSetOnce(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTraceMetaRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
 	ctx := context.Background()
 
-	u1 := seedUser(t, db, "u1")
-	u2 := seedUser(t, db, "u2")
+	u1 := seedUser(t, store, "u1")
+	u2 := seedUser(t, store, "u2")
 
 	if err := repo.UpsertProvision(ctx, "t1", u1.ID, "v0.21.4"); err != nil {
 		t.Fatalf("UpsertProvision: %v", err)
@@ -35,11 +35,11 @@ func TestTraceMetaRepoProvisionSetOnce(t *testing.T) {
 }
 
 func TestTraceMetaRepoIngestGroupSetOnce(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTraceMetaRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
 	ctx := context.Background()
 
-	grepo := NewGroupRepo(db)
+	grepo := NewGroupRepo(store)
 	g1 := &domain.Group{ID: newID(), Name: "G1", AgentAvailable: true}
 	grepo.Create(ctx, g1)
 	g2 := &domain.Group{ID: newID(), Name: "G2", AgentAvailable: true}
@@ -81,24 +81,24 @@ func TestTraceMetaRepoIngestGroupSetOnce(t *testing.T) {
 }
 
 func TestTraceMetaRepoGetMissing(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTraceMetaRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
 	if _, err := repo.Get(context.Background(), "nope"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("Get missing: %v", err)
 	}
 }
 
 func TestTraceMetaRepoListScoping(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTraceMetaRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
 	ctx := context.Background()
 
-	grepo := NewGroupRepo(db)
+	grepo := NewGroupRepo(store)
 	g1 := &domain.Group{ID: newID(), Name: "G1", AgentAvailable: true}
 	grepo.Create(ctx, g1)
 
-	u1 := seedUser(t, db, "u1") // member of g1
-	u2 := seedUser(t, db, "u2") // not a member
+	u1 := seedUser(t, store, "u1") // member of g1
+	u2 := seedUser(t, store, "u2") // not a member
 	grepo.SetMembers(ctx, g1.ID, []string{u1.ID})
 
 	// trace in g1
@@ -144,15 +144,15 @@ func TestTraceMetaRepoListScoping(t *testing.T) {
 }
 
 func TestTraceMetaRepoListUnassignedOnly(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTraceMetaRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
 	ctx := context.Background()
 
-	grepo := NewGroupRepo(db)
+	grepo := NewGroupRepo(store)
 	g1 := &domain.Group{ID: newID(), Name: "G1", AgentAvailable: true}
 	grepo.Create(ctx, g1)
 
-	u1 := seedUser(t, db, "u1")
+	u1 := seedUser(t, store, "u1")
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "in-group", GroupID: g1.ID, UserID: u1.ID, StartedAt: time.Now().UTC()})
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "unassigned-1", UserID: u1.ID, StartedAt: time.Now().UTC()})
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "unassigned-2", StartedAt: time.Now().UTC()})
@@ -175,8 +175,8 @@ func TestTraceMetaRepoListUnassignedOnly(t *testing.T) {
 }
 
 func TestTraceMetaRepoListLimitClamping(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewTraceMetaRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
 	ctx := context.Background()
 
 	for i := 0; i < 5; i++ {

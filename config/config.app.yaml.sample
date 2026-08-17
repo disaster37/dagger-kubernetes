@@ -64,10 +64,56 @@ auth:
     default_group: ""                  # new OAuth users auto-join this group (must exist); empty = none.
 
 # --- Database ----------------------------------------------------------------
-# SQLite file backing the multi-user store (users, groups, tokens, projects,
-# trace metadata). Persist on a volume (PVC / bind-mount) in production.
+# Raft data directory: holds raft.db (boltdb log+stable), snapshots/, node-id.
+# Persist on a volume (PVC / bind-mount) in production.
+# NOTE: this is a fresh-start store. There is NO migration from legacy SQLite
+# data; existing SQLite data is intentionally not carried over.
 database:
-  path: "/var/lib/dagger-cache/dagger-cache.db"
+  dir: "/var/lib/dagger-cache"
+
+# --- Raft (distributed store) ------------------------------------------------
+# Raft ALWAYS runs, even for a single-node deployment. For single-node, leave
+# peers empty (the node bootstraps with itself as the only voter). For a
+# multi-node cluster, either:
+#   - set raft.peers to the full voter list (including self), OR
+#   - set raft.replicas + raft.statefulset_name + raft.headless_service so the
+#     supervisor derives the peer list from the StatefulSet's stable pod DNS
+#     names (<sts>-<i>.<headless>.<ns>.svc.<cluster-domain>) — no K8s API calls.
+#
+# SECURITY: enable raft.tls.enabled (mTLS) before running multi-node. The Helm
+# chart enables it by default and shares the internal raft CA via a K8s Secret.
+# With TLS disabled the Raft transport is plaintext TCP; single-node is
+# unaffected (no inter-node traffic).
+raft:
+  node_id: ""              # "" = load/generate a stable UUID at <dir>/node-id.
+  bind_addr: ":8081"       # dedicated Raft transport port (not control/data).
+  advertise_addr: ""       # "" = derive from <hostname>.<headless_service>.<namespace>.svc.<cluster_domain>.
+  peers: []                # explicit full voter list (non-K8s/testing). Empty = DNS discovery.
+    # - id: "node-1"
+    #   address: "supervisor-0.supervisor-headless:8081"
+    # - id: "node-2"
+    #   address: "supervisor-1.supervisor-headless:8081"
+  replicas: 1              # StatefulSet replica count for DNS peer discovery.
+  statefulset_name: ""     # e.g. "dagger-cache-supervisor" (DNS discovery).
+  headless_service: ""     # e.g. "dagger-cache-headless" (DNS discovery).
+  namespace: ""            # K8s namespace for pod DNS (default = release ns).
+  cluster_domain: "cluster.local"
+  apply_timeout: "5s"
+  leader_wait_timeout: "30s"
+  snapshot_threshold: 1000
+  snapshot_interval: "10m"
+  trailing_logs: 256
+  tls:
+    enabled: false         # binary default (plaintext single-node dev/test). Helm chart sets true.
+    dir: ""                # "" = <database.dir>/tls
+    validity: "8760h"      # leaf cert TTL (1y).
+    organization: "dagger-cache-raft"
+    ca_cert: ""            # manual mode: path to CA cert PEM.
+    cert: ""               # manual mode: path to leaf cert PEM.
+    key: ""                # manual mode: path to leaf key PEM.
+    ca_secret: ""          # auto/K8s mode: Secret name for CA sharing.
+    ca_bootstrap: false    # auto/K8s mode: true = this node generates the CA (auto-detects ordinal 0).
+    client_auth: true      # mTLS (RequireAndVerifyClientCert).
 
 # --- Telemetry backend endpoints --------------------------------------------
 # Used by the Supervisor to query traces/logs/metrics for the UI and to

@@ -4,25 +4,111 @@ import (
 	"bytes"
 	"context"
 	"crypto/aes"
+	"errors"
+	"net"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"k8s.io/client-go/kubernetes"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
+func newRaftStoreForTest(t *testing.T) *repository.RaftStore {
+	t.Helper()
+	store, err := repository.NewRaftStore(repository.RaftStoreConfig{
+		Dir:      t.TempDir(),
+		BindAddr: freeAddr(t),
+	}, observ.NewTestLogger())
+	if err != nil {
+		t.Fatalf("NewRaftStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader: %v", err)
+	}
+	return store
+}
+
+// freeAddr returns a loopback TCP address that is free at call time.
+func freeAddr(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	addr := l.Addr().String()
+	_ = l.Close()
+	return addr
+}
+
 func newMetaStore(t *testing.T) *repository.MetaStore {
 	t.Helper()
-	db, err := repository.OpenSQLite(t.TempDir() + "/jwt.db")
+	return repository.NewMetaStore(newRaftStoreForTest(t))
+}
+
+// newTwoNodeRaftStores builds a real two-node raft cluster over loopback TCP
+// (plaintext) and waits for a leader to be elected.
+func newTwoNodeRaftStores(t *testing.T) (*repository.RaftStore, *repository.RaftStore) {
+	t.Helper()
+	addr1 := freeAddr(t)
+	addr2 := freeAddr(t)
+	peers := []repository.RaftPeer{
+		{ID: "node-1", Address: addr1},
+		{ID: "node-2", Address: addr2},
+	}
+	logger := observ.NewTestLogger()
+
+	s1, err := repository.NewRaftStore(repository.RaftStoreConfig{
+		Dir:           filepath.Join(t.TempDir(), "node-1"),
+		NodeID:        "node-1",
+		BindAddr:      addr1,
+		AdvertiseAddr: addr1,
+		Resolver:      mustResolver(t, "node-1", addr1, peers),
+	}, logger)
 	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
+		t.Fatalf("NewRaftStore node-1: %v", err)
 	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
+	s2, err := repository.NewRaftStore(repository.RaftStoreConfig{
+		Dir:           filepath.Join(t.TempDir(), "node-2"),
+		NodeID:        "node-2",
+		BindAddr:      addr2,
+		AdvertiseAddr: addr2,
+		Resolver:      mustResolver(t, "node-2", addr2, peers),
+	}, logger)
+	if err != nil {
+		t.Fatalf("NewRaftStore node-2: %v", err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	return repository.NewMetaStore(db)
+	t.Cleanup(func() {
+		_ = s1.Close()
+		_ = s2.Close()
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := s1.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader node-1: %v", err)
+	}
+	if err := s2.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader node-2: %v", err)
+	}
+	return s1, s2
+}
+
+func mustResolver(t *testing.T, nodeID, advertise string, peers []repository.RaftPeer) repository.PeerResolver {
+	t.Helper()
+	return repository.NewPeerResolver(repository.RaftDiscoveryConfig{
+		NodeID:        nodeID,
+		AdvertiseAddr: advertise,
+		Peers:         peers,
+	})
 }
 
 func TestLoadOrCreateJWTSecretConfiguredOK(t *testing.T) {
@@ -429,6 +515,431 @@ func TestHostOfStripsPort(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := hostOf(tc.raw); got != tc.want {
 				t.Fatalf("hostOf(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestWaitForMetaSecret(t *testing.T) {
+	t.Run("returns existing value", func(t *testing.T) {
+		ms := newMetaStore(t)
+		if err := ms.Set(context.Background(), "k", "v"); err != nil {
+			t.Fatalf("Set: %v", err)
+		}
+		got, err := waitForMetaSecret(context.Background(), ms, "k", 2*time.Second)
+		if err != nil {
+			t.Fatalf("waitForMetaSecret: %v", err)
+		}
+		if string(got) != "v" {
+			t.Fatalf("got %q, want v", got)
+		}
+	})
+
+	t.Run("times out when absent", func(t *testing.T) {
+		ms := newMetaStore(t)
+		start := time.Now()
+		if _, err := waitForMetaSecret(context.Background(), ms, "missing", 200*time.Millisecond); err == nil {
+			t.Fatal("expected timeout")
+		} else if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want DeadlineExceeded", err)
+		}
+		if elapsed := time.Since(start); elapsed < 100*time.Millisecond {
+			t.Fatalf("returned too early: %v", elapsed)
+		}
+	})
+}
+
+func TestResolveJWTSecretLeaderAndConfigured(t *testing.T) {
+	logger := observ.NewTestLogger()
+
+	t.Run("leader provisions", func(t *testing.T) {
+		store := newRaftStoreForTest(t)
+		if !store.IsLeader() {
+			t.Fatal("single-node store should be leader")
+		}
+		ms := repository.NewMetaStore(store)
+		got, err := resolveJWTSecret(context.Background(), store, ms, "", 5*time.Second, logger)
+		if err != nil {
+			t.Fatalf("resolveJWTSecret: %v", err)
+		}
+		if len(got) < minJWTSecretLen {
+			t.Fatalf("secret too short: %d", len(got))
+		}
+	})
+
+	t.Run("configured short-circuits", func(t *testing.T) {
+		store := newRaftStoreForTest(t)
+		ms := repository.NewMetaStore(store)
+		secret := strings.Repeat("k", minJWTSecretLen)
+		got, err := resolveJWTSecret(context.Background(), store, ms, secret, 5*time.Second, logger)
+		if err != nil {
+			t.Fatalf("resolveJWTSecret: %v", err)
+		}
+		if string(got) != secret {
+			t.Fatalf("got %q, want configured", got)
+		}
+	})
+}
+
+func TestResolveJWTSecretFollowerWaitsForMeta(t *testing.T) {
+	logger := observ.NewTestLogger()
+	s1, s2 := newTwoNodeRaftStores(t)
+	var leader, follower *repository.RaftStore
+	if s1.IsLeader() {
+		leader, follower = s1, s2
+	} else if s2.IsLeader() {
+		leader, follower = s2, s1
+	} else {
+		t.Fatal("no leader elected")
+	}
+
+	// The leader provisions the JWT secret; the follower waits for replication
+	// instead of writing (and must not exit).
+	leaderMS := repository.NewMetaStore(leader)
+	provisioned, err := loadOrCreateJWTSecret(context.Background(), leaderMS, "", logger)
+	if err != nil {
+		t.Fatalf("leader provision: %v", err)
+	}
+
+	followerMS := repository.NewMetaStore(follower)
+	got, err := resolveJWTSecret(context.Background(), follower, followerMS, "", 10*time.Second, logger)
+	if err != nil {
+		t.Fatalf("follower resolveJWTSecret: %v", err)
+	}
+	if !bytes.Equal(got, provisioned) {
+		t.Fatal("follower JWT secret must equal the leader's provisioned value")
+	}
+
+	// Token-encryption key follows the same path.
+	leaderKey, err := loadOrCreateTokenEncryptionKey(context.Background(), leaderMS, "", logger)
+	if err != nil {
+		t.Fatalf("leader key: %v", err)
+	}
+	gotKey, err := resolveTokenEncryptionKey(context.Background(), follower, followerMS, "", 10*time.Second, logger)
+	if err != nil {
+		t.Fatalf("follower resolveTokenEncryptionKey: %v", err)
+	}
+	if !bytes.Equal(gotKey, leaderKey) {
+		t.Fatal("follower token key must equal the leader's provisioned key")
+	}
+}
+
+func TestRaftCABootstrap(t *testing.T) {
+	tests := []struct {
+		name     string
+		tlsCfg   domain.RaftTLSConfig
+		replicas int
+		hostname string
+		want     bool
+	}{
+		{
+			name:     "single node always bootstraps",
+			tlsCfg:   domain.RaftTLSConfig{},
+			replicas: 1,
+			hostname: "a1b2c3d4-0000-0000-0000-000000000000",
+			want:     true,
+		},
+		{
+			name:     "ordinal zero auto-detected",
+			tlsCfg:   domain.RaftTLSConfig{},
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-0",
+			want:     true,
+		},
+		{
+			name:     "higher ordinal not bootstrap",
+			tlsCfg:   domain.RaftTLSConfig{},
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-1",
+			want:     false,
+		},
+		{
+			name:     "two digit ordinal not bootstrap",
+			tlsCfg:   domain.RaftTLSConfig{},
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-10",
+			want:     false,
+		},
+		{
+			name:     "explicit ca_bootstrap wins",
+			tlsCfg:   domain.RaftTLSConfig{CABootstrap: true},
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-1",
+			want:     true,
+		},
+		{
+			name:     "non-k8s uuid not bootstrap (multi-node)",
+			tlsCfg:   domain.RaftTLSConfig{},
+			replicas: 3,
+			hostname: "a1b2c3d4-0000-0000-0000-000000000000",
+			want:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &domain.Config{Raft: domain.RaftConfig{Replicas: tc.replicas, TLS: tc.tlsCfg}}
+			if got := raftCABootstrap(cfg, tc.hostname); got != tc.want {
+				t.Fatalf("raftCABootstrap(%q) = %v, want %v", tc.hostname, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMintingCABootstrap(t *testing.T) {
+	tests := []struct {
+		name     string
+		replicas int
+		peers    []domain.RaftPeer
+		hostname string
+		want     bool
+	}{
+		{
+			name:     "single node always bootstraps",
+			replicas: 1,
+			hostname: "supervisor-5f8c9d7b6-abc12",
+			want:     true,
+		},
+		{
+			name:     "single explicit peer bootstraps",
+			replicas: 1,
+			peers:    []domain.RaftPeer{{ID: "self", Address: "self:8081"}},
+			hostname: "supervisor-5f8c9d7b6-abc12",
+			want:     true,
+		},
+		{
+			name:     "ordinal zero auto-detected",
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-0",
+			want:     true,
+		},
+		{
+			name:     "higher ordinal not bootstrap",
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-1",
+			want:     false,
+		},
+		{
+			name:     "two digit ordinal not bootstrap",
+			replicas: 3,
+			hostname: "dagger-cache-supervisor-10",
+			want:     false,
+		},
+		{
+			name:     "non-k8s pod name not bootstrap (multi-node)",
+			replicas: 3,
+			hostname: "supervisor-5f8c9d7b6-abc12",
+			want:     false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &domain.Config{Raft: domain.RaftConfig{Replicas: tc.replicas, Peers: tc.peers}}
+			if got := mintingCABootstrap(cfg, tc.hostname); got != tc.want {
+				t.Fatalf("mintingCABootstrap(%q) = %v, want %v", tc.hostname, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateMigrateTokensSingleNode(t *testing.T) {
+	tests := []struct {
+		name    string
+		raft    domain.RaftConfig
+		wantErr bool
+	}{
+		{
+			name:    "single node ok",
+			raft:    domain.RaftConfig{Replicas: 1},
+			wantErr: false,
+		},
+		{
+			name: "single explicit peer ok",
+			raft: domain.RaftConfig{
+				Replicas: 1,
+				Peers:    []domain.RaftPeer{{ID: "a", Address: "a:8081"}},
+			},
+			wantErr: false,
+		},
+		{
+			name:    "multi-node replicas rejected",
+			raft:    domain.RaftConfig{Replicas: 3},
+			wantErr: true,
+		},
+		{
+			name: "multi-node peers rejected",
+			raft: domain.RaftConfig{
+				Replicas: 1,
+				Peers:    []domain.RaftPeer{{ID: "a", Address: "a:8081"}, {ID: "b", Address: "b:8081"}},
+			},
+			wantErr: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &domain.Config{Raft: tc.raft}
+			err := validateMigrateTokensSingleNode(cfg)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateMigrateTokensSingleNode() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateRaftConfig(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{
+			Raft: domain.RaftConfig{
+				Replicas: 1,
+				TLS:      domain.RaftTLSConfig{ClientAuth: true},
+			},
+		}
+	}
+
+	tests := []struct {
+		name      string
+		mut       func(*domain.Config)
+		clientset kubernetes.Interface
+		wantErr   bool
+	}{
+		{
+			name: "single node plaintext ok",
+		},
+		{
+			name: "multi-node with peers ok",
+			mut: func(c *domain.Config) {
+				c.Raft.Replicas = 3
+				c.Raft.Peers = []domain.RaftPeer{{ID: "a", Address: "a:8081"}}
+			},
+		},
+		{
+			name:    "multi-node requires statefulset or peers",
+			mut:     func(c *domain.Config) { c.Raft.Replicas = 3 },
+			wantErr: true,
+		},
+		{
+			name: "tls manual all set",
+			mut: func(c *domain.Config) {
+				c.Raft.TLS.Enabled = true
+				c.Raft.TLS.CACertPath = "/ca"
+				c.Raft.TLS.CertPath = "/cert"
+				c.Raft.TLS.KeyPath = "/key"
+			},
+		},
+		{
+			name: "tls manual missing key",
+			mut: func(c *domain.Config) {
+				c.Raft.TLS.Enabled = true
+				c.Raft.TLS.CACertPath = "/ca"
+				c.Raft.TLS.CertPath = "/cert"
+			},
+			wantErr: true,
+		},
+		{
+			name: "tls auto multi-node without k8s",
+			mut: func(c *domain.Config) {
+				c.Raft.TLS.Enabled = true
+				c.Raft.Replicas = 3
+				c.Raft.Peers = []domain.RaftPeer{{ID: "a", Address: "a:8081"}}
+			},
+			clientset: nil,
+			wantErr:   true,
+		},
+		{
+			name: "loopback advertise multi-node rejected",
+			mut: func(c *domain.Config) {
+				c.Raft.Replicas = 3
+				c.Raft.AdvertiseAddr = "127.0.0.1:8081"
+				c.Raft.Peers = []domain.RaftPeer{{ID: "a", Address: "a:8081"}}
+			},
+			wantErr: true,
+		},
+		{
+			name: "routable advertise multi-node ok",
+			mut: func(c *domain.Config) {
+				c.Raft.Replicas = 3
+				c.Raft.AdvertiseAddr = "node-0.headless.ns.svc.cluster.local:8081"
+				c.Raft.Peers = []domain.RaftPeer{{ID: "a", Address: "a:8081"}}
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			if tc.mut != nil {
+				tc.mut(cfg)
+			}
+			err := validateRaftConfig(cfg, tc.clientset)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("validateRaftConfig() error = %v, wantErr %v", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+func TestRaftDiscoveryConfig(t *testing.T) {
+	cfg := &domain.Config{
+		Raft: domain.RaftConfig{
+			NodeID:          "n",
+			BindAddr:        ":9090",
+			AdvertiseAddr:   "a:9090",
+			Replicas:        3,
+			StatefulSetName: "sts",
+			HeadlessService: "headless",
+			Namespace:       "ns",
+			ClusterDomain:   "cluster.local",
+		},
+		Fleet: domain.FleetConfig{Namespace: "fleet-ns"},
+	}
+	d := raftDiscoveryConfig(cfg)
+	// The raft port is derived from BindAddr by the repository's raftPort
+	// (covered in raft_discovery_test.go), so RaftPort stays zero here.
+	if d.BindAddr != ":9090" {
+		t.Fatalf("BindAddr = %q, want :9090", d.BindAddr)
+	}
+	if d.Namespace != "ns" {
+		t.Fatalf("Namespace = %q, want ns", d.Namespace)
+	}
+	if d.Replicas != 3 || d.StatefulSetName != "sts" || d.HeadlessService != "headless" {
+		t.Fatalf("discovery config = %+v", d)
+	}
+
+	// Namespace falls back to fleet namespace.
+	cfg2 := &domain.Config{
+		Raft:  domain.RaftConfig{BindAddr: ":8081"},
+		Fleet: domain.FleetConfig{Namespace: "fleet-ns"},
+	}
+	d2 := raftDiscoveryConfig(cfg2)
+	if d2.Namespace != "fleet-ns" {
+		t.Fatalf("Namespace fallback = %q, want fleet-ns", d2.Namespace)
+	}
+	if d2.BindAddr != ":8081" {
+		t.Fatalf("BindAddr = %q, want :8081", d2.BindAddr)
+	}
+}
+
+func TestIsMintingCAOnPerPodStorage(t *testing.T) {
+	tests := []struct {
+		name   string
+		caPath string
+		dbDir  string
+		want   bool
+	}{
+		{"default under db dir", "/var/lib/dagger-cache/ca", "/var/lib/dagger-cache", true},
+		{"nested under db dir", "/var/lib/dagger-cache/sub/ca", "/var/lib/dagger-cache", true},
+		{"outside db dir", "/etc/dagger-cache/ca", "/var/lib/dagger-cache", false},
+		{"empty ca path", "", "/var/lib/dagger-cache", false},
+		{"empty db dir", "/var/lib/dagger-cache/ca", "", false},
+		{"same path", "/var/lib/dagger-cache", "/var/lib/dagger-cache", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &domain.Config{
+				Database: domain.DatabaseConfig{Dir: tc.dbDir},
+				TLS:      domain.TLSConfig{CAPath: tc.caPath},
+			}
+			if got := isMintingCAOnPerPodStorage(cfg); got != tc.want {
+				t.Fatalf("isMintingCAOnPerPodStorage = %v, want %v", got, tc.want)
 			}
 		})
 	}

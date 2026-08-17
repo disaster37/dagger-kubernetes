@@ -221,9 +221,13 @@ grafana:
 
 ### High availability
 
-- **Supervisor**: run at least 2 replicas (`supervisor.replicaCount: 2`). All state is in the
-  session store (in-memory), so sessions shift on pod restart. Clients will
-  reconnect automatically.
+- **Supervisor**: the RBAC/trace/cache-routing state lives in a Raft cluster
+  (`supervisor.config.raft.*`). The chart ships a **StatefulSet** (default
+  `replicaCount: 3`) with a **headless Service** for stable pod DNS; peers are
+  discovered by DNS arithmetic and the Raft transport is **mTLS** (internal
+  goca CA shared via the `<release>-raft-ca` Secret). See
+  [Raft (distributed store)](#raft-distributed-store) below. Sessions are
+  in-memory and shift on pod restart; clients reconnect automatically.
 - **Loki**: use `deploymentMode: SimpleScalable` with S3/GCS object storage for
   multi-replica setups. SingleBinary is sufficient for up to ~20 GB/day.
 - **Tempo**: use object storage (S3/GCS) for persistence beyond pod lifetime.
@@ -240,6 +244,12 @@ grafana:
   (`supervisor.serviceAccount.clusterScope: false`), limited to the release
   namespace. Set `clusterScope: true` only if engine fleets span multiple
   namespaces — this grants cluster-wide access and is security-sensitive.
+- The `<release>-raft-ca` and `<release>-minting-ca` Secrets contain the
+  internal raft CA **private key** and the engine-client minting CA **private
+  key** respectively (any pod may issue certificates from them). The chart's
+  RBAC already restricts `secrets` verbs to the supervisor ServiceAccount
+  within the release namespace — do **not** broaden it or share these Secrets
+  with other workloads.
 - Restrict network policies so only the collector can reach Tempo/Loki/Victoria.
 - Use Kubernetes Secrets for all credentials (tokens, TLS keys).
 - Enable `supervisor.podSecurityContext` and `supervisor.securityContext` (enabled by default).
@@ -256,8 +266,8 @@ grafana:
 |---|---|---|
 | `supervisor.image.repository` | Supervisor image | `ghcr.io/disaster37/dagger-kubernetes` |
 | `supervisor.image.tag` | Image tag (defaults to `Chart.appVersion`) | `""` |
-| `supervisor.replicaCount` | Supervisor replicas | `2` |
-| `supervisor.persistence.enabled` | Enable PVC for SQLite database | `false` |
+| `supervisor.replicaCount` | Supervisor replicas (mirrors `supervisor.config.raft.replicas`) | `3` |
+| `supervisor.persistence.enabled` | Enable per-pod PVC for the Raft data directory (StatefulSet volumeClaimTemplate) | `true` |
 | `supervisor.resources` | Supervisor container resources | see `values.yaml` |
 | `supervisor.autoscaling.enabled` | Enable HPA for supervisor | `false` |
 | `supervisor.serviceAccount.annotations` | ServiceAccount annotations | `{}` |
@@ -298,6 +308,65 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 | `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<server.publicUrl host>` |
 | `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `supervisor.config.cache.internalAddr`, else `<release>-registry:5000` (when `tools.registry.enabled`) |
 | `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (public ref emitted to clients) |
+
+### Raft (distributed store)
+
+The supervisor persists RBAC state, trace metadata, and the cache routing tables
+in a **Hashicorp Raft** replicated state machine (ADR-015/ADR-016). Raft always
+runs — a single-node deployment is a one-voter cluster. The chart ships a
+**StatefulSet** (with `volumeClaimTemplates` per-pod PVCs, `podManagementPolicy:
+Parallel`) and a **headless Service** (`clusterIP: None`) whose DNS A records
+give each pod a stable identity for peer discovery.
+
+| Value | Default | Description |
+|---|---|---|
+| `supervisor.config.database.dir` | `/var/lib/dagger-cache` | Raft data dir (`raft.db`, `snapshots/`, `node-id`, `tls/`). Mounted from the per-pod `db` volume. |
+| `supervisor.replicaCount` | `3` | Supervisor pod count (mirrors `supervisor.config.raft.replicas`). |
+| `supervisor.config.raft.nodeId` | `""` | Stable node ID; the chart injects the StatefulSet pod name (`<sts>-<ordinal>`) via downward-API. |
+| `supervisor.config.raft.bindAddr` | `:8081` | Dedicated Raft transport port (exposed as the `raft` container port). |
+| `supervisor.config.raft.advertiseAddr` | `""` | Routable `host:port`; empty = derived from `<hostname>.<headless_service>.<namespace>.svc.<cluster_domain>`. |
+| `supervisor.config.raft.peers` | `[]` | Explicit voter list of `{id, address}` (non-K8s/testing); empty = DNS discovery. |
+| `supervisor.config.raft.replicas` | `3` | Voter count for DNS discovery. Keep in sync with `supervisor.replicaCount`. |
+| `supervisor.config.raft.statefulsetName` | `""` | StatefulSet name for DNS discovery (defaults to the chart's StatefulSet name). |
+| `supervisor.config.raft.headlessService` | `""` | Headless Service name for stable pod DNS (defaults to `<release>-headless`). |
+| `supervisor.config.raft.namespace` | `""` | K8s namespace for pod DNS (defaults to the release namespace). |
+| `supervisor.config.raft.clusterDomain` | `cluster.local` | K8s cluster DNS suffix. |
+| `supervisor.config.raft.applyTimeout` | `5s` | `raft.Apply` enqueue timeout. |
+| `supervisor.config.raft.leaderWaitTimeout` | `30s` | Startup wait for leadership (also bounds the CA Secret poll). |
+| `supervisor.config.raft.snapshotThreshold` | `1000` | Snapshot log threshold. |
+| `supervisor.config.raft.snapshotInterval` | `10m` | Snapshot interval. |
+| `supervisor.config.raft.trailingLogs` | `256` | Trailing logs after a snapshot. |
+| `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
+| `supervisor.config.raft.tls.dir` | `""` | Internal raft CA + leaf directory (defaults to `<database.dir>/tls`). |
+| `supervisor.config.raft.tls.validity` | `8760h` | Leaf cert TTL. |
+| `supervisor.config.raft.tls.organization` | `dagger-cache-raft` | CA/leaf subject organization. |
+| `supervisor.config.raft.tls.caCert` / `cert` / `key` | `""` | Manual mode: pre-provisioned CA + leaf PEM paths (all three together). |
+| `supervisor.config.raft.tls.caSecret` | `""` | Auto mode: Secret name for the shared internal CA (defaults to `<release>-raft-ca`). |
+| `supervisor.config.raft.tls.caBootstrap` | `false` | Auto mode: force this node to generate + write the CA Secret (ordinal 0 is auto-detected). |
+| `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
+
+**TLS auto-CA:** pod-0 generates the internal CA with `goca`, writes it to the
+`<release>-raft-ca` Secret, and issues itself a leaf; pods 1..N-1 poll the
+Secret (bounded by `leader_wait_timeout`) before issuing their own leaves.
+Leaves are reused across restarts and re-issued within a 7-day expiry margin.
+The engine-client **minting CA** is likewise shared across pods via the
+`<release>-minting-ca` Secret (so engine mTLS client certs minted by any pod
+are trusted by every pod's data-plane listener). Both Secrets hold CA
+**private keys** — keep them RBAC-restricted to the supervisor ServiceAccount
+(see [Security](#security)).
+
+**Follower reads:** every pod waits until *a* leader exists, then serves stale
+local reads; writes on a follower return `ErrNotLeader` (503) and clients retry.
+
+**Scale-up / scale-down:** the leader reconciles membership (`raft.AddVoter` /
+`raft.RemoveServer`) automatically. To scale up, bump `supervisor.replicaCount`
+**and** `supervisor.config.raft.replicas` together and rolling-restart. To
+scale down, shrink both, rolling-restart, then delete the removed pod.
+
+> **Fresh start:** the Raft store starts empty on first boot. There is **no
+> migration** from any prior SQLite-backed release — existing SQLite data is
+> intentionally not carried over. The bootstrap-admin flow provisions a fresh
+> admin when the user count is 0.
 
 ### Cache proxy (engine → Supervisor → registry)
 

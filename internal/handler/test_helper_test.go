@@ -2,7 +2,6 @@ package handler
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 	"time"
 
@@ -22,30 +21,38 @@ type testEnv struct {
 	auth     *service.AuthService
 	jwt      *service.JWTService
 	sessions *service.Store
-	db       *sql.DB
+	store    *repository.RaftStore
 }
 
-// newTestEnv builds a Server wired to a temp SQLite DB + stub fleet, with auth
-// enabled by default. Pass authDisabled=true for the no-auth mode.
+// newTestStore builds a single-node in-memory Raft store for handler tests.
+func newTestStore(t *testing.T) *repository.RaftStore {
+	t.Helper()
+	store, err := repository.NewInmemRaftStore("handler-test", observ.NewTestLogger(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewInmemRaftStore: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	return store
+}
+
+// newTestEnv builds a Server wired to a temp in-memory Raft store + stub fleet,
+// with auth enabled by default. Pass authDisabled=true for the no-auth mode.
 func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 	t.Helper()
 	logger := observ.NewTestLogger()
 
-	dbPath := t.TempDir() + "/test.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
+	store := newTestStore(t)
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	projectRepo := repository.NewProjectRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	projectRepo := repository.NewProjectRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -132,7 +139,7 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 		auth:     authSvc,
 		jwt:      jwtSvc,
 		sessions: sessions,
-		db:       db,
+		store:    store,
 	}
 }
 

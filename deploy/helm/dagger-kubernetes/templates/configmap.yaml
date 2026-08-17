@@ -35,7 +35,41 @@ data:
         default_group: {{ .defaultGroup | quote }}
 {{- end }}
     database:
-      path: {{ .Values.supervisor.config.database.path | quote }}
+      dir: {{ .Values.supervisor.config.database.dir | quote }}
+    raft:
+      node_id: {{ .Values.supervisor.config.raft.nodeId | quote }}
+      bind_addr: {{ .Values.supervisor.config.raft.bindAddr | quote }}
+      advertise_addr: {{ .Values.supervisor.config.raft.advertiseAddr | quote }}
+{{- if .Values.supervisor.config.raft.peers }}
+      peers:
+{{- range .Values.supervisor.config.raft.peers }}
+        - id: {{ .id | quote }}
+          address: {{ .address | quote }}
+{{- end }}
+{{- else }}
+      peers: []
+{{- end }}
+      replicas: {{ .Values.supervisor.config.raft.replicas }}
+      statefulset_name: {{ include "dagger-kubernetes.supervisorStatefulSetName" . | quote }}
+      headless_service: {{ include "dagger-kubernetes.supervisorHeadlessService" . | quote }}
+      namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
+      cluster_domain: {{ .Values.supervisor.config.raft.clusterDomain | quote }}
+      apply_timeout: {{ .Values.supervisor.config.raft.applyTimeout | quote }}
+      leader_wait_timeout: {{ .Values.supervisor.config.raft.leaderWaitTimeout | quote }}
+      snapshot_threshold: {{ .Values.supervisor.config.raft.snapshotThreshold }}
+      snapshot_interval: {{ .Values.supervisor.config.raft.snapshotInterval | quote }}
+      trailing_logs: {{ .Values.supervisor.config.raft.trailingLogs }}
+      tls:
+        enabled: {{ .Values.supervisor.config.raft.tls.enabled }}
+        dir: {{ .Values.supervisor.config.raft.tls.dir | quote }}
+        validity: {{ .Values.supervisor.config.raft.tls.validity | quote }}
+        organization: {{ .Values.supervisor.config.raft.tls.organization | quote }}
+        ca_cert: {{ .Values.supervisor.config.raft.tls.caCert | quote }}
+        cert: {{ .Values.supervisor.config.raft.tls.cert | quote }}
+        key: {{ .Values.supervisor.config.raft.tls.key | quote }}
+        ca_secret: {{ include "dagger-kubernetes.supervisorRaftCASecret" . | quote }}
+        ca_bootstrap: {{ .Values.supervisor.config.raft.tls.caBootstrap }}
+        client_auth: {{ .Values.supervisor.config.raft.tls.clientAuth }}
     telemetry:
       collector_url: {{ include "dagger-kubernetes.collectorUrl" . | quote }}
       tempo_url: {{ include "dagger-kubernetes.tempoUrl" . | quote }}

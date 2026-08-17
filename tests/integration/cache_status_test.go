@@ -53,20 +53,12 @@ func registryStub(t *testing.T) *httptest.Server {
 
 func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	logger := observ.NewTestLogger()
-	dbPath := t.TempDir() + "/test.db"
-	db, err := repository.OpenSQLite(dbPath)
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	defer db.Close()
+	store := newIntegrationStore(t)
 
-	userRepo := repository.NewUserRepo(db)
-	groupRepo := repository.NewGroupRepo(db)
-	tokenRepo := repository.NewTokenRepo(db)
-	traceMetaRepo := repository.NewTraceMetaRepo(db)
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -92,7 +84,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	}, logger, observ.NewMetrics(nil))
 	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
-	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(db), groupRepo, logger), groupRepo, traceMetaRepo, logger)
+	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
@@ -100,7 +92,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	ts := registryStub(t)
 	router := service.NewRegistryRouter(
 		[]domain.RegistryBackend{{ID: "default", InternalAddr: ts.Listener.Addr().String()}},
-		repository.NewCacheRoutesRepo(db),
+		repository.NewCacheRoutesRepo(store),
 		logger,
 	)
 	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{

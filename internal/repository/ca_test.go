@@ -1,8 +1,10 @@
 package repository
 
 import (
+	"crypto/tls"
 	"crypto/x509"
 	"encoding/pem"
+	"net"
 	"testing"
 	"time"
 )
@@ -107,5 +109,80 @@ func TestSerializableCertificateToTLS(t *testing.T) {
 	}
 	if tlsCert.PrivateKey == nil {
 		t.Fatal("TLS private key is nil")
+	}
+}
+
+func TestMintingCAIssuePeerCertificate(t *testing.T) {
+	ca, err := NewMintingCA(1 * time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+
+	dnsNames := []string{"localhost", "node-0.headless.ns.svc.cluster.local"}
+	ipAddrs := []net.IP{net.ParseIP("127.0.0.1")}
+	certPEM, keyPEM, err := ca.IssuePeerCertificate("node-0", "dagger-cache-raft", dnsNames, ipAddrs, 24*time.Hour)
+	if err != nil {
+		t.Fatalf("IssuePeerCertificate: %v", err)
+	}
+
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	if len(tlsCert.Certificate) == 0 {
+		t.Fatal("certificate chain is empty")
+	}
+
+	cert, err := x509.ParseCertificate(tlsCert.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+
+	if cert.Subject.CommonName != "node-0" {
+		t.Fatalf("CN = %q, want node-0", cert.Subject.CommonName)
+	}
+	if len(cert.DNSNames) != len(dnsNames) {
+		t.Fatalf("DNSNames = %v, want %v", cert.DNSNames, dnsNames)
+	}
+	for i, n := range dnsNames {
+		if cert.DNSNames[i] != n {
+			t.Fatalf("DNSNames[%d] = %q, want %q", i, cert.DNSNames[i], n)
+		}
+	}
+	if len(cert.IPAddresses) != 1 || !cert.IPAddresses[0].Equal(ipAddrs[0]) {
+		t.Fatalf("IPAddresses = %v, want %v", cert.IPAddresses, ipAddrs)
+	}
+
+	hasServer := false
+	hasClient := false
+	for _, usage := range cert.ExtKeyUsage {
+		if usage == x509.ExtKeyUsageServerAuth {
+			hasServer = true
+		}
+		if usage == x509.ExtKeyUsageClientAuth {
+			hasClient = true
+		}
+	}
+	if !hasServer || !hasClient {
+		t.Fatalf("ExtKeyUsage = %v, want ServerAuth + ClientAuth", cert.ExtKeyUsage)
+	}
+
+	roots := ca.CertPool()
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Fatalf("peer cert not trusted for server auth: %v", err)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{
+		Roots:     roots,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		t.Fatalf("peer cert not trusted for client auth: %v", err)
+	}
+
+	block, _ := pem.Decode(keyPEM)
+	if block == nil || block.Type != "EC PRIVATE KEY" {
+		t.Fatalf("key PEM type = %s, want EC PRIVATE KEY", block.Type)
 	}
 }

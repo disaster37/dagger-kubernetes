@@ -53,4 +53,7 @@ var (
 	ErrInvalidCredential   = errors.New("invalid credentials")
 	ErrValidation          = errors.New("validation error")
 	ErrTokenNotRecoverable = errors.New("api token not recoverable")
+	ErrNotLeader           = errors.New("not the raft leader")
+	ErrConflict            = errors.New("resource already exists")
+	ErrRaftTimeout         = errors.New("raft apply timeout")
 )

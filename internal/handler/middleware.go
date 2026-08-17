@@ -3,7 +3,6 @@ package handler
 import (
 	"context"
 	"errors"
-	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -138,6 +137,12 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusNotFound, "not found")
 	case errors.Is(err, domain.ErrTokenExists):
 		writeError(c, consts.StatusConflict, "token already exists")
+	case errors.Is(err, domain.ErrConflict):
+		writeError(c, consts.StatusConflict, "resource already exists")
+	case errors.Is(err, domain.ErrNotLeader):
+		writeError(c, consts.StatusServiceUnavailable, "not the leader")
+	case errors.Is(err, domain.ErrRaftTimeout):
+		writeError(c, consts.StatusGatewayTimeout, "raft apply timeout")
 	case errors.Is(err, domain.ErrInvalidCredential):
 		writeError(c, consts.StatusUnauthorized, "invalid credentials")
 	case errors.Is(err, domain.ErrForbidden):
@@ -152,16 +157,8 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, domain.ErrValidation):
 		writeError(c, consts.StatusBadRequest, err.Error())
-	case isUniqueViolation(err):
-		writeError(c, consts.StatusConflict, "resource already exists")
 	default:
 		s.logger.WithError(err).Error("handler error")
 		writeError(c, consts.StatusInternalServerError, "internal error")
 	}
-}
-
-// isUniqueViolation detects SQLite unique-constraint errors by message
-// substring (modernc.org/sqlite reports "UNIQUE constraint failed: ...").
-func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "UNIQUE constraint failed")
 }

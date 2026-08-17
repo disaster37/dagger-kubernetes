@@ -207,7 +207,7 @@ func TestConnectEnvTokenNotRecoverable(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	// Persist a pre-v2 token (no ciphertext).
-	if err := repository.NewTokenRepo(env.db).Upsert(ctx, &domain.APIToken{
+	if err := repository.NewTokenRepo(env.store).Upsert(ctx, &domain.APIToken{
 		ID:        "t-pre-v2",
 		UserID:    u.ID,
 		TokenHash: service.HashAPIToken("dct_pre-v2"),

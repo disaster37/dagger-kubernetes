@@ -9,8 +9,8 @@ import (
 )
 
 func TestGroupRepoCRUD(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewGroupRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewGroupRepo(store)
 	ctx := context.Background()
 
 	g := &domain.Group{
@@ -81,8 +81,8 @@ func TestGroupRepoCRUD(t *testing.T) {
 }
 
 func TestGroupRepoDuplicateName(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewGroupRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewGroupRepo(store)
 	ctx := context.Background()
 
 	g := &domain.Group{ID: newID(), Name: "TeamA", AgentAvailable: true}
@@ -96,16 +96,16 @@ func TestGroupRepoDuplicateName(t *testing.T) {
 }
 
 func TestGroupRepoMembership(t *testing.T) {
-	db := newTestDB(t)
-	grepo := NewGroupRepo(db)
+	store := newTestRaftStore(t)
+	grepo := NewGroupRepo(store)
 	ctx := context.Background()
 
 	g := &domain.Group{ID: newID(), Name: "G1", AgentAvailable: true}
 	if err := grepo.Create(ctx, g); err != nil {
 		t.Fatalf("Create group: %v", err)
 	}
-	u1 := seedUser(t, db, "u1")
-	u2 := seedUser(t, db, "u2")
+	u1 := seedUser(t, store, "u1")
+	u2 := seedUser(t, store, "u2")
 
 	if err := grepo.SetMembers(ctx, g.ID, []string{u1.ID, u2.ID}); err != nil {
 		t.Fatalf("SetMembers: %v", err)
@@ -151,13 +151,13 @@ func TestGroupRepoMembership(t *testing.T) {
 }
 
 func TestGroupRepoDeleteCascadesMemberships(t *testing.T) {
-	db := newTestDB(t)
-	grepo := NewGroupRepo(db)
+	store := newTestRaftStore(t)
+	grepo := NewGroupRepo(store)
 	ctx := context.Background()
 
 	g := &domain.Group{ID: newID(), Name: "G", AgentAvailable: true}
 	grepo.Create(ctx, g)
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	grepo.SetMembers(ctx, g.ID, []string{u.ID})
 
 	if err := grepo.Delete(ctx, g.ID); err != nil {
@@ -170,14 +170,14 @@ func TestGroupRepoDeleteCascadesMemberships(t *testing.T) {
 }
 
 func TestGroupRepoDeleteUserCascadesMemberships(t *testing.T) {
-	db := newTestDB(t)
-	grepo := NewGroupRepo(db)
-	urepo := NewUserRepo(db)
+	store := newTestRaftStore(t)
+	grepo := NewGroupRepo(store)
+	urepo := NewUserRepo(store)
 	ctx := context.Background()
 
 	g := &domain.Group{ID: newID(), Name: "G", AgentAvailable: true}
 	grepo.Create(ctx, g)
-	u := seedUser(t, db, "u")
+	u := seedUser(t, store, "u")
 	grepo.SetMembers(ctx, g.ID, []string{u.ID})
 
 	if err := urepo.Delete(ctx, u.ID); err != nil {

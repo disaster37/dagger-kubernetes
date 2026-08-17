@@ -21,7 +21,8 @@ services:
       - DAGGER_CACHE_CACHE_REGISTRY=localhost:5000/dagger-cache
       - DAGGER_CACHE_TLS_CA_PATH=/tmp/dagger-cache/ca
       - DAGGER_CACHE_LOG_LEVEL=debug
-      - DAGGER_CACHE_DATABASE_PATH=/var/lib/dagger-cache/dagger-cache.db
+      - DAGGER_CACHE_DATABASE_DIR=/var/lib/dagger-cache
+      - DAGGER_CACHE_RAFT_BIND_ADDR=:8081
       # Set a bootstrap admin password explicitly in production; empty = random
       # password logged once at first boot.
       - DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD=
@@ -32,7 +33,7 @@ services:
       # The tokens file is gitignored and must never be committed.
       # DEPRECATED: migrate with `supervisor migrate-tokens` then remove.
       - ./data/tokens:/etc/dagger-cache/tokens:ro
-      # SQLite database (users, groups, tokens, projects, trace metadata).
+      # Raft data directory (raft.db, snapshots/, node-id). Fresh-start store.
       - ./data:/var/lib/dagger-cache
     depends_on:
       - cache-registry

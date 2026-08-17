@@ -4,19 +4,13 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func newRoutesRepo(t *testing.T) *CacheRoutesRepo {
 	t.Helper()
-	db, err := OpenSQLite(t.TempDir() + "/routes.db")
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return NewCacheRoutesRepo(db)
+	return NewCacheRoutesRepo(newTestRaftStore(t))
 }
 
 func TestManifestRouteRoundTrip(t *testing.T) {
@@ -198,9 +192,13 @@ func TestReapUploadSessions(t *testing.T) {
 
 	// Insert one stale session directly (older than the reap cutoff).
 	stale := time.Now().UTC().Add(-2 * time.Hour).Format(time.RFC3339)
-	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO cache_upload_sessions (upload_uuid, repo, backend_id, created_at) VALUES (?, ?, ?, ?)`,
-		"stale", "dagger-cache", "reg-1", stale); err != nil {
+	cmd := mustCommand(t, kindRecordUpload, &domain.CacheUploadSession{
+		UploadUUID: "stale",
+		Repo:       "dagger-cache",
+		BackendID:  "reg-1",
+		CreatedAt:  stale,
+	})
+	if err := r.store.apply(cmd); err != nil {
 		t.Fatalf("insert stale: %v", err)
 	}
 	if err := r.RecordUpload(ctx, "fresh", "dagger-cache", "reg-1"); err != nil {

@@ -9,8 +9,8 @@ import (
 )
 
 func TestProjectRepoCRUD(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewProjectRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewProjectRepo(store)
 	ctx := context.Background()
 
 	p := &domain.Project{
@@ -39,7 +39,7 @@ func TestProjectRepoCRUD(t *testing.T) {
 	}
 
 	// Assign a group.
-	grepo := NewGroupRepo(db)
+	grepo := NewGroupRepo(store)
 	g := &domain.Group{ID: newID(), Name: "G", AgentAvailable: true}
 	if err := grepo.Create(ctx, g); err != nil {
 		t.Fatalf("create group: %v", err)
@@ -86,8 +86,8 @@ func TestProjectRepoCRUD(t *testing.T) {
 }
 
 func TestProjectRepoDuplicateName(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewProjectRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewProjectRepo(store)
 	ctx := context.Background()
 
 	p := &domain.Project{ID: newID(), Name: "github.com/acme/api"}
@@ -101,9 +101,9 @@ func TestProjectRepoDuplicateName(t *testing.T) {
 }
 
 func TestProjectRepoDeleteGroupNullsProjectGroup(t *testing.T) {
-	db := newTestDB(t)
-	prepo := NewProjectRepo(db)
-	grepo := NewGroupRepo(db)
+	store := newTestRaftStore(t)
+	prepo := NewProjectRepo(store)
+	grepo := NewGroupRepo(store)
 	ctx := context.Background()
 
 	g := &domain.Group{ID: newID(), Name: "G", AgentAvailable: true}

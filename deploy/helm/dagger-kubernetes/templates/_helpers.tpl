@@ -102,6 +102,26 @@ explicit legacy value, else the in-cluster registry Service when enabled. */}}
 {{- end -}}
 {{- end -}}
 
+{{/* Resolve the supervisor StatefulSet name used for raft DNS peer discovery
+(<sts>-<i>.<headless>.<ns>.svc.<clusterDomain>). Defaults to the chart fullname;
+an explicit override supports supervisors managed outside this chart. */}}
+{{- define "dagger-kubernetes.supervisorStatefulSetName" -}}
+{{- default (include "dagger-kubernetes.fullname" .) .Values.supervisor.config.raft.statefulsetName -}}
+{{- end -}}
+
+{{/* Resolve the raft headless Service name (clusterIP: None) whose DNS A records
+back the stable pod names used for discovery. Defaults to <fullname>-headless. */}}
+{{- define "dagger-kubernetes.supervisorHeadlessService" -}}
+{{- default (printf "%s-headless" (include "dagger-kubernetes.fullname" .)) .Values.supervisor.config.raft.headlessService -}}
+{{- end -}}
+
+{{/* Resolve the internal raft CA Secret name (shared CA cert+key across pods).
+Defaults to <fullname>-raft-ca; an explicit override supports externally
+managed CAs. */}}
+{{- define "dagger-kubernetes.supervisorRaftCASecret" -}}
+{{- default (printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .)) .Values.supervisor.config.raft.tls.caSecret -}}
+{{- end -}}
+
 {{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.victoriaUrl" -}}
 {{- if .Values.tools.victoria.enabled -}}

@@ -39,7 +39,35 @@ auth:
 
 # --- Database ----------------------------------------------------------------
 database:
-  path: "/var/lib/dagger-cache/dagger-cache.db"  # SQLite file (users, groups, tokens, projects, trace metadata).
+  dir: "/var/lib/dagger-cache"  # Raft data dir (raft.db, snapshots/, node-id). Fresh-start store: no migration from legacy SQLite.
+
+# --- Raft (distributed store) ------------------------------------------------
+raft:
+  node_id: ""                  # "" = load/generate a stable UUID at <dir>/node-id.
+  bind_addr: ":8081"           # dedicated Raft transport port (not control/data).
+  advertise_addr: ""           # "" = derive from <hostname>.<headless_service>.<namespace>.svc.<cluster_domain>.
+  peers: []                    # single-node default (self is the only voter).
+  replicas: 1                  # StatefulSet replica count for DNS peer discovery.
+  statefulset_name: ""         # e.g. "dagger-cache-supervisor" (DNS discovery).
+  headless_service: ""         # e.g. "dagger-cache-headless" (DNS discovery).
+  namespace: ""                # K8s namespace for pod DNS (default = release ns).
+  cluster_domain: "cluster.local"
+  apply_timeout: "5s"
+  leader_wait_timeout: "30s"
+  snapshot_threshold: 1000
+  snapshot_interval: "10m"
+  trailing_logs: 256
+  tls:
+    enabled: false             # binary default. Helm chart sets true (mTLS).
+    dir: ""                    # "" = <database.dir>/tls
+    validity: "8760h"
+    organization: "dagger-cache-raft"
+    ca_cert: ""                # manual mode: path to CA cert PEM.
+    cert: ""                   # manual mode: path to leaf cert PEM.
+    key: ""                    # manual mode: path to leaf key PEM.
+    ca_secret: ""              # auto/K8s mode: Secret name for CA sharing.
+    ca_bootstrap: false        # auto/K8s mode: this node generates the CA (auto-detects ordinal 0).
+    client_auth: true          # mTLS (RequireAndVerifyClientCert).
 
 # --- Remote shared cache -----------------------------------------------------
 cache:

@@ -134,15 +134,7 @@ func digestStr(c string) string {
 
 func newTestRouter(t *testing.T, backends ...domain.RegistryBackend) *RegistryRouter {
 	t.Helper()
-	db, err := repository.OpenSQLite(t.TempDir() + "/routes.db")
-	if err != nil {
-		t.Fatalf("OpenSQLite: %v", err)
-	}
-	if err := repository.Migrate(context.Background(), db); err != nil {
-		t.Fatalf("Migrate: %v", err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return NewRegistryRouter(backends, repository.NewCacheRoutesRepo(db), observ.NewTestLogger())
+	return NewRegistryRouter(backends, repository.NewCacheRoutesRepo(newServiceStore(t)), observ.NewTestLogger())
 }
 
 func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet domain.FleetProvider, gc domain.GCConfig) (*CacheStatsService, *httptest.Server) {

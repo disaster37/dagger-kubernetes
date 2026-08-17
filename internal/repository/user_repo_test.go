@@ -9,8 +9,8 @@ import (
 )
 
 func TestUserRepoCRUD(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewUserRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewUserRepo(store)
 	ctx := context.Background()
 
 	u := &domain.User{
@@ -96,11 +96,11 @@ func TestUserRepoCRUD(t *testing.T) {
 }
 
 func TestUserRepoDuplicateUsername(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewUserRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewUserRepo(store)
 	ctx := context.Background()
 
-	seedUser(t, db, "bob")
+	seedUser(t, store, "bob")
 
 	dup := &domain.User{ID: newID(), Username: "Bob", Role: domain.RoleUser}
 	if err := repo.Create(ctx, dup); err == nil {
@@ -109,8 +109,8 @@ func TestUserRepoDuplicateUsername(t *testing.T) {
 }
 
 func TestUserRepoGetMissing(t *testing.T) {
-	db := newTestDB(t)
-	repo := NewUserRepo(db)
+	store := newTestRaftStore(t)
+	repo := NewUserRepo(store)
 	ctx := context.Background()
 
 	if _, err := repo.Get(ctx, "nope"); !errors.Is(err, domain.ErrNotFound) {
