@@ -16,6 +16,7 @@ type Claims struct {
 	Role     string   `json:"role"`
 	GroupIDs []string `json:"groups"`
 	Type     string   `json:"typ"` // "access" | "refresh" | "oauth_state"
+	Nonce    string   `json:"nonce,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -73,10 +74,12 @@ func (s *JWTService) ParseOAuthState(token string) (*Claims, error) {
 }
 
 // IssueOAuthState issues a short-lived state token for the OAuth flow. The
-// redirect path is carried in the Username claim.
-func (s *JWTService) IssueOAuthState(redirectPath string) (string, error) {
+// redirect path is carried in the Username claim and the login-CSRF nonce in
+// the Nonce claim; the callback must present the matching nonce cookie.
+func (s *JWTService) IssueOAuthState(redirectPath, nonce string) (string, error) {
 	claims := s.claims(typOAuthState, oauthStateTTL)
 	claims.Username = redirectPath
+	claims.Nonce = nonce
 	tok, err := s.sign(claims)
 	if err != nil {
 		return "", fmt.Errorf("sign oauth state: %w", err)

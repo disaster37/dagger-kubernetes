@@ -192,31 +192,33 @@ func validOCIPathSegment(s string) bool {
 // Deps bundles the collaborators injected into the Server. Replacing the old
 // 11-param constructor, this is far easier to maintain and construct in tests.
 type Deps struct {
-	Logger             *logrus.Logger
-	Metrics            *observ.Metrics
-	MintingCA          domain.MintingCA
-	FleetManager       *service.Manager
-	Sessions           domain.SessionStore
-	CacheBackend       domain.CacheBackend
-	VersionResolver    domain.VersionResolver
-	Auth               *service.AuthService
-	AuthDisabled       bool // mirrors cfg.Auth.Internal.Enabled == false
-	Users              *service.UserService
-	Groups             *service.GroupService
-	Projects           *service.ProjectService
-	Tokens             *service.TokenService
-	Quota              *service.QuotaService
-	Attribution        *service.AttributionService
-	TraceMeta          domain.TraceMetaRepository
-	Traces             domain.TraceRepository
-	Logs               domain.LogRepository
-	OAuth              *service.GitHubOAuthService // nil when disabled
-	JWT                *service.JWTService
-	CacheStatsProvider domain.CacheStatsProvider
-	CachePurger        domain.CachePurger
-	StatusProvider     domain.StatusProvider
-	Connect            *service.ConnectService
-	Router             *service.RegistryRouter
+	Logger              *logrus.Logger
+	Metrics             *observ.Metrics
+	MintingCA           domain.MintingCA
+	FleetManager        *service.Manager
+	Sessions            domain.SessionStore
+	CacheBackend        domain.CacheBackend
+	VersionResolver     domain.VersionResolver
+	Auth                *service.AuthService
+	InternalAuthEnabled bool // mirrors cfg.Auth.Internal.Enabled
+	OAuthCookieSecure   bool // mirrors cfg.Auth.OAuth.CookieSecure
+	Users               *service.UserService
+	Groups              *service.GroupService
+	Projects            *service.ProjectService
+	Tokens              *service.TokenService
+	Quota               *service.QuotaService
+	Attribution         *service.AttributionService
+	TraceMeta           domain.TraceMetaRepository
+	Traces              domain.TraceRepository
+	Logs                domain.LogRepository
+	OAuth               service.OAuthProvider // nil when disabled
+	OAuthProvider       string                // "github" | "oidc" | "" when disabled
+	JWT                 *service.JWTService
+	CacheStatsProvider  domain.CacheStatsProvider
+	CachePurger         domain.CachePurger
+	StatusProvider      domain.StatusProvider
+	Connect             *service.ConnectService
+	Router              *service.RegistryRouter
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -251,18 +253,20 @@ type Server struct {
 	dataConnSem     chan struct{}
 
 	// Auth + RBAC collaborators.
-	auth         *service.AuthService
-	authDisabled bool
-	users        *service.UserService
-	groups       *service.GroupService
-	projects     *service.ProjectService
-	tokens       *service.TokenService
-	quota        *service.QuotaService
-	attribution  *service.AttributionService
-	traceMeta    domain.TraceMetaRepository
-	jwt          *service.JWTService
-	oauth        *service.GitHubOAuthService
-	limiter      *attemptLimiter
+	auth                *service.AuthService
+	internalAuthEnabled bool
+	oauthCookieSecure   bool
+	users               *service.UserService
+	groups              *service.GroupService
+	projects            *service.ProjectService
+	tokens              *service.TokenService
+	quota               *service.QuotaService
+	attribution         *service.AttributionService
+	traceMeta           domain.TraceMetaRepository
+	jwt                 *service.JWTService
+	oauth               service.OAuthProvider
+	oauthProvider       string
+	limiter             *attemptLimiter
 
 	otelProxy     *reverseproxy.ReverseProxy
 	victoriaProxy *reverseproxy.ReverseProxy
@@ -292,18 +296,20 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		logs:            deps.Logs,
 		dataConnSem:     make(chan struct{}, maxDataConnections),
 
-		auth:         deps.Auth,
-		authDisabled: deps.AuthDisabled,
-		users:        deps.Users,
-		groups:       deps.Groups,
-		projects:     deps.Projects,
-		tokens:       deps.Tokens,
-		quota:        deps.Quota,
-		attribution:  deps.Attribution,
-		traceMeta:    deps.TraceMeta,
-		jwt:          deps.JWT,
-		oauth:        deps.OAuth,
-		limiter:      newAttemptLimiter(),
+		auth:                deps.Auth,
+		internalAuthEnabled: deps.InternalAuthEnabled,
+		oauthCookieSecure:   deps.OAuthCookieSecure,
+		users:               deps.Users,
+		groups:              deps.Groups,
+		projects:            deps.Projects,
+		tokens:              deps.Tokens,
+		quota:               deps.Quota,
+		attribution:         deps.Attribution,
+		traceMeta:           deps.TraceMeta,
+		jwt:                 deps.JWT,
+		oauth:               deps.OAuth,
+		oauthProvider:       deps.OAuthProvider,
+		limiter:             newAttemptLimiter(),
 
 		cacheStats:  deps.CacheStatsProvider,
 		cachePurger: deps.CachePurger,
@@ -441,6 +447,8 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/auth/providers", s.handleProviders)
 	h.GET("/api/v1/auth/oauth/github/login", s.handleOAuthLogin)
 	h.GET("/api/v1/auth/oauth/github/callback", s.handleOAuthCallback)
+	h.GET("/api/v1/auth/oauth/oidc/login", s.handleOAuthOIDCLogin)
+	h.GET("/api/v1/auth/oauth/oidc/callback", s.handleOAuthOIDCCallback)
 	h.GET("/api/v1/auth/me", s.handleMe)
 	h.PUT("/api/v1/auth/password", s.handleChangePassword)
 

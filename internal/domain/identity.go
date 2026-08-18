@@ -6,7 +6,6 @@ import "errors"
 type AuthMethod string
 
 const (
-	AuthNone      AuthMethod = "none" // auth disabled
 	AuthJWT       AuthMethod = "jwt"
 	AuthAPIToken  AuthMethod = "api_token"
 	AuthLegacyTok AuthMethod = "legacy_token"

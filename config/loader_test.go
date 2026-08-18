@@ -3,8 +3,11 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func TestLoadDefaults(t *testing.T) {
@@ -90,6 +93,24 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Auth.OAuth.DefaultGroup != "" {
 		t.Fatalf("auth.oauth.default_group default should be empty, got %q", cfg.Auth.OAuth.DefaultGroup)
+	}
+	if cfg.Auth.OAuth.CookieSecure {
+		t.Fatal("auth.oauth.cookie_secure default should be false")
+	}
+	if cfg.Auth.OAuth.Provider != "github" {
+		t.Fatalf("auth.oauth.provider default = %q, want github", cfg.Auth.OAuth.Provider)
+	}
+	if cfg.Auth.OAuth.IssuerURL != "" {
+		t.Fatalf("auth.oauth.issuer_url default should be empty, got %q", cfg.Auth.OAuth.IssuerURL)
+	}
+	if len(cfg.Auth.OAuth.Scopes) != 3 || cfg.Auth.OAuth.Scopes[0] != "openid" || cfg.Auth.OAuth.Scopes[1] != "profile" || cfg.Auth.OAuth.Scopes[2] != "email" {
+		t.Fatalf("auth.oauth.scopes default = %v, want [openid profile email]", cfg.Auth.OAuth.Scopes)
+	}
+	if cfg.Auth.OAuth.UsernameClaim != "preferred_username" {
+		t.Fatalf("auth.oauth.username_claim default = %q, want preferred_username", cfg.Auth.OAuth.UsernameClaim)
+	}
+	if cfg.Auth.OAuth.GroupsClaim != "groups" {
+		t.Fatalf("auth.oauth.groups_claim default = %q, want groups", cfg.Auth.OAuth.GroupsClaim)
 	}
 	if cfg.LogFormat != "json" {
 		t.Fatalf("log_format default = %q, want json", cfg.LogFormat)
@@ -232,5 +253,151 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !cfg.Cache.GC.Enabled {
 		t.Fatal("env override cache.gc.enabled = false, want true")
+	}
+}
+
+func TestValidateAuthConfig(t *testing.T) {
+	githubSet := func(cfg *domain.Config) {
+		cfg.Auth.OAuth.ClientID = "cid"
+		cfg.Auth.OAuth.ClientSecret = "csec"
+		cfg.Auth.OAuth.RedirectURL = "https://supv.example.com/cb"
+	}
+	oidcSet := func(cfg *domain.Config) {
+		cfg.Auth.OAuth.IssuerURL = "https://dex.example.com"
+		githubSet(cfg)
+	}
+
+	tests := []struct {
+		name    string
+		cfg     *domain.Config
+		wantErr string
+	}{
+		{name: "internal enabled oauth off unknown provider tolerated", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth:    domain.OAuthConfig{Enabled: false, Provider: "gitlab"},
+			},
+		}},
+		{name: "internal enabled github configured", cfg: func() *domain.Config {
+			c := &domain.Config{Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "github"},
+			}}
+			githubSet(c)
+			return c
+		}()},
+		{name: "internal enabled github missing fields", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "github"},
+			},
+		}, wantErr: "auth.oauth.enabled: true requires client_id"},
+		{name: "internal enabled oidc configured", cfg: func() *domain.Config {
+			c := &domain.Config{Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "oidc"},
+			}}
+			oidcSet(c)
+			return c
+		}()},
+		{name: "internal enabled oidc missing issuer", cfg: func() *domain.Config {
+			c := &domain.Config{Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "oidc"},
+			}}
+			githubSet(c)
+			return c
+		}(), wantErr: `provider "oidc" requires issuer_url`},
+		{name: "internal enabled oidc missing client_id", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth: domain.OAuthConfig{Enabled: true, Provider: "oidc",
+					IssuerURL: "https://dex.example.com", ClientSecret: "csec", RedirectURL: "https://supv.example.com/cb"},
+			},
+		}, wantErr: `provider "oidc" requires issuer_url`},
+		{name: "internal enabled oauth unsupported provider", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: true},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "gitlab"},
+			},
+		}, wantErr: `only "github" and "oidc" are supported`},
+		{name: "internal disabled oauth off", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: false},
+				OAuth:    domain.OAuthConfig{Enabled: false},
+			},
+		}, wantErr: "auth.internal.enabled: false requires auth.oauth.enabled"},
+		{name: "internal disabled github missing fields", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: false},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "github"},
+			},
+		}, wantErr: "auth.oauth.enabled: true requires client_id"},
+		{name: "internal disabled github configured", cfg: func() *domain.Config {
+			c := &domain.Config{Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: false},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "github"},
+			}}
+			githubSet(c)
+			return c
+		}()},
+		{name: "internal disabled oidc configured", cfg: func() *domain.Config {
+			c := &domain.Config{Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: false},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "oidc"},
+			}}
+			oidcSet(c)
+			return c
+		}()},
+		{name: "internal disabled oidc missing issuer", cfg: func() *domain.Config {
+			c := &domain.Config{Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: false},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "oidc"},
+			}}
+			githubSet(c)
+			return c
+		}(), wantErr: `provider "oidc" requires issuer_url`},
+		{name: "internal disabled unsupported provider", cfg: &domain.Config{
+			Auth: domain.AuthConfig{
+				Internal: domain.InternalAuthConfig{Enabled: false},
+				OAuth:    domain.OAuthConfig{Enabled: true, Provider: "gitlab"},
+			},
+		}, wantErr: `only "github" and "oidc" are supported`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAuthConfig(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateAuthConfig = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateAuthConfig = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateAuthConfig = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInternalDisabledWithoutOAuth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("auth:\n  internal:\n    enabled: false\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "validate auth config") ||
+		!strings.Contains(err.Error(), "auth.internal.enabled: false requires auth.oauth.enabled") {
+		t.Fatalf("Load error = %q, want wrapped validation message", err.Error())
 	}
 }

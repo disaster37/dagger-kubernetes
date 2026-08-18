@@ -111,12 +111,14 @@ compromise." Pre-existing tokens (created before this change) have no
 ciphertext and are **not recoverable** — the UI shows a "Regenerate to enable"
 link (a one-time migration cost).
 
-### 7. Flag (dev mode)
+### 7. Flag (auth gating)
 
-If `auth.internal.enabled: false`, the UI is unauthenticated and the endpoint
-returns the server URL, cache topology, and (when `?reveal=true`) the
-anonymous user's token plaintext to anonymous callers. This is the existing
-dev-mode posture; production must enable auth.
+The unauthenticated dev-mode posture described by earlier drafts has been
+removed: auth is always enforced. `auth.internal.enabled: false` no longer
+means "anonymous access" — it disables username/password + legacy-token auth
+and is only permitted when OAuth is enabled and fully configured, making
+OAuth the sole login path. The Connect-env endpoint always requires an
+authenticated identity (401 otherwise) and never serves the anonymous user.
 
 ## Alternatives rejected
 

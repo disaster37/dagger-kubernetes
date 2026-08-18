@@ -40,14 +40,29 @@ type InternalAuthConfig struct {
 	TokensFile string `mapstructure:"tokens_file"`
 }
 
+// OAuthConfig configures OAuth for human/UI login. A single provider is active
+// per deployment, selected by the `provider` discriminator ("github" | "oidc").
+// The OIDC-only fields (IssuerURL, Scopes, UsernameClaim, GroupsClaim) are
+// ignored when provider is "github"; the github-only fields (AllowedOrgs as org
+// membership) are ignored by oidc (which matches AllowedOrgs against the groups
+// claim instead).
 type OAuthConfig struct {
 	Enabled      bool     `mapstructure:"enabled"`
-	Provider     string   `mapstructure:"provider"`
+	Provider     string   `mapstructure:"provider"` // "github" | "oidc"
 	ClientID     string   `mapstructure:"client_id"`
 	ClientSecret string   `mapstructure:"client_secret"`
 	RedirectURL  string   `mapstructure:"redirect_url"`
-	AllowedOrgs  []string `mapstructure:"allowed_orgs"`
+	AllowedOrgs  []string `mapstructure:"allowed_orgs"`  // github: org membership; oidc: groups claim intersection
 	DefaultGroup string   `mapstructure:"default_group"` // auto-membership for new OAuth users; empty = none
+	// CookieSecure forces the Secure flag on the oauth_state cookie; set true
+	// when TLS terminates at an ingress/proxy in front of the supervisor.
+	CookieSecure bool `mapstructure:"cookie_secure"`
+
+	// OIDC-only fields (ignored when provider: github).
+	IssuerURL     string   `mapstructure:"issuer_url"`     // required for provider: oidc
+	Scopes        []string `mapstructure:"scopes"`         // default ["openid","profile","email"]
+	UsernameClaim string   `mapstructure:"username_claim"` // default "preferred_username"; fallback "email"
+	GroupsClaim   string   `mapstructure:"groups_claim"`   // default "groups"
 }
 
 // DatabaseConfig configures the Raft data directory backing the multi-user

@@ -14,7 +14,7 @@ import (
 )
 
 func TestUsersListAdmin(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -30,7 +30,7 @@ func TestUsersListAdmin(t *testing.T) {
 }
 
 func TestUserCreate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -49,7 +49,7 @@ func TestUserCreate(t *testing.T) {
 }
 
 func TestUserCreateDuplicate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -66,7 +66,7 @@ func TestUserCreateDuplicate(t *testing.T) {
 }
 
 func TestUserCreateValidation(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -86,7 +86,7 @@ func TestUserCreateValidation(t *testing.T) {
 }
 
 func TestUserGetAndUpdate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -113,7 +113,7 @@ func TestUserGetAndUpdate(t *testing.T) {
 }
 
 func TestUserGetMissing(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -124,7 +124,7 @@ func TestUserGetMissing(t *testing.T) {
 }
 
 func TestUserDeleteSelf(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -137,7 +137,7 @@ func TestUserDeleteSelf(t *testing.T) {
 }
 
 func TestUserDelete(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -150,7 +150,7 @@ func TestUserDelete(t *testing.T) {
 }
 
 func TestUserResetPassword(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -166,7 +166,7 @@ func TestUserResetPassword(t *testing.T) {
 }
 
 func TestUserGroups(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -189,7 +189,7 @@ func TestUserGroups(t *testing.T) {
 }
 
 func TestUserTokenMetaAdmin(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -209,7 +209,7 @@ func TestUserTokenMetaAdmin(t *testing.T) {
 }
 
 func TestUserTokenMetaMissing(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -222,7 +222,7 @@ func TestUserTokenMetaMissing(t *testing.T) {
 }
 
 func TestUserTokenRevokeAdmin(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 

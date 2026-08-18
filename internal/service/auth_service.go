@@ -9,14 +9,8 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// AuthServiceConfig configures the AuthService resolution behavior.
-type AuthServiceConfig struct {
-	Disabled bool // auth.internal.enabled == false
-}
-
 // AuthService resolves bearer tokens to identities and handles login/refresh.
 type AuthService struct {
-	cfg    AuthServiceConfig
 	users  *UserService
 	groups domain.GroupRepository
 	tokens *TokenService
@@ -28,7 +22,6 @@ type AuthService struct {
 // NewAuthService returns an AuthService. legacy may be nil when no tokens_file
 // is configured.
 func NewAuthService(
-	cfg AuthServiceConfig,
 	users *UserService,
 	groups domain.GroupRepository,
 	tokens *TokenService,
@@ -37,7 +30,6 @@ func NewAuthService(
 	logger *logrus.Logger,
 ) *AuthService {
 	return &AuthService{
-		cfg:    cfg,
 		users:  users,
 		groups: groups,
 		tokens: tokens,
@@ -48,21 +40,12 @@ func NewAuthService(
 }
 
 // Resolve maps a bearer token to an Identity. Resolution order:
-// 1. auth disabled -> anonymous admin
-// 2. empty bearer -> ErrUnauthenticated
-// 3. dct_ prefix -> API token
-// 4. JWT access token
-// 5. legacy flat-file fallback
-// 6. ErrUnauthenticated
+// 1. empty bearer -> ErrUnauthenticated
+// 2. dct_ prefix -> API token
+// 3. JWT access token
+// 4. legacy flat-file fallback
+// 5. ErrUnauthenticated
 func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Identity, error) {
-	if a.cfg.Disabled {
-		return &domain.Identity{
-			UserID:   "anonymous",
-			Username: "anonymous",
-			Role:     domain.RoleAdmin,
-			Method:   domain.AuthNone,
-		}, nil
-	}
 	if bearer == "" {
 		return nil, domain.ErrUnauthenticated
 	}

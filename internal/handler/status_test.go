@@ -11,7 +11,7 @@ import (
 )
 
 func TestHandlePlatformStatusAuthGating(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/status", nil)
@@ -27,7 +27,7 @@ func TestHandlePlatformStatusAuthGating(t *testing.T) {
 }
 
 func TestHandlePlatformStatusShape(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	env.server.status = &stubStatusProvider{status: &domain.PlatformStatus{
 		State: domain.ServiceOK,
 		Services: []domain.ServiceStatus{
@@ -55,7 +55,7 @@ func TestHandlePlatformStatusShape(t *testing.T) {
 }
 
 func TestHandleHealthzDegraded(t *testing.T) {
-	env := newTestEnv(t, true)
+	env := newTestEnv(t)
 	env.server.status = &stubStatusProvider{status: &domain.PlatformStatus{
 		State:    domain.ServiceDown,
 		Services: []domain.ServiceStatus{},
@@ -76,7 +76,7 @@ func TestHandleHealthzDegraded(t *testing.T) {
 }
 
 func TestHandleReadyzDown(t *testing.T) {
-	env := newTestEnv(t, true)
+	env := newTestEnv(t)
 	env.server.status = &stubStatusProvider{status: &domain.PlatformStatus{
 		State: domain.ServiceDown,
 		Services: []domain.ServiceStatus{

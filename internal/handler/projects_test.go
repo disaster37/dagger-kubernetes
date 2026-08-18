@@ -13,7 +13,7 @@ import (
 )
 
 func TestProjectsList(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -32,7 +32,7 @@ func TestProjectsList(t *testing.T) {
 }
 
 func TestProjectCreate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -46,7 +46,7 @@ func TestProjectCreate(t *testing.T) {
 }
 
 func TestProjectCreateWithGroup(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -67,7 +67,7 @@ func TestProjectCreateWithGroup(t *testing.T) {
 }
 
 func TestProjectUpdateAssign(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -103,7 +103,7 @@ func TestProjectUpdateAssign(t *testing.T) {
 }
 
 func TestProjectDelete(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 

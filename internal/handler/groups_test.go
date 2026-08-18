@@ -13,7 +13,7 @@ import (
 )
 
 func TestGroupsList(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -35,7 +35,7 @@ func TestGroupsList(t *testing.T) {
 }
 
 func TestGroupCreate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -49,7 +49,7 @@ func TestGroupCreate(t *testing.T) {
 }
 
 func TestGroupCreateBadPattern(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -63,7 +63,7 @@ func TestGroupCreateBadPattern(t *testing.T) {
 }
 
 func TestGroupCreateDuplicate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -79,7 +79,7 @@ func TestGroupCreateDuplicate(t *testing.T) {
 }
 
 func TestGroupGetUpdateDelete(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -111,7 +111,7 @@ func TestGroupGetUpdateDelete(t *testing.T) {
 }
 
 func TestGroupMembers(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 

@@ -28,14 +28,20 @@ auth:
     secret: ""                                 # HS256 signing key (>= 32 bytes, enforced); empty = auto-generated and persisted in the DB.
     access_ttl: "15m"
     refresh_ttl: "168h"
-  oauth:                                       # optional; disabled by default
+  oauth:                                       # optional; disabled by default. Single active provider per deployment.
     enabled: false
-    provider: "github"
+    provider: "github"                        # "github" | "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
     client_id: "${OAUTH_CLIENT_ID}"
     client_secret: "${OAUTH_CLIENT_SECRET}"
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"
-    allowed_orgs: ["acme"]
-    default_group: ""                          # new OAuth users auto-join this group (must exist); empty = none.
+    allowed_orgs: ["acme"]                    # github: org membership; oidc: groups-claim intersection; empty = allow all.
+    default_group: ""                         # new OAuth users auto-join this group (must exist); empty = none.
+    cookie_secure: false                      # force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).
+    # OIDC-only fields (provider: oidc). Ignored when provider: github.
+    issuer_url: ""                            # e.g. "https://dex.example.com"; loopback http allowed for dev.
+    scopes: ["openid", "profile", "email"]    # "openid" is always included.
+    username_claim: "preferred_username"      # fallback: "email"; error if both absent.
+    groups_claim: "groups"                    # claim holding group names; array or single string; absent = no groups.
 
 # --- Database ----------------------------------------------------------------
 database:

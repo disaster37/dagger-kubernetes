@@ -59,7 +59,7 @@ func (s *GitHubOAuthService) LoginURL(state string) string {
 	v.Set("redirect_uri", s.redirectURL)
 	v.Set("scope", "read:org")
 	v.Set("state", state)
-	return "https://github.com/login/oauth/authorize?" + v.Encode()
+	return fmt.Sprintf("https://github.com/login/oauth/authorize?%s", v.Encode())
 }
 
 // Complete exchanges the code for a GitHub access token, fetches the user
@@ -85,34 +85,11 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 		return "", "", nil, domain.ErrForbidden
 	}
 
-	u, created, err := s.users.EnsureOAuthUser(ctx, "github", strconv.Itoa(ghUser.ID), ghUser.Login)
+	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup)
 	if err != nil {
-		return "", "", nil, fmt.Errorf("ensure oauth user: %w", err)
-	}
-
-	if created && s.defaultGroup != "" {
-		s.joinDefaultGroup(ctx, u.ID)
-	}
-
-	gids, _ := s.groups.GroupsForUser(ctx, u.ID)
-	access, refresh, err = s.jwt.IssuePair(u, groupIDs(gids))
-	if err != nil {
-		return "", "", nil, fmt.Errorf("issue jwt: %w", err)
+		return "", "", nil, fmt.Errorf("github oauth: %w", err)
 	}
 	return access, refresh, u, nil
-}
-
-// joinDefaultGroup best-effort adds a newly created OAuth user to the
-// configured default group.
-func (s *GitHubOAuthService) joinDefaultGroup(ctx context.Context, userID string) {
-	g, err := s.groups.GetByName(ctx, s.defaultGroup)
-	if err != nil {
-		s.logger.WithError(err).WithField("group", s.defaultGroup).Warn("oauth: default group not found")
-		return
-	}
-	if err := addGroupMember(ctx, s.groups, g.ID, userID); err != nil {
-		s.logger.WithError(err).WithField("group", s.defaultGroup).Warn("oauth: default group auto-join failed")
-	}
 }
 
 func (s *GitHubOAuthService) exchangeCode(ctx context.Context, code string) (string, error) {
@@ -203,15 +180,4 @@ func (s *GitHubOAuthService) getJSON(ctx context.Context, path, accessToken stri
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-func orgsIntersect(allowed, have []string) bool {
-	hset := make(map[string]bool, len(have))
-	for _, h := range have {
-		hset[h] = true
-	}
-	for _, a := range allowed {
-		if hset[a] {
-			return true
-		}
-	}
-	return false
-}
+var _ OAuthProvider = (*GitHubOAuthService)(nil)

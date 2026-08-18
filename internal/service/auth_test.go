@@ -8,9 +8,9 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 )
 
-func newValidator(t *testing.T, tokensFile string, enabled bool) *TokenValidator {
+func newValidator(t *testing.T, tokensFile string) *TokenValidator {
 	t.Helper()
-	return NewTokenValidator(tokensFile, enabled, observ.NewTestLogger())
+	return NewTokenValidator(tokensFile, observ.NewTestLogger())
 }
 
 func writeTokens(t *testing.T, content string) string {
@@ -23,44 +23,22 @@ func writeTokens(t *testing.T, content string) string {
 	return p
 }
 
-func TestValidateTokenDisabledAcceptsAny(t *testing.T) {
-	v := newValidator(t, "", false)
-	tok, err := v.ValidateToken("anything-goes")
-	if err != nil {
-		t.Fatalf("disabled should accept: %v", err)
-	}
-	if tok != "anything-goes" {
-		t.Fatalf("token = %q", tok)
-	}
-}
-
-func TestValidateTokenDisabledAcceptsEmpty(t *testing.T) {
-	v := newValidator(t, "", false)
-	tok, err := v.ValidateToken("")
-	if err != nil {
-		t.Fatalf("disabled should accept empty: %v", err)
-	}
-	if tok != "" {
-		t.Fatalf("token = %q", tok)
-	}
-}
-
 func TestValidateTokenEmpty(t *testing.T) {
-	v := newValidator(t, "", true)
+	v := newValidator(t, "")
 	if _, err := v.ValidateToken(""); err == nil {
 		t.Fatal("expected error for empty token when auth enabled")
 	}
 }
 
 func TestValidateTokenEnabledNoFile(t *testing.T) {
-	v := newValidator(t, "", true)
+	v := newValidator(t, "")
 	if _, err := v.ValidateToken("tok"); err == nil {
 		t.Fatal("expected error when auth enabled but no tokens file configured")
 	}
 }
 
 func TestValidateTokenEnabledFileMissing(t *testing.T) {
-	v := newValidator(t, "/nonexistent/path/tokens", true)
+	v := newValidator(t, "/nonexistent/path/tokens")
 	if _, err := v.ValidateToken("tok"); err == nil {
 		t.Fatal("expected error when enabled and tokens file missing (must fail closed)")
 	}
@@ -68,7 +46,7 @@ func TestValidateTokenEnabledFileMissing(t *testing.T) {
 
 func TestValidateTokenEnabledValid(t *testing.T) {
 	file := writeTokens(t, "# comment\n\ngood-token\nother-token\n")
-	v := newValidator(t, file, true)
+	v := newValidator(t, file)
 
 	tok, err := v.ValidateToken("good-token")
 	if err != nil {
@@ -81,7 +59,7 @@ func TestValidateTokenEnabledValid(t *testing.T) {
 
 func TestValidateTokenEnabledInvalid(t *testing.T) {
 	file := writeTokens(t, "good-token\n")
-	v := newValidator(t, file, true)
+	v := newValidator(t, file)
 	if _, err := v.ValidateToken("bad-token"); err == nil {
 		t.Fatal("expected error for invalid token")
 	}

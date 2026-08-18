@@ -182,13 +182,11 @@ func run(c *cli.Context) error {
 
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
-	if cfg.Auth.Internal.TokensFile != "" {
-		legacyValidator = service.NewTokenValidator(cfg.Auth.Internal.TokensFile, cfg.Auth.Internal.Enabled, logger)
+	if cfg.Auth.Internal.Enabled && cfg.Auth.Internal.TokensFile != "" {
+		legacyValidator = service.NewTokenValidator(cfg.Auth.Internal.TokensFile, logger)
 	}
 
-	authSvc := service.NewAuthService(service.AuthServiceConfig{
-		Disabled: !cfg.Auth.Internal.Enabled,
-	}, usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
 
 	// Bootstrap admin (idempotent: only when user count is 0).
 	if err := bootstrapAdmin(ctx, cfg, usersSvc, logger); err != nil {
@@ -198,9 +196,20 @@ func run(c *cli.Context) error {
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 
-	var oauthSvc *service.GitHubOAuthService
+	var oauthSvc service.OAuthProvider
+	var oauthProvider string
 	if cfg.Auth.OAuth.Enabled {
-		oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
+		switch cfg.Auth.OAuth.Provider {
+		case "github":
+			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
+			oauthProvider = "github"
+		case "oidc":
+			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
+			oauthProvider = "oidc"
+		default:
+			// validateAuthConfig already rejected this, but fail closed.
+			return fmt.Errorf("unsupported oauth provider: %s", cfg.Auth.OAuth.Provider)
+		}
 	}
 
 	// --- Fleet + telemetry wiring ---
@@ -256,31 +265,33 @@ func run(c *cli.Context) error {
 		CertPath:     controlTLSCertPath,
 		KeyPath:      controlTLSKeyPath,
 	}, &handler.Deps{
-		Logger:             logger,
-		Metrics:            metrics,
-		MintingCA:          serverMintingCA,
-		FleetManager:       fleetManager,
-		Sessions:           sessions,
-		CacheBackend:       cacheBackend,
-		VersionResolver:    versionResolver,
-		Auth:               authSvc,
-		AuthDisabled:       !cfg.Auth.Internal.Enabled,
-		Users:              usersSvc,
-		Groups:             groupsSvc,
-		Projects:           projectsSvc,
-		Tokens:             tokensSvc,
-		Quota:              quotaSvc,
-		Attribution:        attributionSvc,
-		TraceMeta:          traceMetaRepo,
-		Traces:             traces,
-		Logs:               logsClient,
-		OAuth:              oauthSvc,
-		JWT:                jwtSvc,
-		CacheStatsProvider: cacheStatsSvc,
-		CachePurger:        cacheStatsSvc,
-		StatusProvider:     statusSvc,
-		Connect:            connectSvc,
-		Router:             router,
+		Logger:              logger,
+		Metrics:             metrics,
+		MintingCA:           serverMintingCA,
+		FleetManager:        fleetManager,
+		Sessions:            sessions,
+		CacheBackend:        cacheBackend,
+		VersionResolver:     versionResolver,
+		Auth:                authSvc,
+		InternalAuthEnabled: cfg.Auth.Internal.Enabled,
+		OAuthCookieSecure:   cfg.Auth.OAuth.CookieSecure,
+		Users:               usersSvc,
+		Groups:              groupsSvc,
+		Projects:            projectsSvc,
+		Tokens:              tokensSvc,
+		Quota:               quotaSvc,
+		Attribution:         attributionSvc,
+		TraceMeta:           traceMetaRepo,
+		Traces:              traces,
+		Logs:                logsClient,
+		OAuth:               oauthSvc,
+		OAuthProvider:       oauthProvider,
+		JWT:                 jwtSvc,
+		CacheStatsProvider:  cacheStatsSvc,
+		CachePurger:         cacheStatsSvc,
+		StatusProvider:      statusSvc,
+		Connect:             connectSvc,
+		Router:              router,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {

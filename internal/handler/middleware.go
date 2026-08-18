@@ -13,9 +13,8 @@ import (
 const identityKey = "auth_identity"
 
 // resolveIdentity resolves the request identity via AuthService and stores it
-// on the context. On failure it writes a 401 and returns false. Extraction
-// failures degrade to an empty bearer so that disabled-auth mode accepts
-// requests exactly as before.
+// on the context. A missing or unparseable bearer results in an
+// unauthenticated error (401).
 func (s *Server) resolveIdentity(c *app.RequestContext) (*domain.Identity, bool) {
 	bearer, _ := extractToken(c)
 	id, err := s.auth.Resolve(context.Background(), bearer)
@@ -120,10 +119,10 @@ func (s *Server) authorizeTrace(c *app.RequestContext, traceID string) bool {
 }
 
 // attributionUserID returns the user id recorded in trace attribution, or ""
-// for synthetic identities (anonymous/legacy) that have no users-table row.
-// Writing those ids would violate the trace_meta user_id foreign key.
+// for synthetic identities (legacy) that have no users-table row. Writing
+// those ids would violate the trace_meta user_id foreign key.
 func attributionUserID(id *domain.Identity) string {
-	if id == nil || id.Method == domain.AuthNone || id.Method == domain.AuthLegacyTok {
+	if id == nil || id.Method == domain.AuthLegacyTok {
 		return ""
 	}
 	return id.UserID

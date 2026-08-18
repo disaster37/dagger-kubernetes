@@ -61,7 +61,7 @@ func loginAsUser(t *testing.T, env *testEnv) string {
 }
 
 func TestConnectEnvRequiresAuth(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/connect/env", nil)
@@ -71,7 +71,7 @@ func TestConnectEnvRequiresAuth(t *testing.T) {
 }
 
 func TestConnectEnvUnavailable(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	env.server.connect = nil
 	e := newAuthEngine(env.server)
 	bearer := loginJWTUserWithToken(t, env)
@@ -83,7 +83,7 @@ func TestConnectEnvUnavailable(t *testing.T) {
 }
 
 func TestConnectEnvDefaultMasked(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	bearer := loginJWTUserWithToken(t, env)
 
@@ -109,7 +109,7 @@ func TestConnectEnvDefaultMasked(t *testing.T) {
 }
 
 func TestConnectEnvRevealed(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	u, err := env.users.Create(context.Background(), "alice", "password123", domain.RoleUser)
@@ -136,7 +136,7 @@ func TestConnectEnvRevealed(t *testing.T) {
 }
 
 func TestConnectEnvWithVersion(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	bearer := loginJWTUserWithToken(t, env)
 
@@ -157,7 +157,7 @@ func TestConnectEnvWithVersion(t *testing.T) {
 }
 
 func TestConnectEnvInvalidVersion(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	bearer := loginJWTUserWithToken(t, env)
 
@@ -168,7 +168,7 @@ func TestConnectEnvInvalidVersion(t *testing.T) {
 }
 
 func TestConnectEnvDisallowedVersion(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	bearer := loginJWTUserWithToken(t, env)
 
@@ -179,7 +179,7 @@ func TestConnectEnvDisallowedVersion(t *testing.T) {
 }
 
 func TestConnectEnvTokenMissing(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	if _, err := env.users.Create(context.Background(), "alice", "password123", domain.RoleUser); err != nil {
@@ -198,7 +198,7 @@ func TestConnectEnvTokenMissing(t *testing.T) {
 }
 
 func TestConnectEnvTokenNotRecoverable(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -231,25 +231,8 @@ func TestConnectEnvTokenNotRecoverable(t *testing.T) {
 	}
 }
 
-func TestConnectEnvAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
-	e := newAuthEngine(env.server)
-
-	resp := ut.PerformRequest(e, "GET", "/api/v1/connect/env", nil)
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("auth disabled: %d, want 200", resp.Result().StatusCode())
-	}
-	snap := decodeSnapshot(t, resp.Result().Body())
-	if snap.Token.Exists {
-		t.Fatal("auth-disabled should yield missing token")
-	}
-	if len(snap.EnvVars) != 4 {
-		t.Fatalf("EnvVars = %d, want 4", len(snap.EnvVars))
-	}
-}
-
 func TestConnectEnvCacheControlHeader(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	bearer := loginJWTUserWithToken(t, env)
 
@@ -262,7 +245,7 @@ func TestConnectEnvCacheControlHeader(t *testing.T) {
 }
 
 func TestConnectEnvNoTokenInLogs(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 
 	var buf bytes.Buffer
 	logger := logrus.New()

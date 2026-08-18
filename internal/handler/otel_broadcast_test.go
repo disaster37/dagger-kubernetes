@@ -157,7 +157,7 @@ func waitForString(t *testing.T, conn *mockConn, want string, timeout time.Durat
 }
 
 func TestBroadcastOTelUpdateTraces(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	s.broadcastOTelUpdate("traces", otlpTraceBody(t, testTraceID))
@@ -165,7 +165,7 @@ func TestBroadcastOTelUpdateTraces(t *testing.T) {
 }
 
 func TestBroadcastOTelUpdateLogs(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	s.broadcastOTelUpdate("logs", otlpLogsBody(t, testTraceID))
@@ -173,7 +173,7 @@ func TestBroadcastOTelUpdateLogs(t *testing.T) {
 }
 
 func TestBroadcastOTelUpdateMetricsNoop(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	s.broadcastOTelUpdate("metrics", otlpTraceBody(t, testTraceID))
@@ -186,7 +186,7 @@ func TestBroadcastOTelUpdateMetricsNoop(t *testing.T) {
 }
 
 func TestBroadcastOTelUpdateNilHub(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	s.liveHub = nil
 	// Must not panic.
 	s.broadcastOTelUpdate("traces", otlpTraceBody(t, testTraceID))
@@ -194,7 +194,7 @@ func TestBroadcastOTelUpdateNilHub(t *testing.T) {
 }
 
 func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 
 	// Point the OTLP proxy at a local collector stub so handleOTel runs to
 	// completion (broadcast is independent of proxy success, but this keeps
@@ -215,7 +215,7 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	resp := ut.PerformRequest(e, "POST", "/v1/traces", &ut.Body{
 		Body: bytes.NewReader(traceBody),
 		Len:  len(traceBody),
-	})
+	}, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200 from traces ingest, got %d", resp.Result().StatusCode())
 	}
@@ -227,7 +227,7 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	resp = ut.PerformRequest(e, "POST", "/v1/logs", &ut.Body{
 		Body: bytes.NewReader(logsBody),
 		Len:  len(logsBody),
-	})
+	}, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200 from logs ingest, got %d", resp.Result().StatusCode())
 	}

@@ -55,22 +55,10 @@ func TestExtractTokenSchemes(t *testing.T) {
 	}
 }
 
-// TestRequireAuthDisabled verifies that auth-disabled mode (anonymous admin)
-// admits requests without a token.
-func TestRequireAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
-	e := newTestEngine(env.server)
-
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("disabled auth should admit, got %d", resp.Result().StatusCode())
-	}
-}
-
 // TestRequireAuthEnabledRejects verifies that auth-enabled mode rejects
 // requests without a token.
 func TestRequireAuthEnabledRejects(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
@@ -82,7 +70,7 @@ func TestRequireAuthEnabledRejects(t *testing.T) {
 // TestRequireAuthWithQueryFallback verifies the ?token= query-param fallback
 // used by the SSE /live route (D14): EventSource clients cannot set headers.
 func TestRequireAuthWithQueryFallback(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 
 	bearer, _ := env.createUserAndToken(t)
 	token := strings.TrimPrefix(bearer, "Bearer ")

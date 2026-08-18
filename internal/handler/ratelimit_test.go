@@ -150,7 +150,7 @@ func TestAttemptLimiterEvictsWhenFull(t *testing.T) {
 // TestLoginRateLimited verifies the login endpoint locks out a username+IP
 // after repeated failures (CWE-307).
 func TestLoginRateLimited(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	body := `{"username":"admin","password":"wrong"}`
@@ -181,7 +181,7 @@ func TestLoginRateLimited(t *testing.T) {
 // TestLoginRateLimitCaseInsensitive verifies username casing cannot bypass a
 // lockout (usernames are COLLATE NOCASE).
 func TestLoginRateLimitCaseInsensitive(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	for i := 0; i < maxFailedAttempts; i++ {
@@ -204,7 +204,7 @@ func TestLoginRateLimitCaseInsensitive(t *testing.T) {
 // TestLoginSuccessClearsFailures verifies a successful login resets the
 // failure counter for the key.
 func TestLoginSuccessClearsFailures(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	// Fewer than threshold failures, then a success.
@@ -234,7 +234,7 @@ func TestLoginSuccessClearsFailures(t *testing.T) {
 // TestChangePasswordRateLimited verifies the change-password endpoint (which
 // also verifies a password) is rate-limited.
 func TestChangePasswordRateLimited(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	bearer := env.loginAsAdmin(t)
 

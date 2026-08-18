@@ -12,7 +12,7 @@ import (
 )
 
 func TestHandleCacheInfoAuthGating(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/cache", nil)
@@ -28,7 +28,7 @@ func TestHandleCacheInfoAuthGating(t *testing.T) {
 }
 
 func TestHandleCacheInfoShape(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 
 	auth := env.loginAsAdmin(t)
@@ -47,7 +47,7 @@ func TestHandleCacheInfoShape(t *testing.T) {
 }
 
 func TestHandleCachePurgeAdminOnly(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 
 	body := `{"version":"v0.21.4"}`
@@ -73,7 +73,7 @@ func TestHandleCachePurgeAdminOnly(t *testing.T) {
 }
 
 func TestHandleCachePurgeInvalidVersion(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 	auth := env.loginAsAdmin(t)
 
@@ -85,7 +85,7 @@ func TestHandleCachePurgeInvalidVersion(t *testing.T) {
 }
 
 func TestHandleCachePurgeDeleteDisabled(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	env.server.cachePurger = &stubCachePurger{err: domain.ErrRegistryDeleteDisabled}
 	e := newTestEngine(env.server)
 	auth := env.loginAsAdmin(t)
@@ -98,7 +98,7 @@ func TestHandleCachePurgeDeleteDisabled(t *testing.T) {
 }
 
 func TestHandleCachePurgeAllAdminOnly(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newTestEngine(env.server)
 
 	resp := ut.PerformRequest(e, "POST", "/api/v1/cache/purge-all", nil)

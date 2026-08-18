@@ -74,7 +74,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 		t.Fatalf("generate token: %v", err)
 	}
 
-	authSvc := service.NewAuthService(service.AuthServiceConfig{}, usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
 	sessions := service.NewStore(2 * time.Minute)

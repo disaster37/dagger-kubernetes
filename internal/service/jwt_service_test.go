@@ -103,7 +103,7 @@ func TestJWTAlgNoneAttack(t *testing.T) {
 
 func TestJWTOAuthState(t *testing.T) {
 	s := newJWTService()
-	state, err := s.IssueOAuthState("/pipelines")
+	state, err := s.IssueOAuthState("/pipelines", "nonce-1")
 	if err != nil {
 		t.Fatalf("IssueOAuthState: %v", err)
 	}
@@ -116,6 +116,9 @@ func TestJWTOAuthState(t *testing.T) {
 	}
 	if claims.Username != "/pipelines" {
 		t.Fatalf("username (redirect) = %q", claims.Username)
+	}
+	if claims.Nonce != "nonce-1" {
+		t.Fatalf("nonce = %q, want nonce-1", claims.Nonce)
 	}
 	// State token is not a valid access token.
 	if _, err := s.ParseAccess(state); err == nil {

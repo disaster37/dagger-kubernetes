@@ -40,7 +40,7 @@ func TestProvisionEngineWithAPIToken(t *testing.T) {
 		t.Fatalf("generate token: %v", err)
 	}
 
-	authSvc := service.NewAuthService(service.AuthServiceConfig{}, usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
 	sessions := service.NewStore(2 * time.Minute)
@@ -117,7 +117,7 @@ func TestHealthEndpoint(t *testing.T) {
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("health-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
-	authSvc := service.NewAuthService(service.AuthServiceConfig{Disabled: true}, usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
 	traces := repository.NewSpanTreeReconstructor("")
@@ -129,7 +129,7 @@ func TestHealthEndpoint(t *testing.T) {
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
-		VersionResolver: versionResolver, Auth: authSvc, AuthDisabled: true,
+		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
 		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
 		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
 	})

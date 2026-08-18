@@ -49,7 +49,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	admin, _ := usersSvc.Create(context.Background(), "admin", "password123", domain.RoleAdmin)
 	adminToken, _, _ := tokensSvc.Generate(context.Background(), admin.ID)
 
-	authSvc := service.NewAuthService(service.AuthServiceConfig{}, usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
 	sessions := service.NewStore(2 * time.Minute)
@@ -237,10 +237,10 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
 	jwtSvc := service.NewJWTService([]byte("legacy-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
-	legacyValidator := service.NewTokenValidator(tokensPath, true, logger)
+	legacyValidator := service.NewTokenValidator(tokensPath, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger)
-	authSvc := service.NewAuthService(service.AuthServiceConfig{}, usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)

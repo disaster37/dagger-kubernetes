@@ -41,8 +41,8 @@ func newTestStore(t *testing.T) *repository.RaftStore {
 }
 
 // newTestEnv builds a Server wired to a temp in-memory Raft store + stub fleet,
-// with auth enabled by default. Pass authDisabled=true for the no-auth mode.
-func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
+// with auth always enabled.
+func newTestEnv(t *testing.T) *testEnv {
 	t.Helper()
 	logger := observ.NewTestLogger()
 
@@ -68,7 +68,7 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 	_ = admin
 
 	var legacy domain.TokenValidator
-	authSvc := service.NewAuthService(service.AuthServiceConfig{Disabled: authDisabled}, usersSvc, groupRepo, tokensSvc, jwtSvc, legacy, logger)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacy, logger)
 
 	sessions := service.NewStore(2 * time.Minute)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
@@ -103,25 +103,26 @@ func newTestEnv(t *testing.T, authDisabled bool) *testEnv {
 		DataAddr:    ":0",
 		DataHost:    "localhost",
 	}, &Deps{
-		Logger:          logger,
-		Metrics:         observ.NewMetrics(nil),
-		MintingCA:       mintingCA,
-		FleetManager:    fleetManager,
-		Sessions:        sessions,
-		CacheBackend:    cacheBackend,
-		VersionResolver: versionResolver,
-		Auth:            authSvc,
-		AuthDisabled:    authDisabled,
-		Users:           usersSvc,
-		Groups:          groupsSvc,
-		Projects:        projectsSvc,
-		Tokens:          tokensSvc,
-		Quota:           quotaSvc,
-		Attribution:     attributionSvc,
-		TraceMeta:       traceMetaRepo,
-		Traces:          traces,
-		Logs:            logsClient,
-		JWT:             jwtSvc,
+		Logger:              logger,
+		Metrics:             observ.NewMetrics(nil),
+		MintingCA:           mintingCA,
+		FleetManager:        fleetManager,
+		Sessions:            sessions,
+		CacheBackend:        cacheBackend,
+		VersionResolver:     versionResolver,
+		Auth:                authSvc,
+		InternalAuthEnabled: true,
+		Users:               usersSvc,
+		Groups:              groupsSvc,
+		Projects:            projectsSvc,
+		Tokens:              tokensSvc,
+		Quota:               quotaSvc,
+		Attribution:         attributionSvc,
+		TraceMeta:           traceMetaRepo,
+		Traces:              traces,
+		Logs:                logsClient,
+		JWT:                 jwtSvc,
+		OAuthProvider:       "",
 		CacheStatsProvider: &stubCacheStatsProvider{
 			stats: &domain.CacheStats{Backend: "registry", Registry: "cache.reg/dagger-cache", Running: true, Reachable: true},
 		},

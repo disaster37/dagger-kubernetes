@@ -2,12 +2,16 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
+	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -16,6 +20,10 @@ import (
 // oauthErrorRedirect is where the OAuth callback sends the browser on any
 // failure (the SPA surfaces the error message).
 const oauthErrorRedirect = "/auth/login?error=oauth"
+
+const oauthStateCookie = "oauth_state"
+const oauthStateCookiePath = "/api/v1/auth/oauth"
+const oauthStateCookieMaxAge = 600 // seconds; matches the 10m oauth state TTL
 
 type loginRequest struct {
 	Username string `json:"username"`
@@ -53,6 +61,7 @@ type groupSummary struct {
 type providersResponse struct {
 	Internal    bool `json:"internal"`
 	OAuthGitHub bool `json:"oauth_github"`
+	OAuthOIDC   bool `json:"oauth_oidc"`
 }
 
 type changePasswordRequest struct {
@@ -63,25 +72,16 @@ type changePasswordRequest struct {
 // handleLogin authenticates a user and issues a JWT pair. Password attempts
 // are rate-limited per username + client IP (CWE-307).
 func (s *Server) handleLogin(_ context.Context, c *app.RequestContext) {
+	if !s.internalAuthEnabled {
+		writeError(c, consts.StatusNotFound, "internal auth disabled")
+		return
+	}
 	var req loginRequest
 	if !decodeBody(c, &req) {
 		return
 	}
 	if req.Username == "" || req.Password == "" {
 		writeError(c, consts.StatusBadRequest, "username and password are required")
-		return
-	}
-
-	// Auth disabled (dev mode, D9): every request resolves to the anonymous
-	// admin identity, so login accepts anything and hands back placeholder
-	// tokens (Resolve ignores them). This keeps the UI flow working without
-	// a users table entry for "anonymous".
-	if s.authDisabled {
-		c.JSON(consts.StatusOK, loginResponse{
-			AccessToken:  "anonymous",
-			RefreshToken: "anonymous",
-			User:         syntheticUserResponse(domain.AuthNone),
-		})
 		return
 	}
 
@@ -127,11 +127,6 @@ func (s *Server) handleRefresh(_ context.Context, c *app.RequestContext) {
 		writeError(c, consts.StatusBadRequest, "refresh_token is required")
 		return
 	}
-	// Auth-disabled parity (D9): placeholder tokens are never validated.
-	if s.authDisabled {
-		c.JSON(consts.StatusOK, refreshResponse{AccessToken: "anonymous", RefreshToken: "anonymous"})
-		return
-	}
 	access, refresh, err := s.auth.Refresh(context.Background(), req.RefreshToken)
 	if err != nil {
 		s.writeServiceError(c, err)
@@ -146,10 +141,10 @@ func (s *Server) handleMe(_ context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	// Synthetic identities (auth-disabled anonymous, legacy flat-file) have no
-	// users-table row; answer from the identity itself.
-	if id.Method == domain.AuthNone || id.Method == domain.AuthLegacyTok {
-		c.JSON(consts.StatusOK, syntheticUserResponse(id.Method))
+	// Synthetic identities (legacy flat-file) have no users-table row; answer
+	// from the identity itself.
+	if id.Method == domain.AuthLegacyTok {
+		c.JSON(consts.StatusOK, syntheticUserResponse())
 		return
 	}
 	u, err := s.users.Get(context.Background(), id.UserID)
@@ -161,13 +156,10 @@ func (s *Server) handleMe(_ context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
 }
 
-// syntheticUserResponse builds the /me + login user object for synthetic
-// identities that have no users-table row (anonymous dev mode, legacy token).
-func syntheticUserResponse(method domain.AuthMethod) authMeResponse {
+// syntheticUserResponse builds the /me + login user object for the synthetic
+// legacy-token identity that has no users-table row.
+func syntheticUserResponse() authMeResponse {
 	name := "legacy"
-	if method == domain.AuthNone {
-		name = "anonymous"
-	}
 	return authMeResponse{
 		ID:       name,
 		Username: name,
@@ -179,9 +171,25 @@ func syntheticUserResponse(method domain.AuthMethod) authMeResponse {
 // handleProviders reports which auth providers are enabled.
 func (s *Server) handleProviders(_ context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, providersResponse{
-		Internal:    !s.authDisabled,
-		OAuthGitHub: s.oauth != nil,
+		Internal:    s.internalAuthEnabled,
+		OAuthGitHub: s.oauthEnabled("github"),
+		OAuthOIDC:   s.oauthEnabled("oidc"),
 	})
+}
+
+// oauthEnabled reports whether provider is the active OAuth provider.
+func (s *Server) oauthEnabled(provider string) bool {
+	return s.oauth != nil && s.oauthProvider == provider
+}
+
+// requireOAuthProvider writes a 404 and returns false when provider is not the
+// active OAuth provider (mirrors the requireAuth bool convention).
+func (s *Server) requireOAuthProvider(c *app.RequestContext, provider string) bool {
+	if s.oauthEnabled(provider) {
+		return true
+	}
+	writeError(c, consts.StatusNotFound, "oauth not enabled")
+	return false
 }
 
 // handleChangePassword verifies the current password and sets a new one.
@@ -191,9 +199,9 @@ func (s *Server) handleChangePassword(_ context.Context, c *app.RequestContext) 
 	if !ok {
 		return
 	}
-	// Synthetic identities (auth-disabled anonymous, legacy flat-file) have no
-	// users-table row to change a password on.
-	if id.Method == domain.AuthNone || id.Method == domain.AuthLegacyTok {
+	// Synthetic identities (legacy flat-file) have no users-table row to
+	// change a password on.
+	if id.Method == domain.AuthLegacyTok {
 		writeError(c, consts.StatusBadRequest, "password changes require a real user account")
 		return
 	}
@@ -224,36 +232,90 @@ func (s *Server) handleChangePassword(_ context.Context, c *app.RequestContext) 
 // handleOAuthLogin redirects to the GitHub authorize URL with a state token
 // encoding the redirect path (for post-login navigation).
 func (s *Server) handleOAuthLogin(_ context.Context, c *app.RequestContext) {
-	if s.oauth == nil {
-		writeError(c, consts.StatusNotFound, "oauth not enabled")
+	if !s.requireOAuthProvider(c, "github") {
 		return
 	}
+	s.startOAuthLogin(c)
+}
+
+// handleOAuthOIDCLogin redirects to the OIDC authorize URL with a state token
+// encoding the redirect path (for post-login navigation).
+func (s *Server) handleOAuthOIDCLogin(_ context.Context, c *app.RequestContext) {
+	if !s.requireOAuthProvider(c, "oidc") {
+		return
+	}
+	s.startOAuthLogin(c)
+}
+
+// startOAuthLogin is the shared OAuth login flow (nonce cookie + state
+// issuance + redirect).
+func (s *Server) startOAuthLogin(c *app.RequestContext) {
 	redirect := safeRedirectPath(c.Query("redirect"))
-	state, err := s.jwt.IssueOAuthState(redirect)
+
+	// Bind the state token to a cookie nonce so the callback can only be
+	// completed by the browser that initiated the login (login-CSRF, CWE-352).
+	nonce, err := newOAuthNonce()
 	if err != nil {
 		writeError(c, consts.StatusInternalServerError, "oauth state error")
 		return
 	}
-	c.Redirect(consts.StatusFound, []byte(s.oauth.LoginURL(state)))
+	c.SetCookie(oauthStateCookie, nonce, oauthStateCookieMaxAge, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
+
+	state, err := s.jwt.IssueOAuthState(redirect, nonce)
+	if err != nil {
+		writeError(c, consts.StatusInternalServerError, "oauth state error")
+		return
+	}
+	loginURL := s.oauth.LoginURL(state)
+	if loginURL == "" {
+		redirectOAuthError(c)
+		return
+	}
+	c.Redirect(consts.StatusFound, []byte(loginURL))
 }
 
 // handleOAuthCallback exchanges the GitHub code for tokens and redirects to
 // the SPA with the JWT pair in the URL fragment (never logged).
 func (s *Server) handleOAuthCallback(_ context.Context, c *app.RequestContext) {
-	if s.oauth == nil {
-		writeError(c, consts.StatusNotFound, "oauth not enabled")
+	if !s.requireOAuthProvider(c, "github") {
 		return
 	}
+	s.completeOAuthCallback(c)
+}
+
+// handleOAuthOIDCCallback exchanges the OIDC code for tokens and redirects to
+// the SPA with the JWT pair in the URL fragment (never logged).
+func (s *Server) handleOAuthOIDCCallback(_ context.Context, c *app.RequestContext) {
+	if !s.requireOAuthProvider(c, "oidc") {
+		return
+	}
+	s.completeOAuthCallback(c)
+}
+
+// completeOAuthCallback is the shared OAuth callback flow (nonce verification,
+// state validation, code exchange, fragment redirect).
+func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 	code := c.Query("code")
 	state := c.Query("state")
 
-	// Validate the state token, then exchange the code. Any failure lands the
-	// browser back on the login screen with an error hint.
+	// The state token must be accompanied by the nonce cookie set at login
+	// time; compare in constant time (login-CSRF, CWE-352).
+	cookieVal := c.Cookie(oauthStateCookie)
 	stateClaims, err := s.jwt.ParseOAuthState(state)
-	if code == "" || state == "" || err != nil {
+	if code == "" || state == "" || err != nil || len(cookieVal) == 0 {
+		s.clearOAuthStateCookie(c)
 		redirectOAuthError(c)
 		return
 	}
+	if subtle.ConstantTimeCompare([]byte(stateClaims.Nonce), cookieVal) != 1 {
+		s.clearOAuthStateCookie(c)
+		redirectOAuthError(c)
+		return
+	}
+	s.clearOAuthStateCookie(c)
+
+	// Validate the state token, then exchange the code. Any failure lands the
+	// browser back on the login screen with an error hint.
 	access, refresh, _, err := s.oauth.Complete(context.Background(), code)
 	if err != nil {
 		redirectOAuthError(c)
@@ -265,6 +327,11 @@ func (s *Server) handleOAuthCallback(_ context.Context, c *app.RequestContext) {
 	// redirect path is percent-encoded so it cannot corrupt the fragment.
 	fragment := fmt.Sprintf("/auth/callback#access_token=%s&refresh_token=%s&redirect=%s", access, refresh, url.QueryEscape(redirectPath))
 	c.Redirect(consts.StatusFound, []byte(fragment))
+}
+
+// clearOAuthStateCookie removes the login nonce cookie (best-effort).
+func (s *Server) clearOAuthStateCookie(c *app.RequestContext) {
+	c.SetCookie(oauthStateCookie, "", -1, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
 }
 
 // safeRedirectPath validates a post-login SPA redirect target. Only internal
@@ -282,6 +349,23 @@ func safeRedirectPath(redirect string) string {
 
 func redirectOAuthError(c *app.RequestContext) {
 	c.Redirect(consts.StatusFound, []byte(oauthErrorRedirect))
+}
+
+// newOAuthNonce returns a cryptographically random 16-byte nonce, base64url
+// encoded, for binding the OAuth state to a cookie.
+func newOAuthNonce() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("read oauth nonce: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// requestIsTLS reports whether the request arrived over TLS. hertz does not
+// expose an IsTLS getter; the URI scheme is set to "https" by the TLS server
+// via Request.SetIsTLS.
+func requestIsTLS(c *app.RequestContext) bool {
+	return string(c.Request.Scheme()) == "https"
 }
 
 // toAuthMeResponse builds the user-facing me/login user object.

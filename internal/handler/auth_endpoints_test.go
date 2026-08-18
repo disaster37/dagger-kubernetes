@@ -1,16 +1,20 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/common/ut"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func TestHandleLoginSuccess(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	body := `{"username":"admin","password":"password123"}`
@@ -33,7 +37,7 @@ func TestHandleLoginSuccess(t *testing.T) {
 }
 
 func TestHandleLoginBadCredentials(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	body := `{"username":"admin","password":"wrong"}`
@@ -45,7 +49,7 @@ func TestHandleLoginBadCredentials(t *testing.T) {
 }
 
 func TestHandleLoginBadBody(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/login", &ut.Body{Body: strings.NewReader("not-json"), Len: 8},
@@ -56,7 +60,7 @@ func TestHandleLoginBadBody(t *testing.T) {
 }
 
 func TestHandleRefreshRotation(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	// Login to get a refresh token.
@@ -82,7 +86,7 @@ func TestHandleRefreshRotation(t *testing.T) {
 }
 
 func TestHandleRefreshBadToken(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	body := `{"refresh_token":"not-a-jwt"}`
@@ -94,7 +98,7 @@ func TestHandleRefreshBadToken(t *testing.T) {
 }
 
 func TestHandleMe(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -110,7 +114,7 @@ func TestHandleMe(t *testing.T) {
 }
 
 func TestHandleMeUnauthenticated(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/me", nil)
@@ -120,7 +124,7 @@ func TestHandleMeUnauthenticated(t *testing.T) {
 }
 
 func TestHandleProviders(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil)
@@ -135,10 +139,13 @@ func TestHandleProviders(t *testing.T) {
 	if out["oauth_github"] != false {
 		t.Fatal("oauth_github should be false (not configured)")
 	}
+	if out["oauth_oidc"] != false {
+		t.Fatal("oauth_oidc should be false (not configured)")
+	}
 }
 
 func TestHandleChangePassword(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -166,7 +173,7 @@ func TestHandleChangePassword(t *testing.T) {
 }
 
 func TestHandleChangePasswordWrongCurrent(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -179,58 +186,120 @@ func TestHandleChangePasswordWrongCurrent(t *testing.T) {
 	}
 }
 
-// TestHandleLoginAuthDisabled verifies dev-mode (auth disabled) parity (D9):
-// login accepts any credentials and returns the anonymous admin identity so the
-// UI flow works without a users-table entry.
-func TestHandleLoginAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
+// TestHandleLoginInternalDisabled verifies that username/password login 404s
+// when internal auth is disabled (OAuth-only mode).
+func TestHandleLoginInternalDisabled(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.internalAuthEnabled = false
 	e := newAuthEngine(env.server)
 
-	body := `{"username":"anything","password":"whatever"}`
+	body := `{"username":"admin","password":"password123"}`
 	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/login", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("disabled login: %d", resp.Result().StatusCode())
-	}
-	var out map[string]any
-	json.Unmarshal(resp.Result().Body(), &out)
-	user := out["user"].(map[string]any)
-	if user["username"] != "anonymous" || user["role"] != "admin" {
-		t.Fatalf("user = %v", user)
+	if resp.Result().StatusCode() != http.StatusNotFound {
+		t.Fatalf("internal disabled login: %d, want 404", resp.Result().StatusCode())
 	}
 }
 
-// TestHandleMeAuthDisabled verifies /me answers the synthetic anonymous admin
-// instead of failing with a 404 users-table lookup.
-func TestHandleMeAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
+// TestHandleProvidersInternalDisabled verifies providers.internal is false when
+// internal auth is disabled.
+func TestHandleProvidersInternalDisabled(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.internalAuthEnabled = false
 	e := newAuthEngine(env.server)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/me", nil)
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("disabled me: %d", resp.Result().StatusCode())
-	}
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil)
 	var out map[string]any
 	json.Unmarshal(resp.Result().Body(), &out)
-	if out["username"] != "anonymous" || out["role"] != "admin" {
-		t.Fatalf("me = %v", out)
+	if out["internal"] != false {
+		t.Fatalf("internal = %v, want false", out["internal"])
 	}
 }
 
-// TestMyTokenCreateAuthDisabled verifies synthetic identities cannot create API
-// tokens (there is no users-table row; the FK would fail with a 500).
-func TestMyTokenCreateAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
+// fakeOAuthProvider is an in-test OAuthProvider stub.
+type fakeOAuthProvider struct{}
+
+func (fakeOAuthProvider) LoginURL(state string) string {
+	return fmt.Sprintf("https://provider/auth?state=%s", state)
+}
+func (fakeOAuthProvider) Complete(ctx context.Context, code string) (string, string, *domain.User, error) {
+	return "a", "r", &domain.User{ID: "u1", Username: "alice"}, nil
+}
+
+// TestHandleProvidersOIDC verifies providers reports oauth_oidc for the oidc
+// provider.
+func TestHandleProvidersOIDC(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
 	e := newAuthEngine(env.server)
 
-	resp := ut.PerformRequest(e, "POST", "/api/v1/tokens/me", nil)
-	if resp.Result().StatusCode() != http.StatusBadRequest {
-		t.Fatalf("anonymous token create: %d, want 400", resp.Result().StatusCode())
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil)
+	var out map[string]any
+	json.Unmarshal(resp.Result().Body(), &out)
+	if out["oauth_oidc"] != true {
+		t.Fatal("oauth_oidc should be true")
+	}
+	if out["oauth_github"] != false {
+		t.Fatal("oauth_github should be false")
+	}
+}
+
+// TestHandleProvidersGitHub verifies providers reports oauth_github for the
+// github provider.
+func TestHandleProvidersGitHub(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "github"
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil)
+	var out map[string]any
+	json.Unmarshal(resp.Result().Body(), &out)
+	if out["oauth_github"] != true {
+		t.Fatal("oauth_github should be true")
+	}
+	if out["oauth_oidc"] != false {
+		t.Fatal("oauth_oidc should be false")
+	}
+}
+
+func TestHandleOAuthOIDCLoginNotEnabled(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
+	if resp.Result().StatusCode() != http.StatusNotFound {
+		t.Fatalf("oidc login not enabled: %d, want 404", resp.Result().StatusCode())
+	}
+}
+
+func TestHandleOAuthOIDCLoginWrongProvider(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "github"
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
+	if resp.Result().StatusCode() != http.StatusNotFound {
+		t.Fatalf("oidc login wrong provider: %d, want 404", resp.Result().StatusCode())
+	}
+}
+
+func TestHandleOAuthGitHubLoginWrongProvider(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/login", nil)
+	if resp.Result().StatusCode() != http.StatusNotFound {
+		t.Fatalf("github login wrong provider: %d, want 404", resp.Result().StatusCode())
 	}
 }
 
 func TestHandleOAuthLoginDisabled(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/login", nil)
@@ -240,7 +309,7 @@ func TestHandleOAuthLoginDisabled(t *testing.T) {
 }
 
 func TestHandleOAuthCallbackDisabled(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/callback?code=x&state=y", nil)
@@ -271,30 +340,135 @@ func TestSafeRedirectPath(t *testing.T) {
 	}
 }
 
-// TestHandleRefreshAuthDisabled verifies dev-mode parity (D9): refresh with
-// the placeholder tokens succeeds instead of failing JWT validation.
-func TestHandleRefreshAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
+// oauthCallbackPath builds the OIDC callback URL for a given state.
+func oauthCallbackPath(state string) string {
+	return fmt.Sprintf("/api/v1/auth/oauth/oidc/callback?code=x&state=%s", state)
+}
+
+func TestOAuthCallbackMissingNonceCookie(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
 	e := newAuthEngine(env.server)
 
-	body := `{"refresh_token":"anonymous"}`
-	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/refresh", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
-		ut.Header{Key: "Content-Type", Value: "application/json"})
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("disabled refresh: %d, want 200", resp.Result().StatusCode())
+	state, err := env.server.jwt.IssueOAuthState("/pipelines", "n1")
+	if err != nil {
+		t.Fatalf("IssueOAuthState: %v", err)
+	}
+	resp := ut.PerformRequest(e, "GET", oauthCallbackPath(state), nil)
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want oauth error redirect", loc)
 	}
 }
 
-// TestHandleChangePasswordAuthDisabled verifies synthetic identities get a
-// 400 (not a 404 users-table lookup) in dev mode.
-func TestHandleChangePasswordAuthDisabled(t *testing.T) {
-	env := newTestEnv(t, true)
+func TestOAuthCallbackNonceMismatch(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
 	e := newAuthEngine(env.server)
 
-	body := `{"current_password":"x","new_password":"newpassword123"}`
-	resp := ut.PerformRequest(e, "PUT", "/api/v1/auth/password", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
-		ut.Header{Key: "Content-Type", Value: "application/json"})
-	if resp.Result().StatusCode() != http.StatusBadRequest {
-		t.Fatalf("disabled change password: %d, want 400", resp.Result().StatusCode())
+	state, err := env.server.jwt.IssueOAuthState("/pipelines", "n1")
+	if err != nil {
+		t.Fatalf("IssueOAuthState: %v", err)
 	}
+	resp := ut.PerformRequest(e, "GET", oauthCallbackPath(state), nil,
+		ut.Header{Key: "Cookie", Value: "oauth_state=WRONG"})
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want oauth error redirect", loc)
+	}
+}
+
+func TestOAuthCallbackSuccess(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	e := newAuthEngine(env.server)
+
+	state, err := env.server.jwt.IssueOAuthState("/pipelines", "n1")
+	if err != nil {
+		t.Fatalf("IssueOAuthState: %v", err)
+	}
+	resp := ut.PerformRequest(e, "GET", oauthCallbackPath(state), nil,
+		ut.Header{Key: "Cookie", Value: "oauth_state=n1"})
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); !strings.HasPrefix(loc, "/auth/callback#access_token=") {
+		t.Fatalf("Location = %q, want fragment redirect with access token", loc)
+	}
+}
+
+func TestOAuthLoginSetsNonceCookie(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); !strings.HasPrefix(loc, "https://provider/auth?state=") {
+		t.Fatalf("Location = %q, want provider authorize URL", loc)
+	}
+	setCookie := resp.Result().Header.Get("Set-Cookie")
+	if !strings.Contains(setCookie, "oauth_state=") {
+		t.Fatalf("Set-Cookie = %q, want oauth_state nonce cookie", setCookie)
+	}
+	if !cookieHeaderContains(setCookie, "HttpOnly") {
+		t.Fatalf("Set-Cookie = %q, want HttpOnly flag", setCookie)
+	}
+	if !cookieHeaderContains(setCookie, "SameSite=Lax") {
+		t.Fatalf("Set-Cookie = %q, want SameSite=Lax", setCookie)
+	}
+	if !cookieHeaderContains(setCookie, "Path=/api/v1/auth/oauth") {
+		t.Fatalf("Set-Cookie = %q, want Path=/api/v1/auth/oauth", setCookie)
+	}
+}
+
+func TestOAuthLoginCookieSecure(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	env.server.oauthCookieSecure = true
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	setCookie := resp.Result().Header.Get("Set-Cookie")
+	if !cookieHeaderContains(setCookie, "Secure") {
+		t.Fatalf("Set-Cookie = %q, want Secure flag when oauthCookieSecure=true", setCookie)
+	}
+}
+
+func TestOAuthLoginCookieNotSecure(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = fakeOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	setCookie := resp.Result().Header.Get("Set-Cookie")
+	if cookieHeaderContains(setCookie, "Secure") {
+		t.Fatalf("Set-Cookie = %q, want no Secure flag on a non-TLS request with oauthCookieSecure=false", setCookie)
+	}
+}
+
+// cookieHeaderContains reports whether the Set-Cookie response header contains
+// token case-insensitively. hertz serializes the HttpOnly/SameSite attributes
+// capitalized but the secure/path attributes lowercase, so a case-insensitive
+// match keeps the assertions independent of that serialization detail.
+func cookieHeaderContains(setCookie, token string) bool {
+	return strings.Contains(strings.ToLower(setCookie), strings.ToLower(token))
 }

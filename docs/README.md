@@ -339,11 +339,16 @@ inline comments. The sections below summarise the most important ones.
 |              | `data_addr`                 | `:8443`                          | mTLS L4 data proxy.                               |
 |              | `data_hostname`             | `data.supv.example.com`          | Public data-plane hostname.                       |
 |              | `public_url`                | `https://supv.example.com`       | Public control/UI URL.                            |
-| `auth.internal` | `enabled`                | `true`                           | Static bearer-token auth.                         |
+| `auth.internal` | `enabled`                | `true`                           | Username/password + legacy-token auth. `false` = OAuth-only (requires `auth.oauth` fully configured); auth is always enforced. |
 |              | `tokens_file`               | `/etc/dagger-cache/tokens`       | One token per line.                               |
-| `auth.oauth` | `enabled`                   | `false`                          | OAuth (GitHub) for UI login.                      |
-|              | `provider`                  | `github`                         |                                                   |
-|              | `allowed_orgs`              | —                                | Restrict login to members of these orgs.          |
+| `auth.oauth` | `enabled`                   | `false`                          | OAuth for UI login. Single active provider.       |
+|              | `provider`                  | `github`                         | `"github"` \| `"oidc"` (generic OIDC).           |
+|              | `allowed_orgs`              | —                                | Restrict login to members of these orgs (github) / groups-claim intersection (oidc). |
+|              | `issuer_url`                | `""`                             | OIDC issuer; required for `provider: oidc`.        |
+|              | `scopes`                    | `["openid","profile","email"]`   | OIDC scopes; `openid` always included.            |
+|              | `username_claim`            | `preferred_username`             | OIDC username claim; fallback `email`.            |
+|              | `groups_claim`              | `groups`                         | OIDC groups claim (array or single string).       |
+|              | `cookie_secure`             | `false`                          | Set `true` when TLS terminates in front of the supervisor so the `oauth_state` cookie is marked `Secure`. |
 | `auth.token` | `encryption_key`            | `""` (auto-generated)            | AES-256-GCM key (≥32 bytes) for token plaintext recovery (Connect page). |
 | `database`   | `dir`                       | `/var/lib/dagger-cache`          | Raft data dir: `raft.db`, `snapshots/`, `node-id`. Fresh-start store (no migration). |
 | `raft`       | `node_id`                   | `""` (auto-generated)            | Stable Raft node ID (persisted at `<dir>/node-id`). |
@@ -640,11 +645,14 @@ more **groups**; groups carry engine-session quotas and project visibility.
 
 - **Username + password** → JWT (HS256, access 15m / refresh 7d, rotated on
   use). The primary path for human/UI login.
-- **GitHub OAuth** (`auth.oauth.enabled: true`) → JWT. The callback is handled
-  by the backend at `/api/v1/auth/oauth/github/callback`, which 302s to the
-  SPA with the tokens in the URL fragment. `allowed_orgs` restricts who may
-  log in (empty = allow all); `default_group` auto-joins new OAuth users to a
-  group.
+- **GitHub OAuth** (`auth.oauth.enabled: true` with `provider: github`) → JWT.
+  The callback is `/api/v1/auth/oauth/github/callback`. `allowed_orgs` restricts
+  who may log in (empty = allow all); `default_group` auto-joins new OAuth
+  users to a group.
+- **Generic OIDC** (`auth.oauth.enabled: true` with `provider: oidc`) → JWT.
+  Discovery via `issuer_url` `/.well-known/openid-configuration`; the callback
+  is `/api/v1/auth/oauth/oidc/callback`. `allowed_orgs` is matched against the
+  `groups_claim` (default `groups`). Covers Dex, Keycloak, Google, Auth0, etc.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
   at most one token; the plaintext is shown once at creation/regeneration.
   Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext
@@ -657,6 +665,33 @@ more **groups**; groups carry engine-session quotas and project visibility.
   `legacy` admin identity (full access, quota bypass) for zero-breakage
   migration. Run `supervisor migrate-tokens` to import them as real users +
   API tokens, then remove the key.
+
+Auth is always enforced — there is no fully-disabled mode. Setting
+`auth.internal.enabled: false` disables username/password login and legacy
+flat-file tokens; it requires `auth.oauth.enabled: true` with a fully
+configured provider, or the supervisor refuses to start. When internal auth is
+disabled, `POST /api/v1/auth/login` returns 404 and OAuth is the sole login
+path.
+
+### OAuth provider: generic OIDC (Dex example)
+
+```yaml
+auth:
+  internal:
+    enabled: false
+  oauth:
+    enabled: true
+    provider: "oidc"
+    issuer_url: "https://dex.example.com"
+    client_id: "dagger-cache"
+    client_secret: "${OAUTH_CLIENT_SECRET}"
+    redirect_url: "https://supv.example.com/api/v1/auth/oauth/oidc/callback"
+    allowed_orgs: ["devs"]   # matches the `groups` claim from Dex
+    default_group: ""
+    scopes: ["openid", "profile", "email", "groups"]
+    username_claim: "preferred_username"
+    groups_claim: "groups"
+```
 
 ### Bootstrap admin
 

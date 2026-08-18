@@ -22,11 +22,12 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
-// newTestServer builds a Server with the legacy (no-auth) mode for the
-// pre-existing engine/fleet/cache tests that don't care about RBAC.
-func newTestServer(t *testing.T) *Server {
+// newTestServer builds a Server with auth enabled plus an admin bearer for the
+// pre-existing engine/fleet/cache tests that authenticate explicitly.
+func newTestServer(t *testing.T) (*Server, string) {
 	t.Helper()
-	return newTestEnv(t, true).server
+	env := newTestEnv(t)
+	return env.server, env.loginAsAdmin(t)
 }
 
 // newTestEngine creates a route.Engine and registers all handlers for testing.
@@ -48,7 +49,7 @@ func newTestEngine(s *Server) *route.Engine {
 }
 
 func TestHandleHealthz(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	e := newTestEngine(s)
 
 	resp := ut.PerformRequest(e, "GET", "/healthz", nil)
@@ -66,7 +67,7 @@ func TestHandleHealthz(t *testing.T) {
 }
 
 func TestHandleReadyz(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	e := newTestEngine(s)
 
 	resp := ut.PerformRequest(e, "GET", "/readyz", nil)
@@ -84,14 +85,14 @@ func TestHandleReadyz(t *testing.T) {
 }
 
 func TestHandleEnginesSuccess(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
 	body := `{"image":"registry.dagger.io/engine:v0.21.4","trace_id":"test-001"}`
 	resp := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
 		Body: strings.NewReader(body),
 		Len:  len(body),
-	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: bearer})
 
 	if resp.Result().StatusCode() != http.StatusCreated {
 		t.Fatalf("expected 201, got %d", resp.Result().StatusCode())
@@ -110,14 +111,14 @@ func TestHandleEnginesSuccess(t *testing.T) {
 }
 
 func TestHandleEnginesInvalidJSON(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
 	body := `not-json`
 	resp := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
 		Body: strings.NewReader(body),
 		Len:  len(body),
-	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: bearer})
 
 	if resp.Result().StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
@@ -125,14 +126,14 @@ func TestHandleEnginesInvalidJSON(t *testing.T) {
 }
 
 func TestHandleEnginesBadVersion(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
 	body := `{"image":"registry.dagger.io/engine:invalid","trace_id":"test-001"}`
 	resp := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
 		Body: strings.NewReader(body),
 		Len:  len(body),
-	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: bearer})
 
 	if resp.Result().StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
@@ -140,10 +141,10 @@ func TestHandleEnginesBadVersion(t *testing.T) {
 }
 
 func TestHandleCacheInfo(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/cache", nil)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/cache", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
@@ -161,21 +162,21 @@ func TestHandleCacheInfo(t *testing.T) {
 }
 
 func TestHandleAdminVersions(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/versions", nil)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/versions", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
 }
 
 func TestHandleMetricsProxyNoVictora(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 	e.GET("/api/v1/metrics", s.handleMetricsProxy)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/metrics", nil)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/metrics", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
@@ -230,7 +231,7 @@ func TestWriteJSON(t *testing.T) {
 }
 
 func TestHandleEnginesBodyTooLarge(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
 	largeBody := strings.Repeat("x", 2*1024*1024)
@@ -238,7 +239,7 @@ func TestHandleEnginesBodyTooLarge(t *testing.T) {
 	resp := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
 		Body: strings.NewReader(body),
 		Len:  len(body),
-	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: bearer})
 
 	if resp.Result().StatusCode() != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d", resp.Result().StatusCode())
@@ -294,14 +295,14 @@ func TestValidTraceID(t *testing.T) {
 // TestHandleEnginesInvalidTraceID verifies oversized/malformed trace IDs are
 // rejected before persistence (CWE-770/CWE-20).
 func TestHandleEnginesInvalidTraceID(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
 	body := fmt.Sprintf(`{"image":"registry.dagger.io/engine:v0.21.4","trace_id":"%s"}`, strings.Repeat("a", 200))
 	resp := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
 		Body: strings.NewReader(body),
 		Len:  len(body),
-	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: bearer})
 
 	if resp.Result().StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
@@ -311,7 +312,7 @@ func TestHandleEnginesInvalidTraceID(t *testing.T) {
 // TestSecurityHeaders verifies the hardening response headers (CWE-1021,
 // CWE-200) are set on every response.
 func TestSecurityHeaders(t *testing.T) {
-	s := newTestServer(t)
+	s, _ := newTestServer(t)
 	e := route.NewEngine(config.NewOptions(nil))
 	e.Use(s.securityHeaders())
 	e.GET("/healthz", s.handleHealthz)
@@ -339,10 +340,10 @@ var (
 )
 
 func TestHandleFleetInfoEmpty(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
@@ -354,7 +355,7 @@ func TestHandleFleetInfoEmpty(t *testing.T) {
 }
 
 func TestHandleFleetInfoJSONShape(t *testing.T) {
-	s := newTestServer(t)
+	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
 	// Seed a replica via the engines endpoint.
@@ -362,12 +363,12 @@ func TestHandleFleetInfoJSONShape(t *testing.T) {
 	respEng := ut.PerformRequest(e, "POST", "/v1/engines", &ut.Body{
 		Body: strings.NewReader(body),
 		Len:  len(body),
-	}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	}, ut.Header{Key: "Content-Type", Value: "application/json"}, ut.Header{Key: "Authorization", Value: bearer})
 	if respEng.Result().StatusCode() != http.StatusCreated {
 		t.Fatalf("expected 201 from engines endpoint, got %d", respEng.Result().StatusCode())
 	}
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
@@ -414,58 +415,24 @@ func (p *faultyProvider) AllVersions() ([]string, error) {
 }
 
 func TestHandleFleetInfoError(t *testing.T) {
+	env := newTestEnv(t)
+
 	buf := &bytes.Buffer{}
 	logger := logrus.New()
 	logger.SetOutput(buf)
 	logger.SetFormatter(&logrus.JSONFormatter{})
+	env.server.logger = logger
 
-	authSvc := service.NewAuthService(
-		service.AuthServiceConfig{Disabled: true},
-		nil, nil, nil, nil, nil, logger,
-	)
-
-	provider := &faultyProvider{StubProvider: repository.NewStubProvider()}
-	sessions := service.NewStore(2 * time.Minute)
-	mintingCA, err := repository.NewMintingCA(2 * time.Hour)
-	if err != nil {
-		t.Fatalf("NewMintingCA: %v", err)
-	}
-	vr, err := service.NewResolver("v0.19.0", nil, nil)
-	if err != nil {
-		t.Fatalf("NewResolver: %v", err)
-	}
-
-	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
+	env.server.fleetManager = service.NewManager(&faultyProvider{StubProvider: repository.NewStubProvider()}, env.sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3,
 		MaxSessionsPerReplica: 8,
 		ReplicaIdleTTL:        5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
 
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
-	traces := repository.NewSpanTreeReconstructor("")
-	logsClient := repository.NewLogsClient("")
+	e := newTestEngine(env.server)
+	bearer := env.loginAsAdmin(t)
 
-	srv := NewServer(&ServerConfig{
-		ControlAddr: ":0",
-		DataAddr:    ":0",
-		DataHost:    "localhost",
-	}, &Deps{
-		Logger:          logger,
-		Metrics:         observ.NewMetrics(nil),
-		MintingCA:       mintingCA,
-		FleetManager:    fleetManager,
-		Sessions:        sessions,
-		CacheBackend:    cacheBackend,
-		VersionResolver: vr,
-		Auth:            authSvc,
-		AuthDisabled:    true,
-		Traces:          traces,
-		Logs:            logsClient,
-	})
-
-	e := newTestEngine(srv)
-
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", resp.Result().StatusCode())
 	}

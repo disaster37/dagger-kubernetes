@@ -35,6 +35,11 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.redirect_url", "")
 	v.SetDefault("auth.oauth.allowed_orgs", []string{})
 	v.SetDefault("auth.oauth.default_group", "")
+	v.SetDefault("auth.oauth.cookie_secure", false)
+	v.SetDefault("auth.oauth.issuer_url", "")
+	v.SetDefault("auth.oauth.scopes", []string{"openid", "profile", "email"})
+	v.SetDefault("auth.oauth.username_claim", "preferred_username")
+	v.SetDefault("auth.oauth.groups_claim", "groups")
 
 	v.SetDefault("auth.jwt.secret", "")
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)
@@ -158,5 +163,50 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
+	if err := validateAuthConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate auth config: %w", err)
+	}
+
 	return &cfg, nil
+}
+
+// validateAuthConfig enforces the auth-provider gating rules:
+//   - auth is always required (no fully-disabled mode);
+//   - auth.internal.enabled: false is only allowed when OAuth is enabled and
+//     fully configured for the chosen provider (github: client_id+secret+redirect_url;
+//     oidc: issuer_url+client_id+secret+redirect_url);
+//   - when auth.oauth.enabled: true, the provider must be "github" or "oidc"
+//     and the per-provider required fields must be non-empty.
+func validateAuthConfig(cfg *domain.Config) error {
+	o := cfg.Auth.OAuth
+	if o.Enabled {
+		switch o.Provider {
+		case "github":
+			if anyEmpty(o.ClientID, o.ClientSecret, o.RedirectURL) {
+				return fmt.Errorf("auth.oauth.enabled: true requires client_id, client_secret, and redirect_url")
+			}
+		case "oidc":
+			if anyEmpty(o.IssuerURL, o.ClientID, o.ClientSecret, o.RedirectURL) {
+				return fmt.Errorf(`auth.oauth.enabled: true with provider "oidc" requires issuer_url, client_id, client_secret, and redirect_url`)
+			}
+		default:
+			return fmt.Errorf(`auth.oauth.provider: only "github" and "oidc" are supported`)
+		}
+	}
+
+	if !cfg.Auth.Internal.Enabled && !o.Enabled {
+		return fmt.Errorf("auth.internal.enabled: false requires auth.oauth.enabled: true with a fully configured provider")
+	}
+
+	return nil
+}
+
+// anyEmpty reports whether any of the supplied strings is empty.
+func anyEmpty(fields ...string) bool {
+	for _, f := range fields {
+		if f == "" {
+			return true
+		}
+	}
+	return false
 }

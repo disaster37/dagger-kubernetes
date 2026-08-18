@@ -13,23 +13,16 @@ import (
 
 type TokenValidator struct {
 	TokensFile string
-	Enabled    bool
 	logger     *logrus.Logger
 }
 
 var _ domain.TokenValidator = (*TokenValidator)(nil)
 
-func NewTokenValidator(tokensFile string, enabled bool, logger *logrus.Logger) *TokenValidator {
-	return &TokenValidator{TokensFile: tokensFile, Enabled: enabled, logger: logger}
+func NewTokenValidator(tokensFile string, logger *logrus.Logger) *TokenValidator {
+	return &TokenValidator{TokensFile: tokensFile, logger: logger}
 }
 
 func (v *TokenValidator) ValidateToken(token string) (string, error) {
-	// Auth explicitly disabled: accept any token including empty (dev / no-auth mode).
-	if !v.Enabled {
-		v.logger.Debug("auth disabled, accepting token")
-		return token, nil
-	}
-
 	if token == "" {
 		return "", fmt.Errorf("empty token")
 	}

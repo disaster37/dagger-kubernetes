@@ -25,6 +25,10 @@ func newAuthEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/auth/providers", s.handleProviders)
 	e.GET("/api/v1/auth/me", s.handleMe)
 	e.PUT("/api/v1/auth/password", s.handleChangePassword)
+	e.GET("/api/v1/auth/oauth/github/login", s.handleOAuthLogin)
+	e.GET("/api/v1/auth/oauth/github/callback", s.handleOAuthCallback)
+	e.GET("/api/v1/auth/oauth/oidc/login", s.handleOAuthOIDCLogin)
+	e.GET("/api/v1/auth/oauth/oidc/callback", s.handleOAuthOIDCCallback)
 	e.GET("/api/v1/users", s.adminOnly(s.handleUsersList))
 	e.POST("/api/v1/users", s.adminOnly(s.handleUserCreate))
 	e.GET("/api/v1/users/:id", s.adminOnly(s.handleUserGet))
@@ -59,7 +63,7 @@ func newAuthEngine(s *Server) *route.Engine {
 }
 
 func TestMiddlewareRequireAdminRejectsUser(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer, _ := env.createUserAndToken(t)
@@ -70,7 +74,7 @@ func TestMiddlewareRequireAdminRejectsUser(t *testing.T) {
 }
 
 func TestMiddlewareRequireAdminRejectsAnonymous(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/users", nil)
@@ -80,7 +84,7 @@ func TestMiddlewareRequireAdminRejectsAnonymous(t *testing.T) {
 }
 
 func TestMiddlewareRequireAdminAllowsAdmin(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer := env.loginAsAdmin(t)
@@ -91,7 +95,7 @@ func TestMiddlewareRequireAdminAllowsAdmin(t *testing.T) {
 }
 
 func TestAuthorizeTraceOwnerSeesOwn(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -116,7 +120,7 @@ func TestAuthorizeTraceOwnerSeesOwn(t *testing.T) {
 }
 
 func TestAuthorizeTraceNonMember404(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -136,7 +140,7 @@ func TestAuthorizeTraceNonMember404(t *testing.T) {
 }
 
 func TestAuthorizeTraceAdminSeesAll(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -151,7 +155,7 @@ func TestAuthorizeTraceAdminSeesAll(t *testing.T) {
 }
 
 func TestAuthorizeTraceNonMemberUnknownTrace404(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer, _ := env.createUserAndToken(t)
@@ -162,7 +166,7 @@ func TestAuthorizeTraceNonMemberUnknownTrace404(t *testing.T) {
 }
 
 func TestTracesListAdminUnassignedFilter(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
@@ -196,7 +200,7 @@ func TestTracesListAdminUnassignedFilter(t *testing.T) {
 }
 
 func TestWriteServiceErrorMapping(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	cases := []struct {
 		name   string
 		err    error

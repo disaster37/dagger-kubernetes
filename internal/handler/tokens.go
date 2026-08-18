@@ -46,9 +46,9 @@ func (s *Server) issueMyToken(c *app.RequestContext, status int, generate func(c
 	if !ok {
 		return
 	}
-	// Synthetic identities (auth-disabled anonymous, legacy flat-file) have no
-	// users-table row; a token row would violate the user_id foreign key.
-	if id.Method == domain.AuthNone || id.Method == domain.AuthLegacyTok {
+	// Synthetic identities (legacy flat-file) have no users-table row; a token
+	// row would violate the user_id foreign key.
+	if id.Method == domain.AuthLegacyTok {
 		writeError(c, consts.StatusBadRequest, "api tokens require a real user account")
 		return
 	}

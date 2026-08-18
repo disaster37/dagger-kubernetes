@@ -12,7 +12,7 @@ import (
 )
 
 func TestMyTokenCreateAndMeta(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer, _ := env.createUserAndToken(t)
@@ -36,7 +36,7 @@ func TestMyTokenCreateAndMeta(t *testing.T) {
 }
 
 func TestMyTokenMetaMissing(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	// Create a user but log in via JWT (no API token).
@@ -52,7 +52,7 @@ func TestMyTokenMetaMissing(t *testing.T) {
 }
 
 func TestMyTokenCreateFromJWT(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	env.users.Create(context.Background(), "alice", "password123", domain.RoleUser)
@@ -74,7 +74,7 @@ func TestMyTokenCreateFromJWT(t *testing.T) {
 }
 
 func TestMyTokenRegenerate(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer, _ := env.createUserAndToken(t)
@@ -91,7 +91,7 @@ func TestMyTokenRegenerate(t *testing.T) {
 }
 
 func TestMyTokenRevoke(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	bearer, _ := env.createUserAndToken(t)
@@ -109,7 +109,7 @@ func TestMyTokenRevoke(t *testing.T) {
 }
 
 func TestMyTokenUnauthenticated(t *testing.T) {
-	env := newTestEnv(t, false)
+	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/tokens/me", nil)

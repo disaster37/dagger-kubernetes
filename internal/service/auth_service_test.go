@@ -9,7 +9,7 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func newAuthForTest(t *testing.T, cfg AuthServiceConfig, legacy domain.TokenValidator) (*AuthService, *UserService, *stubUserRepo, *stubGroupRepo) {
+func newAuthForTest(t *testing.T, legacy domain.TokenValidator) (*AuthService, *UserService, *stubUserRepo, *stubGroupRepo) {
 	t.Helper()
 	urepo := newStubUserRepo()
 	grepo := newStubGroupRepo()
@@ -18,30 +18,19 @@ func newAuthForTest(t *testing.T, cfg AuthServiceConfig, legacy domain.TokenVali
 	usvc := NewUserService(urepo, grepo, logger)
 	tsvc := NewTokenService(trepo, logger, nil)
 	jwtSvc := NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
-	asvc := NewAuthService(cfg, usvc, grepo, tsvc, jwtSvc, legacy, logger)
+	asvc := NewAuthService(usvc, grepo, tsvc, jwtSvc, legacy, logger)
 	return asvc, usvc, urepo, grepo
 }
 
-func TestAuthResolveDisabled(t *testing.T) {
-	asvc, _, _, _ := newAuthForTest(t, AuthServiceConfig{Disabled: true}, nil)
-	id, err := asvc.Resolve(context.Background(), "")
-	if err != nil {
-		t.Fatalf("Resolve: %v", err)
-	}
-	if !id.IsAdmin() || id.Method != domain.AuthNone {
-		t.Fatalf("disabled identity = %+v", id)
-	}
-}
-
 func TestAuthResolveEmpty(t *testing.T) {
-	asvc, _, _, _ := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, _, _, _ := newAuthForTest(t, nil)
 	if _, err := asvc.Resolve(context.Background(), ""); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("empty bearer: %v", err)
 	}
 }
 
 func TestAuthResolveAPIToken(t *testing.T) {
-	asvc, usvc, _, grepo := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, usvc, _, grepo := newAuthForTest(t, nil)
 	ctx := context.Background()
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	g := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: true}
@@ -62,7 +51,7 @@ func TestAuthResolveAPIToken(t *testing.T) {
 }
 
 func TestAuthResolveJWT(t *testing.T) {
-	asvc, usvc, _, grepo := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, usvc, _, grepo := newAuthForTest(t, nil)
 	ctx := context.Background()
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleAdmin)
 	g := &domain.Group{ID: "g1", Name: "G1"}
@@ -81,7 +70,7 @@ func TestAuthResolveJWT(t *testing.T) {
 
 func TestAuthResolveLegacy(t *testing.T) {
 	legacy := &stubLegacyValidator{valid: map[string]bool{"legacy-token": true}}
-	asvc, _, _, _ := newAuthForTest(t, AuthServiceConfig{}, legacy)
+	asvc, _, _, _ := newAuthForTest(t, legacy)
 	id, err := asvc.Resolve(context.Background(), "legacy-token")
 	if err != nil {
 		t.Fatalf("Resolve legacy: %v", err)
@@ -93,14 +82,14 @@ func TestAuthResolveLegacy(t *testing.T) {
 
 func TestAuthResolveLegacyMiss(t *testing.T) {
 	legacy := &stubLegacyValidator{valid: map[string]bool{"legacy-token": true}}
-	asvc, _, _, _ := newAuthForTest(t, AuthServiceConfig{}, legacy)
+	asvc, _, _, _ := newAuthForTest(t, legacy)
 	if _, err := asvc.Resolve(context.Background(), "not-a-token"); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("legacy miss: %v", err)
 	}
 }
 
 func TestAuthResolveDeletedUserJWT(t *testing.T) {
-	asvc, usvc, urepo, _ := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, usvc, urepo, _ := newAuthForTest(t, nil)
 	ctx := context.Background()
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	access, _, _ := asvc.jwt.IssuePair(u, nil)
@@ -112,7 +101,7 @@ func TestAuthResolveDeletedUserJWT(t *testing.T) {
 }
 
 func TestAuthResolveOrphanedTokenHash(t *testing.T) {
-	asvc, usvc, urepo, _ := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, usvc, urepo, _ := newAuthForTest(t, nil)
 	ctx := context.Background()
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	plaintext, _, _ := asvc.tokens.Generate(ctx, u.ID)
@@ -124,7 +113,7 @@ func TestAuthResolveOrphanedTokenHash(t *testing.T) {
 }
 
 func TestAuthLogin(t *testing.T) {
-	asvc, usvc, _, _ := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, usvc, _, _ := newAuthForTest(t, nil)
 	ctx := context.Background()
 	usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 
@@ -144,7 +133,7 @@ func TestAuthLogin(t *testing.T) {
 }
 
 func TestAuthRefresh(t *testing.T) {
-	asvc, usvc, _, _ := newAuthForTest(t, AuthServiceConfig{}, nil)
+	asvc, usvc, _, _ := newAuthForTest(t, nil)
 	ctx := context.Background()
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	_, refresh, _, _ := asvc.Login(ctx, "alice", "password123")
