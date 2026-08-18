@@ -250,6 +250,7 @@ func run(c *cli.Context) error {
 	}
 
 	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, metricsClient, provider, cfg.Cache.GC, logger, metrics)
+	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
 	statusSvc := service.NewStatusService(cfg, cacheBackend, router, fleetManager, logger)
 	connectSvc := service.NewConnectService(cfg, cacheBackend, versionResolver, tokensSvc, logger)
 
@@ -265,33 +266,35 @@ func run(c *cli.Context) error {
 		CertPath:     controlTLSCertPath,
 		KeyPath:      controlTLSKeyPath,
 	}, &handler.Deps{
-		Logger:              logger,
-		Metrics:             metrics,
-		MintingCA:           serverMintingCA,
-		FleetManager:        fleetManager,
-		Sessions:            sessions,
-		CacheBackend:        cacheBackend,
-		VersionResolver:     versionResolver,
-		Auth:                authSvc,
-		InternalAuthEnabled: cfg.Auth.Internal.Enabled,
-		OAuthCookieSecure:   cfg.Auth.OAuth.CookieSecure,
-		Users:               usersSvc,
-		Groups:              groupsSvc,
-		Projects:            projectsSvc,
-		Tokens:              tokensSvc,
-		Quota:               quotaSvc,
-		Attribution:         attributionSvc,
-		TraceMeta:           traceMetaRepo,
-		Traces:              traces,
-		Logs:                logsClient,
-		OAuth:               oauthSvc,
-		OAuthProvider:       oauthProvider,
-		JWT:                 jwtSvc,
-		CacheStatsProvider:  cacheStatsSvc,
-		CachePurger:         cacheStatsSvc,
-		StatusProvider:      statusSvc,
-		Connect:             connectSvc,
-		Router:              router,
+		Logger:               logger,
+		Metrics:              metrics,
+		MintingCA:            serverMintingCA,
+		FleetManager:         fleetManager,
+		Sessions:             sessions,
+		CacheBackend:         cacheBackend,
+		VersionResolver:      versionResolver,
+		Auth:                 authSvc,
+		InternalAuthEnabled:  cfg.Auth.Internal.Enabled,
+		OAuthCookieSecure:    cfg.Auth.OAuth.CookieSecure,
+		Users:                usersSvc,
+		Groups:               groupsSvc,
+		Projects:             projectsSvc,
+		Tokens:               tokensSvc,
+		Quota:                quotaSvc,
+		Attribution:          attributionSvc,
+		TraceMeta:            traceMetaRepo,
+		Traces:               traces,
+		Logs:                 logsClient,
+		OAuth:                oauthSvc,
+		OAuthProvider:        oauthProvider,
+		JWT:                  jwtSvc,
+		CacheStatsProvider:   cacheStatsSvc,
+		CachePurger:          cacheStatsSvc,
+		HistoryStatsProvider: historyPurgeSvc,
+		HistoryPurger:        historyPurgeSvc,
+		StatusProvider:       statusSvc,
+		Connect:              connectSvc,
+		Router:               router,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
@@ -300,6 +303,9 @@ func run(c *cli.Context) error {
 
 	stopGC := cacheStatsSvc.StartGCSweeper(ctx)
 	defer stopGC()
+
+	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
+	defer stopHistoryGC()
 
 	sweepTicker := time.NewTicker(30 * time.Second)
 	defer sweepTicker.Stop()

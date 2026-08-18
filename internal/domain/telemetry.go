@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 type SpanNode struct {
 	SpanID       string            `json:"span_id"`
@@ -53,4 +56,9 @@ type TraceRepository interface {
 
 type LogRepository interface {
 	QueryTraceLogs(traceID string, start, end time.Time, limit int) ([]LogEntry, error)
+	// DeleteTraceLogs requests deletion of all log streams for traceID from
+	// Loki (POST /loki/api/v1/delete). Best-effort: returns nil on 204;
+	// returns a wrapped error on non-2xx. Requires Loki compactor + deletion
+	// enabled on the backend.
+	DeleteTraceLogs(ctx context.Context, traceID string) error
 }

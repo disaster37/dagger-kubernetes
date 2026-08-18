@@ -37,6 +37,7 @@ const (
 	kindRecordUpload
 	kindDeleteUpload
 	kindReapUploads
+	kindDeleteTrace
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -157,6 +158,10 @@ type (
 
 	cmdReapUploads struct {
 		CutoffRFC3339 string `json:"cutoff"`
+	}
+
+	cmdDeleteTrace struct {
+		TraceID string `json:"trace_id"`
 	}
 )
 
@@ -393,6 +398,11 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 			return nil, err
 		}
 		return s.reapUploads(p.CutoffRFC3339)
+	case kindDeleteTrace:
+		return nil, applyPayload(cmd, "delete trace", func(p cmdDeleteTrace) error {
+			delete(s.traces, p.TraceID)
+			return nil
+		})
 	default:
 		return nil, fmt.Errorf("unknown raft command kind %d", cmd.Kind)
 	}
@@ -1054,6 +1064,53 @@ func (f *FSM) readTrace(traceID string) (*domain.TraceMeta, error) {
 	}
 	cp := *m
 	return &cp, nil
+}
+
+// listTracesBefore returns trace_meta rows older than cutoff (by
+// COALESCE(started_at, updated_at)), excluding running traces when
+// protectRunning is true. Sorted oldest-first. No limit (the sweeper must
+// see every candidate). Rows with a zero-time sort key (unknown age) are
+// always skipped — never purge what we cannot age.
+func (f *FSM) listTracesBefore(cutoff time.Time, protectRunning bool) []*domain.TraceMeta {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	var out []*domain.TraceMeta
+	for _, m := range f.state.traces {
+		key := traceSortKey(m)
+		if key.IsZero() {
+			continue
+		}
+		if key.After(cutoff) {
+			continue
+		}
+		if protectRunning && (m.Status == "" || m.Status == "running") {
+			continue
+		}
+		cp := *m
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return traceSortKey(out[i]).Before(traceSortKey(out[j]))
+	})
+	return out
+}
+
+// traceStats returns the total trace count and the oldest trace sort key
+// (zero time when no trace has a known age).
+func (f *FSM) traceStats() (int, time.Time) {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	var oldest time.Time
+	for _, m := range f.state.traces {
+		k := traceSortKey(m)
+		if k.IsZero() {
+			continue // unknown age never counts as the oldest
+		}
+		if oldest.IsZero() || k.Before(oldest) {
+			oldest = k
+		}
+	}
+	return len(f.state.traces), oldest
 }
 
 // listTraces applies the filter, joins group/user names, sorts by

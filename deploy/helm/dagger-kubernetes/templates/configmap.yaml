@@ -96,6 +96,13 @@ data:
         bucket: {{ .Values.supervisor.config.cache.s3.bucket | quote }}
         region: {{ .Values.supervisor.config.cache.s3.region | quote }}
 {{- end }}
+{{- with .Values.supervisor.config.history }}
+    history:
+      gc:
+        enabled: {{ .gc.enabled }}
+        max_age: {{ .gc.maxAge | quote }}
+        schedule: {{ .gc.schedule | quote }}
+{{- end }}
     fleet:
       namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
       min_replicas_per_version: {{ .Values.supervisor.config.fleet.minReplicasPerVersion }}

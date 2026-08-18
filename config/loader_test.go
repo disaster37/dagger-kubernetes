@@ -151,6 +151,15 @@ func TestLoadDefaults(t *testing.T) {
 	if !cfg.Cache.GC.ProtectActiveVersions {
 		t.Fatal("cache.gc.protect_active_versions default should be true")
 	}
+	if cfg.History.GC.Enabled {
+		t.Fatal("history.gc.enabled default should be false")
+	}
+	if cfg.History.GC.MaxAge != 720*time.Hour {
+		t.Fatalf("history.gc.max_age default = %v, want 720h", cfg.History.GC.MaxAge)
+	}
+	if cfg.History.GC.Schedule != time.Hour {
+		t.Fatalf("history.gc.schedule default = %v, want 1h", cfg.History.GC.Schedule)
+	}
 }
 
 func TestLoadFile(t *testing.T) {
@@ -253,6 +262,18 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !cfg.Cache.GC.Enabled {
 		t.Fatal("env override cache.gc.enabled = false, want true")
+	}
+}
+
+func TestLoadHistoryEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_CACHE_HISTORY_GC_ENABLED", "true")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.History.GC.Enabled {
+		t.Fatal("env override history.gc.enabled = false, want true")
 	}
 }
 

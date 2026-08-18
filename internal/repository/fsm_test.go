@@ -333,6 +333,87 @@ func traceIDs(rows []*domain.TraceListResult) []string {
 	return out
 }
 
+func traceMetaIDs(rows []*domain.TraceMeta) []string {
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = r.TraceID
+	}
+	return out
+}
+
+func TestFSMDeleteTrace(t *testing.T) {
+	f := newTestFSM(t)
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "abc123", Status: "success", StartedAt: time.Now().UTC()})
+	if _, err := f.readTrace("abc123"); err != nil {
+		t.Fatalf("readTrace before delete: %v", err)
+	}
+
+	if err := applyCmd(t, f, kindDeleteTrace, cmdDeleteTrace{TraceID: "abc123"}); err != nil {
+		t.Fatalf("delete trace: %v", err)
+	}
+	if _, err := f.readTrace("abc123"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("readTrace after delete: %v, want ErrNotFound", err)
+	}
+	// Re-apply is idempotent (delete on a missing key is a no-op).
+	if err := applyCmd(t, f, kindDeleteTrace, cmdDeleteTrace{TraceID: "abc123"}); err != nil {
+		t.Fatalf("re-delete trace: %v", err)
+	}
+}
+
+func TestFSMListTracesBefore(t *testing.T) {
+	f := newTestFSM(t)
+	base := time.Now().UTC()
+	cutoff := base.Add(-time.Hour)
+
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "oldest", Status: "success", StartedAt: base.Add(-5 * time.Hour), UpdatedAt: base.Add(-5 * time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "old-running", Status: "running", StartedAt: base.Add(-3 * time.Hour), UpdatedAt: base.Add(-3 * time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "old-empty", StartedAt: base.Add(-4 * time.Hour), UpdatedAt: base.Add(-4 * time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "future", Status: "success", StartedAt: base.Add(time.Hour), UpdatedAt: base.Add(time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "unknown-age", Status: "success"})
+
+	// protectRunning excludes "" and "running"; unknown-age + future skipped.
+	protected := f.listTracesBefore(cutoff, true)
+	if len(protected) != 1 || protected[0].TraceID != "oldest" {
+		t.Fatalf("protected = %v, want [oldest]", traceMetaIDs(protected))
+	}
+
+	// Without protection, running + empty-status traces are included; future
+	// and unknown-age still skipped. Sorted oldest-first.
+	unprotected := f.listTracesBefore(cutoff, false)
+	want := []string{"oldest", "old-empty", "old-running"}
+	if len(unprotected) != len(want) {
+		t.Fatalf("unprotected = %v, want %v", traceMetaIDs(unprotected), want)
+	}
+	for i, id := range want {
+		if unprotected[i].TraceID != id {
+			t.Fatalf("unprotected order = %v, want %v", traceMetaIDs(unprotected), want)
+		}
+	}
+}
+
+func TestFSMTraceStats(t *testing.T) {
+	f := newTestFSM(t)
+	base := time.Now().UTC()
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "new", StartedAt: base, UpdatedAt: base})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "old", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "no-time"})
+
+	count, oldest := f.traceStats()
+	if count != 3 {
+		t.Fatalf("count = %d, want 3", count)
+	}
+	if !oldest.Equal(base.Add(-2 * time.Hour)) {
+		t.Fatalf("oldest = %v, want %v", oldest, base.Add(-2*time.Hour))
+	}
+
+	// Empty FSM: zero count and zero oldest.
+	empty := NewFSM()
+	count, oldest = empty.traceStats()
+	if count != 0 || !oldest.IsZero() {
+		t.Fatalf("empty stats = (%d, %v), want (0, zero)", count, oldest)
+	}
+}
+
 func TestFSMMetaAndCacheRouting(t *testing.T) {
 	f := newTestFSM(t)
 
@@ -448,6 +529,8 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	applyCmd(t, f, kindSetMembers, cmdSetMembers{GroupID: "g", UserIDs: []string{"u"}})
 	applyCmd(t, f, kindUpsertToken, &cmdToken{ID: "t", UserID: "u", TokenHash: "h", TokenCiphertext: "ct"})
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "tr", UserID: "u", GroupID: "g", ProjectName: "github.com/acme/api", UpdatedAt: time.Now().UTC()})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "tr-del", UserID: "u", UpdatedAt: time.Now().UTC()})
+	applyCmd(t, f, kindDeleteTrace, cmdDeleteTrace{TraceID: "tr-del"})
 	applyCmd(t, f, kindSetMeta, cmdSetMeta{Key: "k", Value: "v"})
 	applyCmd(t, f, kindUpsertManifestRoute, &domain.CacheRoute{Repo: "r", Tag: "t", BackendID: "b1", StoredBytes: 5, CreatedAt: "2026-01-01T00:00:00Z", LastSeenAt: "2026-01-01T00:00:00Z"})
 	applyCmd(t, f, kindUpsertBlobRoute, cmdUpsertBlobRoute{Digest: "dgst", BackendID: "b1", CreatedAt: "2026-01-01T00:00:00Z"})
@@ -483,6 +566,9 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 	if tr, err := restored.readTrace("tr"); err != nil || tr.GroupID != "g" {
 		t.Fatalf("trace after restore = %+v err=%v", tr, err)
+	}
+	if _, err := restored.readTrace("tr-del"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("deleted trace should not survive restore: %v", err)
 	}
 	if cr, ok := restored.lookupManifestRoute("r", "t"); !ok || cr.StoredBytes != 5 {
 		t.Fatalf("manifest route after restore = %+v ok=%v", cr, ok)

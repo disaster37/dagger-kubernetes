@@ -722,6 +722,10 @@ func (s *CacheStatsService) StartGCSweeper(ctx context.Context) (stop func()) {
 	if !s.gcCfg.Enabled {
 		return func() {}
 	}
+	if s.gcCfg.Schedule <= 0 {
+		s.logger.Warn("cache gc schedule is non-positive; sweeper disabled")
+		return func() {}
+	}
 	ticker := time.NewTicker(s.gcCfg.Schedule)
 	done := make(chan struct{})
 	go func() {

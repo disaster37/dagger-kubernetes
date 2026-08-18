@@ -161,6 +161,19 @@ cache:
     min_refs_to_keep: 3              # always keep at least this many most-recent tags per version.
     protect_active_versions: true    # never purge tags for versions with active fleet replicas.
 
+# --- Pipeline history retention ------------------------------------------------
+# Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics
+# metrics. Auto-purge removes all three for traces whose last update
+# (COALESCE(started_at, updated_at)) is older than max_age. Tempo spans are NOT
+# deleted here — set tempo.retention to a matching (or longer) value so spans
+# age out alongside the supervisor-side purge. Running traces are protected.
+# See ADR-018.
+history:
+  gc:                                # auto-purge sweeper for pipeline history.
+    enabled: false                   # master switch; disabled by default.
+    max_age: "720h"                  # purge traces whose last update is older than this (30d).
+    schedule: "1h"                   # background sweeper ticker interval.
+
 # --- Engine fleet (Kubernetes) ----------------------------------------------
 fleet:
   namespace: "dagger-cache"                # namespace engines run in.

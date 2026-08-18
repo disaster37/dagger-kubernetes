@@ -7,6 +7,9 @@ import type {
   FleetInfo,
   Group,
   GroupSummary,
+  HistoryInfo,
+  HistoryPurgeRequest,
+  HistoryPurgeResult,
   LoginResponse,
   PlatformStatus,
   Project,
@@ -201,6 +204,18 @@ export async function purgeCache(payload: PurgeRequest): Promise<PurgeResult> {
 export async function purgeAllCache(): Promise<PurgeResult> {
   const { data } = await api.post('/api/v1/cache/purge-all')
   return data as PurgeResult
+}
+export async function fetchHistoryInfo(): Promise<HistoryInfo> {
+  const { data } = await api.get('/api/v1/history')
+  return data as HistoryInfo
+}
+export async function purgeHistory(payload: HistoryPurgeRequest): Promise<HistoryPurgeResult> {
+  const { data } = await api.post('/api/v1/history/purge', payload)
+  return data as HistoryPurgeResult
+}
+export async function purgeAllHistory(): Promise<HistoryPurgeResult> {
+  const { data } = await api.post('/api/v1/history/purge-all')
+  return data as HistoryPurgeResult
 }
 export async function fetchPlatformStatus(): Promise<PlatformStatus> {
   const { data } = await api.get('/api/v1/status')

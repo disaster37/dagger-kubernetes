@@ -258,6 +258,21 @@ grafana:
 - Configure `ingress.tls` for the control-plane Ingress; the default ships
   with no TLS (`tls: []`) to avoid binding a placeholder secret.
 
+### Pipeline history retention
+
+- Tempo spans are **not** deleted by the supervisor's history purge — set
+  `tempo.retention` to match (or exceed) `supervisor.config.history.gc.maxAge`
+  so spans age out alongside the purge.
+- Loki log deletion is enabled by default: the chart runs the Loki compactor
+  with `limits_config.deletion_mode: filter-and-delete`,
+  `compactor.retention_enabled: true`, and a `delete_request_store`
+  (`filesystem` by default). For object-storage deployments, set
+  `loki.loki.compactor.delete_request_store` to the S3/GCS bucket used for
+  delete requests.
+- VictoriaMetrics `delete_series` is admin-only — ensure no `-deleteAuthKey`
+  is set on the VictoriaMetrics server (or provide the matching key to the
+  supervisor) so series deletion is not rejected.
+
 ## Configuration reference
 
 ### Top-level values
@@ -390,6 +405,18 @@ TLS certificate must include the cache vhost as a SAN.
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
+
+### Pipeline history retention
+
+The supervisor auto-purges pipeline history (trace metadata + Loki logs +
+VictoriaMetrics series) for traces whose last update is older than `maxAge`.
+Configure it under `supervisor.config.history`:
+
+| Value | Default | Description |
+|---|---|---|
+| `supervisor.config.history.gc.enabled` | `false` | Master switch for history auto-purge. |
+| `supervisor.config.history.gc.maxAge` | `720h` | Purge traces older than this (30d). |
+| `supervisor.config.history.gc.schedule` | `1h` | Sweeper ticker interval. |
 
 ## Parameters
 

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -99,6 +100,38 @@ func (c *LogsClient) QueryTraceLogs(traceID string, start, end time.Time, limit 
 	}
 
 	return entries, nil
+}
+
+// DeleteTraceLogs requests deletion of all log streams for traceID from Loki.
+// Endpoint: POST /loki/api/v1/delete with query={trace_id="<id>"}&start=<unix>&end=<unix>.
+// Requires Loki compactor with deletion enabled. Returns nil on 204.
+func (c *LogsClient) DeleteTraceLogs(ctx context.Context, traceID string) error {
+	if !hexTraceID.MatchString(traceID) {
+		return fmt.Errorf("invalid trace ID format")
+	}
+	if c.lokiURL == "" {
+		return fmt.Errorf("loki URL not configured")
+	}
+	sanitized := sanitizeLogQLValue(traceID)
+	// Delete all-time logs for this trace_id: start=0, end=now.
+	params := url.Values{}
+	params.Set("query", fmt.Sprintf(`{trace_id="%s"}`, sanitized))
+	params.Set("start", "0")
+	params.Set("end", fmt.Sprintf("%d", time.Now().Unix()))
+	deleteURL := fmt.Sprintf("%s/loki/api/v1/delete?%s", c.lokiURL, params.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deleteURL, nil)
+	if err != nil {
+		return fmt.Errorf("loki delete request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("loki delete failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusNoContent || resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	return fmt.Errorf("loki delete returned status %d", resp.StatusCode)
 }
 
 // normalizeSpanID converts a span ID label into the base64 form used by the

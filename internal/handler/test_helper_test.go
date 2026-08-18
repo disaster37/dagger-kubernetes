@@ -126,7 +126,11 @@ func newTestEnv(t *testing.T) *testEnv {
 		CacheStatsProvider: &stubCacheStatsProvider{
 			stats: &domain.CacheStats{Backend: "registry", Registry: "cache.reg/dagger-cache", Running: true, Reachable: true},
 		},
-		CachePurger:    &stubCachePurger{result: &domain.PurgeResult{}},
+		CachePurger: &stubCachePurger{result: &domain.PurgeResult{}},
+		HistoryStatsProvider: &stubHistoryStatsProvider{
+			stats: &domain.HistoryStats{TraceCount: 0, GC: domain.HistoryGCRules{}},
+		},
+		HistoryPurger:  &stubHistoryPurger{result: &domain.HistoryPurgeResult{}},
 		StatusProvider: &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
 		Connect:        connectSvc,
 	})
@@ -206,6 +210,28 @@ type stubStatusProvider struct {
 
 func (p *stubStatusProvider) Status(context.Context) (*domain.PlatformStatus, error) {
 	return p.status, p.err
+}
+
+type stubHistoryStatsProvider struct {
+	stats *domain.HistoryStats
+	err   error
+}
+
+func (s *stubHistoryStatsProvider) Stats(context.Context) (*domain.HistoryStats, error) {
+	return s.stats, s.err
+}
+func (s *stubHistoryStatsProvider) GCRules() domain.HistoryGCRules { return domain.HistoryGCRules{} }
+
+type stubHistoryPurger struct {
+	result *domain.HistoryPurgeResult
+	err    error
+}
+
+func (p *stubHistoryPurger) Purge(context.Context, domain.HistoryPurgeRequest) (*domain.HistoryPurgeResult, error) {
+	return p.result, p.err
+}
+func (p *stubHistoryPurger) PurgeAll(context.Context) (*domain.HistoryPurgeResult, error) {
+	return p.result, p.err
 }
 
 type stubTraceRepo struct {

@@ -17,6 +17,8 @@ type Metrics struct {
 	CacheObjectCount      prometheus.Gauge
 	CachePurgeTotal       prometheus.Counter
 	GCRunTotal            *prometheus.CounterVec
+	HistoryPurgeTotal     prometheus.Counter
+	HistoryGCRunTotal     *prometheus.CounterVec
 }
 
 // NewMetrics builds the Metrics collectors and registers them on reg when
@@ -69,6 +71,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_cache_gc_run_total",
 			Help: "Total number of cache GC sweeper runs",
 		}, []string{"status"}),
+
+		HistoryPurgeTotal: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "dagger_cache_history_purge_total",
+			Help: "Total number of traces purged from history (manual + GC)",
+		}),
+
+		HistoryGCRunTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_cache_history_gc_run_total",
+			Help: "Total number of history GC sweeper runs",
+		}, []string{"status"}),
 	}
 
 	if reg != nil {
@@ -82,6 +94,8 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.CacheObjectCount,
 			m.CachePurgeTotal,
 			m.GCRunTotal,
+			m.HistoryPurgeTotal,
+			m.HistoryGCRunTotal,
 		)
 	}
 

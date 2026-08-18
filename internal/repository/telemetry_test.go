@@ -1,9 +1,12 @@
 package repository
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 )
@@ -772,5 +775,75 @@ func TestQueryTraceLogsParsesSpanID(t *testing.T) {
 	}
 	if entries[1].SpanID != "" {
 		t.Fatalf("entry[1] span_id = %q, want empty", entries[1].SpanID)
+	}
+}
+
+func TestDeleteTraceLogs(t *testing.T) {
+	const traceID = "401ccb197124a8ff2028720fcb5eaa06"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/loki/api/v1/delete" {
+			t.Errorf("path = %s, want /loki/api/v1/delete", r.URL.Path)
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("method = %s, want POST", r.Method)
+		}
+		q := r.URL.Query()
+		if q.Get("query") != fmt.Sprintf(`{trace_id=%q}`, traceID) {
+			t.Errorf("query = %s", q.Get("query"))
+		}
+		if q.Get("start") != "0" {
+			t.Errorf("start = %s, want 0", q.Get("start"))
+		}
+		endRaw := q.Get("end")
+		if endRaw == "" {
+			t.Error("end should be set to now in unix seconds")
+		}
+		endSec, err := strconv.ParseInt(endRaw, 10, 64)
+		if err != nil {
+			t.Errorf("end = %q, want integer unix seconds: %v", endRaw, err)
+		} else if endSec < 1_000_000_000 || endSec > 10_000_000_000 {
+			t.Errorf("end = %d, want seconds-scale timestamp (year 2001..2286)", endSec)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer srv.Close()
+
+	client := NewLogsClient(srv.URL)
+	if err := client.DeleteTraceLogs(context.Background(), traceID); err != nil {
+		t.Fatalf("DeleteTraceLogs: %v", err)
+	}
+}
+
+func TestDeleteTraceLogsNon2xx(t *testing.T) {
+	const traceID = "401ccb197124a8ff2028720fcb5eaa06"
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	client := NewLogsClient(srv.URL)
+	err := client.DeleteTraceLogs(context.Background(), traceID)
+	if err == nil {
+		t.Fatal("expected error for 404")
+	}
+	if !strings.Contains(err.Error(), "404") {
+		t.Fatalf("err = %v, want containing 404", err)
+	}
+}
+
+func TestDeleteTraceLogsInvalidTraceID(t *testing.T) {
+	client := NewLogsClient("http://loki:3100")
+	if err := client.DeleteTraceLogs(context.Background(), "not-hex!"); err == nil {
+		t.Fatal("expected error for invalid trace ID")
+	}
+}
+
+func TestDeleteTraceLogsUnconfigured(t *testing.T) {
+	client := NewLogsClient("")
+	err := client.DeleteTraceLogs(context.Background(), "401ccb197124a8ff2028720fcb5eaa06")
+	if err == nil || !strings.Contains(err.Error(), "loki URL not configured") {
+		t.Fatalf("err = %v, want loki URL not configured", err)
 	}
 }

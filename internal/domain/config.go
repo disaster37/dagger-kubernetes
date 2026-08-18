@@ -7,6 +7,7 @@ type Config struct {
 	Auth      AuthConfig      `mapstructure:"auth"`
 	Telemetry TelemetryConfig `mapstructure:"telemetry"`
 	Cache     CacheConfig     `mapstructure:"cache"`
+	History   HistoryConfig   `mapstructure:"history"`
 	Fleet     FleetConfig     `mapstructure:"fleet"`
 	CA        CAConfig        `mapstructure:"ca"`
 	TLS       TLSConfig       `mapstructure:"tls"`
@@ -172,6 +173,19 @@ type GCConfig struct {
 	Schedule              time.Duration `mapstructure:"schedule"`
 	MinRefsToKeep         int           `mapstructure:"min_refs_to_keep"`
 	ProtectActiveVersions bool          `mapstructure:"protect_active_versions"`
+}
+
+// HistoryConfig governs pipeline-history retention (trace_meta + logs +
+// metrics). Mirrors CacheConfig.GC.
+type HistoryConfig struct {
+	GC HistoryGCConfig `mapstructure:"gc"`
+}
+
+// HistoryGCConfig governs the history auto-purge background sweeper.
+type HistoryGCConfig struct {
+	Enabled  bool          `mapstructure:"enabled"`
+	MaxAge   time.Duration `mapstructure:"max_age"`
+	Schedule time.Duration `mapstructure:"schedule"`
 }
 
 // EnvVarSource selects one key of a Kubernetes Secret as the value of an

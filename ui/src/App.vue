@@ -5,6 +5,7 @@
       <div class="nav-links">
         <router-link to="/pipelines">Pipelines</router-link>
         <router-link to="/cache">MagicCache</router-link>
+        <router-link to="/history">History</router-link>
         <router-link to="/fleet">Runners</router-link>
         <router-link to="/services">Services</router-link>
         <router-link to="/settings">Settings</router-link>

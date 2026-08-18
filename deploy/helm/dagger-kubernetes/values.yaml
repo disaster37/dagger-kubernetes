@@ -217,6 +217,14 @@ supervisor:
       s3:
         bucket: ""
         region: ""
+## @param supervisor.config.history.gc.enabled Master switch for the history auto-purge sweeper.
+## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default).
+## @param supervisor.config.history.gc.schedule History sweeper ticker interval.
+    history:
+      gc:
+        enabled: false
+        maxAge: "720h"
+        schedule: "1h"
 ## @param supervisor.config.fleet.minReplicasPerVersion Minimum warm engine replicas per Dagger version.
 ## @param supervisor.config.fleet.maxReplicasPerVersion Maximum engine replicas per Dagger version.
 ## @param supervisor.config.fleet.maxSessionsPerReplica Maximum concurrent sessions per engine replica.
@@ -518,6 +526,9 @@ tempo:
     size: 20Gi
     storageClassName: ""
   tempo:
+    ## @param tempo.retention Trace retention duration. Spans are NOT deleted by
+    ## the supervisor's history purge; set this to match (or exceed)
+    ## supervisor.config.history.gc.maxAge so spans age out alongside the purge.
     retention: 48h
     storage:
       trace:
@@ -557,6 +568,16 @@ loki:
     ## with "at least 2 live replicas required".
     commonConfig:
       replication_factor: 1
+    ## History purge (supervisor.config.history.gc.*) calls POST /loki/api/v1/delete.
+    ## Deletion is enabled by default: the Loki compactor runs with retention
+    ## enabled and a delete_request_store configured, and deletion_mode is set to
+    ## filter-and-delete. For object-storage deployments, change
+    ## compactor.delete_request_store to the S3/GCS bucket used for delete requests.
+    limits_config:
+      deletion_mode: filter-and-delete
+    compactor:
+      retention_enabled: true
+      delete_request_store: filesystem
     useTestSchema: true
     storage:
       bucketNames:

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -517,13 +518,16 @@ func TestReadBoundedBodyRejectsOversized(t *testing.T) {
 }
 
 func TestCacheProxyEndToEnd(t *testing.T) {
+	var sawAuthMu sync.Mutex
 	var sawAuth string
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v2/":
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodGet && r.URL.Path == "/v2/dagger-cache/manifests/v0-21-4":
+			sawAuthMu.Lock()
 			sawAuth = r.Header.Get("Authorization")
+			sawAuthMu.Unlock()
 			w.Header().Set("Docker-Content-Digest", testDigest)
 			_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`))
 		default:
@@ -551,18 +555,26 @@ func TestCacheProxyEndToEnd(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.Result().StatusCode())
 	}
-	if sawAuth != basicAuthHeader("backend", "secret") {
-		t.Fatalf("backend saw Authorization = %q, want backend creds", sawAuth)
+	sawAuthMu.Lock()
+	gotAuth := sawAuth
+	sawAuthMu.Unlock()
+	if gotAuth != basicAuthHeader("backend", "secret") {
+		t.Fatalf("backend saw Authorization = %q, want backend creds", gotAuth)
 	}
 
 	// Wrong token → 401 (never reaches backend).
+	sawAuthMu.Lock()
 	sawAuth = ""
+	sawAuthMu.Unlock()
 	resp = ut.PerformRequest(e, "GET", "http://cache.example.com/v2/dagger-cache/manifests/v0-21-4", nil,
 		ut.Header{Key: "Authorization", Value: "Bearer wrong"})
 	if resp.Result().StatusCode() != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401", resp.Result().StatusCode())
 	}
-	if sawAuth != "" {
+	sawAuthMu.Lock()
+	gotAuth = sawAuth
+	sawAuthMu.Unlock()
+	if gotAuth != "" {
 		t.Fatal("backend should not be reached on auth failure")
 	}
 }

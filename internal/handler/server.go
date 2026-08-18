@@ -192,33 +192,35 @@ func validOCIPathSegment(s string) bool {
 // Deps bundles the collaborators injected into the Server. Replacing the old
 // 11-param constructor, this is far easier to maintain and construct in tests.
 type Deps struct {
-	Logger              *logrus.Logger
-	Metrics             *observ.Metrics
-	MintingCA           domain.MintingCA
-	FleetManager        *service.Manager
-	Sessions            domain.SessionStore
-	CacheBackend        domain.CacheBackend
-	VersionResolver     domain.VersionResolver
-	Auth                *service.AuthService
-	InternalAuthEnabled bool // mirrors cfg.Auth.Internal.Enabled
-	OAuthCookieSecure   bool // mirrors cfg.Auth.OAuth.CookieSecure
-	Users               *service.UserService
-	Groups              *service.GroupService
-	Projects            *service.ProjectService
-	Tokens              *service.TokenService
-	Quota               *service.QuotaService
-	Attribution         *service.AttributionService
-	TraceMeta           domain.TraceMetaRepository
-	Traces              domain.TraceRepository
-	Logs                domain.LogRepository
-	OAuth               service.OAuthProvider // nil when disabled
-	OAuthProvider       string                // "github" | "oidc" | "" when disabled
-	JWT                 *service.JWTService
-	CacheStatsProvider  domain.CacheStatsProvider
-	CachePurger         domain.CachePurger
-	StatusProvider      domain.StatusProvider
-	Connect             *service.ConnectService
-	Router              *service.RegistryRouter
+	Logger               *logrus.Logger
+	Metrics              *observ.Metrics
+	MintingCA            domain.MintingCA
+	FleetManager         *service.Manager
+	Sessions             domain.SessionStore
+	CacheBackend         domain.CacheBackend
+	VersionResolver      domain.VersionResolver
+	Auth                 *service.AuthService
+	InternalAuthEnabled  bool // mirrors cfg.Auth.Internal.Enabled
+	OAuthCookieSecure    bool // mirrors cfg.Auth.OAuth.CookieSecure
+	Users                *service.UserService
+	Groups               *service.GroupService
+	Projects             *service.ProjectService
+	Tokens               *service.TokenService
+	Quota                *service.QuotaService
+	Attribution          *service.AttributionService
+	TraceMeta            domain.TraceMetaRepository
+	Traces               domain.TraceRepository
+	Logs                 domain.LogRepository
+	OAuth                service.OAuthProvider // nil when disabled
+	OAuthProvider        string                // "github" | "oidc" | "" when disabled
+	JWT                  *service.JWTService
+	CacheStatsProvider   domain.CacheStatsProvider
+	CachePurger          domain.CachePurger
+	HistoryStatsProvider domain.HistoryStatsProvider
+	HistoryPurger        domain.HistoryPurger
+	StatusProvider       domain.StatusProvider
+	Connect              *service.ConnectService
+	Router               *service.RegistryRouter
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -274,10 +276,12 @@ type Server struct {
 	router        cacheRouter
 	cacheToken    string
 
-	cacheStats  domain.CacheStatsProvider
-	cachePurger domain.CachePurger
-	status      domain.StatusProvider
-	connect     *service.ConnectService
+	cacheStats    domain.CacheStatsProvider
+	cachePurger   domain.CachePurger
+	historyStats  domain.HistoryStatsProvider
+	historyPurger domain.HistoryPurger
+	status        domain.StatusProvider
+	connect       *service.ConnectService
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -311,11 +315,13 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		oauthProvider:       deps.OAuthProvider,
 		limiter:             newAttemptLimiter(),
 
-		cacheStats:  deps.CacheStatsProvider,
-		cachePurger: deps.CachePurger,
-		status:      deps.StatusProvider,
-		connect:     deps.Connect,
-		cacheToken:  cfg.CacheToken,
+		cacheStats:    deps.CacheStatsProvider,
+		cachePurger:   deps.CachePurger,
+		historyStats:  deps.HistoryStatsProvider,
+		historyPurger: deps.HistoryPurger,
+		status:        deps.StatusProvider,
+		connect:       deps.Connect,
+		cacheToken:    cfg.CacheToken,
 	}
 
 	// Only store a non-nil router: assigning a nil *service.RegistryRouter to
@@ -438,6 +444,9 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/cache", s.handleCacheInfo)
 	h.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
 	h.POST("/api/v1/cache/purge-all", s.adminOnly(s.handleCachePurgeAll))
+	h.GET("/api/v1/history", s.handleHistoryInfo)
+	h.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
+	h.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
 	h.GET("/api/v1/status", s.handlePlatformStatus)
 	h.GET("/api/v1/connect/env", s.handleConnectEnv)
 

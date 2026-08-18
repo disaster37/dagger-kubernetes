@@ -33,6 +33,7 @@ Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
 - [Running the Supervisor](#running-the-supervisor)
 - [Engine fleet](#engine-fleet)
 - [Remote shared cache](#remote-shared-cache)
+- [Pipeline history retention](#pipeline-history-retention)
 - [Authentication](#authentication)
 - [TLS & client certificates](#tls--client-certificates)
 - [Telemetry stack](#telemetry-stack)
@@ -388,6 +389,9 @@ inline comments. The sections below summarise the most important ones.
 |              | `gc.schedule`               | `1h`                             | Sweeper ticker interval.                          |
 |              | `gc.min_refs_to_keep`       | `3`                              | Keep at least this many most-recent tags per minor version. |
 |              | `gc.protect_active_versions`| `true`                           | Never purge tags for versions with active replicas. |
+| `history`    | `gc.enabled`                | `false`                          | Master switch for the history auto-purge sweeper. |
+|              | `gc.max_age`                | `720h`                           | Purge traces whose last update is older than this (30d). |
+|              | `gc.schedule`               | `1h`                             | History sweeper ticker interval.                  |
 | `fleet`      | `namespace`                 | `dagger-cache`                   | K8s namespace for engine pods.                    |
 |              | `min_replicas_per_version`  | `0`                              | Autoscaler floor per version.                     |
 |              | `max_replicas_per_version`  | `3`                              | Autoscaler ceiling per version.                   |
@@ -635,6 +639,62 @@ enabled"`.
 
 ---
 
+## Pipeline history retention
+
+Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics
+metrics. A background sweeper can auto-purge it, and admins can purge manually
+from the `/history` page. See ADR-018.
+
+```yaml
+history:
+  gc:
+    enabled: true                 # master switch (disabled by default)
+    max_age: "720h"               # purge traces whose last update is older than 30d
+    schedule: "1h"                # sweeper interval
+```
+
+Age is `COALESCE(started_at, updated_at)`; traces with no known timestamp are
+never purged (conservative). **Running traces are protected**: the sweeper and
+`purge-all` skip traces whose status is `""` or `"running"`. A manual
+per-trace purge is an admin override and is not protected.
+
+### Manual purge (admin)
+
+| Endpoint | Scope |
+|---|---|
+| `GET /api/v1/history` | Stats: `trace_count`, oldest update, collected time, GC rules. |
+| `POST /api/v1/history/purge` | Body `{"trace_id":"<hex>"}`. Purges one trace (metadata + logs + metrics), running or not. Idempotent. |
+| `POST /api/v1/history/purge-all` | Purges every trace older than `history.gc.max_age` (running traces protected). |
+
+For each candidate, Loki logs + VictoriaMetrics series are deleted
+best-effort **first**; a telemetry failure is logged but does not abort the
+trace-metadata deletion, so the trace still disappears from the UI (orphaned
+telemetry ages out via backend retention).
+
+### Telemetry backend prerequisites
+
+- **Loki** — `POST /loki/api/v1/delete` is enabled by default: the chart runs
+  the Loki **compactor** with `limits_config.deletion_mode: filter-and-delete`,
+  `compactor.retention_enabled: true`, and a `delete_request_store`
+  (`filesystem` by default). For object-storage deployments, set
+  `delete_request_store` to the S3/GCS bucket used for delete requests.
+- **VictoriaMetrics** — `delete_series` is admin-only and deletes the entire
+  series matching `match[]` (no time range; space is reclaimed lazily during
+  background merges). If `-deleteAuthKey` is set on the VM deployment, the
+  supervisor's delete request must include that key. The OpenTelemetry
+  collector's `transform/logs` processor promotes `trace_id`/`span_id` to
+  **log** labels only; the metrics pipeline (`otlp → batch →
+  prometheusremotewrite`) has no such transform, and the metrics currently
+  emitted (BuildKit cache hit/miss counters, engine metrics) are aggregate
+  with no trace association. `{trace_id="..."}` metric deletion is therefore a
+  no-op today and activates automatically only if per-trace metrics carrying a
+  `trace_id` label are introduced.
+- **Tempo** — spans are **not** deleted by this feature. Set `tempo.retention`
+  to match (or exceed) `history.gc.max_age` so spans age out alongside the
+  supervisor-side purge (see [Telemetry stack](#telemetry-stack)).
+
+---
+
 ## Authentication
 
 The supervisor supports multi-user authentication with role-based access
@@ -870,17 +930,29 @@ Receives OTLP/HTTP telemetry from the Dagger CLI and the Supervisor on port
 ### Grafana Tempo
 Distributed tracing backend. Stores OTLP traces. Exposes the HTTP query API
 on port 3100. The Helm chart defaults to local filesystem storage with
-persistent volumes.
+persistent volumes. **Retention**: the supervisor's history purge does not
+delete spans; set `tempo.retention` (Helm `tempo.tempo.retention`) to match or
+exceed `history.gc.max_age` so spans age out alongside the supervisor-side
+purge of trace metadata, logs, and metrics.
 
 ### Grafana Loki
 Log aggregation backend. Stores OTLP logs. Exposes the Loki HTTP API on port
 3100. Deployed in SingleBinary mode (sufficient for up to ~20 GB/day). For
 production, switch to `SimpleScalable` with S3/GCS object storage.
+**Deletion**: enabled by default — the chart runs the Loki compactor with
+`limits_config.deletion_mode: filter-and-delete`, `retention_enabled: true`,
+and a `delete_request_store` (filesystem by default). For object-storage
+deployments, set `delete_request_store` to the S3/GCS bucket used for delete
+requests.
 
 ### VictoriaMetrics
 PromQL-compatible metrics backend. Stores OTLP metrics via the Prometheus
 remote write protocol. Exposes the HTTP API on port 8428. Single-server
-deployment with persistent volumes.
+deployment with persistent volumes. **Deletion**: the history purge calls
+`POST /api/v1/admin/tsdb/delete_series`, which is admin-only and deletes the
+entire series matching `match[]` (no time range); space is reclaimed lazily
+during background merges. If `-deleteAuthKey` is set on the VM deployment, the
+supervisor's delete request must include that key.
 
 ### Grafana
 Unified dashboards for Tempo (traces), Loki (logs), and VictoriaMetrics
@@ -944,6 +1016,9 @@ Features:
   object (layer) count, hit rate (from VictoriaMetrics BuildKit counters),
   per-version cache refs (size, layers, digest, protected flag), auto-clean
   (GC) rules with last/next run, and admin-only purge buttons
+- **History dashboard** (`/history`) — pipeline-history trace count + oldest
+  update, auto-purge (GC) rules with last/next run summary, and admin-only
+  per-trace / purge-all buttons
 - **Services status page** (`/services`) — every platform service
   (supervisor, cache, collector, tempo, loki, victoria, fleet) with a
   `ok`/`degraded`/`down`/`unknown` state and a rolled-up overall state

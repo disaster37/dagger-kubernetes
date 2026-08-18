@@ -34,6 +34,42 @@ func TestTraceMetaRepoProvisionSetOnce(t *testing.T) {
 	}
 }
 
+func TestTraceMetaRepoValidatesTraceIDKey(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	t.Run("provision rejects invalid key", func(t *testing.T) {
+		for _, id := range []string{`bad"id`, "has space", "", ".leading-dot"} {
+			err := repo.UpsertProvision(ctx, id, "u1", "v0.21.4")
+			if !errors.Is(err, domain.ErrValidation) {
+				t.Fatalf("UpsertProvision(%q) err = %v, want ErrValidation", id, err)
+			}
+		}
+	})
+
+	t.Run("ingest rejects invalid key", func(t *testing.T) {
+		for _, id := range []string{`bad"id`, "has space", "", "a/b"} {
+			err := repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: id})
+			if !errors.Is(err, domain.ErrValidation) {
+				t.Fatalf("UpsertIngest(%q) err = %v, want ErrValidation", id, err)
+			}
+		}
+	})
+
+	t.Run("broad-charset key still succeeds", func(t *testing.T) {
+		if err := repo.UpsertProvision(ctx, "test-trace-001", "u1", "v0.21.4"); err != nil {
+			t.Fatalf("UpsertProvision broad key: %v", err)
+		}
+		if err := repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "in-group_1.v2", Status: "success"}); err != nil {
+			t.Fatalf("UpsertIngest broad key: %v", err)
+		}
+		if _, err := repo.Get(ctx, "test-trace-001"); err != nil {
+			t.Fatalf("Get broad key: %v", err)
+		}
+	})
+}
+
 func TestTraceMetaRepoIngestGroupSetOnce(t *testing.T) {
 	store := newTestRaftStore(t)
 	repo := NewTraceMetaRepo(store)
@@ -196,5 +232,80 @@ func TestTraceMetaRepoListLimitClamping(t *testing.T) {
 	res, _ = repo.List(ctx, domain.TraceFilter{IncludeUnassigned: true, Limit: 1000})
 	if len(res) != 5 {
 		t.Fatalf("limit=1000 returned %d, want 5", len(res))
+	}
+}
+
+func TestTraceMetaRepoDelete(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	if err := repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "abc123", Status: "success", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatalf("UpsertIngest: %v", err)
+	}
+	if _, err := repo.Get(ctx, "abc123"); err != nil {
+		t.Fatalf("Get before delete: %v", err)
+	}
+
+	if err := repo.Delete(ctx, "abc123"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := repo.Get(ctx, "abc123"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("Get after delete: %v, want ErrNotFound", err)
+	}
+
+	// Idempotent: deleting an absent row returns nil.
+	if err := repo.Delete(ctx, "abc123"); err != nil {
+		t.Fatalf("Delete again: %v", err)
+	}
+}
+
+func TestTraceMetaRepoListBefore(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	base := time.Now().UTC()
+	cutoff := base.Add(-time.Hour)
+
+	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "old", Status: "success", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
+	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "old-running", Status: "running", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
+	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "future", Status: "success", StartedAt: base.Add(time.Hour), UpdatedAt: base.Add(time.Hour)})
+
+	protected, err := repo.ListBefore(ctx, cutoff, true)
+	if err != nil {
+		t.Fatalf("ListBefore: %v", err)
+	}
+	if len(protected) != 1 || protected[0].TraceID != "old" {
+		t.Fatalf("protected = %v, want [old]", traceMetaIDs(protected))
+	}
+
+	all, err := repo.ListBefore(ctx, cutoff, false)
+	if err != nil {
+		t.Fatalf("ListBefore(false): %v", err)
+	}
+	if len(all) != 2 {
+		t.Fatalf("unprotected = %v, want 2", traceMetaIDs(all))
+	}
+}
+
+func TestTraceMetaRepoStats(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	base := time.Now().UTC()
+	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "a", StartedAt: base, UpdatedAt: base})
+	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "b", StartedAt: base.Add(-3 * time.Hour), UpdatedAt: base.Add(-3 * time.Hour)})
+
+	count, oldest, err := repo.Stats(ctx)
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if count != 2 {
+		t.Fatalf("count = %d, want 2", count)
+	}
+	if !oldest.Equal(base.Add(-3 * time.Hour)) {
+		t.Fatalf("oldest = %v, want %v", oldest, base.Add(-3*time.Hour))
 	}
 }

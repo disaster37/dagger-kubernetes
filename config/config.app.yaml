@@ -86,6 +86,13 @@ cache:
     min_refs_to_keep: 3              # always keep at least this many most-recent tags per version.
     protect_active_versions: true    # never purge tags for versions with active fleet replicas.
 
+# --- Pipeline history retention ------------------------------------------------
+history:
+  gc:                                 # auto-purge of trace_meta + logs + metrics (see ADR-018).
+    enabled: false                     # master switch; disabled by default.
+    max_age: "720h"                    # purge traces whose last update is older than this (30d).
+    schedule: "1h"                     # background sweeper ticker interval.
+
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
   floor: "v0.19.0"                          # minimum supported engine

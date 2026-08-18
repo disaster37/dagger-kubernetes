@@ -204,6 +204,47 @@ export interface PurgeResult {
   message?: string
 }
 
+export interface HistoryGCRunSummary {
+  started_at: string
+  finished_at: string
+  purged_traces: number
+  skipped_running: number
+  logs_deleted: number
+  metrics_deleted: number
+  telemetry_errors: number
+  errors: number
+  message?: string
+}
+
+export interface HistoryGCRules {
+  enabled: boolean
+  max_age: string
+  schedule: string
+  last_run_at?: string
+  last_run_summary?: HistoryGCRunSummary
+  next_run_at?: string
+}
+
+export interface HistoryInfo {
+  trace_count: number
+  oldest_updated_at?: string
+  collected_at: string
+  gc: HistoryGCRules
+}
+
+export interface HistoryPurgeRequest {
+  trace_id?: string
+}
+
+export interface HistoryPurgeResult {
+  purged_traces: number
+  logs_deleted: number
+  metrics_deleted: number
+  trace_ids: string[]
+  already_purged: number
+  message?: string
+}
+
 export type ServiceState = 'ok' | 'degraded' | 'down' | 'unknown'
 
 export interface ServiceStatus {
