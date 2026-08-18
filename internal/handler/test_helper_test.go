@@ -207,3 +207,12 @@ type stubStatusProvider struct {
 func (p *stubStatusProvider) Status(context.Context) (*domain.PlatformStatus, error) {
 	return p.status, p.err
 }
+
+type stubTraceRepo struct {
+	trace *domain.TraceInfo
+	err   error
+}
+
+func (s *stubTraceRepo) GetTrace(traceID string) (*domain.TraceInfo, error) {
+	return s.trace, s.err
+}

@@ -918,6 +918,10 @@ Features:
   promoted) showing status and wall-clock duration. Sub-spans are collapsed
   and summarised as a hidden count; click a step to expand. `dagger.io/ui.*`
   boolean span attributes drive the collapse/passthrough grouping.
+  The trace viewer header shows an `@username` chip (or `anonymous` for
+  legacy/anonymous runs) next to the status badge, and the Details table
+  includes a "User" row — so the pipeline owner is always visible on the
+  detail view, matching the list view's `@username · org/repo` identity.
 - **Live updates** — the viewer subscribes to the `/api/v1/traces/:id/live`
   SSE stream. As the supervisor ingests each OTLP trace/log batch it extracts
   the affected trace IDs and broadcasts a lightweight `trace_update` or

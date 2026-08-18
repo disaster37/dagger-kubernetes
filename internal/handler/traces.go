@@ -86,6 +86,16 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 			trace.DurationMS = meta.DurationMS
 			trace.Duration = time.Duration(meta.DurationMS) * time.Millisecond
 		}
+		// User attribution: UserID from trace_meta, Username joined best-effort
+		// from the users table (empty for legacy/anonymous or deleted users).
+		trace.UserID = meta.UserID
+		if meta.UserID != "" {
+			if u, err := s.users.Get(context.Background(), meta.UserID); err == nil {
+				trace.Username = u.Username
+			} else {
+				s.logger.WithError(err).WithField("user_id", meta.UserID).Debug("trace user lookup failed")
+			}
+		}
 	} else {
 		s.logger.WithError(err).WithField("trace_id", traceID).Debug("trace_meta enrichment failed")
 	}

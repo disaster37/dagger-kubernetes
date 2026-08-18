@@ -82,6 +82,8 @@ export interface TraceDetail {
   version: string
   ci_provider?: string
   ci_repo?: string
+  user_id?: string
+  username?: string
 }
 
 export interface TraceLogEntry {

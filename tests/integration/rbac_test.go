@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"testing"
@@ -216,6 +217,58 @@ func TestRBACAdminBypassesQuota(t *testing.T) {
 		if code := postEngines(t, env.baseURL, bearer, "trace-admin"); code != http.StatusCreated {
 			t.Fatalf("admin provision %d: %d, want 201", i, code)
 		}
+	}
+}
+
+// TestTraceDetailIncludesUser exercises the real provision → detail flow:
+// POST /v1/engines calls attribution.Provision which persists trace_meta.user_id,
+// and the owner's GET /api/v1/traces/:traceID passes authorizeTrace (owner
+// match). With no real Tempo wired, SpanTreeReconstructor("") returns 404
+// before the enrichment block runs, so the user_id/username JSON assertion
+// lives in the handler unit test (TestHandleTracesDetailEnrichesUser) which
+// stubs Tempo.
+func TestTraceDetailIncludesUser(t *testing.T) {
+	env := newRBACEnv(t)
+	ctx := context.Background()
+
+	g, err := env.groups.Create(ctx, service.GroupInput{
+		Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1,
+	})
+	if err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	u, err := env.users.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := env.groups.SetUserGroups(ctx, u.ID, []string{g.ID}); err != nil {
+		t.Fatalf("set user groups: %v", err)
+	}
+	token, _, err := env.tokens.Generate(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+	bearer := fmt.Sprintf("Bearer %s", token)
+
+	const traceID = "trace-detail-user"
+	if code := postEngines(t, env.baseURL, bearer, traceID); code != http.StatusCreated {
+		t.Fatalf("provision: %d, want 201", code)
+	}
+
+	// Provision persisted the owner attribution (trace_meta.user_id).
+	meta, err := env.traceMeta.Get(ctx, traceID)
+	if err != nil {
+		t.Fatalf("trace meta: %v", err)
+	}
+	if meta.UserID != u.ID {
+		t.Fatalf("trace_meta.user_id = %q, want %q", meta.UserID, u.ID)
+	}
+
+	// Owner passes authorizeTrace; Tempo is absent so detail returns 404
+	// before user enrichment runs.
+	code := getTrace(t, env.baseURL, bearer, traceID)
+	if code != http.StatusNotFound {
+		t.Fatalf("owner trace detail: %d, want 404 (from Tempo)", code)
 	}
 }
 

@@ -8,6 +8,9 @@
       </div>
       <div class="header-meta">
         <span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span>
+        <span class="user-chip" :title="trace.user_id ? `user_id: ${trace.user_id}` : ''">
+          {{ trace.username ? `@${trace.username}` : 'anonymous' }}
+        </span>
         <span class="duration">{{ formatDuration(trace.duration_ms) }}</span>
       </div>
     </div>
@@ -133,6 +136,13 @@
       <h3>Details</h3>
       <table>
         <tbody>
+          <tr>
+            <td>User</td>
+            <td>
+              <span v-if="trace.username">{{ trace.username }}</span>
+              <span v-else class="empty-value">anonymous</span>
+            </td>
+          </tr>
           <tr><td>Status</td><td><span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span></td></tr>
           <tr><td>Duration</td><td>{{ formatDuration(trace.duration_ms) }}</td></tr>
           <tr><td>Version</td><td>{{ trace.version || '-' }}</td></tr>
@@ -668,6 +678,20 @@ function decodeBase64UTF8(s: string): string | null {
   font-size: 20px;
   font-weight: 600;
   color: #f0f6fc;
+}
+
+.user-chip {
+  font-size: 13px;
+  font-weight: 600;
+  color: #58a6ff;
+  background: #1f2a3a;
+  border-radius: 10px;
+  padding: 2px 10px;
+}
+
+.empty-value {
+  color: #8b949e;
+  font-style: italic;
 }
 
 .empty {

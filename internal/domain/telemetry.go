@@ -31,6 +31,8 @@ type TraceInfo struct {
 	Version    string        `json:"version"`
 	CIProvider string        `json:"ci_provider,omitempty"`
 	CIRepo     string        `json:"ci_repo,omitempty"`
+	UserID     string        `json:"user_id,omitempty"`  // owner from trace_meta
+	Username   string        `json:"username,omitempty"` // joined from users table
 }
 
 type LogEntry struct {
