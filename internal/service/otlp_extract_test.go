@@ -348,7 +348,7 @@ func TestExtractTraceSummariesMissingAttrs(t *testing.T) {
 	if len(sums) != 1 {
 		t.Fatalf("got %d, want 1", len(sums))
 	}
-	if sums[0].CIRepo != "" || sums[0].Status != "unset" {
+	if sums[0].CIRepo != "" || sums[0].Status != "running" {
 		t.Fatalf("missing attrs: %+v", sums[0])
 	}
 }
@@ -382,6 +382,53 @@ func TestExtractTraceSummariesMalformed(t *testing.T) {
 	}
 	if sums := ExtractTraceSummaries([]byte{}); sums != nil {
 		t.Fatalf("empty should yield nil, got %v", sums)
+	}
+}
+
+func TestExtractTraceSummariesIgnoresSubtreeBatches(t *testing.T) {
+	// A batch carrying only a subtree (a child span whose parent is not part
+	// of this payload) must not produce a summary: only the true root may
+	// drive trace_meta status/duration. Otherwise a finished child span would
+	// mark a still-running trace as success/failed.
+	body := mustMarshalRequest(t, &tracepb.ResourceSpans{
+		ScopeSpans: []*tracepb.ScopeSpans{
+			{
+				Spans: []*tracepb.Span{
+					{
+						TraceId:           tid(t, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+						SpanId:            tid(t, "2222222222222222"),
+						ParentSpanId:      tid(t, "1111111111111111"),
+						StartTimeUnixNano: 1700000000000000000,
+						EndTimeUnixNano:   1700000001000000000,
+						Status:            &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK},
+					},
+				},
+			},
+		},
+	})
+	if sums := ExtractTraceSummaries(body); len(sums) != 0 {
+		t.Fatalf("subtree batch produced summaries: %+v", sums)
+	}
+}
+
+func TestExtractTraceSummariesAllZeroParentIsRoot(t *testing.T) {
+	body := mustMarshalRequest(t, &tracepb.ResourceSpans{
+		ScopeSpans: []*tracepb.ScopeSpans{
+			{
+				Spans: []*tracepb.Span{
+					{
+						TraceId:      tid(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+						SpanId:       tid(t, "3333333333333333"),
+						ParentSpanId: make([]byte, 8),
+						Status:       &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK},
+					},
+				},
+			},
+		},
+	})
+	sums := ExtractTraceSummaries(body)
+	if len(sums) != 1 || sums[0].Status != "success" {
+		t.Fatalf("all-zero parent should be a root: %+v", sums)
 	}
 }
 

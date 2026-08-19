@@ -284,9 +284,20 @@ func (s *stubSessionStore) Get(certFP string) (*domain.Lease, error) {
 	}
 	return nil, errors.New("not found")
 }
-func (s *stubSessionStore) Touch(string) error                 { return nil }
-func (s *stubSessionStore) IncInFlight(string) error           { return nil }
-func (s *stubSessionStore) DecInFlight(string) error           { return nil }
+func (s *stubSessionStore) Touch(string) error       { return nil }
+func (s *stubSessionStore) IncInFlight(string) error { return nil }
+func (s *stubSessionStore) DecInFlight(string) error { return nil }
+func (s *stubSessionStore) DecInFlightAndGet(certFP string) (int, error) {
+	for _, l := range s.leases {
+		if l.CertFP == certFP {
+			if l.InFlight > 0 {
+				l.InFlight--
+			}
+			return l.InFlight, nil
+		}
+	}
+	return 0, errors.New("not found")
+}
 func (s *stubSessionStore) Remove(string)                      {}
 func (s *stubSessionStore) PinnedSessionsOnReplica(string) int { return 0 }
 func (s *stubSessionStore) SetGroupID(certFP, groupID string) {

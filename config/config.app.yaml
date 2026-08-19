@@ -93,6 +93,14 @@ history:
     max_age: "720h"                    # purge traces whose last update is older than this (30d).
     schedule: "1h"                     # background sweeper ticker interval.
 
+# --- Pipeline disconnect detection --------------------------------------------
+pipeline:
+  disconnect_grace: "0s"               # 0s = fail immediately on tunnel close (default).
+  stale_sweep:
+    enabled: true                      # supervisor-restart / crash recovery sweeper.
+    schedule: "1m"
+    stale_after: "5m"
+
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
   floor: "v0.19.0"                          # minimum supported engine

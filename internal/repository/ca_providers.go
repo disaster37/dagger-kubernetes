@@ -91,8 +91,11 @@ func (p *EmbeddedProvider) loadOrCreateCA() (*MintingCA, error) {
 		return nil, fmt.Errorf("create CA path: %w", err)
 	}
 	// Tighten an existing directory (e.g. a mounted PVC) so the cached CA key
-	// is not readable by other users (CWE-732).
-	if err := os.Chmod(p.caPath, 0o700); err != nil {
+	// is not readable by other users (CWE-732). Best-effort: when the pod runs
+	// non-root and the directory is owned by another UID (e.g. created by an
+	// earlier root-run deployment), chmod fails with EPERM. That is tolerable —
+	// the CA key is still written 0600 below — so proceed rather than crash.
+	if err := os.Chmod(p.caPath, 0o700); err != nil && !os.IsPermission(err) {
 		return nil, fmt.Errorf("chmod CA path: %w", err)
 	}
 
@@ -294,31 +297,23 @@ func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath stri
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
-// fileCAProvider serves a minting CA and server TLS certificate from PEM
-// files managed outside of dagger-cache (cert-manager or external tooling).
-// The minting CA is loaded from the embedded CA path; the server certificate
-// is loaded from the cert-manager or external PEM files.
+// fileCAProvider serves the server TLS certificate from PEM files managed
+// outside of dagger-cache (cert-manager or external tooling). The minting CA
+// is always auto-bootstrapped by the embedded provider (K8s Secret or local
+// files), independent of where the server certificate comes from — the
+// minting CA signs short-lived engine client certs and is an internal CA that
+// never needs a public/cert-manager issuer.
 type fileCAProvider struct {
 	label    string
 	certPath string
 	keyPath  string
-	caPath   string
+	minting  *EmbeddedProvider
 }
 
 var _ domain.CAProvider = (*fileCAProvider)(nil)
 
 func (p *fileCAProvider) MintingCA() (domain.MintingCA, error) {
-	caCertPath := filepath.Join(p.caPath, "ca.crt")
-	caKeyPath := filepath.Join(p.caPath, "ca.key")
-	certPEM, err := os.ReadFile(caCertPath)
-	if err != nil {
-		return nil, fmt.Errorf("read CA cert from %s: %w", caCertPath, err)
-	}
-	keyPEM, err := os.ReadFile(caKeyPath)
-	if err != nil {
-		return nil, fmt.Errorf("read CA key from %s: %w", caKeyPath, err)
-	}
-	return NewMintingCAFromPEM(certPEM, keyPEM, 2*time.Hour)
+	return p.minting.MintingCA()
 }
 
 func (p *fileCAProvider) ServerTLSCert() (tls.Certificate, error) {
@@ -326,17 +321,17 @@ func (p *fileCAProvider) ServerTLSCert() (tls.Certificate, error) {
 }
 
 // NewCertManagerProvider returns a CA provider backed by cert-manager
-// mounted PEM files for the server certificate. The minting CA is loaded
-// from the embedded CA path.
-func NewCertManagerProvider(certPath, keyPath, caPath string) domain.CAProvider {
-	return &fileCAProvider{label: "cert-manager", certPath: certPath, keyPath: keyPath, caPath: caPath}
+// mounted PEM files for the server certificate. The minting CA is
+// auto-bootstrapped via the supplied embedded provider.
+func NewCertManagerProvider(certPath, keyPath string, minting *EmbeddedProvider) domain.CAProvider {
+	return &fileCAProvider{label: "cert-manager", certPath: certPath, keyPath: keyPath, minting: minting}
 }
 
 // NewExternalProvider returns a CA provider backed by externally managed PEM
-// files for the server certificate. The minting CA is loaded from the
-// embedded CA path.
-func NewExternalProvider(certPath, keyPath, caPath string) domain.CAProvider {
-	return &fileCAProvider{label: "external", certPath: certPath, keyPath: keyPath, caPath: caPath}
+// files for the server certificate. The minting CA is auto-bootstrapped via
+// the supplied embedded provider.
+func NewExternalProvider(certPath, keyPath string, minting *EmbeddedProvider) domain.CAProvider {
+	return &fileCAProvider{label: "external", certPath: certPath, keyPath: keyPath, minting: minting}
 }
 
 // loadTLSKeyPair reads a PEM certificate/key pair and returns the TLS

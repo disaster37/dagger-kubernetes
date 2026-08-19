@@ -29,6 +29,7 @@ const (
 	kindTouchToken
 	kindUpsertTraceProvision
 	kindUpsertTraceIngest
+	kindMarkTraceFailed
 	kindSetMeta
 	kindUpsertManifestRoute
 	kindDeleteManifestRoute
@@ -129,6 +130,12 @@ type (
 		TraceID   string    `json:"trace_id"`
 		UserID    string    `json:"user_id"`
 		Version   string    `json:"version"`
+		UpdatedAt time.Time `json:"updated_at"`
+	}
+
+	cmdMarkTraceFailed struct {
+		TraceID   string    `json:"trace_id"`
+		Reason    string    `json:"reason"`
 		UpdatedAt time.Time `json:"updated_at"`
 	}
 
@@ -357,6 +364,12 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 			s.upsertTraceIngest(&m)
 			return nil
 		})
+	case kindMarkTraceFailed:
+		p, err := decode[cmdMarkTraceFailed](cmd, "mark trace failed")
+		if err != nil {
+			return nil, err
+		}
+		return s.markTraceFailed(p), nil
 	case kindSetMeta:
 		return nil, applyPayload(cmd, "set meta", func(p cmdSetMeta) error {
 			s.meta[p.Key] = p.Value
@@ -754,7 +767,18 @@ func (s *fsmState) upsertTraceIngest(m *domain.TraceMeta) {
 	if m.ProjectName != "" {
 		existing.ProjectName = m.ProjectName
 	}
-	if m.Status != "" {
+	// A terminal OTLP finish (success/failed) is authoritative: it supersedes
+	// any disconnect-failed status and clears the disconnect reason. A
+	// non-terminal OTLP status ("running", the default for an in-flight root
+	// span) must NOT overwrite a terminal status or clear its failure_reason
+	// — otherwise a late-arriving "running" span (e.g. a buffered/retried
+	// OTLP batch from before the disconnect, or an engine-emitted root span
+	// without a status code) would resurrect a disconnect-failed trace and
+	// defeat the disconnect detection (CWE-346 / data integrity).
+	if m.Status == "success" || m.Status == "failed" {
+		existing.Status = m.Status
+		existing.FailureReason = ""
+	} else if m.Status != "" && existing.Status != "success" && existing.Status != "failed" {
 		existing.Status = m.Status
 	}
 	if m.Version != "" {
@@ -774,6 +798,23 @@ func (s *fsmState) upsertTraceIngest(m *domain.TraceMeta) {
 	}
 	existing.UpdatedAt = m.UpdatedAt
 	s.traces[m.TraceID] = existing
+}
+
+// markTraceFailed transitions a non-terminal trace to "failed". Returns
+// true iff the status changed. Deterministic; caller supplies UpdatedAt.
+func (s *fsmState) markTraceFailed(p cmdMarkTraceFailed) bool {
+	m, ok := s.traces[p.TraceID]
+	if !ok {
+		return false
+	}
+	if m.Status == "success" || m.Status == "failed" {
+		return false
+	}
+	m.Status = "failed"
+	m.FailureReason = p.Reason
+	m.UpdatedAt = p.UpdatedAt
+	s.traces[p.TraceID] = m
+	return true
 }
 
 // --- cache routing ----------------------------------------------------------
@@ -1125,6 +1166,11 @@ func (f *FSM) listTraces(filter domain.TraceFilter) []*domain.TraceListResult {
 			continue
 		}
 		r := &domain.TraceListResult{TraceMeta: *m}
+		// Normalise in-flight/unknown statuses so the UI never renders a bare
+		// "unset" (or empty) badge: a trace without a final status is running.
+		if r.Status == "" || r.Status == "unset" {
+			r.Status = "running"
+		}
 		if g, ok := f.state.groups[m.GroupID]; ok {
 			r.GroupName = g.Name
 		}

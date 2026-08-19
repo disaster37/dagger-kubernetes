@@ -221,6 +221,8 @@ type Deps struct {
 	StatusProvider       domain.StatusProvider
 	Connect              *service.ConnectService
 	Router               *service.RegistryRouter
+	LiveHub              service.TraceEventBroadcaster // concrete *repository.LiveHub satisfies it; nil = create one
+	Lifecycle            *service.PipelineLifecycle
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -248,6 +250,7 @@ type Server struct {
 	cacheBackend    domain.CacheBackend
 	versionResolver domain.VersionResolver
 	liveHub         *repository.LiveHub
+	lifecycle       *service.PipelineLifecycle
 	traces          domain.TraceRepository
 	logs            domain.LogRepository
 	hertz           *server.Hertz
@@ -295,7 +298,8 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		sessions:        deps.Sessions,
 		cacheBackend:    deps.CacheBackend,
 		versionResolver: deps.VersionResolver,
-		liveHub:         repository.NewLiveHub(),
+		liveHub:         resolveLiveHub(deps.LiveHub),
+		lifecycle:       deps.Lifecycle,
 		traces:          deps.Traces,
 		logs:            deps.Logs,
 		dataConnSem:     make(chan struct{}, maxDataConnections),
@@ -330,6 +334,16 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		s.router = deps.Router
 	}
 	return s
+}
+
+// resolveLiveHub returns the concrete *repository.LiveHub to use for SSE
+// subscribe/unsubscribe, preferring the broadcaster injected via Deps.LiveHub
+// (a *repository.LiveHub in practice) and falling back to a fresh hub.
+func resolveLiveHub(b service.TraceEventBroadcaster) *repository.LiveHub {
+	if h, ok := b.(*repository.LiveHub); ok && h != nil {
+		return h
+	}
+	return repository.NewLiveHub()
 }
 
 // Start boots the control-plane HTTP server and the mTLS data-plane listener.
@@ -858,14 +872,31 @@ func (s *Server) handleDataConn(conn net.Conn) {
 	}
 
 	state := tlsConn.ConnectionState()
-	if len(state.PeerCertificates) == 0 {
+	fp := clientFingerprint(state)
+	if fp == "" {
 		s.logger.Error("no client certificate")
 		return
 	}
 
-	clientCert := state.PeerCertificates[0]
-	fp := fmt.Sprintf("%x", clientCert.SerialNumber)
+	s.serveDataTunnel(fp, conn)
+}
 
+// clientFingerprint extracts the client-cert fingerprint (serial number hex)
+// from a TLS connection state. Returns "" when no client certificate is
+// present. Extracted so tests can drive serveDataTunnel without a real TLS
+// handshake.
+func clientFingerprint(state tls.ConnectionState) string {
+	if len(state.PeerCertificates) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("%x", state.PeerCertificates[0].SerialNumber)
+}
+
+// serveDataTunnel is the body of the L4 data-plane tunnel for the client-cert
+// fingerprint fp. On every exit path after IncInFlight it decrements the
+// in-flight count and notifies the pipeline lifecycle, which marks the
+// associated trace failed when this was the last tunnel for the lease.
+func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 	lease, err := s.sessions.Get(fp)
 	if err != nil {
 		s.logger.WithField("fp", fp).WithError(err).Error("lease not found")
@@ -873,7 +904,15 @@ func (s *Server) handleDataConn(conn net.Conn) {
 	}
 
 	_ = s.sessions.IncInFlight(fp)
-	defer func() { _ = s.sessions.DecInFlight(fp) }()
+	if s.lifecycle != nil {
+		s.lifecycle.OnTunnelOpen(lease.TraceID)
+	}
+	defer func() {
+		remaining, _ := s.sessions.DecInFlightAndGet(fp)
+		if s.lifecycle != nil {
+			s.lifecycle.OnTunnelClosed(lease.TraceID, remaining)
+		}
+	}()
 
 	fleet, err := s.fleetManager.GetVersionFleet(lease.Version)
 	if err != nil {
@@ -903,9 +942,18 @@ func (s *Server) handleDataConn(conn net.Conn) {
 
 	_ = s.sessions.Touch(fp)
 
-	// Set initial deadlines; the io.Copy goroutines will refresh them.
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Minute))
-	_ = backend.SetDeadline(time.Now().Add(10 * time.Minute))
+	// A long-running pipeline holds a single tunnel open for its whole
+	// lifetime. If the lease's LastActivity were only set here, the reaper
+	// would expire it mid-run (default lease_ttl is 2m) and the fleet sweeper
+	// would scale the engine down underneath the client. Refresh the lease and
+	// the connection deadlines on a heartbeat so the tunnel (and its engine)
+	// survive long-running sessions.
+	const (
+		tunnelIdleTimeout = 10 * time.Minute
+		heartbeatInterval = 30 * time.Second
+	)
+	_ = conn.SetDeadline(time.Now().Add(tunnelIdleTimeout))
+	_ = backend.SetDeadline(time.Now().Add(tunnelIdleTimeout))
 
 	errc := make(chan error, 2)
 	go func() {
@@ -917,9 +965,21 @@ func (s *Server) handleDataConn(conn net.Conn) {
 		errc <- e
 	}()
 
-	<-errc
-	_ = conn.Close()
-	_ = backend.Close()
+	heartbeat := time.NewTicker(heartbeatInterval)
+	defer heartbeat.Stop()
+
+	for {
+		select {
+		case <-heartbeat.C:
+			_ = s.sessions.Touch(fp)
+			_ = conn.SetDeadline(time.Now().Add(tunnelIdleTimeout))
+			_ = backend.SetDeadline(time.Now().Add(tunnelIdleTimeout))
+		case <-errc:
+			_ = conn.Close()
+			_ = backend.Close()
+			return
+		}
+	}
 }
 
 // handleNoRoute serves the embedded SPA for unmatched routes. Cache-host

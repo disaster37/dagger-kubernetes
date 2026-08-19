@@ -82,23 +82,13 @@ in dev mode.
 ### Kubernetes (Helm)
 
 The recommended production deployment uses the Helm chart published to the
-GitHub Container Registry (GHCR) as an OCI artifact on every release:
+GitHub Container Registry (GHCR) as an OCI artifact on every release. The
+minting CA and the Raft transport CA are **auto-bootstrapped** on first boot —
+you no longer need to generate certificates by hand (see
+[TLS & client certificates](#tls--client-certificates)).
 
 ```bash
-# 1. Generate certificates
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-  -days 3650 -nodes -keyout ca.key -out ca.crt \
-  -subj "/CN=Dagger Minting CA"
-
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
-  -days 365 -nodes -keyout tls.key -out tls.crt \
-  -subj "/CN=data.your-domain.com" \
-  -addext "subjectAltName=DNS:data.your-domain.com"
-
-# 2. Generate a token
-TOKEN=$(openssl rand -hex 32)
-
-# 3. Create a values override
+# 1. Create a values override
 cat > my-values.yaml <<'EOF'
 ingress:
   hosts:
@@ -110,17 +100,27 @@ supervisor:
       publicUrl: https://supv.example.com
 EOF
 
-# 4. Install from the GHCR OCI repository
+# 2. Install from the GHCR OCI repository. No certificate generation needed:
+#    the minting CA + data-plane server cert are auto-generated on first boot.
 helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
   --version 0.1.0 \
   -f my-values.yaml \
-  --namespace dagger-stack --create-namespace \
-  --set ca.crt="$(cat ca.crt)" \
-  --set ca.key="$(cat ca.key)" \
-  --set tls.crt="$(cat tls.crt)" \
-  --set tls.key="$(cat tls.key)" \
+  --namespace dagger-stack --create-namespace
+
+# 3. Create an API token from the UI (Settings page) or import a legacy token:
+TOKEN=$(openssl rand -hex 32)
+helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+  --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
   --set-string "auth.tokens[0]=$TOKEN"
 ```
+
+> **Public certificates via cert-manager (optional):** the default `embedded`
+> TLS provider issues a self-signed server certificate from the auto-generated
+> minting CA — sufficient for mTLS but not publicly trusted. To serve a
+> Let's Encrypt certificate instead, install
+> [cert-manager](https://cert-manager.io) and enable
+> `dataCert` (see [TLS & client certificates](#tls--client-certificates)).
+> The minting CA is still auto-bootstrapped either way.
 
 To list available chart versions:
 
@@ -158,7 +158,9 @@ to the `-control` Service, and appends it to `ingress.tls[].hosts`. Set
 `supervisor.config.cache.authToken` (or leave it empty to read the
 `engine-registry-auth` Secret key `token`); the same token is injected into
 engine pods as `DAGGER_CACHE_TOKEN`. The control-plane TLS certificate must
-include the cache vhost as a SAN. For multiple backend registries, set
+include the cache vhost as a SAN — the `embedded` provider adds it
+automatically; when using cert-manager, include `cache.<host>` in the
+certificate's `dnsNames`. For multiple backend registries, set
 `supervisor.config.cache.registries` (list of
 `{id, internalAddr, username, password}`).
 
@@ -392,6 +394,10 @@ inline comments. The sections below summarise the most important ones.
 | `history`    | `gc.enabled`                | `false`                          | Master switch for the history auto-purge sweeper. |
 |              | `gc.max_age`                | `720h`                           | Purge traces whose last update is older than this (30d). |
 |              | `gc.schedule`               | `1h`                             | History sweeper ticker interval.                  |
+| `pipeline`   | `disconnect_grace`          | `0s`                             | Linger window before a closed tunnel fails the trace; `0s` = immediate. |
+|              | `stale_sweep.enabled`       | `true`                           | Master switch for the pipeline stale-trace sweeper. |
+|              | `stale_sweep.schedule`      | `1m`                             | Stale sweeper ticker interval.                    |
+|              | `stale_sweep.stale_after`   | `5m`                             | Mark running traces with no active lease failed once older than this. |
 | `fleet`      | `namespace`                 | `dagger-cache`                   | K8s namespace for engine pods.                    |
 |              | `min_replicas_per_version`  | `0`                              | Autoscaler floor per version.                     |
 |              | `max_replicas_per_version`  | `3`                              | Autoscaler ceiling per version.                   |
@@ -405,9 +411,11 @@ inline comments. The sections below summarise the most important ones.
 |              | `engine_debug`              | `false`                          | `engine.toml: debug = true`.                      |
 |              | `engine_log_format`         | `json`                           | `engine.toml: [log] format`; `""` omits.          |
 |              | `engine_registry_mirrors`   | `{}`                             | `engine.toml` registry mirrors.                   |
-| `ca`         | `minting_ca_secret`         | `supervisor-minting-ca`          | K8s Secret with the minting CA (holds the CA private key; shared across pods in multi-node). |
+| `ca`         | `minting_ca_secret`         | `supervisor-minting-ca`          | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `ca.crt`/`ca.key` to bring an existing CA. |
 |              | `client_cert_ttl`           | `2h`                             | TTL of minted client certs.                       |
-| `tls`        | `server_cert_secret`        | `supervisor-tls`                 | K8s Secret with `tls.crt`/`tls.key`.              |
+| `tls`        | `provider`                  | `embedded`                       | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Minting CA is auto-bootstrapped for all. |
+|              | `cert_path` / `key_path`    | see loader                      | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager). |
+|              | `server_cert_secret`        | `supervisor-tls`                 | K8s Secret with `tls.crt`/`tls.key`.              |
 |              | `lease_ttl`                 | `2m`                             | Lease TTL; clients renew before expiry.           |
 | `version`    | `floor`                     | `v0.19.0`                        | Minimum engine version.                           |
 |              | `allowlist`                 | —                                | `major.minor` prefixes to admit.                  |
@@ -693,6 +701,34 @@ telemetry ages out via backend retention).
   to match (or exceed) `history.gc.max_age` so spans age out alongside the
   supervisor-side purge (see [Telemetry stack](#telemetry-stack)).
 
+### Pipeline disconnect detection
+
+The L4 data-plane tunnel is the *owning* client connection: the Dagger CLI holds
+it open for the lifetime of a run. If that tunnel closes before the run's OTLP
+finish record arrives (e.g. the CLI was killed), the supervisor marks the
+associated `trace_meta` `failed` with `failure_reason: "client connection lost"`
+— idempotently, and only when the trace is still non-terminal. Passive UI
+viewers (the `/api/v1/traces/:id/live` SSE stream) never trigger this. See
+ADR-019.
+
+A background staleness sweeper recovers traces orphaned by a supervisor
+restart/crash: it marks `running` traces with no active lease (`InFlight == 0`)
+older than `pipeline.stale_sweep.stale_after` as `failed` with
+`failure_reason: "client session expired"`.
+
+```yaml
+pipeline:
+  disconnect_grace: "0s"    # 0s = fail immediately on tunnel close (default).
+                            # >0s = linger window; a same-trace reconnect cancels.
+  stale_sweep:
+    enabled: true           # supervisor-restart / crash recovery sweeper.
+    schedule: "1m"
+    stale_after: "5m"
+```
+
+`GET /api/v1/traces/:id` returns the `failure_reason` field on the merged
+`TraceMeta` so the UI can render why a pipeline failed.
+
 ---
 
 ## Authentication
@@ -902,19 +938,89 @@ subcommand remain (they import flat-file tokens, not SQLite data):
 
 The data plane is mTLS-only. The Supervisor:
 
-1. Holds a server cert in the `tls.server_cert_secret` K8s Secret
-   (`tls.crt` + `tls.key`).
-2. Holds a minting CA in `ca.minting_ca_secret`; it signs short-lived
-   (`ca.client_cert_ttl`) client certs at lease grant. In a multi-node
-   deployment the embedded provider shares this CA across pods through that
-   Secret (with a local cache under `tls.ca_path`), so engine mTLS client
-   certs minted by any pod are trusted by every pod's data-plane listener.
-   The Secret contains the CA **private key** and must be RBAC-restricted to
-   the supervisor ServiceAccount.
+1. Holds a **server cert** — where it comes from depends on `tls.provider`
+   (see below).
+2. Holds a **minting CA** in `ca.minting_ca_secret`; it signs short-lived
+   (`ca.client_cert_ttl`) client certs at lease grant. The minting CA is
+   **auto-bootstrapped on first boot** for every provider: ordinal 0 of the
+   supervisor StatefulSet generates a goca CA and writes it to the
+   `<release>-minting-ca` Secret; the other pods poll the Secret before
+   issuing anything. The `tls.ca_path` files are kept as a local cache. The
+   Secret contains the CA **private key** (any pod may mint client certs) and
+   must be RBAC-restricted to the supervisor ServiceAccount — the chart
+   already does this.
 3. Pins each minted cert's lease to a specific engine pod via the L4 proxy.
 
-For local dev (Docker compose) mTLS is relaxed; in Kubernetes you must
-provision both secrets before applying the Supervisor.
+The **Raft transport** is likewise mTLS (chart default) with its own
+auto-bootstrapped internal CA (`<release>-raft-ca`) — see
+[Storage (Raft)](#storage-raft--multi-user-migration).
+
+### TLS providers
+
+| `tls.provider` | Server certificate source | Minting CA | Notes |
+|---|---|---|---|
+| `embedded` (default) | Self-signed, issued by the auto-generated minting CA | auto-bootstrapped | Zero config. Server cert SANs cover the data host, cache vhost, and pod names automatically. |
+| `cert-manager` | cert-manager `Certificate` (e.g. Let's Encrypt) | auto-bootstrapped | Publicly trusted server cert; the minting CA is still internal. |
+| `external` | Operator-managed PEM files (`tls.cert_path`/`tls.key_path`) | auto-bootstrapped | Bring your own keypair (e.g. from an external PKI). |
+
+**Zero certificate generation:** with `embedded` (the default) or
+`cert-manager`, you never run `openssl` by hand — the minting CA, the Raft CA,
+and the server cert (embedded) are all generated automatically. To bring an
+existing minting CA (e.g. migrating a prior deployment), set `ca.crt`/`ca.key`
+in the chart values; the supervisor reuses it instead of generating a new one.
+
+### cert-manager (public server certificate)
+
+Install [cert-manager](https://cert-manager.io) and a `ClusterIssuer`, then
+point the chart at it. The minting CA is still auto-bootstrapped — it signs
+engine client certs and never needs a public issuer.
+
+```bash
+# 1. Create a ClusterIssuer once (cluster-wide)
+cat <<'EOF' | kubectl apply -f -
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    server: https://acme-v02.api.letsencrypt.org/directory
+    email: you@example.com
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:
+          ingress:
+            class: nginx
+EOF
+
+# 2. Install with the cert-manager provider
+helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+  --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
+  --set supervisor.config.tls.provider=cert-manager \
+  --set dataIngress.enabled=true \
+  --set dataIngress.host=data.your-domain.com \
+  --set dataIngress.annotations.cert-manager.io/cluster-issuer=letsencrypt-prod \
+  --set dataIngress.tls.secretName=dagger-data-tls
+```
+
+The chart renders a cert-manager `Certificate` (`dataCert.enabled: true` +
+`dataCert.issuerName`/`issuerKind`) and auto-wires `tls.cert_path`/`key_path`
+to the mounted Secret (`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`).
+The `dataIngress` (nginx `ssl-passthrough`) forwards the raw mTLS handshake to
+the supervisor, which serves the cert-manager certificate.
+
+> The certificate must include the **cache vhost** (`cache.<public_url host>`)
+> as a SAN alongside the data host, because the cache proxy shares the
+> control-plane TLS listener. Add both to the `Certificate` `dnsNames` (the
+> chart's `dataCert` template only adds `dataIngress.host`; include the cache
+> host via a custom `Certificate` or set `ingress.cacheHost` and add it to the
+> issuer's request).
+
+For local dev (Docker compose) mTLS is relaxed; in Kubernetes the minting CA
+and Raft CA are auto-bootstrapped, and the server cert is either auto-issued
+(`embedded`) or cert-manager-managed — no manual certificate provisioning is
+required.
 
 ---
 
@@ -984,7 +1090,8 @@ Features:
 - **Pipeline list** — every run identified by a friendly name (`@username · org/repo`,
   or the root-folder/module name when there is no git repo) with status,
   duration, and engine version; the raw trace ID is shown as a secondary
-  reference under the name
+  reference under the name. The list auto-refreshes every 10s while any run is
+  in flight, and the per-row duration ticks live every 1s until the run finishes
 - **Trace viewer** — compact step view: one row per high-level step (direct
   children of the root span, with Dagger `dagger.io/ui.passthrough` spans
   promoted) showing status and wall-clock duration. Sub-spans are collapsed
@@ -1001,9 +1108,12 @@ Features:
   of steps/logs so new spans and log lines appear as the pipeline runs. A 5s
   polling fallback remains for resilience.
 - **Duration** — shown prominently in the viewer header next to the status and
-  in the details table; the `/api/v1/traces/:id` response returns `duration_ms`
-  in milliseconds (matching the list endpoint), with the raw value available
-  as `duration_ns`
+  in the details table; while a pipeline or step is `running`, the displayed
+  duration ticks live every 250ms (Details) / 1s (list) from the
+  server-provided `start_time`/`started_at` absolute timestamp, and freezes at
+  the final server `duration_ms` once the run finishes. The
+  `/api/v1/traces/:id` response returns `duration_ms` in milliseconds (matching
+  the list endpoint), with the raw value available as `duration_ns`
 - **Log viewer** — log lines correlated by span ID (the collector promotes
   `trace_id` and `span_id` to Loki labels) and rendered inline under the step
   or sub-span that produced them (`GET /api/v1/traces/:id/logs`); logs with no
@@ -1142,8 +1252,8 @@ all delegate to (or mirror) this script.
 ## Production checklist
 
 - [ ] Set `grafana.adminPassword` to a strong value
-- [ ] Use `cert-manager` or external TLS provider instead of embedded CA
-- [ ] Provision all required K8s Secrets before install (CA, TLS, tokens)
+- [ ] Use `cert-manager` (`tls.provider: cert-manager`) for a publicly trusted server certificate (optional; `embedded` is fully auto-provisioned but self-signed)
+- [ ] Back up the auto-generated `<release>-minting-ca` and `<release>-raft-ca` Secrets (or set `ca.crt`/`ca.key` explicitly to reuse a known CA)
 - [ ] Configure persistent storage for all stateful components
 - [ ] Set appropriate resource requests/limits per component
 - [ ] Configure ingress with TLS for the control plane

@@ -167,6 +167,63 @@ func TestAttributionIngestNoCIRepo(t *testing.T) {
 	}
 }
 
+func TestAttributionMarkFailed(t *testing.T) {
+	asvc, _, _, _ := newAttributionForTest(t)
+	ctx := context.Background()
+
+	// Empty trace ID is a no-op.
+	if asvc.MarkFailed(ctx, "", "reason") {
+		t.Fatal("empty trace ID should not transition")
+	}
+
+	// A provisioned (non-terminal) trace transitions to failed with the reason.
+	asvc.Provision(ctx, "t1", "u1", "v0.21.4")
+	if !asvc.MarkFailed(ctx, "t1", "client connection lost") {
+		t.Fatal("expected transition for t1")
+	}
+	meta, err := asvc.traceMeta.Get(ctx, "t1")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if meta.Status != "failed" || meta.FailureReason != "client connection lost" {
+		t.Fatalf("trace = %+v", meta)
+	}
+
+	// A terminal trace does not transition again.
+	if asvc.MarkFailed(ctx, "t1", "again") {
+		t.Fatal("terminal trace should not transition")
+	}
+}
+
+// errorTraceMetaRepo is a TraceMetaRepository whose MarkFailed always errors.
+type errorTraceMetaRepo struct{}
+
+func (errorTraceMetaRepo) UpsertProvision(context.Context, string, string, string) error {
+	return nil
+}
+func (errorTraceMetaRepo) UpsertIngest(context.Context, *domain.TraceMeta) error { return nil }
+func (errorTraceMetaRepo) Get(context.Context, string) (*domain.TraceMeta, error) {
+	return nil, errors.New("boom")
+}
+func (errorTraceMetaRepo) List(context.Context, domain.TraceFilter) ([]*domain.TraceListResult, error) {
+	return nil, nil
+}
+func (errorTraceMetaRepo) ListBefore(context.Context, time.Time, bool) ([]*domain.TraceMeta, error) {
+	return nil, nil
+}
+func (errorTraceMetaRepo) Delete(context.Context, string) error { return nil }
+func (errorTraceMetaRepo) MarkFailed(context.Context, string, string) (bool, error) {
+	return false, errors.New("boom")
+}
+func (errorTraceMetaRepo) Stats(context.Context) (int, time.Time, error) { return 0, time.Time{}, nil }
+
+func TestAttributionMarkFailedRepoError(t *testing.T) {
+	asvc := NewAttributionService(nil, nil, errorTraceMetaRepo{}, testLogger())
+	if asvc.MarkFailed(context.Background(), "t1", "reason") {
+		t.Fatal("expected false when the repo errors")
+	}
+}
+
 // TestAttributionIngestGitRemoteFallback verifies that a local (non-CI) run,
 // which emits "dagger.io/git.remote" but not "dagger.io/ci.repo", still gets
 // an identity persisted (project_name + ci_repo) and can auto-assign a group.

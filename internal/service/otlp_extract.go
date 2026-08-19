@@ -152,9 +152,8 @@ func ExtractLogTraceIDs(body []byte) []string {
 }
 
 // ExtractTraceSummaries parses an OTLP/HTTP protobuf body (ExportTraceServiceRequest)
-// and returns one summary per distinct root trace (root = span whose parent is
-// absent among the payload's span IDs). Malformed bodies yield nil (caller
-// proceeds without metadata).
+// and returns one summary per distinct root trace (root = span with no parent
+// at all). Malformed bodies yield nil (caller proceeds without metadata).
 //
 // The top-level ExportTraceServiceRequest message only wraps
 // "repeated ResourceSpans resource_spans = 1"; its envelope is walked with
@@ -166,18 +165,16 @@ func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
 		return nil
 	}
 
-	// Index span IDs present in this payload (raw bytes as map keys).
-	present := make(map[string]bool, len(spans))
-	for i := range spans {
-		present[string(spans[i].span.GetSpanId())] = true
-	}
-
-	// Root = span whose parent is absent in this payload. First root per
-	// trace wins.
+	// Root = span with no parent at all (absent or all-zero parentSpanId).
+	// A span whose parent is merely absent from THIS payload batch is not the
+	// trace root: a batch that carries only a subtree must not be allowed to
+	// drive trace_meta status/duration, otherwise a finished child span would
+	// mark the whole trace finished (success/failed) while it is still
+	// running. First root per trace wins.
 	byTrace := make(map[string]*spanWithResource)
 	for i := range spans {
 		s := &spans[i]
-		if pid := string(s.span.GetParentSpanId()); pid == "" || !present[pid] {
+		if isRootSpan(s.span.GetParentSpanId()) {
 			tid := string(s.span.GetTraceId())
 			if _, ok := byTrace[tid]; !ok {
 				byTrace[tid] = s
@@ -190,6 +187,19 @@ func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
 		out = append(out, buildSummary(root))
 	}
 	return out
+}
+
+// isRootSpan reports whether a parent span ID is empty: absent (nil/len 0) or
+// all zero bytes. Only spans without any parent are trace roots; every other
+// span carries its parent's ID even when that parent is not part of the same
+// export batch.
+func isRootSpan(parent []byte) bool {
+	for _, b := range parent {
+		if b != 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // stringAttrs extracts string-valued attributes from OTLP KeyValue pairs.
@@ -210,14 +220,17 @@ func buildSummary(s *spanWithResource) TraceIngestSummary {
 	// match the trace_id persisted at engine-provision time.
 	sum := TraceIngestSummary{TraceID: hex.EncodeToString(root.GetTraceId())}
 
-	// Status code mapping (reuse trace_store semantics).
+	// Status code mapping (reuse trace_store semantics). The root span carries
+	// no status while the run is in flight, so the default is "running" rather
+	// than a distinct "unset" state: a final status must only be surfaced once
+	// the root span actually finished.
 	switch root.GetStatus().GetCode() {
 	case tracepb.Status_STATUS_CODE_OK:
 		sum.Status = "success"
 	case tracepb.Status_STATUS_CODE_ERROR:
 		sum.Status = "failed"
 	default:
-		sum.Status = "unset"
+		sum.Status = "running"
 	}
 
 	// Start time + duration.

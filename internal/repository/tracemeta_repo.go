@@ -49,6 +49,32 @@ func (r *TraceMetaRepo) UpsertIngest(ctx context.Context, m *domain.TraceMeta) e
 	return r.store.applyCtx(ctx, kindUpsertTraceIngest, m)
 }
 
+// maxReasonLen bounds the MarkFailed reason string before it is persisted,
+// mirroring attribution.maxIngestFieldLen (CWE-770).
+const maxReasonLen = 256
+
+// MarkFailed transitions a non-terminal trace to "failed" with reason (see
+// fsmState.markTraceFailed). Idempotent: terminal traces are untouched. The
+// returned bool reports whether the status actually changed.
+func (r *TraceMetaRepo) MarkFailed(ctx context.Context, traceID, reason string) (bool, error) {
+	if !domain.ValidTraceIDKey(traceID) {
+		return false, fmt.Errorf("invalid trace ID: %w", domain.ErrValidation)
+	}
+	if len(reason) > maxReasonLen {
+		reason = reason[:maxReasonLen]
+	}
+	resp, err := r.store.applyCtxResponse(ctx, kindMarkTraceFailed, cmdMarkTraceFailed{
+		TraceID:   traceID,
+		Reason:    reason,
+		UpdatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return false, err
+	}
+	transitioned, _ := resp.(bool)
+	return transitioned, nil
+}
+
 func (r *TraceMetaRepo) Get(ctx context.Context, traceID string) (*domain.TraceMeta, error) {
 	return r.store.fsmRead().readTrace(traceID)
 }

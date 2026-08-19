@@ -20,6 +20,9 @@ type SessionStore interface {
 	Touch(certFP string) error
 	IncInFlight(certFP string) error
 	DecInFlight(certFP string) error
+	// DecInFlightAndGet decrements the in-flight count for certFP and returns
+	// the resulting count. Returns 0 and a non-nil error when the lease is gone.
+	DecInFlightAndGet(certFP string) (int, error)
 	Remove(certFP string)
 	PinnedSessionsOnReplica(podName string) int
 	CountByUser(userID string) int

@@ -13,6 +13,7 @@ type Config struct {
 	TLS       TLSConfig       `mapstructure:"tls"`
 	Version   VersionConfig   `mapstructure:"version"`
 	LeaseTTL  time.Duration   `mapstructure:"lease_ttl"`
+	Pipeline  PipelineConfig  `mapstructure:"pipeline"`
 	CI        CIConfig        `mapstructure:"ci"`
 	LogLevel  string          `mapstructure:"log_level"`
 	LogFormat string          `mapstructure:"log_format"` // "json" (default) | "text"
@@ -186,6 +187,24 @@ type HistoryGCConfig struct {
 	Enabled  bool          `mapstructure:"enabled"`
 	MaxAge   time.Duration `mapstructure:"max_age"`
 	Schedule time.Duration `mapstructure:"schedule"`
+}
+
+// PipelineConfig governs client-disconnect detection for pipelines (see
+// ADR-019): when the owning L4 data-plane tunnel closes, or when a running
+// trace has no active lease beyond a staleness threshold, the supervisor
+// transitions the trace to "failed" with a recorded reason.
+type PipelineConfig struct {
+	DisconnectGrace time.Duration      `mapstructure:"disconnect_grace"`
+	StaleSweep      PipelineStaleSweep `mapstructure:"stale_sweep"`
+}
+
+// PipelineStaleSweep governs the background staleness sweeper that recovers
+// orphaned running traces after a supervisor restart/crash (in-memory leases
+// are lost, so the disconnect handler cannot run).
+type PipelineStaleSweep struct {
+	Enabled    bool          `mapstructure:"enabled"`
+	Schedule   time.Duration `mapstructure:"schedule"`
+	StaleAfter time.Duration `mapstructure:"stale_after"`
 }
 
 // EnvVarSource selects one key of a Kubernetes Secret as the value of an

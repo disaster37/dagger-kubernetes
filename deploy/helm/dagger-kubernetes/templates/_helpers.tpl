@@ -122,6 +122,27 @@ managed CAs. */}}
 {{- default (printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .)) .Values.supervisor.config.raft.tls.caSecret -}}
 {{- end -}}
 
+{{/* Resolve the control/data-plane server TLS certificate path. The embedded
+provider issues its own server cert from the minting CA (under tls.ca_path), so
+the path is unused. The cert-manager provider reads the cert-manager-issued
+keypair mounted at /etc/dagger-kubernetes/data-tls (tls.crt). The external
+provider uses the operator-supplied path. */}}
+{{- define "dagger-kubernetes.controlTLSCertPath" -}}
+{{- if eq (.Values.supervisor.config.tls.provider | default "embedded") "cert-manager" -}}
+/etc/dagger-kubernetes/data-tls/tls.crt
+{{- else -}}
+{{- .Values.supervisor.config.tls.certPath | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.controlTLSKeyPath" -}}
+{{- if eq (.Values.supervisor.config.tls.provider | default "embedded") "cert-manager" -}}
+/etc/dagger-kubernetes/data-tls/tls.key
+{{- else -}}
+{{- .Values.supervisor.config.tls.keyPath | default "" -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.victoriaUrl" -}}
 {{- if .Values.tools.victoria.enabled -}}

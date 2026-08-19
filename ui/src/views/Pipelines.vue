@@ -34,7 +34,7 @@
               <span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span>
             </td>
             <td>{{ trace.version || '-' }}</td>
-            <td>{{ formatDuration(trace.duration_ms) }}</td>
+            <td>{{ formatDuration(liveRowDuration(trace)) }}</td>
             <td>{{ ciLabel(trace.ci_provider) }}</td>
             <td>{{ trace.group_name || '-' }}</td>
             <td>
@@ -51,7 +51,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { fetchTraces, listGroups } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import type { TraceRow, Group } from '@/api/types'
@@ -61,6 +61,13 @@ const traces = ref<TraceRow[]>([])
 const groups = ref<Group[]>([])
 const groupFilter = ref('')
 
+// Live-ticking clock (1s cadence is enough for the list) used by
+// liveRowDuration; a running row recomputes elapsed from now − started_at.
+const now = ref<number>(Date.now())
+let nowTimer: number | undefined
+let pollTimer: number | undefined
+let disposed = false
+
 onMounted(async () => {
   if (auth.isAdmin) {
     try {
@@ -68,7 +75,39 @@ onMounted(async () => {
     } catch { /* ignore */ }
   }
   await load()
+
+  // The component may have unmounted while load() was in flight; do not
+  // register timers/listeners on a dead component.
+  if (disposed) return
+
+  nowTimer = window.setInterval(() => {
+    now.value = Date.now()
+  }, 1000)
+
+  // While any row is running, re-fetch every 10s to detect status transitions
+  // and pick up the final server duration_ms. Skipped when every row is done.
+  pollTimer = window.setInterval(() => {
+    if (traces.value.some((t) => t.status === 'running')) {
+      void load()
+    }
+  }, 10000)
+
+  document.addEventListener('visibilitychange', onVisibilityChange)
 })
+
+onUnmounted(() => {
+  disposed = true
+  if (nowTimer) window.clearInterval(nowTimer)
+  if (pollTimer) window.clearInterval(pollTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
+})
+
+// Background tabs throttle setInterval to ≤1/s; recompute `now` from Date.now()
+// the moment the tab becomes visible again so the display never shows a stale
+// frozen elapsed after a long absence.
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') now.value = Date.now()
+}
 
 async function load() {
   try {
@@ -76,6 +115,15 @@ async function load() {
   } catch (e) {
     console.error('Failed to fetch traces', e)
   }
+}
+
+// liveRowDuration ticks upward for a running trace (now − started_at) and
+// freezes at the server duration_ms once finished. Returns ms.
+function liveRowDuration(trace: TraceRow): number {
+  if (trace.status !== 'running') return trace.duration_ms
+  const start = Date.parse(trace.started_at)
+  if (!Number.isFinite(start) || start <= 0) return trace.duration_ms
+  return Math.max(0, now.value - start)
 }
 
 function formatDuration(ms: number): string {

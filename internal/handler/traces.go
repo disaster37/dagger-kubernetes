@@ -79,7 +79,11 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 				trace.CIRepo = meta.ProjectName
 			}
 		}
-		if (trace.Status == "running" || trace.Status == "") && meta.Status != "" {
+		// The Tempo reconstruction may still report "running" while the root
+		// span's finish record has not been indexed yet. Only promote to a
+		// final status when trace_meta captured one at ingest; a stale
+		// "running" (or empty) meta value must never downgrade a final status.
+		if (trace.Status == "running" || trace.Status == "") && (meta.Status == "success" || meta.Status == "failed") {
 			trace.Status = meta.Status
 		}
 		if trace.DurationMS == 0 && meta.DurationMS != 0 {

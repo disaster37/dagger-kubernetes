@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,6 +287,83 @@ func TestTraceMetaRepoListBefore(t *testing.T) {
 	}
 	if len(all) != 2 {
 		t.Fatalf("unprotected = %v, want 2", traceMetaIDs(all))
+	}
+}
+
+func TestTraceMetaRepoMarkFailedInvalidTraceID(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	for _, id := range []string{`bad"id`, "has space", "", ".leading-dot", "a/b"} {
+		transitioned, err := repo.MarkFailed(ctx, id, "reason")
+		if !errors.Is(err, domain.ErrValidation) {
+			t.Fatalf("MarkFailed(%q) err = %v, want ErrValidation", id, err)
+		}
+		if transitioned {
+			t.Fatalf("MarkFailed(%q) transitioned = true, want false", id)
+		}
+	}
+}
+
+func TestTraceMetaRepoMarkFailedBoundsReason(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	if err := repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "test-trace-001", Status: "running"}); err != nil {
+		t.Fatalf("UpsertIngest: %v", err)
+	}
+
+	reason := strings.Repeat("r", maxReasonLen+100)
+	transitioned, err := repo.MarkFailed(ctx, "test-trace-001", reason)
+	if err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	if !transitioned {
+		t.Fatal("expected transition")
+	}
+	m, _ := repo.Get(ctx, "test-trace-001")
+	if len(m.FailureReason) != maxReasonLen {
+		t.Fatalf("failure_reason len = %d, want %d (bounded)", len(m.FailureReason), maxReasonLen)
+	}
+	if !strings.HasPrefix(reason, m.FailureReason) {
+		t.Fatalf("failure_reason = %q, want prefix of original", m.FailureReason)
+	}
+}
+
+func TestTraceMetaRepoMarkFailedTransitioned(t *testing.T) {
+	store := newTestRaftStore(t)
+	repo := NewTraceMetaRepo(store)
+	ctx := context.Background()
+
+	if err := repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "test-trace-002", Status: "running"}); err != nil {
+		t.Fatalf("UpsertIngest: %v", err)
+	}
+
+	transitioned, err := repo.MarkFailed(ctx, "test-trace-002", "client connection lost")
+	if err != nil {
+		t.Fatalf("MarkFailed: %v", err)
+	}
+	if !transitioned {
+		t.Fatal("first MarkFailed should transition")
+	}
+	m, _ := repo.Get(ctx, "test-trace-002")
+	if m.Status != "failed" || m.FailureReason != "client connection lost" {
+		t.Fatalf("trace = %+v", m)
+	}
+
+	// Idempotent: a terminal trace is untouched.
+	transitioned, err = repo.MarkFailed(ctx, "test-trace-002", "other")
+	if err != nil {
+		t.Fatalf("second MarkFailed: %v", err)
+	}
+	if transitioned {
+		t.Fatal("second MarkFailed should not transition")
+	}
+	m, _ = repo.Get(ctx, "test-trace-002")
+	if m.FailureReason != "client connection lost" {
+		t.Fatalf("failure_reason = %q, want original", m.FailureReason)
 	}
 }
 

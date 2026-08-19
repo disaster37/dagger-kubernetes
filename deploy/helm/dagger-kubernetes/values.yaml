@@ -279,12 +279,19 @@ supervisor:
 ## @param supervisor.config.ca.clientCertTtl Client certificate TTL.
 ##   The engine-client minting CA is shared across supervisor pods via the
 ##   <release>-minting-ca Secret (ca.minting_ca_secret), which holds the CA
-##   private key — RBAC-restrict it to the supervisor ServiceAccount.
+##   private key — RBAC-restrict it to the supervisor ServiceAccount. The CA is
+##   AUTO-BOOTSTRAPPED on first boot (ordinal 0 generates it, other pods poll):
+##   no manual certificate generation is required. Only set ca.crt/ca.key (below)
+##   to bring an existing CA.
     ca:
       clientCertTtl: "2h"
-## @param supervisor.config.tls.provider TLS provider for the control plane ("embedded" or "cert-manager").
-## @param supervisor.config.tls.certPath Control-plane certificate path (empty = TLS disabled).
-## @param supervisor.config.tls.keyPath Control-plane key path (empty = TLS disabled).
+## @param supervisor.config.tls.provider TLS provider for the server certificate:
+##   "embedded" (default, minting CA issues a self-signed server cert),
+##   "cert-manager" (cert-manager issues the server cert, see dataCert/dataIngress below),
+##   or "external" (operator-managed PEM files at certPath/keyPath).
+##   The minting CA is auto-bootstrapped for every provider.
+## @param supervisor.config.tls.certPath Server certificate path (only "external"). cert-manager auto-wires the mounted data-tls secret.
+## @param supervisor.config.tls.keyPath Server key path (only "external"). cert-manager auto-wires the mounted data-tls secret.
     tls:
       provider: "embedded"
       certPath: ""
@@ -320,13 +327,16 @@ auth:
 
 ## @section Minting CA and TLS
 
-## @param ca.crt PEM-encoded CA certificate for engine mTLS.
-## @param ca.key PEM-encoded CA private key for engine mTLS.
+## @param ca.crt [optional] PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot.
+## @param ca.key [optional] PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot.
+##   When both are empty (the default), the supervisor generates the minting CA
+##   on first boot and stores it in the <release>-minting-ca Secret. Only set
+##   these to bring an existing CA (e.g. migrating from a prior deployment).
 ca:
   crt: ""
   key: ""
-## @param tls.crt PEM-encoded data-plane server certificate.
-## @param tls.key PEM-encoded data-plane server private key.
+## @param tls.crt [optional] PEM-encoded data-plane server certificate (only needed for provider "external" / legacy). cert-manager auto-wires this.
+## @param tls.key [optional] PEM-encoded data-plane server private key (only needed for provider "external" / legacy). cert-manager auto-wires this.
 tls:
   crt: ""
   key: ""
@@ -397,10 +407,12 @@ dataIngress:
 
 ## @section Data-plane certificate (cert-manager)
 
-## @param dataCert.enabled Provision a Let's Encrypt certificate for the data
-##   plane via cert-manager. Requires cert-manager to be installed. The
-##   resulting Secret is mounted as the supervisor's TLS server certificate.
-##   When enabled, tls.provider must be set to "cert-manager".
+## @param dataCert.enabled Provision a certificate for the data plane via
+##   cert-manager (e.g. Let's Encrypt). Requires cert-manager to be installed
+##   in the cluster and `supervisor.config.tls.provider: "cert-manager"`. The
+##   resulting Secret is mounted as the supervisor's server certificate; the
+##   chart auto-wires certPath/keyPath to it. The minting CA is still
+##   auto-bootstrapped (it never needs a public issuer).
 ## @param dataCert.issuerName cert-manager ClusterIssuer name (e.g. letsencrypt-prod).
 ## @param dataCert.issuerKind cert-manager issuer kind: ClusterIssuer or Issuer.
 ## @param dataCert.secretName Secret name where cert-manager stores the certificate.

@@ -84,6 +84,8 @@ func TestNewMetricsRegisters(t *testing.T) {
 	m.ActiveLeases.Inc()
 	m.ActiveReplicas.WithLabelValues("v0.21.4").Set(1)
 	m.OTelIngestTotal.WithLabelValues("traces", "success").Inc()
+	m.PipelineDisconnectFailedTotal.WithLabelValues("tunnel_close").Inc()
+	m.PipelineDisconnectFailedTotal.WithLabelValues("stale_sweep").Inc()
 
 	fam, err := reg.Gather()
 	if err != nil {
@@ -91,6 +93,19 @@ func TestNewMetricsRegisters(t *testing.T) {
 	}
 	if len(fam) == 0 {
 		t.Fatal("no metric families gathered")
+	}
+
+	found := false
+	for _, f := range fam {
+		if f.GetName() == "dagger_cache_pipeline_disconnect_failed_total" {
+			found = true
+			if len(f.GetMetric()) != 2 {
+				t.Fatalf("pipeline disconnect metric has %d series, want 2", len(f.GetMetric()))
+			}
+		}
+	}
+	if !found {
+		t.Fatal("pipeline_disconnect_failed_total metric not registered")
 	}
 }
 

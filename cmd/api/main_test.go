@@ -11,7 +11,9 @@ import (
 	"testing"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
@@ -739,6 +741,57 @@ func TestMintingCABootstrap(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSelectTLSProvider(t *testing.T) {
+	t.Run("embedded returns provider that shares minting CA via secret", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset()
+		cfg := &domain.Config{
+			CA:     domain.CAConfig{MintingCASecret: "minting-ca", ClientCertTTL: 2 * time.Hour},
+			TLS:    domain.TLSConfig{Provider: "embedded", CAPath: t.TempDir()},
+			Raft:   domain.RaftConfig{Replicas: 1},
+			Fleet:  domain.FleetConfig{Namespace: "ns"},
+			Server: domain.ServerConfig{DataHost: "data.example.com"},
+		}
+		p, err := selectTLSProvider(cfg, clientset)
+		if err != nil {
+			t.Fatalf("selectTLSProvider: %v", err)
+		}
+		if _, err := p.MintingCA(); err != nil {
+			t.Fatalf("MintingCA: %v", err)
+		}
+		if _, err := clientset.CoreV1().Secrets("ns").Get(context.Background(), "minting-ca", metav1.GetOptions{}); err != nil {
+			t.Fatalf("minting-ca secret not created: %v", err)
+		}
+	})
+
+	t.Run("cert-manager still bootstraps the minting CA", func(t *testing.T) {
+		clientset := fake.NewSimpleClientset()
+		cfg := &domain.Config{
+			CA:     domain.CAConfig{MintingCASecret: "minting-ca", ClientCertTTL: 2 * time.Hour},
+			TLS:    domain.TLSConfig{Provider: "cert-manager", CAPath: t.TempDir(), CertPath: "unused", KeyPath: "unused"},
+			Raft:   domain.RaftConfig{Replicas: 1},
+			Fleet:  domain.FleetConfig{Namespace: "ns"},
+			Server: domain.ServerConfig{DataHost: "data.example.com"},
+		}
+		p, err := selectTLSProvider(cfg, clientset)
+		if err != nil {
+			t.Fatalf("selectTLSProvider: %v", err)
+		}
+		if _, err := p.MintingCA(); err != nil {
+			t.Fatalf("MintingCA: %v", err)
+		}
+		if _, err := clientset.CoreV1().Secrets("ns").Get(context.Background(), "minting-ca", metav1.GetOptions{}); err != nil {
+			t.Fatalf("minting-ca secret not created: %v", err)
+		}
+	})
+
+	t.Run("unknown provider errors", func(t *testing.T) {
+		cfg := &domain.Config{TLS: domain.TLSConfig{Provider: "bogus"}}
+		if _, err := selectTLSProvider(cfg, nil); err == nil {
+			t.Fatal("expected error for unknown provider")
+		}
+	})
 }
 
 func TestValidateMigrateTokensSingleNode(t *testing.T) {

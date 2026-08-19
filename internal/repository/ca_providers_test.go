@@ -12,6 +12,8 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func TestEmbeddedProviderCreateCA(t *testing.T) {
@@ -276,6 +278,67 @@ func TestEmbeddedProviderLocalFileFallback(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir2, "ca.crt")); err != nil {
 		t.Fatalf("local ca.crt not created (nil clientset): %v", err)
+	}
+}
+
+func TestFileCAProviderDelegatesMinting(t *testing.T) {
+	// The cert-manager/external providers must still auto-bootstrap the
+	// minting CA (shared across pods), only delegating the server cert to
+	// externally managed PEM files.
+	dir := t.TempDir()
+	clientset := fake.NewSimpleClientset()
+	minting := NewEmbeddedProviderWithSecret(dir, 2*time.Hour, "minting-ca", "ns", clientset, true, time.Second)
+
+	serverCert := filepath.Join(dir, "server.crt")
+	serverKey := filepath.Join(dir, "server.key")
+	if err := os.WriteFile(serverCert, []byte("cert"), 0o600); err != nil {
+		t.Fatalf("write server.crt: %v", err)
+	}
+	if err := os.WriteFile(serverKey, []byte("key"), 0o600); err != nil {
+		t.Fatalf("write server.key: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name     string
+		provider domain.CAProvider
+	}{
+		{"cert-manager", NewCertManagerProvider(serverCert, serverKey, minting)},
+		{"external", NewExternalProvider(serverCert, serverKey, minting)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ca, err := tc.provider.MintingCA()
+			if err != nil {
+				t.Fatalf("MintingCA: %v", err)
+			}
+			sc, err := ca.MintClientCert("file-ca-client")
+			if err != nil {
+				t.Fatalf("MintClientCert: %v", err)
+			}
+			clientCert, err := x509.ParseCertificate(sc.CertificateChain[0])
+			if err != nil {
+				t.Fatalf("ParseCertificate: %v", err)
+			}
+			if _, err := clientCert.Verify(x509.VerifyOptions{
+				Roots:     ca.CertPool(),
+				KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+			}); err != nil {
+				t.Fatalf("client cert not trusted: %v", err)
+			}
+
+			// The server cert must still come from the mounted PEM files.
+			if _, err := tc.provider.ServerTLSCert(); err == nil {
+				t.Fatal("expected ServerTLSCert to fail on invalid PEM, got nil error")
+			}
+		})
+	}
+
+	// The bootstrap node must have written the minting CA to the Secret.
+	secret, err := clientset.CoreV1().Secrets("ns").Get(context.Background(), "minting-ca", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("secret not created: %v", err)
+	}
+	if len(secret.Data["ca.crt"]) == 0 || len(secret.Data["ca.key"]) == 0 {
+		t.Fatal("secret missing ca.crt/ca.key keys")
 	}
 }
 

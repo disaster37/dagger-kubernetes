@@ -36,17 +36,18 @@ func ValidTraceIDKey(id string) bool {
 // TraceMeta is the persisted metadata for a trace, used for scoped listing
 // and visibility checks.
 type TraceMeta struct {
-	TraceID     string    `json:"trace_id"`
-	UserID      string    `json:"user_id,omitempty"`
-	GroupID     string    `json:"group_id,omitempty"`
-	ProjectName string    `json:"project_name,omitempty"`
-	Status      string    `json:"status,omitempty"`
-	Version     string    `json:"version,omitempty"`
-	CIProvider  string    `json:"ci_provider,omitempty"`
-	CIRepo      string    `json:"ci_repo,omitempty"`
-	DurationMS  int64     `json:"duration_ms"`
-	StartedAt   time.Time `json:"started_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	TraceID       string    `json:"trace_id"`
+	UserID        string    `json:"user_id,omitempty"`
+	GroupID       string    `json:"group_id,omitempty"`
+	ProjectName   string    `json:"project_name,omitempty"`
+	Status        string    `json:"status,omitempty"`
+	FailureReason string    `json:"failure_reason,omitempty"`
+	Version       string    `json:"version,omitempty"`
+	CIProvider    string    `json:"ci_provider,omitempty"`
+	CIRepo        string    `json:"ci_repo,omitempty"`
+	DurationMS    int64     `json:"duration_ms"`
+	StartedAt     time.Time `json:"started_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // TraceListResult enriches TraceMeta with joined display names.
@@ -88,6 +89,12 @@ type TraceMetaRepository interface {
 	// Delete removes a single trace_meta row. Idempotent: a missing row
 	// returns nil.
 	Delete(ctx context.Context, traceID string) error
+
+	// MarkFailed transitions a non-terminal trace (status "" or "running") to
+	// "failed" with the given reason. Idempotent: a trace already in a terminal
+	// state ("success"/"failed") is not modified. Returns transitioned=true
+	// when the status actually changed.
+	MarkFailed(ctx context.Context, traceID, reason string) (transitioned bool, err error)
 
 	// Stats returns the total trace count and the oldest COALESCE(started_at,
 	// updated_at) timestamp (zero time when no traces exist). Cheap FSM read.

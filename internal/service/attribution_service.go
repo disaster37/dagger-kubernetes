@@ -102,6 +102,24 @@ func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo
 	}
 }
 
+// MarkFailed transitions a non-terminal trace to "failed" with reason.
+// Best-effort like Provision/Ingest: errors are logged, never returned to
+// break the caller. Returns transitioned=true when the status changed.
+func (a *AttributionService) MarkFailed(ctx context.Context, traceID, reason string) bool {
+	if traceID == "" || len(traceID) > maxIngestFieldLen {
+		return false
+	}
+	if len(reason) > maxIngestFieldLen {
+		reason = reason[:maxIngestFieldLen]
+	}
+	transitioned, err := a.traceMeta.MarkFailed(ctx, traceID, reason)
+	if err != nil {
+		a.logger.WithError(err).WithField("trace_id", traceID).Warn("attribution mark failed")
+		return false
+	}
+	return transitioned
+}
+
 // autoAssign finds the first group (by id order) whose AutoAssignPattern
 // matches the project name, persists the assignment, and returns the group
 // id. Invalid patterns are skipped with a warning. Returns "" when no match.

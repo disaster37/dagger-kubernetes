@@ -8,17 +8,18 @@ import (
 // constructed once via NewMetrics and injected into the components that
 // observe metrics (Server, Manager), avoiding package-level global state.
 type Metrics struct {
-	EngineAcquireTotal    *prometheus.CounterVec
-	EngineAcquireDuration *prometheus.HistogramVec
-	ActiveLeases          prometheus.Gauge
-	ActiveReplicas        *prometheus.GaugeVec
-	OTelIngestTotal       *prometheus.CounterVec
-	CacheSizeBytes        prometheus.Gauge
-	CacheObjectCount      prometheus.Gauge
-	CachePurgeTotal       prometheus.Counter
-	GCRunTotal            *prometheus.CounterVec
-	HistoryPurgeTotal     prometheus.Counter
-	HistoryGCRunTotal     *prometheus.CounterVec
+	EngineAcquireTotal            *prometheus.CounterVec
+	EngineAcquireDuration         *prometheus.HistogramVec
+	ActiveLeases                  prometheus.Gauge
+	ActiveReplicas                *prometheus.GaugeVec
+	OTelIngestTotal               *prometheus.CounterVec
+	CacheSizeBytes                prometheus.Gauge
+	CacheObjectCount              prometheus.Gauge
+	CachePurgeTotal               prometheus.Counter
+	GCRunTotal                    *prometheus.CounterVec
+	HistoryPurgeTotal             prometheus.Counter
+	HistoryGCRunTotal             *prometheus.CounterVec
+	PipelineDisconnectFailedTotal *prometheus.CounterVec
 }
 
 // NewMetrics builds the Metrics collectors and registers them on reg when
@@ -81,6 +82,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_cache_history_gc_run_total",
 			Help: "Total number of history GC sweeper runs",
 		}, []string{"status"}),
+
+		PipelineDisconnectFailedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_cache_pipeline_disconnect_failed_total",
+			Help: "Total number of pipelines marked failed by disconnect detection",
+		}, []string{"source"}),
 	}
 
 	if reg != nil {
@@ -96,6 +102,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.GCRunTotal,
 			m.HistoryPurgeTotal,
 			m.HistoryGCRunTotal,
+			m.PipelineDisconnectFailedTotal,
 		)
 	}
 

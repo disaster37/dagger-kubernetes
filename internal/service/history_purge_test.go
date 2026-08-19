@@ -83,6 +83,20 @@ func (r *fakeTraceMetaRepo) Delete(_ context.Context, traceID string) error {
 	delete(r.traces, traceID)
 	return nil
 }
+func (r *fakeTraceMetaRepo) MarkFailed(_ context.Context, traceID, reason string) (bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	m, ok := r.traces[traceID]
+	if !ok {
+		return false, nil
+	}
+	if m.Status == "success" || m.Status == "failed" {
+		return false, nil
+	}
+	m.Status = "failed"
+	m.FailureReason = reason
+	return true, nil
+}
 func (r *fakeTraceMetaRepo) Stats(context.Context) (int, time.Time, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

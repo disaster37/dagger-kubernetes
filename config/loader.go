@@ -102,6 +102,11 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("history.gc.max_age", "720h") // 30d
 	v.SetDefault("history.gc.schedule", "1h")
 
+	v.SetDefault("pipeline.disconnect_grace", 0) // 0 = immediate
+	v.SetDefault("pipeline.stale_sweep.enabled", true)
+	v.SetDefault("pipeline.stale_sweep.schedule", time.Minute)
+	v.SetDefault("pipeline.stale_sweep.stale_after", 5*time.Minute)
+
 	v.SetDefault("fleet.namespace", "dagger-cache")
 	v.SetDefault("fleet.max_replicas_per_version", 3)
 	v.SetDefault("fleet.max_sessions_per_replica", 8)

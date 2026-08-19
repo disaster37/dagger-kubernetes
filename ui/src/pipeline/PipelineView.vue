@@ -8,10 +8,11 @@
       </div>
       <div class="header-meta">
         <span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span>
+        <span v-if="trace.version" class="version-chip">{{ trace.version }}</span>
         <span class="user-chip" :title="trace.user_id ? `user_id: ${trace.user_id}` : ''">
           {{ trace.username ? `@${trace.username}` : 'anonymous' }}
         </span>
-        <span class="duration">{{ formatDuration(trace.duration_ms) }}</span>
+        <span class="duration">{{ formatDuration(liveTraceDuration()) }}</span>
       </div>
     </div>
 
@@ -27,7 +28,7 @@
           <span v-if="svc.port != null" class="service-port">:{{ svc.port }}</span>
           <span v-if="svc.url" class="service-url">{{ svc.url }}</span>
           <span v-else-if="!svc.running && svc.port == null" class="service-noport">no port</span>
-          <span class="service-duration">{{ formatDuration(subtreeDuration(svc.span)) }}</span>
+          <span class="service-duration">{{ formatDuration(liveSpanDuration(svc.span)) }}</span>
         </div>
         <div v-if="svc.expanded" class="service-detail">
           <div class="service-meta">
@@ -38,7 +39,7 @@
             <span><strong>Status:</strong> {{ svc.running ? 'running' : svc.span.status }}</span>
             <span><strong>Span:</strong> <code>{{ svc.span.span_id }}</code></span>
           </div>
-          <div class="logs">
+          <div v-follow-logs class="logs">
             <template v-for="(log, i) in svc.logs" :key="`sv-${i}`">
               <div v-if="logText(log.line) !== null" class="log-line">
                 <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
@@ -66,8 +67,8 @@
 
     <div class="card">
       <h3>Steps</h3>
-      <div v-if="traceLoading" class="empty">Loading steps...</div>
-      <div v-else-if="traceError" class="empty">
+      <div v-if="traceLoading && steps.length === 0" class="empty">Loading steps...</div>
+      <div v-else-if="traceError && steps.length === 0" class="empty">
         <p>Failed to load steps.</p>
         <button class="btn" @click="loadTrace()">Retry</button>
       </div>
@@ -80,17 +81,19 @@
             <span class="chevron">{{ step.expanded ? '▾' : '▸' }}</span>
             <span :class="['dot', `dot-${step.span.status}`]"></span>
             <span class="step-name">{{ step.span.name }}</span>
-            <span class="step-duration">{{ formatDuration(step.durationMs) }}</span>
+            <span class="step-duration">{{ formatDuration(liveSpanDuration(step.span)) }}</span>
             <span v-if="stepLogCount(step) > 0" class="step-logs-badge">{{ stepLogCount(step) }} logs</span>
             <span v-if="step.hiddenCount > 0" class="step-hidden">{{ step.hiddenCount }} hidden</span>
           </div>
           <div v-if="step.expanded" class="step-detail">
-            <template v-for="(log, i) in logsForSpan(step.span)" :key="`s-${i}`">
-              <div v-if="logText(log.line) !== null" class="log-line">
-                <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
-                <span class="log-msg">{{ logText(log.line) }}</span>
-              </div>
-            </template>
+            <div v-if="logsForSpan(step.span).length > 0" v-follow-logs class="logs">
+              <template v-for="(log, i) in logsForSpan(step.span)" :key="`s-${i}`">
+                <div v-if="logText(log.line) !== null" class="log-line">
+                  <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
+                  <span class="log-msg">{{ logText(log.line) }}</span>
+                </div>
+              </template>
+            </div>
             <div class="subspans">
               <div
                 v-for="s in step.subSpans"
@@ -101,7 +104,7 @@
                 <div class="subspan">
                   <span :class="['dot', `dot-${s.node.status}`]"></span>
                   <span class="subspan-name">{{ s.node.name }}</span>
-                  <span class="subspan-duration">{{ formatDuration(s.node.duration_ms) }}</span>
+                  <span class="subspan-duration">{{ formatDuration(liveSpanDuration(s.node)) }}</span>
                 </div>
                 <template v-for="(log, i) in logsForSubtree(s.node)" :key="`ss-${i}`">
                   <div v-if="logText(log.line) !== null" class="log-line subspan-log">
@@ -120,7 +123,7 @@
 
     <details class="card" :open="unmatchedLogs.length > 0 && logs.length > 0 && unmatchedLogs.length === logs.length">
       <summary>Unmatched / general logs ({{ unmatchedLogs.length }})</summary>
-      <div class="logs">
+      <div v-follow-logs class="logs">
         <template v-for="(log, i) in unmatchedLogs" :key="i">
           <div v-if="logText(log.line) !== null" class="log-line">
             <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
@@ -144,7 +147,7 @@
             </td>
           </tr>
           <tr><td>Status</td><td><span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span></td></tr>
-          <tr><td>Duration</td><td>{{ formatDuration(trace.duration_ms) }}</td></tr>
+          <tr><td>Duration</td><td>{{ formatDuration(liveTraceDuration()) }}</td></tr>
           <tr><td>Version</td><td>{{ trace.version || '-' }}</td></tr>
           <tr><td>CI Provider</td><td>{{ ciLabel(trace.ci_provider) }}</td></tr>
           <tr><td>Repository</td><td>{{ trace.ci_repo || '-' }}</td></tr>
@@ -155,7 +158,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, type Directive } from 'vue'
 import { useRoute } from 'vue-router'
 import { fetchTrace, fetchTraceLogs, connectLiveTrace } from '@/api/client'
 import type { ServiceInfo, SpanNode, TraceDetail, TraceLogEntry } from '@/api/types'
@@ -178,6 +181,10 @@ const traceLoading = ref(true)
 const traceError = ref(false)
 const steps = ref<Step[]>([])
 
+// Live-ticking clock: refreshed every 250ms while mounted so running durations
+// visibly increase (see liveSpanDuration/liveTraceDuration below).
+const now = ref<number>(Date.now())
+
 // Tunable detection constants — isolated so they can be adjusted after a real-trace
 // inspection without touching logic.
 const SERVICE_LOG_BODY = 'tunnel started'
@@ -195,6 +202,8 @@ let pollTimer: number | undefined
 let eventSource: EventSource | undefined
 let traceDebounce: number | undefined
 let logsDebounce: number | undefined
+let nowTimer: number | undefined
+let disposed = false
 
 interface DisplaySpan {
   node: SpanNode
@@ -210,6 +219,41 @@ interface Step {
 }
 
 const shortId = computed(() => (traceId.length > 12 ? `${traceId.slice(0, 12)}…` : traceId))
+
+// v-follow-logs keeps a scrollable log container pinned to the bottom while
+// new lines arrive, and stops following as soon as the user scrolls up. When
+// the user scrolls back to the very end, following resumes.
+const FOLLOW_LOG_THRESHOLD = 8
+
+function followLogsOnScroll(e: Event) {
+  const el = e.currentTarget as HTMLElement
+  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_LOG_THRESHOLD
+  el.dataset.followLogs = atBottom ? 'true' : 'false'
+}
+
+const vFollowLogs: Directive<HTMLElement> = {
+  mounted(el: HTMLElement) {
+    el.scrollTop = el.scrollHeight
+    el.dataset.followLogs = 'true'
+    el.addEventListener('scroll', followLogsOnScroll)
+    // The container may not have its final layout at mount time (fonts, the
+    // v-for content rendered in the same patch); re-assert the bottom
+    // position after the next paint.
+    requestAnimationFrame(() => {
+      if (el.dataset.followLogs !== 'false') {
+        el.scrollTop = el.scrollHeight
+      }
+    })
+  },
+  updated(el: HTMLElement) {
+    if (el.dataset.followLogs !== 'false') {
+      el.scrollTop = el.scrollHeight
+    }
+  },
+  unmounted(el: HTMLElement) {
+    el.removeEventListener('scroll', followLogsOnScroll)
+  },
+}
 
 // Logs keyed by their span_id so they can be attached to the span tree.
 // The backend normalises the Loki span_id label to the same base64 form used
@@ -242,6 +286,17 @@ const unmatchedLogs = computed<TraceLogEntry[]>(() =>
 
 onMounted(async () => {
   await loadAll()
+
+  // The component may have unmounted while loadAll() was in flight; do not
+  // register timers/listeners on a dead component.
+  if (disposed) return
+
+  now.value = Date.now()
+  nowTimer = window.setInterval(() => {
+    now.value = Date.now()
+  }, 250)
+  document.addEventListener('visibilitychange', onVisibilityChange)
+
   pollTimer = window.setInterval(async () => {
     if (trace.value.status === 'success' || trace.value.status === 'failed') return
     await loadAll()
@@ -263,11 +318,21 @@ onMounted(async () => {
 })
 
 onUnmounted(() => {
+  disposed = true
   if (pollTimer) window.clearInterval(pollTimer)
   if (traceDebounce) window.clearTimeout(traceDebounce)
   if (logsDebounce) window.clearTimeout(logsDebounce)
   if (eventSource) eventSource.close()
+  if (nowTimer) window.clearInterval(nowTimer)
+  document.removeEventListener('visibilitychange', onVisibilityChange)
 })
+
+// Background tabs throttle setInterval to ≤1/s; recompute `now` from Date.now()
+// the moment the tab becomes visible again so the display never shows a stale
+// frozen elapsed after a long absence.
+function onVisibilityChange() {
+  if (document.visibilityState === 'visible') now.value = Date.now()
+}
 
 function scheduleTraceRefetch() {
   if (traceDebounce) window.clearTimeout(traceDebounce)
@@ -293,7 +358,7 @@ async function loadTrace() {
   try {
     trace.value = await fetchTrace(traceId)
     if (trace.value.root_span) normalizeChildren(trace.value.root_span)
-    steps.value = computeSteps(trace.value.root_span)
+    recomputeSteps()
     recomputeServices()
   } catch (e) {
     traceError.value = true
@@ -454,6 +519,24 @@ function subtreeDuration(node: SpanNode): number {
   return Math.round(maxEnd - minStart)
 }
 
+// liveSpanDuration ticks upward for a running span (now − start_time) and
+// freezes at the stored subtree wall-clock once finished. Returns ms.
+function liveSpanDuration(node: SpanNode): number {
+  if (node.status !== 'running') return subtreeDuration(node)
+  const start = spanStartMs(node)
+  if (!start) return node.duration_ms || 0
+  return Math.max(0, now.value - start)
+}
+
+// liveTraceDuration ticks upward while the trace is running and freezes at the
+// server duration_ms once finished. Returns ms.
+function liveTraceDuration(): number {
+  if (trace.value.status !== 'running' || !trace.value.start_time) return trace.value.duration_ms
+  const start = Date.parse(trace.value.start_time)
+  if (Number.isNaN(start)) return trace.value.duration_ms
+  return Math.max(0, now.value - start)
+}
+
 // --- Services -------------------------------------------------------------
 //
 // Dagger services started via dagger.Up() / service.Up() / --up resolve to
@@ -543,6 +626,20 @@ function serviceTailLogs(svc: ServiceRow): TraceLogEntry[] {
 // service's expanded state across refetches (SSE logs_update / the 5s poll
 // otherwise collapse any service the user expanded) and keeps the live preview
 // in sync when only logs change (logs_update does not carry new span data).
+// Recompute the Steps list from the current trace, preserving each step's
+// expanded state across refetches. Without this, every SSE trace_update (or the
+// 5s poll) rebuilds the steps with expanded=false, collapsing the step whose
+// logs the user is reading.
+function recomputeSteps() {
+  const expanded = new Set(
+    steps.value.filter((s) => s.expanded).map((s) => s.span.span_id)
+  )
+  steps.value = computeSteps(trace.value.root_span)
+  for (const step of steps.value) {
+    if (expanded.has(step.span.span_id)) step.expanded = true
+  }
+}
+
 function recomputeServices() {
   const expanded = new Set(
     services.value.filter((s) => s.expanded).map((s) => s.span.span_id)
@@ -687,6 +784,16 @@ function decodeBase64UTF8(s: string): string | null {
   background: #1f2a3a;
   border-radius: 10px;
   padding: 2px 10px;
+}
+
+.version-chip {
+  font-size: 12px;
+  font-weight: 600;
+  color: #8b949e;
+  background: #21262d;
+  border-radius: 10px;
+  padding: 2px 10px;
+  font-family: monospace;
 }
 
 .empty-value {

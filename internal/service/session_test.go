@@ -100,6 +100,39 @@ func TestStoreInFlight(t *testing.T) {
 	}
 }
 
+func TestDecInFlightAndGet(t *testing.T) {
+	s := NewStore(5 * time.Minute)
+	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+
+	s.IncInFlight("fp1")
+	s.IncInFlight("fp1")
+
+	remaining, err := s.DecInFlightAndGet("fp1")
+	if err != nil {
+		t.Fatalf("DecInFlightAndGet: %v", err)
+	}
+	if remaining != 1 {
+		t.Fatalf("remaining = %d, want 1", remaining)
+	}
+
+	remaining, err = s.DecInFlightAndGet("fp1")
+	if err != nil {
+		t.Fatalf("DecInFlightAndGet 2: %v", err)
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining = %d, want 0", remaining)
+	}
+
+	// Missing lease returns error + 0.
+	remaining, err = s.DecInFlightAndGet("nope")
+	if err == nil {
+		t.Fatal("expected error for missing lease")
+	}
+	if remaining != 0 {
+		t.Fatalf("remaining = %d, want 0", remaining)
+	}
+}
+
 // TestStoreListSnapshotNoRace verifies List returns copies so a caller reading
 // fields (e.g. InFlight) does not race with concurrent Inc/DecInFlight writes.
 // Run with -race.

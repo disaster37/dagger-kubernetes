@@ -25,3 +25,4 @@ the decision.
 | 016  | [Raft multi-node TLS + StatefulSet](ADR-016-raft-multinode-tls.md) |
 | 017  | [Auth always enforced + multi-provider OAuth](ADR-017-auth-always-enforced-and-multi-provider-oauth.md) |
 | 018  | [Pipeline history auto-purge + manual purge](ADR-018-history-purge.md) |
+| 019  | [Client disconnect detection](ADR-019-client-disconnect-detection.md) |

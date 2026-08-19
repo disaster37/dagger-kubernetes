@@ -80,17 +80,24 @@ func (s *Store) IncInFlight(certFP string) error {
 }
 
 func (s *Store) DecInFlight(certFP string) error {
+	_, err := s.DecInFlightAndGet(certFP)
+	return err
+}
+
+// DecInFlightAndGet decrements the in-flight count for certFP and returns the
+// resulting count. Returns 0 and a non-nil error when the lease is gone.
+func (s *Store) DecInFlightAndGet(certFP string) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	l, err := s.lease(certFP)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if l.InFlight > 0 {
 		l.InFlight--
 	}
-	return nil
+	return l.InFlight, nil
 }
 
 // lease returns the lease for certFP. Callers must hold the mutex.

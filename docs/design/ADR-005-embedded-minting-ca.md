@@ -24,6 +24,14 @@ startup and persists it:
   requested `commonName`, with a configurable TTL (`client_cert_ttl`).
 - Three TLS provider implementations: `embedded` (goca-based),
   `cert-manager` (external), `external` (user-managed files).
+- **The minting CA is auto-bootstrapped for every server-TLS provider.** It
+  is an internal CA that only signs short-lived engine client certs, so it
+  never needs a public/cert-manager issuer. The provider (`tls.provider`)
+  only decides where the server certificate comes from: `embedded` = minting
+  CA issues it; `cert-manager` = a cert-manager `Certificate` issues it;
+  `external` = operator-managed PEM files. In all cases the minting CA is
+  generated in-pod and shared via `ca.minting_ca_secret` in multi-node
+  deployments.
 
 ## Rationale
 

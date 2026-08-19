@@ -196,6 +196,9 @@ func run(c *cli.Context) error {
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 
+	liveHub := repository.NewLiveHub()
+	pipelineLifecycle := service.NewPipelineLifecycle(attributionSvc, traceMetaRepo, sessions, liveHub, cfg.Pipeline, logger, metrics)
+
 	var oauthSvc service.OAuthProvider
 	var oauthProvider string
 	if cfg.Auth.OAuth.Enabled {
@@ -295,11 +298,16 @@ func run(c *cli.Context) error {
 		StatusProvider:       statusSvc,
 		Connect:              connectSvc,
 		Router:               router,
+		LiveHub:              liveHub,
+		Lifecycle:            pipelineLifecycle,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
 		return fmt.Errorf("start server: %w", err)
 	}
+
+	stopStaleSweep := pipelineLifecycle.StartStaleSweep(ctx)
+	defer stopStaleSweep()
 
 	stopGC := cacheStatsSvc.StartGCSweeper(ctx)
 	defer stopGC()
@@ -340,6 +348,10 @@ func run(c *cli.Context) error {
 	sig := <-sigCh
 	logger.WithField("signal", sig.String()).Info("received signal, shutting down")
 	cancel()
+
+	// Cancel pending disconnect-grace timers before the Raft store closes so
+	// late callbacks do not issue applies against a closed store.
+	pipelineLifecycle.Stop()
 
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
@@ -868,36 +880,48 @@ func raftCABootstrap(cfg *domain.Config, hostname string) bool {
 }
 
 func selectTLSProvider(cfg *domain.Config, clientset kubernetes.Interface) (domain.CAProvider, error) {
+	// The minting CA is always auto-bootstrapped and shared across pods via
+	// ca.minting_ca_secret when a K8s clientset is available (multi-node),
+	// regardless of the server-TLS provider below. The provider only decides
+	// where the data/control-plane server certificate comes from.
+	minting := mintingProvider(cfg, clientset)
 	switch cfg.TLS.Provider {
 	case "embedded":
-		// Share the minting CA across pods via ca.minting_ca_secret when a
-		// K8s clientset is available (multi-node). Otherwise fall back to the
-		// local-file behavior (single-node dev/test or a shared RWX volume).
-		if clientset != nil && cfg.CA.MintingCASecret != "" {
-			namespace := cfg.Raft.Namespace
-			if namespace == "" {
-				namespace = cfg.Fleet.Namespace
-			}
-			hostname, _ := os.Hostname()
-			return repository.NewEmbeddedProviderWithSecret(
-				cfg.TLS.CAPath,
-				cfg.CA.ClientCertTTL,
-				cfg.CA.MintingCASecret,
-				namespace,
-				clientset,
-				mintingCABootstrap(cfg, hostname),
-				cfg.Raft.LeaderWaitTimeout,
-				cfg.Server.DataHost,
-			), nil
-		}
-		return repository.NewEmbeddedProvider(cfg.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost), nil
+		return minting, nil
 	case "cert-manager":
-		return repository.NewCertManagerProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, cfg.TLS.CAPath), nil
+		return repository.NewCertManagerProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, minting), nil
 	case "external":
-		return repository.NewExternalProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, cfg.TLS.CAPath), nil
+		return repository.NewExternalProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, minting), nil
 	default:
 		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.TLS.Provider)
 	}
+}
+
+// mintingProvider returns the minting-CA provider. It shares the CA across
+// pods via ca.minting_ca_secret when a K8s clientset is available, otherwise
+// falls back to the local-file behavior (single-node dev/test or a shared RWX
+// volume). The minting CA signs short-lived engine client certs and is an
+// internal CA — it never needs a public/cert-manager issuer, so it is
+// auto-bootstrapped for every server-TLS provider.
+func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *repository.EmbeddedProvider {
+	if clientset != nil && cfg.CA.MintingCASecret != "" {
+		namespace := cfg.Raft.Namespace
+		if namespace == "" {
+			namespace = cfg.Fleet.Namespace
+		}
+		hostname, _ := os.Hostname()
+		return repository.NewEmbeddedProviderWithSecret(
+			cfg.TLS.CAPath,
+			cfg.CA.ClientCertTTL,
+			cfg.CA.MintingCASecret,
+			namespace,
+			clientset,
+			mintingCABootstrap(cfg, hostname),
+			cfg.Raft.LeaderWaitTimeout,
+			cfg.Server.DataHost,
+		)
+	}
+	return repository.NewEmbeddedProvider(cfg.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost)
 }
 
 // mintingCABootstrap reports whether this node should generate + share the

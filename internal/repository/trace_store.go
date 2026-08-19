@@ -110,7 +110,7 @@ func (r *SpanTreeReconstructor) reconstruct(traceID string, raw map[string]inter
 		}
 	}
 
-	info.Status = traceStatus(order)
+	info.Status = traceStatus(root)
 	info.DurationMS = traceDurationMS(order)
 	info.Duration = time.Duration(info.DurationMS) * time.Millisecond
 
@@ -177,23 +177,21 @@ func mergeSpanNode(dst, src *domain.SpanNode) {
 	}
 }
 
-// traceStatus derives the overall trace status from its spans: any failed span
-// fails the trace; otherwise any completed span marks it successful; a trace
-// with only in-flight spans remains running.
-func traceStatus(spans []*domain.SpanNode) string {
-	completed := false
-	for _, s := range spans {
-		switch s.Status {
-		case "failed":
-			return "failed"
-		case "success":
-			completed = true
-		}
+// traceStatus derives the overall trace status from the root span. The root
+// span represents the whole run; until it carries a final status the pipeline
+// is still in flight, so we report "running". Child spans can finish (and even
+// fail) while sibling steps are still executing, so deriving the status from
+// any single child would surface a final state prematurely.
+func traceStatus(root *domain.SpanNode) string {
+	if root == nil {
+		return "running"
 	}
-	if completed {
-		return "success"
+	switch root.Status {
+	case "success", "failed":
+		return root.Status
+	default:
+		return "running"
 	}
-	return "running"
 }
 
 // traceDurationMS computes the trace duration as the span of time between the

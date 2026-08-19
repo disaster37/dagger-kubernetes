@@ -325,6 +325,31 @@ func TestFSMTraceListFilterAndSort(t *testing.T) {
 	}
 }
 
+func TestFSMTraceListNormalizesStatus(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "empty", StartedAt: now, UpdatedAt: now})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "legacy-unset", Status: "unset", StartedAt: now, UpdatedAt: now})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "running", Status: "running", StartedAt: now, UpdatedAt: now})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "success", Status: "success", StartedAt: now, UpdatedAt: now})
+
+	rows := f.listTraces(domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
+	want := map[string]string{
+		"empty":        "running",
+		"legacy-unset": "running",
+		"running":      "running",
+		"success":      "success",
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("got %d rows, want %d", len(rows), len(want))
+	}
+	for _, r := range rows {
+		if r.Status != want[r.TraceID] {
+			t.Fatalf("status[%s] = %q, want %q", r.TraceID, r.Status, want[r.TraceID])
+		}
+	}
+}
+
 func traceIDs(rows []*domain.TraceListResult) []string {
 	out := make([]string, len(rows))
 	for i, r := range rows {
@@ -518,6 +543,175 @@ func TestFSMUnknownKind(t *testing.T) {
 	// Malformed payload.
 	if _, err := f.applyCommand(&command{Kind: kindUpsertUser, Data: []byte("{bad")}); err == nil {
 		t.Fatal("expected error for malformed payload")
+	}
+}
+
+func TestMarkTraceFailed(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+
+	seed := func(id, status string) {
+		applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: id, Status: status, UpdatedAt: now})
+	}
+	mark := func(id, reason string) bool {
+		resp, err := f.applyCommand(mustCommand(t, kindMarkTraceFailed, cmdMarkTraceFailed{
+			TraceID: id, Reason: reason, UpdatedAt: now.Add(time.Minute),
+		}))
+		if err != nil {
+			t.Fatalf("markTraceFailed: %v", err)
+		}
+		return resp.(bool)
+	}
+
+	t.Run("missing trace", func(t *testing.T) {
+		if mark("nope", "r") {
+			t.Fatal("missing trace should not transition")
+		}
+		if _, err := f.readTrace("nope"); !errors.Is(err, domain.ErrNotFound) {
+			t.Fatalf("missing trace should not exist: %v", err)
+		}
+	})
+
+	t.Run("empty status transitions", func(t *testing.T) {
+		seed("empty", "")
+		if !mark("empty", "client connection lost") {
+			t.Fatal("empty status should transition")
+		}
+		m, _ := f.readTrace("empty")
+		if m.Status != "failed" || m.FailureReason != "client connection lost" {
+			t.Fatalf("trace = %+v", m)
+		}
+	})
+
+	t.Run("running transitions", func(t *testing.T) {
+		seed("running", "running")
+		if !mark("running", "client connection lost") {
+			t.Fatal("running should transition")
+		}
+		m, _ := f.readTrace("running")
+		if m.Status != "failed" {
+			t.Fatalf("status = %q", m.Status)
+		}
+	})
+
+	t.Run("success unchanged", func(t *testing.T) {
+		seed("success", "success")
+		if mark("success", "r") {
+			t.Fatal("success should not transition")
+		}
+		m, _ := f.readTrace("success")
+		if m.Status != "success" || m.FailureReason != "" {
+			t.Fatalf("trace = %+v", m)
+		}
+	})
+
+	t.Run("failed unchanged keeps reason", func(t *testing.T) {
+		applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "failed", Status: "failed", FailureReason: "prior", UpdatedAt: now})
+		if mark("failed", "new reason") {
+			t.Fatal("failed should not transition")
+		}
+		m, _ := f.readTrace("failed")
+		if m.Status != "failed" || m.FailureReason != "prior" {
+			t.Fatalf("trace = %+v (existing reason must be preserved)", m)
+		}
+	})
+
+	t.Run("updated_at advanced on transition", func(t *testing.T) {
+		seed("time", "")
+		mark("time", "r")
+		m, _ := f.readTrace("time")
+		if !m.UpdatedAt.Equal(now.Add(time.Minute)) {
+			t.Fatalf("updated_at = %v, want %v", m.UpdatedAt, now.Add(time.Minute))
+		}
+	})
+}
+
+func TestUpsertTraceIngestClearsFailureReason(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "running", UpdatedAt: now})
+	applyCmd(t, f, kindMarkTraceFailed, cmdMarkTraceFailed{TraceID: "t", Reason: "client connection lost", UpdatedAt: now.Add(time.Minute)})
+	m, _ := f.readTrace("t")
+	if m.Status != "failed" || m.FailureReason != "client connection lost" {
+		t.Fatalf("after mark failed: %+v", m)
+	}
+
+	// A late OTLP finish is authoritative and supersedes the disconnect reason.
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "success", UpdatedAt: now.Add(2 * time.Minute)})
+	m, _ = f.readTrace("t")
+	if m.Status != "success" {
+		t.Fatalf("status = %q, want success", m.Status)
+	}
+	if m.FailureReason != "" {
+		t.Fatalf("failure_reason = %q, want empty (OTLP finish supersedes)", m.FailureReason)
+	}
+}
+
+func TestUpsertTraceIngestRunningDoesNotResurrectFailed(t *testing.T) {
+	// A non-terminal OTLP status ("running", the default for an in-flight
+	// root span) must NOT resurrect a disconnect-failed trace or clear its
+	// failure_reason. Otherwise a late-arriving "running" span (buffered/
+	// retried OTLP, or an engine-emitted root span without a status code)
+	// would defeat the disconnect detection (CWE-346).
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "running", UpdatedAt: now})
+	applyCmd(t, f, kindMarkTraceFailed, cmdMarkTraceFailed{TraceID: "t", Reason: "client connection lost", UpdatedAt: now.Add(time.Minute)})
+	m, _ := f.readTrace("t")
+	if m.Status != "failed" || m.FailureReason != "client connection lost" {
+		t.Fatalf("after mark failed: %+v", m)
+	}
+
+	// A late OTLP ingest with the non-terminal "running" status must NOT
+	// overwrite the terminal "failed" status or clear the failure reason.
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "running", UpdatedAt: now.Add(2 * time.Minute)})
+	m, _ = f.readTrace("t")
+	if m.Status != "failed" {
+		t.Fatalf("status = %q, want failed (non-terminal OTLP must not resurrect)", m.Status)
+	}
+	if m.FailureReason != "client connection lost" {
+		t.Fatalf("failure_reason = %q, want preserved", m.FailureReason)
+	}
+
+	// A terminal OTLP finish still supersedes (regression guard).
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "success", UpdatedAt: now.Add(3 * time.Minute)})
+	m, _ = f.readTrace("t")
+	if m.Status != "success" || m.FailureReason != "" {
+		t.Fatalf("after terminal OTLP: %+v (want success/empty reason)", m)
+	}
+}
+
+func TestUpsertTraceIngestRunningDoesNotDowngradeSuccess(t *testing.T) {
+	// A non-terminal OTLP status must not downgrade an existing terminal
+	// status either (defense-in-depth for the same CWE-346 vector).
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "success", UpdatedAt: now})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "running", UpdatedAt: now.Add(time.Minute)})
+	m, _ := f.readTrace("t")
+	if m.Status != "success" {
+		t.Fatalf("status = %q, want success (non-terminal must not downgrade)", m.Status)
+	}
+}
+
+func TestUpsertTraceIngestRunningPromotesEmptyStatus(t *testing.T) {
+	// A non-terminal OTLP status still promotes a non-terminal existing
+	// status (the normal "" -> "running" path during a live run).
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+
+	applyCmd(t, f, kindUpsertTraceProvision, cmdUpsertTraceProvision{TraceID: "t", UserID: "u", UpdatedAt: now})
+	m, _ := f.readTrace("t")
+	if m.Status != "" {
+		t.Fatalf("after provision: status = %q, want empty", m.Status)
+	}
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "t", Status: "running", UpdatedAt: now.Add(time.Minute)})
+	m, _ = f.readTrace("t")
+	if m.Status != "running" {
+		t.Fatalf("after running ingest: status = %q, want running", m.Status)
 	}
 }
 

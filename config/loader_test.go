@@ -277,6 +277,51 @@ func TestLoadHistoryEnvOverride(t *testing.T) {
 	}
 }
 
+func TestPipelineDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load with missing file: %v", err)
+	}
+
+	if cfg.Pipeline.DisconnectGrace != 0 {
+		t.Fatalf("pipeline.disconnect_grace default = %v, want 0", cfg.Pipeline.DisconnectGrace)
+	}
+	if !cfg.Pipeline.StaleSweep.Enabled {
+		t.Fatal("pipeline.stale_sweep.enabled default should be true")
+	}
+	if cfg.Pipeline.StaleSweep.Schedule != time.Minute {
+		t.Fatalf("pipeline.stale_sweep.schedule default = %v, want 1m", cfg.Pipeline.StaleSweep.Schedule)
+	}
+	if cfg.Pipeline.StaleSweep.StaleAfter != 5*time.Minute {
+		t.Fatalf("pipeline.stale_sweep.stale_after default = %v, want 5m", cfg.Pipeline.StaleSweep.StaleAfter)
+	}
+}
+
+func TestPipelineEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_CACHE_PIPELINE_DISCONNECT_GRACE", "10s")
+	t.Setenv("DAGGER_CACHE_PIPELINE_STALE_SWEEP_ENABLED", "false")
+	t.Setenv("DAGGER_CACHE_PIPELINE_STALE_SWEEP_SCHEDULE", "30s")
+	t.Setenv("DAGGER_CACHE_PIPELINE_STALE_SWEEP_STALE_AFTER", "2m")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Pipeline.DisconnectGrace != 10*time.Second {
+		t.Fatalf("env override disconnect_grace = %v, want 10s", cfg.Pipeline.DisconnectGrace)
+	}
+	if cfg.Pipeline.StaleSweep.Enabled {
+		t.Fatal("env override stale_sweep.enabled = true, want false")
+	}
+	if cfg.Pipeline.StaleSweep.Schedule != 30*time.Second {
+		t.Fatalf("env override stale_sweep.schedule = %v, want 30s", cfg.Pipeline.StaleSweep.Schedule)
+	}
+	if cfg.Pipeline.StaleSweep.StaleAfter != 2*time.Minute {
+		t.Fatalf("env override stale_sweep.stale_after = %v, want 2m", cfg.Pipeline.StaleSweep.StaleAfter)
+	}
+}
+
 func TestValidateAuthConfig(t *testing.T) {
 	githubSet := func(cfg *domain.Config) {
 		cfg.Auth.OAuth.ClientID = "cid"

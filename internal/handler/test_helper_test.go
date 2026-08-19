@@ -74,6 +74,9 @@ func newTestEnv(t *testing.T) *testEnv {
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 
+	liveHub := repository.NewLiveHub()
+	pipelineLifecycle := service.NewPipelineLifecycle(attributionSvc, traceMetaRepo, sessions, liveHub, domain.PipelineConfig{}, logger, observ.NewMetrics(nil))
+
 	mintingCA, err := repository.NewMintingCA(2 * time.Hour)
 	if err != nil {
 		t.Fatalf("NewMintingCA: %v", err)
@@ -133,6 +136,8 @@ func newTestEnv(t *testing.T) *testEnv {
 		HistoryPurger:  &stubHistoryPurger{result: &domain.HistoryPurgeResult{}},
 		StatusProvider: &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
 		Connect:        connectSvc,
+		LiveHub:        liveHub,
+		Lifecycle:      pipelineLifecycle,
 	})
 
 	return &testEnv{

@@ -540,12 +540,16 @@ func TestTraceDurationMSAcrossSpans(t *testing.T) {
 	if info.DurationMS != 25000 {
 		t.Fatalf("duration_ms = %d, want 25000", info.DurationMS)
 	}
-	if info.Status != "success" {
-		t.Fatalf("status = %q, want success", info.Status)
+	// The root span has no final status yet, so the trace must stay running
+	// even though a child already completed successfully.
+	if info.Status != "running" {
+		t.Fatalf("status = %q, want running", info.Status)
 	}
 }
 
-func TestTraceStatusFailed(t *testing.T) {
+// A failed child must not finalise the trace while the root span is still
+// running: sibling steps may still be in flight, so the trace stays "running".
+func TestTraceStatusRunningWithFailedChild(t *testing.T) {
 	r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
 	info := r.reconstruct("test-trace", map[string]interface{}{
 		"batches": []interface{}{
@@ -565,6 +569,37 @@ func TestTraceStatusFailed(t *testing.T) {
 								"traceId":           "test-trace",
 								"name":              "child-op",
 								"startTimeUnixNano": "2000000000",
+								"endTimeUnixNano":   "3000000000",
+								"status":            map[string]interface{}{"code": "STATUS_CODE_ERROR"},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if info == nil {
+		t.Fatal("nil trace info")
+	}
+	if info.Status != "running" {
+		t.Fatalf("status = %q, want running", info.Status)
+	}
+}
+
+// When the root span itself finishes with an error the trace is failed.
+func TestTraceStatusFailedRoot(t *testing.T) {
+	r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
+	info := r.reconstruct("test-trace", map[string]interface{}{
+		"batches": []interface{}{
+			map[string]interface{}{
+				"scopeSpans": []interface{}{
+					map[string]interface{}{
+						"spans": []interface{}{
+							map[string]interface{}{
+								"spanId":            "root",
+								"traceId":           "test-trace",
+								"name":              "root-op",
+								"startTimeUnixNano": "1000000000",
 								"endTimeUnixNano":   "3000000000",
 								"status":            map[string]interface{}{"code": "STATUS_CODE_ERROR"},
 							},

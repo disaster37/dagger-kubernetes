@@ -220,19 +220,37 @@ fleet:
 
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:
-  minting_ca_secret: "supervisor-minting-ca"  # K8s Secret holding the minting CA.
+  minting_ca_secret: "supervisor-minting-ca"  # K8s Secret holding the minting CA (AUTO-BOOTSTRAPPED on first boot; holds the CA private key).
   client_cert_ttl: "2h"                        # TTL of client certs minted at lease grant.
 
 # --- TLS ---------------------------------------------------------------------
+# The minting CA (above) is AUTO-BOOTSTRAPPED for every provider and shared
+# across pods via ca.minting_ca_secret (ordinal 0 generates it, others poll).
+# `provider` only decides where the server certificate comes from:
 tls:
-  provider: "embedded"              # "embedded" (goca, default) | "cert-manager" | "external".
-  server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key for cert-manager/external.
-  ca_path: "/var/lib/dagger-cache/ca"   # path to persist the embedded CA (Docker bind-mount or PVC).
-  cert_path: "/etc/dagger-cache/tls/tls.crt"  # PEM cert path for the cert-manager/external providers.
+  provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external".
+  server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key (legacy; unused by embedded/cert-manager auto-wiring).
+  ca_path: "/var/lib/dagger-cache/ca"   # path to persist the embedded minting CA (Docker bind-mount or PVC); also a local cache of the shared Secret.
+  cert_path: "/etc/dagger-cache/tls/tls.crt"  # PEM cert path for the cert-manager/external providers (the Helm chart auto-wires cert-manager to /etc/dagger-kubernetes/data-tls/tls.crt).
   key_path: "/etc/dagger-cache/tls/tls.key"   # PEM key path for the cert-manager/external providers.
 
 # --- Lease -------------------------------------------------------------------
 lease_ttl: "2m"   # TTL of a client's engine lease; renew before this expires.
+
+# --- Pipeline disconnect detection -------------------------------------------
+# Detects when the owning client's L4 data-plane tunnel closes and transitions
+# the associated trace_meta to "failed" (idempotent, replicated). A background
+# staleness sweeper recovers traces orphaned by a supervisor restart/crash.
+# See ADR-019.
+pipeline:
+  disconnect_grace: "0s"        # grace period before a closed tunnel fails the trace.
+                                # 0s = fail immediately on tunnel close (default). >0s =
+                                # wait this long, allowing a same-trace reconnect to cancel.
+  stale_sweep:                  # supervisor-restart / crash recovery sweeper.
+    enabled: true               # master switch; enabled by default.
+    schedule: "1m"              # how often the sweeper scans for stale running traces.
+    stale_after: "5m"           # mark running traces with no active lease (InFlight == 0)
+                                # failed once their sort key is older than this.
 
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
