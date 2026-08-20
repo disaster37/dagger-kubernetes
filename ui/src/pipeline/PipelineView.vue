@@ -95,25 +95,27 @@
               </template>
             </div>
             <div class="subspans">
-              <div
-                v-for="s in step.subSpans"
-                :key="s.node.span_id"
-                class="subspan-block"
-                :style="{ paddingLeft: (12 + s.depth * 16) + 'px' }"
-              >
-                <div class="subspan">
-                  <span :class="['dot', `dot-${s.node.status}`]"></span>
-                  <span class="subspan-name">{{ s.node.name }}</span>
-                  <span class="subspan-duration">{{ formatDuration(liveSpanDuration(s.node)) }}</span>
-                </div>
-                <template v-for="(log, i) in logsForSubtree(s.node)" :key="`ss-${i}`">
-                  <div v-if="logText(log.line) !== null" class="log-line subspan-log">
-                    <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
-                    <span class="log-msg">{{ logText(log.line) }}</span>
+              <div v-if="step.subSpans.length === 0" class="empty">No sub-spans</div>
+              <div v-else v-follow-logs class="logs">
+                <template v-for="s in step.subSpans" :key="s.node.span_id">
+                  <div
+                    class="subspan-block"
+                    :style="{ paddingLeft: (12 + s.depth * 16) + 'px' }"
+                  >
+                    <div class="subspan">
+                      <span :class="['dot', `dot-${s.node.status}`]"></span>
+                      <span class="subspan-name">{{ s.node.name }}</span>
+                      <span class="subspan-duration">{{ formatDuration(liveSpanDuration(s.node)) }}</span>
+                    </div>
+                    <template v-for="(log, i) in logsForSubtree(s.node)" :key="`ss-${i}`">
+                      <div v-if="logText(log.line) !== null" class="log-line subspan-log">
+                        <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
+                        <span class="log-msg">{{ logText(log.line) }}</span>
+                      </div>
+                    </template>
                   </div>
                 </template>
               </div>
-              <div v-if="step.subSpans.length === 0" class="empty">No sub-spans</div>
             </div>
             <div v-if="stepLogCount(step) === 0" class="empty">No logs for this step</div>
           </div>
@@ -158,10 +160,11 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, type Directive } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { fetchTrace, fetchTraceLogs, connectLiveTrace } from '@/api/client'
 import type { ServiceInfo, SpanNode, TraceDetail, TraceLogEntry } from '@/api/types'
+import { vFollowLogs } from '@/directives/followLogs'
 
 const route = useRoute()
 const traceId = route.params.id as string
@@ -219,41 +222,6 @@ interface Step {
 }
 
 const shortId = computed(() => (traceId.length > 12 ? `${traceId.slice(0, 12)}…` : traceId))
-
-// v-follow-logs keeps a scrollable log container pinned to the bottom while
-// new lines arrive, and stops following as soon as the user scrolls up. When
-// the user scrolls back to the very end, following resumes.
-const FOLLOW_LOG_THRESHOLD = 8
-
-function followLogsOnScroll(e: Event) {
-  const el = e.currentTarget as HTMLElement
-  const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_LOG_THRESHOLD
-  el.dataset.followLogs = atBottom ? 'true' : 'false'
-}
-
-const vFollowLogs: Directive<HTMLElement> = {
-  mounted(el: HTMLElement) {
-    el.scrollTop = el.scrollHeight
-    el.dataset.followLogs = 'true'
-    el.addEventListener('scroll', followLogsOnScroll)
-    // The container may not have its final layout at mount time (fonts, the
-    // v-for content rendered in the same patch); re-assert the bottom
-    // position after the next paint.
-    requestAnimationFrame(() => {
-      if (el.dataset.followLogs !== 'false') {
-        el.scrollTop = el.scrollHeight
-      }
-    })
-  },
-  updated(el: HTMLElement) {
-    if (el.dataset.followLogs !== 'false') {
-      el.scrollTop = el.scrollHeight
-    }
-  },
-  unmounted(el: HTMLElement) {
-    el.removeEventListener('scroll', followLogsOnScroll)
-  },
-}
 
 // Logs keyed by their span_id so they can be attached to the span tree.
 // The backend normalises the Loki span_id label to the same base64 form used

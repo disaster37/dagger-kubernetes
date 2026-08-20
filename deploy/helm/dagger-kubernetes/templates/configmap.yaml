@@ -12,6 +12,7 @@ data:
       data_addr: ":8443"
       data_hostname: {{ include "dagger-kubernetes.dataHostname" . | quote }}
       public_url: {{ .Values.supervisor.config.server.publicUrl | quote }}
+      pipeline_url: {{ .Values.supervisor.config.server.pipelineUrl | quote }}
     auth:
       internal:
         enabled: {{ .Values.supervisor.config.auth.internal.enabled }}

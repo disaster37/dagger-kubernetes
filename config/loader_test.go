@@ -467,3 +467,90 @@ func TestLoadRejectsInternalDisabledWithoutOAuth(t *testing.T) {
 		t.Fatalf("Load error = %q, want wrapped validation message", err.Error())
 	}
 }
+
+func TestLoadServerPipelineURLDefault(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.PipelineURL != "" {
+		t.Fatalf("server.pipeline_url default = %q, want empty", cfg.Server.PipelineURL)
+	}
+}
+
+func TestLoadServerPipelineURLEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_CACHE_SERVER_PIPELINE_URL", "https://x.example.com")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Server.PipelineURL != "https://x.example.com" {
+		t.Fatalf("server.pipeline_url = %q, want https://x.example.com", cfg.Server.PipelineURL)
+	}
+}
+
+func TestLoadInvalidPipelineURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("server:\n  pipeline_url: \"ftp://x\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "server.pipeline_url/public_url") ||
+		!strings.Contains(err.Error(), "pipeline url base must be http(s)") {
+		t.Fatalf("Load error = %q, want pipeline url scheme validation message", err.Error())
+	}
+}
+
+func TestLoadEmptyPublicURL(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("server:\n  public_url: \"\"\n  pipeline_url: \"\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "server.public_url must be set so a pipeline view URL can be derived") {
+		t.Fatalf("Load error = %q, want empty public_url message", err.Error())
+	}
+}
+
+func TestLoadPipelineURLFallbackValid(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("server:\n  pipeline_url: \"\"\n  public_url: \"https://supv.example.com\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestLoadPipelineURLWithUserinfo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("server:\n  pipeline_url: \"https://user:pass@supv.example.com\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load = nil, want validation error for userinfo in pipeline_url")
+	}
+	if !strings.Contains(err.Error(), "must not contain userinfo") {
+		t.Fatalf("Load error = %q, want userinfo rejection message", err.Error())
+	}
+}

@@ -105,6 +105,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		ControlAddr: ":0",
 		DataAddr:    ":0",
 		DataHost:    "localhost",
+		PipelineURL: "https://supv.example.com",
 	}, &Deps{
 		Logger:              logger,
 		Metrics:             observ.NewMetrics(nil),

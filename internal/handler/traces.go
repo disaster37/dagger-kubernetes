@@ -104,6 +104,12 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 		s.logger.WithError(err).WithField("trace_id", traceID).Debug("trace_meta enrichment failed")
 	}
 
+	// Best-effort self-hosted pipeline view URL: a misconfigured base does not
+	// break trace detail; the url field is simply omitted.
+	if u, ok := s.pipelineViewURL(traceID); ok {
+		trace.URL = u
+	}
+
 	writeJSON(c, trace)
 }
 

@@ -12,6 +12,9 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v2"
+
+	"github.com/disaster/dagger-kubernetes/config"
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 var traceIDRe = regexp.MustCompile(`[a-f0-9]{32,}`)
@@ -21,9 +24,10 @@ func main() {
 		Name:  "dagger-cache-ci",
 		Usage: "Dagger Cache CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "server", Usage: "Dagger Cache server URL (required)"},
+			&cli.StringFlag{Name: "server", Usage: "Dagger Cache server URL (required unless server.public_url is set in --config)"},
 			&cli.StringFlag{Name: "token", Usage: "Dagger Cloud token (required)"},
-			&cli.StringFlag{Name: "ui-url", Usage: "UI URL for trace links"},
+			&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.pipeline_url/server.public_url; links use /pipelines/<traceID>)"},
+			&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.pipeline_url/server.public_url fallbacks)"},
 			&cli.StringFlag{Name: "cache-registry", Value: "cache.reg/dagger-cache", Usage: "Cache registry host/repo"},
 			&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
 			&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
@@ -37,17 +41,32 @@ func main() {
 }
 
 func run(c *cli.Context) error {
+	cfg, err := config.Load(c.String("config"))
+	if err != nil {
+		return fmt.Errorf("load config: %w", err)
+	}
+
+	// Only trust config values when the config file was actually present;
+	// config.Load otherwise returns compiled-in defaults (e.g. the example
+	// public_url) that must not silently become the wrapper's target.
+	hasConfigFile := fileExists(c.String("config"))
+	var configPipelineURL, configPublicURL string
+	if hasConfigFile {
+		configPipelineURL = cfg.Server.PipelineURL
+		configPublicURL = cfg.Server.PublicURL
+	}
+
 	serverURL := c.String("server")
+	if serverURL == "" {
+		serverURL = configPublicURL
+	}
 	token := c.String("token")
 
 	if serverURL == "" || token == "" {
 		return fmt.Errorf("--server and --token required")
 	}
 
-	uiURL := c.String("ui-url")
-	if uiURL == "" {
-		uiURL = serverURL
-	}
+	uiURL := resolveUIBase(c.String("ui-url"), c.String("server"), configPipelineURL, configPublicURL)
 
 	cacheRegistry := c.String("cache-registry")
 	version := c.String("version")
@@ -77,26 +96,50 @@ func run(c *cli.Context) error {
 	var logBuf strings.Builder
 	cmd.Stderr = io.MultiWriter(os.Stderr, &logBuf)
 
-	err := cmd.Run()
+	err = cmd.Run()
 	logOutput := logBuf.String()
 
 	traceID := extractTraceID(logOutput)
 
 	if traceID != "" {
-		traceURL := fmt.Sprintf("%s/traces/%s", uiURL, traceID)
-		fmt.Fprintf(os.Stderr, "\nPipeline View: %s\n", traceURL)
+		traceURL, err := domain.PipelineViewURL(uiURL, traceID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "\nPipeline View: <unavailable: %v>\n", err)
+		} else {
+			fmt.Fprintf(os.Stderr, "\nPipeline View: %s\n", traceURL)
 
-		switch ciMode {
-		case "gha":
-			emitGHAAnnotations(traceURL, traceID)
-		case "jenkins":
-			emitJenkinsStages(traceURL, traceID)
-		case "drone":
-			emitDroneAnnotations(traceURL)
+			switch ciMode {
+			case "gha":
+				emitGHAAnnotations(traceURL, traceID)
+			case "jenkins":
+				emitJenkinsStages(traceURL, traceID)
+			case "drone":
+				emitDroneAnnotations(traceURL)
+			}
 		}
 	}
 
 	return err
+}
+
+// resolveUIBase returns the effective pipeline-view base URL with the
+// precedence: uiURLFlag > configPipelineURL > configPublicURL > serverURLFlag.
+// The config precedence itself is delegated to domain.ResolvePipelineBase.
+func resolveUIBase(uiURLFlag, serverURLFlag, configPipelineURL, configPublicURL string) string {
+	if uiURLFlag != "" {
+		return uiURLFlag
+	}
+	if base := domain.ResolvePipelineBase(configPublicURL, configPipelineURL); base != "" {
+		return base
+	}
+	return serverURLFlag
+}
+
+// fileExists reports whether path exists (used to distinguish a real config
+// file from config.Load's compiled-in defaults).
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func extractTraceID(output string) string {

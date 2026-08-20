@@ -316,6 +316,7 @@ variables **take precedence** over the file. Examples:
 | YAML key                                  | Environment variable                                |
 |-------------------------------------------|-----------------------------------------------------|
 | `server.public_url`                       | `DAGGER_CACHE_SERVER_PUBLIC_URL`                    |
+| `server.pipeline_url`                     | `DAGGER_CACHE_SERVER_PIPELINE_URL`                  |
 | `cache.registry`                          | `DAGGER_CACHE_CACHE_REGISTRY`                       |
 | `fleet.max_replicas_per_version`          | `DAGGER_CACHE_FLEET_MAX_REPLICAS_PER_VERSION`       |
 | `log_level`                               | `DAGGER_CACHE_LOG_LEVEL`                            |
@@ -342,6 +343,7 @@ inline comments. The sections below summarise the most important ones.
 |              | `data_addr`                 | `:8443`                          | mTLS L4 data proxy.                               |
 |              | `data_hostname`             | `data.supv.example.com`          | Public data-plane hostname.                       |
 |              | `public_url`                | `https://supv.example.com`       | Public control/UI URL.                            |
+|              | `pipeline_url`              | `""` (falls back to `public_url`) | Base URL for pipeline-view links (absolute http(s)); only scheme + host are used. |
 | `auth.internal` | `enabled`                | `true`                           | Username/password + legacy-token auth. `false` = OAuth-only (requires `auth.oauth` fully configured); auth is always enforced. |
 |              | `tokens_file`               | `/etc/dagger-cache/tokens`       | One token per line.                               |
 | `auth.oauth` | `enabled`                   | `false`                          | OAuth for UI login. Single active provider.       |
@@ -1083,8 +1085,8 @@ To export the Supervisor's *own* OTLP (e.g. to the same collector), set
 ## Pipeline UI
 
 The UI is an embedded Vue 3 SPA (packaged in `ui-dist/` via `//go:embed`).
-It is always served by the control plane at `/` and trace links like
-`/traces/<id>`. No separate configuration is needed.
+It is always served by the control plane at `/` and single-pipeline views at
+`/pipelines/<id>`. No separate configuration is needed.
 
 Features:
 - **Pipeline list** — every run identified by a friendly name (`@username · org/repo`,
@@ -1119,7 +1121,10 @@ Features:
   or sub-span that produced them (`GET /api/v1/traces/:id/logs`); logs with no
   recognisable span are grouped under a collapsed "unmatched" section. Logs
   load on open and auto-refresh every few seconds while the pipeline is still
-  running. Dagger engine verbose progress payloads (base64 protobufs) are
+  running. Each log container auto-scrolls to the end when opened and sticks
+  to the bottom while new lines stream in; scrolling up unpins, scrolling back
+  to the bottom re-pins (with a small hysteresis so jitter does not flap the
+  state). Dagger engine verbose progress payloads (base64 protobufs) are
   collapsed to a placeholder rather than rendered as base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
 - **MagicCache dashboard** (`/cache`) — cache running state, total size,
@@ -1144,6 +1149,43 @@ Features:
 - **Header status indicator** — a colored dot in the navbar (green/amber/red/
   grey) polling `/api/v1/status` every 10s; clicking navigates to `/services`
 - **Cache status** — registry health, cache hit rates
+
+### Pipeline view URL
+
+The stock `dagger` CLI hardcodes the pipeline/trace link it prints to
+`https://dagger.cloud/<org>/traces/<id>` (`engine/telemetry/url.go`); it never
+reads a server-side field, header, or endpoint to derive that host. A
+self-hosted platform therefore cannot redirect the bare CLI's printed link —
+the platform supplies the self-hosted URL through the wrapper and a dedicated
+endpoint instead:
+
+- **`dagger-cache-ci` wrapper** (`cmd/ci`) wraps `dagger`, extracts the trace
+  ID from its stderr, and prints `Pipeline View: <base>/pipelines/<id>` (the
+  canonical UI route). The base is resolved with precedence `--ui-url` >
+  `server.pipeline_url` (config) > `server.public_url` (config) > `--server`.
+- **`GET /api/v1/traces/:id/url`** returns
+  `{"trace_id":"<id>","url":"<base>/pipelines/<id>"}`, auth-gated by the same
+  visibility rules as the trace detail endpoint (owner/member/admin; unknown
+  metadata → admin-only). Clients that already know a trace ID can resolve the
+  self-hosted URL without parsing CLI output. The same URL is also returned as
+  the `url` field of `GET /api/v1/traces/:id`.
+
+The base URL is `server.pipeline_url` when set, otherwise `server.public_url`.
+It must be an absolute `http(s)` URL; only its scheme + host are used (the
+path `/pipelines/<id>` is fixed, and any path/query/fragment on the configured
+base is dropped, so links stay stable behind proxies and TLS-terminating
+ingresses). Set it explicitly to point pipeline-view links at a different
+public host than the control plane:
+
+```yaml
+server:
+  public_url: "https://supv.example.com"            # control plane + API + UI
+  pipeline_url: "https://dagger.supv.example.com"   # optional; pipeline-view links only
+```
+
+If `server.public_url` is also empty, the supervisor refuses to start (it
+cannot derive a pipeline-view URL). See
+[ADR-021](design/ADR-021-pipeline-view-url.md).
 
 ---
 

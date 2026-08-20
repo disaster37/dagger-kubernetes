@@ -36,6 +36,7 @@ type TraceInfo struct {
 	CIRepo     string        `json:"ci_repo,omitempty"`
 	UserID     string        `json:"user_id,omitempty"`  // owner from trace_meta
 	Username   string        `json:"username,omitempty"` // joined from users table
+	URL        string        `json:"url,omitempty"`      // self-hosted pipeline view URL
 }
 
 type LogEntry struct {

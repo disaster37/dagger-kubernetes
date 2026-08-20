@@ -26,3 +26,5 @@ the decision.
 | 017  | [Auth always enforced + multi-provider OAuth](ADR-017-auth-always-enforced-and-multi-provider-oauth.md) |
 | 018  | [Pipeline history auto-purge + manual purge](ADR-018-history-purge.md) |
 | 019  | [Client disconnect detection](ADR-019-client-disconnect-detection.md) |
+| 020  | [Log auto-follow UX](ADR-020-log-autofollow-ux.md) |
+| 021  | [Self-hosted pipeline view URL](ADR-021-pipeline-view-url.md) |

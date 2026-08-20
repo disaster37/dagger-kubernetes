@@ -27,6 +27,7 @@ type ServerConfig struct {
 	DataAddr    string `mapstructure:"data_addr"`
 	DataHost    string `mapstructure:"data_hostname"`
 	PublicURL   string `mapstructure:"public_url"`
+	PipelineURL string `mapstructure:"pipeline_url"` // base for pipeline-view links; "" => fall back to PublicURL
 }
 
 type AuthConfig struct {

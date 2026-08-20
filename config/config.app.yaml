@@ -16,6 +16,7 @@ server:
   data_addr: ":8443"            # mTLS L4 data-plane proxy
   data_hostname: "data.supv.example.com"
   public_url: "https://supv.example.com"
+  pipeline_url: ""            # Optional base for pipeline-view links (e.g. https://dagger-cache.example.com). Empty => use public_url.
 
 # --- Authentication ----------------------------------------------------------
 auth:

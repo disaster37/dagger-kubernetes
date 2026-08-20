@@ -115,6 +115,12 @@ type ErrorResponse struct {
 	Message string `json:"message"`
 }
 
+// traceURLResponse is the body of GET /api/v1/traces/:traceID/url.
+type traceURLResponse struct {
+	TraceID string `json:"trace_id"`
+	URL     string `json:"url"`
+}
+
 // cacheRouter is the subset of *service.RegistryRouter used by the cache proxy
 // handler. Introduced so tests can inject a stub (mirrors the
 // domain.CacheBackend stub pattern). *service.RegistryRouter satisfies it.
@@ -237,6 +243,7 @@ type ServerConfig struct {
 	VictoriaURL  string
 	CertPath     string
 	KeyPath      string
+	PipelineURL  string // resolved base for pipeline-view links (absolute http(s) URL)
 }
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
@@ -510,6 +517,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 	// Traces (scoped + authorized).
 	h.GET("/api/v1/traces", s.handleTracesList)
 	h.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
+	h.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
 	h.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
 	h.GET("/api/v1/traces/:traceID/live", s.handleTracesLive)
 
@@ -846,6 +854,41 @@ func (s *Server) handleAdminVersions(_ context.Context, c *app.RequestContext) {
 		out[i] = v.String()
 	}
 	writeJSON(c, out)
+}
+
+// handleTracesURL returns the self-hosted pipeline-view URL for a trace.
+// Gated by authorizeTraceRequest (owner/member/admin; unknown meta ->
+// admin-only). URL derivation does not require the trace to exist in Tempo.
+func (s *Server) handleTracesURL(_ context.Context, c *app.RequestContext) {
+	traceID, ok := s.authorizeTraceRequest(c)
+	if !ok {
+		return
+	}
+	// Validate the trace ID charset before URL derivation so a malformed
+	// id yields 400 (bad request) rather than 500 (misconfigured base).
+	// authorizeTraceRequest only checks non-empty (CWE-20).
+	if !validTraceID(traceID) {
+		writeError(c, consts.StatusBadRequest, "invalid trace ID")
+		return
+	}
+	u, ok := s.pipelineViewURL(traceID)
+	if !ok {
+		writeError(c, consts.StatusInternalServerError, "pipeline url misconfigured")
+		return
+	}
+	writeJSON(c, traceURLResponse{TraceID: traceID, URL: u})
+}
+
+// pipelineViewURL builds the self-hosted pipeline-view URL for traceID, logging
+// a warning when the configured base is invalid. Callers decide whether an
+// invalid base is fatal (endpoint) or best-effort (trace detail enrichment).
+func (s *Server) pipelineViewURL(traceID string) (string, bool) {
+	u, err := domain.PipelineViewURL(s.cfg.PipelineURL, traceID)
+	if err != nil {
+		s.logger.WithError(err).WithField("trace_id", traceID).Warn("pipeline url misconfigured")
+		return "", false
+	}
+	return u, true
 }
 
 func (s *Server) handleFleetInfo(_ context.Context, c *app.RequestContext) {

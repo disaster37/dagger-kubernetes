@@ -94,10 +94,12 @@ supervisor:
 
 ## @param supervisor.config.server.dataHostname Data-plane hostname for engine fleets.
 ## @param supervisor.config.server.publicUrl Public URL of the supervisor.
+## @param supervisor.config.server.pipelineUrl Optional base URL for pipeline-view links (empty = use publicUrl). Must be absolute http(s) when set.
   config:
     server:
       dataHostname: "data.supv.example.com"
       publicUrl: "https://supv.example.com"
+      pipelineUrl: ""
 ## @param supervisor.config.database.dir Raft data directory (raft.db, snapshots/, node-id). Fresh-start store; no migration from legacy SQLite.
     database:
       dir: "/var/lib/dagger-cache"

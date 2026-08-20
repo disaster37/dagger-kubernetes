@@ -25,6 +25,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("server.data_addr", ":8443")
 	v.SetDefault("server.data_hostname", "data.supv.example.com")
 	v.SetDefault("server.public_url", "https://supv.example.com")
+	v.SetDefault("server.pipeline_url", "")
 
 	v.SetDefault("auth.internal.enabled", true)
 	v.SetDefault("auth.internal.tokens_file", "/etc/dagger-cache/tokens")
@@ -176,7 +177,25 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("validate auth config: %w", err)
 	}
 
+	if err := validateServerConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate server config: %w", err)
+	}
+
 	return &cfg, nil
+}
+
+// validateServerConfig ensures the resolved pipeline-view base URL is an
+// absolute http(s) URL with a host (validated via PipelineViewURL with a
+// placeholder trace ID). Fails fast at startup when it is not.
+func validateServerConfig(cfg *domain.Config) error {
+	base := domain.ResolvePipelineBase(cfg.Server.PublicURL, cfg.Server.PipelineURL)
+	if base == "" {
+		return fmt.Errorf("server.public_url must be set so a pipeline view URL can be derived")
+	}
+	if _, err := domain.PipelineViewURL(base, "traceid-placeholder"); err != nil {
+		return fmt.Errorf("server.pipeline_url/public_url: %w", err)
+	}
+	return nil
 }
 
 // validateAuthConfig enforces the auth-provider gating rules:

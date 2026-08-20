@@ -7,6 +7,7 @@
 # Every value can also be set via an environment variable using the
 # DAGGER_CACHE_ prefix (dots -> underscores, uppercase). Examples:
 #   server.public_url        -> DAGGER_CACHE_SERVER_PUBLIC_URL
+#   server.pipeline_url      -> DAGGER_CACHE_SERVER_PIPELINE_URL
 #   cache.registry           -> DAGGER_CACHE_CACHE_REGISTRY
 #   fleet.max_replicas_per_version -> DAGGER_CACHE_FLEET_MAX_REPLICAS_PER_VERSION
 # Environment variables take precedence over this file.
@@ -25,6 +26,7 @@ server:
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
   public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI).
+  pipeline_url: ""  # Optional base URL for pipeline-view links printed by the dagger-cache-ci wrapper and returned by GET /api/v1/traces/:id/url. Empty => fall back to public_url. Must be an absolute http(s) URL when set.
 
 # --- Authentication ----------------------------------------------------------
 auth:
