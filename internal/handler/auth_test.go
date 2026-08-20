@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"net/http"
@@ -88,6 +89,21 @@ func TestRequireAuthWithQueryFallback(t *testing.T) {
 	c = ut.CreateUtRequestContext("GET", "/api/v1/traces/t1/live", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if !env.server.requireAuthWithQueryFallback(c) {
 		t.Fatal("header token should authenticate")
+	}
+
+	// Access cookie authenticates when no header/query is present
+	// (header → cookie → query order).
+	access, _, _, err := env.auth.Login(context.Background(), "admin", "password123")
+	if err != nil {
+		t.Fatalf("admin login: %v", err)
+	}
+	c = ut.CreateUtRequestContext("GET", "/api/v1/traces/t1/live", nil,
+		ut.Header{Key: "Cookie", Value: fmt.Sprintf("dagger_kubernetes_access=%s", access)})
+	if !env.server.requireAuthWithQueryFallback(c) {
+		t.Fatal("access cookie should authenticate")
+	}
+	if id := identityOf(c); id == nil || id.Username != "admin" {
+		t.Fatalf("identity = %+v", id)
 	}
 
 	// No token at all -> rejected.

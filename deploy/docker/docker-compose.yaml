@@ -9,36 +9,36 @@ services:
       - "8080:8080"
       - "8443:8443"
     environment:
-      - DAGGER_CACHE_SERVER_CONTROL_ADDR=:8080
-      - DAGGER_CACHE_SERVER_DATA_ADDR=:8443
-      - DAGGER_CACHE_SERVER_DATA_HOSTNAME=localhost
-      - DAGGER_CACHE_SERVER_PUBLIC_URL=http://localhost:8080
-      - DAGGER_CACHE_TELEMETRY_COLLECTOR_URL=http://otel-collector:4318
-      - DAGGER_CACHE_TELEMETRY_TEMPO_URL=http://tempo:3200
-      - DAGGER_CACHE_TELEMETRY_LOKI_URL=http://loki:3100
-      - DAGGER_CACHE_TELEMETRY_VICTORIA_URL=http://victoria:8428
-      - DAGGER_CACHE_CACHE_BACKEND=registry
-      - DAGGER_CACHE_CACHE_REGISTRY=localhost:5000/dagger-cache
-      - DAGGER_CACHE_TLS_CA_PATH=/tmp/dagger-cache/ca
-      - DAGGER_CACHE_LOG_LEVEL=debug
-      - DAGGER_CACHE_DATABASE_DIR=/var/lib/dagger-cache
-      - DAGGER_CACHE_RAFT_BIND_ADDR=:8081
+      - DAGGER_KUBERNETES_SERVER_CONTROL_ADDR=:8080
+      - DAGGER_KUBERNETES_SERVER_DATA_ADDR=:8443
+      - DAGGER_KUBERNETES_SERVER_DATA_HOSTNAME=localhost
+      - DAGGER_KUBERNETES_SERVER_PUBLIC_URL=http://localhost:8080
+      - DAGGER_KUBERNETES_TELEMETRY_COLLECTOR_URL=http://otel-collector:4318
+      - DAGGER_KUBERNETES_TELEMETRY_TEMPO_URL=http://tempo:3200
+      - DAGGER_KUBERNETES_TELEMETRY_LOKI_URL=http://loki:3100
+      - DAGGER_KUBERNETES_TELEMETRY_VICTORIA_URL=http://victoria:8428
+      - DAGGER_KUBERNETES_CACHE_BACKEND=registry
+      - DAGGER_KUBERNETES_CACHE_REGISTRY=localhost:5000/dagger-cache
+      - DAGGER_KUBERNETES_TLS_CA_PATH=/tmp/dagger-kubernetes/ca
+      - DAGGER_KUBERNETES_LOG_LEVEL=debug
+      - DAGGER_KUBERNETES_DATABASE_DIR=/var/lib/dagger-kubernetes
+      - DAGGER_KUBERNETES_RAFT_BIND_ADDR=:8081
       # Set a bootstrap admin password explicitly in production; empty = random
       # password logged once at first boot.
-      - DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD=
+      - DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD=
     volumes:
       # Generate your own bearer token and write it to ./data/tokens before
       # starting the stack, e.g.:
       #   mkdir -p data && head -c 32 /dev/urandom | xxd -p -u > data/tokens
       # The tokens file is gitignored and must never be committed.
       # DEPRECATED: migrate with `supervisor migrate-tokens` then remove.
-      - ./data/tokens:/etc/dagger-cache/tokens:ro
+      - ./data/tokens:/etc/dagger-kubernetes/tokens:ro
       # Raft data directory (raft.db, snapshots/, node-id). Fresh-start store.
-      - ./data:/var/lib/dagger-cache
+      - ./data:/var/lib/dagger-kubernetes
     depends_on:
       - cache-registry
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
   otel-collector:
     image: otel/opentelemetry-collector-contrib:0.127.0
@@ -47,7 +47,7 @@ services:
     volumes:
       - ./otel-collector-config.yaml:/etc/otel/config.yaml
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
   tempo:
     image: grafana/tempo:2.7.2
@@ -57,14 +57,14 @@ services:
     volumes:
       - ./tempo.yaml:/etc/tempo.yaml
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
   loki:
     image: grafana/loki:3.6.3
     ports:
       - "3101:3100"
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
   victoria:
     image: victoriametrics/victoria-metrics:v1.119.0
@@ -76,7 +76,7 @@ services:
       - -storageDataPath=/victoria-metrics-data
       - -retentionPeriod=30d
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
   grafana:
     image: grafana/grafana:11.6.2
@@ -85,7 +85,7 @@ services:
     environment:
       - GF_AUTH_ANONYMOUS_ENABLED=false
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
   cache-registry:
     image: registry:2
@@ -96,10 +96,10 @@ services:
     volumes:
       - registry-data:/var/lib/registry
     networks:
-      - dagger-cache
+      - dagger-kubernetes
 
 networks:
-  dagger-cache:
+  dagger-kubernetes:
 
 volumes:
   registry-data:

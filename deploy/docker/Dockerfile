@@ -18,6 +18,7 @@ RUN apk add --no-cache ca-certificates tzdata \
     && addgroup -S dagger && adduser -S -G dagger -u 10001 dagger
 
 COPY --from=builder /supervisor /usr/local/bin/supervisor
+COPY config/config.app.yaml.sample /etc/dagger-kubernetes/config.app.yaml
 
 USER dagger
 EXPOSE 8080 8443

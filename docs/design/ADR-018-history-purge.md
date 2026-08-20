@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-18
-- **Deciders:** dagger-cache maintainers
+- **Deciders:** dagger-kubernetes maintainers
 
 ## Context
 
@@ -50,8 +50,8 @@ attempts the (idempotent) telemetry deletes and reports `already_purged`.
 
 Top-level `history.gc.*` with `enabled`, `max_age`, `schedule` — the same shape
 as `cache.gc.*`. Defaults: `enabled: false`, `max_age: "720h"` (30d),
-`schedule: "1h"`. Env overrides are `DAGGER_CACHE_HISTORY_GC_ENABLED`,
-`DAGGER_CACHE_HISTORY_GC_MAX_AGE`, `DAGGER_CACHE_HISTORY_GC_SCHEDULE`.
+`schedule: "1h"`. Env overrides are `DAGGER_KUBERNETES_HISTORY_GC_ENABLED`,
+`DAGGER_KUBERNETES_HISTORY_GC_MAX_AGE`, `DAGGER_KUBERNETES_HISTORY_GC_SCHEDULE`.
 
 ### 5. Partial-failure semantics
 

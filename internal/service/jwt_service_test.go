@@ -136,6 +136,16 @@ func TestJWTSecretMismatch(t *testing.T) {
 	}
 }
 
+func TestJWTTTLGetters(t *testing.T) {
+	s := NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
+	if got := s.AccessTTL(); got != 15*time.Minute {
+		t.Fatalf("AccessTTL = %v, want 15m", got)
+	}
+	if got := s.RefreshTTL(); got != 168*time.Hour {
+		t.Fatalf("RefreshTTL = %v, want 168h", got)
+	}
+}
+
 // flip returns the byte b with its low bit flipped (for tamper tests).
 func flip(b byte) byte {
 	if b == 'a' {

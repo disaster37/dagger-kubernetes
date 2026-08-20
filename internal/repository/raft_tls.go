@@ -29,7 +29,7 @@ type RaftTLSConfig struct {
 	Enabled      bool
 	Dir          string        // default <database.dir>/tls
 	Validity     time.Duration // default 8760h (1y)
-	Organization string        // default "dagger-cache-raft"
+	Organization string        // default "dagger-kubernetes-raft"
 	CACertPath   string        // manual mode: CA cert file
 	CertPath     string        // manual mode: leaf cert file
 	KeyPath      string        // manual mode: leaf key file
@@ -72,7 +72,7 @@ func LoadOrBuildRaftTLS(
 		cfg.Validity = 8760 * time.Hour
 	}
 	if cfg.Organization == "" {
-		cfg.Organization = "dagger-cache-raft"
+		cfg.Organization = "dagger-kubernetes-raft"
 	}
 
 	// Manual mode: operator pre-provisions CA + leaf PEM files.
@@ -150,7 +150,7 @@ func ensureRaftCA(
 // generates + writes it, other nodes poll until it appears.
 func ensureRaftCAFromSecret(cfg RaftTLSConfig, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) ([]byte, []byte, error) {
 	if cfg.CABootstrap {
-		certPEM, keyPEM, err := createRaftCAWithGoca("dagger-cache-raft-ca", cfg.Organization)
+		certPEM, keyPEM, err := createRaftCAWithGoca("dagger-kubernetes-raft-ca", cfg.Organization)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -242,7 +242,7 @@ func ensureLocalRaftCA(cfg RaftTLSConfig) ([]byte, []byte, error) {
 		return certPEM, keyPEM, nil
 	}
 
-	certPEM, keyPEM, err := createRaftCAWithGoca("dagger-cache-raft-ca", cfg.Organization)
+	certPEM, keyPEM, err := createRaftCAWithGoca("dagger-kubernetes-raft-ca", cfg.Organization)
 	if err != nil {
 		return nil, nil, err
 	}

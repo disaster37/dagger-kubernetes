@@ -135,17 +135,17 @@ func TestPipelineViewURLEndpoint(t *testing.T) {
 }
 
 // TestCIWrapperPrintsSelfHostedURL proves the client-facing behavior
-// end-to-end: the compiled dagger-cache-ci wrapper, pointed at a running
+// end-to-end: the compiled dagger-kubernetes-ci wrapper, pointed at a running
 // integration server with a fake dagger on PATH, prints the self-hosted
 // pipeline-view link using the /pipelines/<id> path.
 func TestCIWrapperPrintsSelfHostedURL(t *testing.T) {
 	serverURL, adminToken := startPipelineURLServer(t, ":18098", ":18459")
 
 	binDir := t.TempDir()
-	bin := filepath.Join(binDir, "dagger-cache-ci")
+	bin := filepath.Join(binDir, "dagger-kubernetes-ci")
 	build := exec.Command("go", "build", "-o", bin, "../../cmd/ci")
 	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build dagger-cache-ci: %v\n%s", err, out)
+		t.Fatalf("build dagger-kubernetes-ci: %v\n%s", err, out)
 	}
 
 	fakeDir := t.TempDir()
@@ -166,7 +166,7 @@ func TestCIWrapperPrintsSelfHostedURL(t *testing.T) {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
-		t.Fatalf("dagger-cache-ci: %v\n%s", err, stderr.String())
+		t.Fatalf("dagger-kubernetes-ci: %v\n%s", err, stderr.String())
 	}
 
 	want := fmt.Sprintf("Pipeline View: https://supv.example.com/pipelines/%s", ciWrapperTraceID)

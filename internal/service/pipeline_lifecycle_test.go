@@ -107,7 +107,7 @@ func TestOnTunnelClosed(t *testing.T) {
 		if !bc.sawEvent("t1") {
 			t.Fatal("expected broadcast on transition")
 		}
-		if got := counterVecValue(t, reg, "dagger_cache_pipeline_disconnect_failed_total", "tunnel_close"); got != 1 {
+		if got := counterVecValue(t, reg, "dagger_kubernetes_pipeline_disconnect_failed_total", "tunnel_close"); got != 1 {
 			t.Fatalf("tunnel_close metric = %v, want 1", got)
 		}
 	})
@@ -266,7 +266,7 @@ func TestRunStaleSweep(t *testing.T) {
 	if bc.sawEvent("active-running") || bc.sawEvent("success-old") {
 		t.Fatal("broadcast must only fire on transition")
 	}
-	if got := counterVecValue(t, reg, "dagger_cache_pipeline_disconnect_failed_total", "stale_sweep"); got != 1 {
+	if got := counterVecValue(t, reg, "dagger_kubernetes_pipeline_disconnect_failed_total", "stale_sweep"); got != 1 {
 		t.Fatalf("stale_sweep metric = %v, want 1", got)
 	}
 }

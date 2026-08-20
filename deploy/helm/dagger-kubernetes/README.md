@@ -3,7 +3,7 @@
 Self-hosted, Dagger-Cloud-compatible platform: remote shared cache, auto-scaling
 engine fleets, live pipeline UI, and drop-in CI integration.
 <!-- version-marker -->
-[^1]: Latest released version: `0.0.1-alpha4`
+[^1]: Latest released version: `0.1.0`
 
 
 The chart deploys the Supervisor control plane and all required infrastructure
@@ -34,13 +34,13 @@ EOF
 # Install directly from GHCR (no local clone needed). The embedded TLS provider
 # auto-issues the minting CA + a self-signed server cert on first boot.
 helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
-  --version 0.0.1-alpha4 -f my-values.yaml \
+  --version 0.1.0 -f my-values.yaml \
   --namespace dagger-stack --create-namespace
 
 # Optionally pre-seed a legacy token (or create API tokens from the UI):
 TOKEN=$(openssl rand -hex 32)
 helm upgrade dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
-  --version 0.0.1-alpha4 -f my-values.yaml --namespace dagger-stack \
+  --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
   --set-string "auth.tokens[0]=$TOKEN"
 ```
 
@@ -171,7 +171,7 @@ EOF
 
 # 2. Install with the cert-manager provider (chart-rendered Certificate)
 helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
-  --version 0.0.1-alpha4 -f my-values.yaml --namespace dagger-stack \
+  --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
   --set supervisor.config.tls.provider=cert-manager \
   --set dataCert.enabled=true \
   --set dataCert.issuerName=letsencrypt-prod \
@@ -399,7 +399,7 @@ give each pod a stable identity for peer discovery.
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.config.database.dir` | `/var/lib/dagger-cache` | Raft data dir (`raft.db`, `snapshots/`, `node-id`, `tls/`). Mounted from the per-pod `db` volume. |
+| `supervisor.config.database.dir` | `/var/lib/dagger-kubernetes` | Raft data dir (`raft.db`, `snapshots/`, `node-id`, `tls/`). Mounted from the per-pod `db` volume. |
 | `supervisor.replicaCount` | `3` | Supervisor pod count (mirrors `supervisor.config.raft.replicas`). |
 | `supervisor.config.raft.nodeId` | `""` | Stable node ID; the chart injects the StatefulSet pod name (`<sts>-<ordinal>`) via downward-API. |
 | `supervisor.config.raft.bindAddr` | `:8081` | Dedicated Raft transport port (exposed as the `raft` container port). |
@@ -418,7 +418,7 @@ give each pod a stable identity for peer discovery.
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.dir` | `""` | Internal raft CA + leaf directory (defaults to `<database.dir>/tls`). |
 | `supervisor.config.raft.tls.validity` | `8760h` | Leaf cert TTL. |
-| `supervisor.config.raft.tls.organization` | `dagger-cache-raft` | CA/leaf subject organization. |
+| `supervisor.config.raft.tls.organization` | `dagger-kubernetes-raft` | CA/leaf subject organization. |
 | `supervisor.config.raft.tls.caCert` / `cert` / `key` | `""` | Manual mode: pre-provisioned CA + leaf PEM paths (all three together). |
 | `supervisor.config.raft.tls.caSecret` | `""` | Auto mode: Secret name for the shared internal CA (defaults to `<release>-raft-ca`). |
 | `supervisor.config.raft.tls.caBootstrap` | `false` | Auto mode: force this node to generate + write the CA Secret (ordinal 0 is auto-detected). |
@@ -524,7 +524,7 @@ From the OCI repository (recommended):
 
 ```bash
 helm upgrade dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
-  --version 0.0.1-alpha4 -f my-values.yaml --namespace dagger-stack
+  --version 0.1.0 -f my-values.yaml --namespace dagger-stack
 ```
 
 From source:

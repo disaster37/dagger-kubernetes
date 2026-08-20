@@ -139,7 +139,7 @@
           <ol style="margin: 12px 0 0 24px; line-height: 1.8;">
             <li>Check "Show token plaintext" to include your token in the snippets.</li>
             <li>Click "Copy .bashrc snippet" and paste it into a shell to persist the env for interactive use.</li>
-            <li>Reload your shell (or run <code>source ~/.dagger-cache.env</code>).</li>
+            <li>Reload your shell (or run <code>source ~/.dagger-kubernetes.env</code>).</li>
             <li>Run <code>dagger call github.com/your-org/ci@v1.0.0 build</code>.</li>
             <li>For CI, paste the GitHub Actions / GitLab CI block into your workflow and store the token in your CI secret store once.</li>
           </ol>
@@ -192,7 +192,7 @@ const genericExports = computed(() => exportLines(false))
 
 const bashrcSnippet = computed(() => {
   const body = bashExports.value
-  return `cat >> ~/.dagger-cache.env <<'EOF'\n${body}\nEOF\necho 'source ~/.dagger-cache.env' >> ~/.bashrc`
+  return `cat >> ~/.dagger-kubernetes.env <<'EOF'\n${body}\nEOF\necho 'source ~/.dagger-kubernetes.env' >> ~/.bashrc`
 })
 
 function ciTokenLine(secretRef: string): string {

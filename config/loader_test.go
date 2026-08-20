@@ -25,19 +25,19 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.Internal.Enabled != true {
 		t.Fatal("auth.internal.enabled default should be true")
 	}
-	if cfg.Auth.Internal.TokensFile != "/etc/dagger-cache/tokens" {
+	if cfg.Auth.Internal.TokensFile != "/etc/dagger-kubernetes/tokens" {
 		t.Fatalf("tokens_file default = %q", cfg.Auth.Internal.TokensFile)
 	}
-	if cfg.Fleet.Namespace != "dagger-cache" {
-		t.Fatalf("fleet.namespace default = %q, want dagger-cache", cfg.Fleet.Namespace)
+	if cfg.Fleet.Namespace != "dagger-kubernetes" {
+		t.Fatalf("fleet.namespace default = %q, want dagger-kubernetes", cfg.Fleet.Namespace)
 	}
 	if cfg.Cache.InternalAddr != "" {
 		t.Fatalf("cache.internal_addr default = %q, want empty", cfg.Cache.InternalAddr)
 	}
-	if cfg.TLS.CertPath != "/etc/dagger-cache/tls/tls.crt" {
+	if cfg.TLS.CertPath != "/etc/dagger-kubernetes/tls/tls.crt" {
 		t.Fatalf("tls.cert_path default = %q", cfg.TLS.CertPath)
 	}
-	if cfg.TLS.KeyPath != "/etc/dagger-cache/tls/tls.key" {
+	if cfg.TLS.KeyPath != "/etc/dagger-kubernetes/tls/tls.key" {
 		t.Fatalf("tls.key_path default = %q", cfg.TLS.KeyPath)
 	}
 	if cfg.LeaseTTL != 2*time.Minute {
@@ -52,7 +52,7 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.LogLevel != "info" {
 		t.Fatalf("log_level default = %q, want info", cfg.LogLevel)
 	}
-	if cfg.Database.Dir != "/var/lib/dagger-cache" {
+	if cfg.Database.Dir != "/var/lib/dagger-kubernetes" {
 		t.Fatalf("database.dir default = %q", cfg.Database.Dir)
 	}
 	if cfg.Raft.BindAddr != ":8081" {
@@ -245,9 +245,9 @@ log_format: "text"
 }
 
 func TestLoadEnvOverride(t *testing.T) {
-	t.Setenv("DAGGER_CACHE_SERVER_CONTROL_ADDR", ":7070")
-	t.Setenv("DAGGER_CACHE_LOG_LEVEL", "error")
-	t.Setenv("DAGGER_CACHE_CACHE_GC_ENABLED", "true")
+	t.Setenv("DAGGER_KUBERNETES_SERVER_CONTROL_ADDR", ":7070")
+	t.Setenv("DAGGER_KUBERNETES_LOG_LEVEL", "error")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_GC_ENABLED", "true")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
@@ -266,7 +266,7 @@ func TestLoadEnvOverride(t *testing.T) {
 }
 
 func TestLoadHistoryEnvOverride(t *testing.T) {
-	t.Setenv("DAGGER_CACHE_HISTORY_GC_ENABLED", "true")
+	t.Setenv("DAGGER_KUBERNETES_HISTORY_GC_ENABLED", "true")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
@@ -298,10 +298,10 @@ func TestPipelineDefaults(t *testing.T) {
 }
 
 func TestPipelineEnvOverride(t *testing.T) {
-	t.Setenv("DAGGER_CACHE_PIPELINE_DISCONNECT_GRACE", "10s")
-	t.Setenv("DAGGER_CACHE_PIPELINE_STALE_SWEEP_ENABLED", "false")
-	t.Setenv("DAGGER_CACHE_PIPELINE_STALE_SWEEP_SCHEDULE", "30s")
-	t.Setenv("DAGGER_CACHE_PIPELINE_STALE_SWEEP_STALE_AFTER", "2m")
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_DISCONNECT_GRACE", "10s")
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_STALE_SWEEP_ENABLED", "false")
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_STALE_SWEEP_SCHEDULE", "30s")
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_STALE_SWEEP_STALE_AFTER", "2m")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
@@ -479,7 +479,7 @@ func TestLoadServerPipelineURLDefault(t *testing.T) {
 }
 
 func TestLoadServerPipelineURLEnvOverride(t *testing.T) {
-	t.Setenv("DAGGER_CACHE_SERVER_PIPELINE_URL", "https://x.example.com")
+	t.Setenv("DAGGER_KUBERNETES_SERVER_PIPELINE_URL", "https://x.example.com")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {

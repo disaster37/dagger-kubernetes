@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-19
-- **Deciders:** dagger-cache maintainers
+- **Deciders:** dagger-kubernetes maintainers
 
 ## Context
 
@@ -28,7 +28,7 @@ url = fmt.Sprintf("https://dagger.cloud/%s/traces/%s", orgName, trace.SpanContex
 
 The platform therefore **cannot**, with the unmodified stock `dagger` CLI,
 change what the CLI itself prints. The only client this repository controls is
-the **`dagger-cache-ci` wrapper** (`cmd/ci/main.go`), which wraps `dagger`,
+the **`dagger-kubernetes-ci` wrapper** (`cmd/ci/main.go`), which wraps `dagger`,
 extracts the traceID from stderr, and prints a self-hosted link.
 
 A secondary bug existed in that wrapper: it constructed `<uiURL>/traces/<id>`,
@@ -40,7 +40,7 @@ printed link landed on the SPA not-found route.
 Deliver the self-hosted URL via the **wrapper** plus a **dedicated platform
 endpoint**, with a single shared helper for URL construction.
 
-### 1. Wrapper (`dagger-cache-ci`) — correct path + config-driven base
+### 1. Wrapper (`dagger-kubernetes-ci`) — correct path + config-driven base
 
 - Use the canonical UI path `/pipelines/<traceID>`.
 - Derive the URL base with precedence `--ui-url` > `server.pipeline_url`

@@ -19,9 +19,8 @@ data:
         tokens_file: {{ .Values.supervisor.config.auth.internal.tokensFile | quote }}
       bootstrap_admin:
         username: {{ .Values.supervisor.config.auth.bootstrapAdmin.username | quote }}
-        password: {{ .Values.supervisor.config.auth.bootstrapAdmin.password | quote }}
       jwt:
-        secret: {{ .Values.supervisor.config.auth.jwt.secret | quote }}
+        secret: ""
         access_ttl: {{ .Values.supervisor.config.auth.jwt.accessTtl | quote }}
         refresh_ttl: {{ .Values.supervisor.config.auth.jwt.refreshTtl | quote }}
       oauth:
@@ -29,12 +28,19 @@ data:
 {{- with .Values.supervisor.config.auth.oauth }}
         provider: {{ .provider | quote }}
         client_id: {{ .clientId | quote }}
-        client_secret: {{ .clientSecret | quote }}
+        client_secret: ""
         redirect_url: {{ .redirectUrl | quote }}
         allowed_orgs:
 {{ toYaml .allowedOrgs | indent 10 }}
         default_group: {{ .defaultGroup | quote }}
 {{- end }}
+      cookie:
+        access_name: {{ .Values.supervisor.config.auth.cookie.accessName | quote }}
+        refresh_name: {{ .Values.supervisor.config.auth.cookie.refreshName | quote }}
+        secure: {{ .Values.supervisor.config.auth.cookie.secure }}
+      cors:
+        allowed_origins:
+{{ toYaml .Values.supervisor.config.auth.cors.allowedOrigins | indent 10 }}
     database:
       dir: {{ .Values.supervisor.config.database.dir | quote }}
     raft:
@@ -81,7 +87,7 @@ data:
       registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}
       public_host: {{ include "dagger-kubernetes.cachePublicHost" . | quote }}
       internal_addr: {{ include "dagger-kubernetes.cacheInternalAddr" . | quote }}
-      auth_token: {{ .Values.supervisor.config.cache.authToken | quote }}
+      auth_token: ""
       ref_per_version: {{ .Values.supervisor.config.cache.refPerVersion }}
 {{- if .Values.supervisor.config.cache.registries }}
       registries:
@@ -89,7 +95,12 @@ data:
         - id: {{ .id | quote }}
           internal_addr: {{ .internalAddr | quote }}
           username: {{ .username | quote }}
-          password: {{ .password | quote }}
+          password: ""
+          {{- with .passwordSecret }}
+          password_secret:
+            name: {{ .name | quote }}
+            key: {{ .key | quote }}
+          {{- end }}
 {{- end }}
 {{- end }}
 {{- if eq .Values.supervisor.config.cache.backend "s3" }}

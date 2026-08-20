@@ -2,7 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: supervisor
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
   labels:
     app: supervisor
 spec:
@@ -18,7 +18,7 @@ spec:
       serviceAccountName: supervisor
       containers:
         - name: supervisor
-          image: dagger-cache/supervisor:latest
+          image: dagger-kubernetes/supervisor:latest
           imagePullPolicy: IfNotPresent
           ports:
             - name: control
@@ -28,23 +28,28 @@ spec:
             - name: raft
               containerPort: 8081
           args:
-            - "--config=/etc/dagger-cache/config.app.yaml"
+            - "--config=/etc/dagger-kubernetes/config.app.yaml"
           env:
-            - name: DAGGER_CACHE_LOG_LEVEL
+            - name: DAGGER_KUBERNETES_LOG_LEVEL
               value: "info"
-            - name: DAGGER_CACHE_DATABASE_DIR
-              value: "/var/lib/dagger-cache"
-            - name: DAGGER_CACHE_RAFT_BIND_ADDR
+            - name: DAGGER_KUBERNETES_DATABASE_DIR
+              value: "/var/lib/dagger-kubernetes"
+            - name: DAGGER_KUBERNETES_RAFT_BIND_ADDR
               value: ":8081"
           volumeMounts:
             - name: config
-              mountPath: /etc/dagger-cache
+              mountPath: /etc/dagger-kubernetes/config.app.yaml
+              subPath: config.app.yaml
+              readOnly: true
+            - name: tokens
+              mountPath: /etc/dagger-kubernetes/tokens
+              subPath: tokens
               readOnly: true
             - name: tls
-              mountPath: /etc/dagger-cache/tls
+              mountPath: /etc/dagger-kubernetes/tls
               readOnly: true
             - name: db
-              mountPath: /var/lib/dagger-cache
+              mountPath: /var/lib/dagger-kubernetes
           readinessProbe:
             httpGet:
               path: /readyz
@@ -68,6 +73,10 @@ spec:
         - name: config
           configMap:
             name: supervisor-config
+        - name: tokens
+          secret:
+            secretName: supervisor-tokens
+            optional: true
         - name: tls
           secret:
             secretName: supervisor-tls
@@ -78,7 +87,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: supervisor-control
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 spec:
   selector:
     app: supervisor
@@ -91,7 +100,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: supervisor-data
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 spec:
   selector:
     app: supervisor
@@ -105,7 +114,7 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: supervisor-ingress
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 spec:
   rules:
     - host: supv.example.com

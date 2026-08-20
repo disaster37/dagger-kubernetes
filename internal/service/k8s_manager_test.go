@@ -18,7 +18,7 @@ import (
 func TestK8sProviderWithManagerIntegration(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	p := repository.NewK8sProvider(cs, repository.K8sProviderConfig{
-		Namespace:           "dagger-cache",
+		Namespace:           "dagger-kubernetes",
 		ImageRegistry:       "registry.dagger.io/engine",
 		StorageSize:         "10Gi",
 		CPURequest:          "200m",
@@ -60,7 +60,7 @@ func TestK8sProviderWithManagerIntegration(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dagger-engine-v0-20-0-0",
-			Namespace: "dagger-cache",
+			Namespace: "dagger-kubernetes",
 			Labels:    labels,
 		},
 		Status: corev1.PodStatus{
@@ -75,7 +75,7 @@ func TestK8sProviderWithManagerIntegration(t *testing.T) {
 			Containers: []corev1.Container{{Name: "engine", Image: "e"}},
 		},
 	}
-	cs.CoreV1().Pods("dagger-cache").Create(context.Background(), pod, metav1.CreateOptions{})
+	cs.CoreV1().Pods("dagger-kubernetes").Create(context.Background(), pod, metav1.CreateOptions{})
 
 	err := <-errChan2
 	if err != nil {
@@ -94,7 +94,7 @@ func TestK8sProviderWithManagerIntegration(t *testing.T) {
 		t.Errorf("expected IP 10.0.0.5, got %s", result.PodIP)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), domain.StsName("v0.20.0"), metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName("v0.20.0"), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestK8sProviderWithManagerIntegration(t *testing.T) {
 		t.Error("expected statefulset to be scaled up to at least 1 replica")
 	}
 
-	_, err = cs.CoreV1().Services("dagger-cache").Get(context.Background(), domain.ServiceName("v0.20.0"), metav1.GetOptions{})
+	_, err = cs.CoreV1().Services("dagger-kubernetes").Get(context.Background(), domain.ServiceName("v0.20.0"), metav1.GetOptions{})
 	if err != nil {
 		t.Errorf("expected service to exist: %v", err)
 	}

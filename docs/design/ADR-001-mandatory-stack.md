@@ -1,6 +1,6 @@
 # ADR-001: Mandatory Library Stack
 
-**Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-cache team
+**Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-kubernetes team
 
 ## Context
 

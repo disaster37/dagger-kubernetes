@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-17
-- **Deciders:** dagger-cache maintainers
+- **Deciders:** dagger-kubernetes maintainers
 
 ## Context
 

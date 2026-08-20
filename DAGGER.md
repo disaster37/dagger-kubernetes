@@ -2,7 +2,7 @@
 
 ## Overview
 
-The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](./dagger) (module name `dagger-cache`). It delegates lint and build to the [`golang`](https://github.com/disaster37/dagger-library-go) module and helm lint to the [`helm`](https://github.com/disaster37/dagger-library-go) module, both pinned at `2.0.10`. Test, UI, docker, and the helm template matrix are implemented locally because the upstream modules cannot express them.
+The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](./dagger) (module name `dagger-kubernetes`). It delegates lint and build to the [`golang`](https://github.com/disaster37/dagger-library-go) module and helm lint to the [`helm`](https://github.com/disaster37/dagger-library-go) module, both pinned at `2.0.10`. Test, UI, docker, and the helm template matrix are implemented locally because the upstream modules cannot express them.
 
 > **Note on the golang dependency:** The upstream `golang` module at tag `2.0.10` has a `replace ../lib/` directive in its `go.mod` but does not declare `"include": ["../lib"]` in its `dagger.json`, which breaks remote loading. The module is therefore vendored at `dagger/deps/golang/` (with the `include` fix applied) and referenced as a local dependency. The `helm` module works remotely and is fetched from GitHub.
 
@@ -40,7 +40,7 @@ Outputs:
 | Path | Contents |
 |------|----------|
 | `out/bin/supervisor` | Supervisor binary |
-| `out/bin/dagger-cache-ci` | CI helper binary |
+| `out/bin/dagger-kubernetes-ci` | CI helper binary |
 | `out/coverage.out` | Go test coverage profile |
 
 ## Individual functions

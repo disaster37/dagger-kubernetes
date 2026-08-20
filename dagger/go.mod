@@ -1,4 +1,4 @@
-module dagger/dagger-cache
+module dagger/dagger-kubernetes
 
 go 1.26.5
 

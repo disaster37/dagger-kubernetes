@@ -28,63 +28,63 @@ type Metrics struct {
 func NewMetrics(reg prometheus.Registerer) *Metrics {
 	m := &Metrics{
 		EngineAcquireTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "dagger_cache_engine_acquire_total",
+			Name: "dagger_kubernetes_engine_acquire_total",
 			Help: "Total number of engine acquire requests",
 		}, []string{"version", "status"}),
 
 		EngineAcquireDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
-			Name:    "dagger_cache_engine_acquire_duration_seconds",
+			Name:    "dagger_kubernetes_engine_acquire_duration_seconds",
 			Help:    "Duration of engine acquire requests",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"version"}),
 
 		ActiveLeases: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "dagger_cache_active_leases",
+			Name: "dagger_kubernetes_active_leases",
 			Help: "Number of active session leases",
 		}),
 
 		ActiveReplicas: prometheus.NewGaugeVec(prometheus.GaugeOpts{
-			Name: "dagger_cache_active_replicas",
+			Name: "dagger_kubernetes_active_replicas",
 			Help: "Number of active engine replicas per version",
 		}, []string{"version"}),
 
 		OTelIngestTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "dagger_cache_otel_ingest_total",
+			Name: "dagger_kubernetes_otel_ingest_total",
 			Help: "Total OTLP ingest requests",
 		}, []string{"signal", "status"}),
 
 		CacheSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "dagger_cache_cache_size_bytes",
+			Name: "dagger_kubernetes_cache_size_bytes",
 			Help: "Total size of cache blobs observed in the OCI registry",
 		}),
 
 		CacheObjectCount: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "dagger_cache_cache_object_count",
+			Name: "dagger_kubernetes_cache_object_count",
 			Help: "Total number of cache layers/blobs observed in the OCI registry",
 		}),
 
 		CachePurgeTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "dagger_cache_cache_purge_total",
+			Name: "dagger_kubernetes_cache_purge_total",
 			Help: "Total number of cache tags purged (manual + GC)",
 		}),
 
 		GCRunTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "dagger_cache_gc_run_total",
+			Name: "dagger_kubernetes_gc_run_total",
 			Help: "Total number of cache GC sweeper runs",
 		}, []string{"status"}),
 
 		HistoryPurgeTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "dagger_cache_history_purge_total",
+			Name: "dagger_kubernetes_history_purge_total",
 			Help: "Total number of traces purged from history (manual + GC)",
 		}),
 
 		HistoryGCRunTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "dagger_cache_history_gc_run_total",
+			Name: "dagger_kubernetes_history_gc_run_total",
 			Help: "Total number of history GC sweeper runs",
 		}, []string{"status"}),
 
 		PipelineDisconnectFailedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "dagger_cache_pipeline_disconnect_failed_total",
+			Name: "dagger_kubernetes_pipeline_disconnect_failed_total",
 			Help: "Total number of pipelines marked failed by disconnect detection",
 		}, []string{"source"}),
 	}

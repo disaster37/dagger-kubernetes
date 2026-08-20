@@ -5,11 +5,11 @@
 # config/loader.go.
 #
 # Every value can also be set via an environment variable using the
-# DAGGER_CACHE_ prefix (dots -> underscores, uppercase). Examples:
-#   server.public_url        -> DAGGER_CACHE_SERVER_PUBLIC_URL
-#   server.pipeline_url      -> DAGGER_CACHE_SERVER_PIPELINE_URL
-#   cache.registry           -> DAGGER_CACHE_CACHE_REGISTRY
-#   fleet.max_replicas_per_version -> DAGGER_CACHE_FLEET_MAX_REPLICAS_PER_VERSION
+# DAGGER_KUBERNETES_ prefix (dots -> underscores, uppercase). Examples:
+#   server.public_url        -> DAGGER_KUBERNETES_SERVER_PUBLIC_URL
+#   server.pipeline_url      -> DAGGER_KUBERNETES_SERVER_PIPELINE_URL
+#   cache.registry           -> DAGGER_KUBERNETES_CACHE_REGISTRY
+#   fleet.max_replicas_per_version -> DAGGER_KUBERNETES_FLEET_MAX_REPLICAS_PER_VERSION
 # Environment variables take precedence over this file.
 #
 # When deploying with the Helm chart (recommended for production), the
@@ -26,7 +26,7 @@ server:
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
   public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI).
-  pipeline_url: ""  # Optional base URL for pipeline-view links printed by the dagger-cache-ci wrapper and returned by GET /api/v1/traces/:id/url. Empty => fall back to public_url. Must be an absolute http(s) URL when set.
+  pipeline_url: ""  # Optional base URL for pipeline-view links printed by the dagger-kubernetes-ci wrapper and returned by GET /api/v1/traces/:id/url. Empty => fall back to public_url. Must be an absolute http(s) URL when set.
 
 # --- Authentication ----------------------------------------------------------
 auth:
@@ -35,7 +35,7 @@ auth:
   # then remove this key. See ADR-010.
   internal:
     enabled: true                                   # false = disable username/password + legacy-token auth; ONLY allowed when auth.oauth.enabled: true with a fully configured provider. Auth is always enforced (no fully-disabled mode).
-    tokens_file: "/etc/dagger-cache/tokens"         # legacy fallback + migration source only.
+    tokens_file: "/etc/dagger-kubernetes/tokens"         # legacy fallback + migration source only.
     # When auth.internal.enabled: false, OAuth must be fully configured for the chosen provider or config load fails.
 
   # Bootstrap admin: created on first boot when the users table is empty.
@@ -46,12 +46,13 @@ auth:
   # JWT (HS256) issuance for username/password and OAuth login.
   jwt:
     secret: ""                                      # HS256 signing key (>= 32 bytes, enforced); empty = auto-generated and persisted in the DB.
+                                                    # In production set via env (DAGGER_KUBERNETES_AUTH_JWT_SECRET) or the Helm <release>-jwt Secret — never this file.
     access_ttl: "15m"
     refresh_ttl: "168h"                             # 7d; refresh rotated on use.
 
   # API-token plaintext recovery (Connect-env UI). AES-256-GCM key (>= 32 bytes).
   # Empty = auto-generated and persisted in the DB meta table (dev mode).
-  # Configure via env (DAGGER_CACHE_AUTH_TOKEN_ENCRYPTION_KEY) in production
+  # Configure via env (DAGGER_KUBERNETES_AUTH_TOKEN_ENCRYPTION_KEY) in production
   # so DB compromise alone does not yield token plaintexts.
   token:
     encryption_key: ""
@@ -62,8 +63,8 @@ auth:
     enabled: false
     provider: "github"                 # "github" | "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
     client_id: "${OAUTH_CLIENT_ID}"    # set via env, do not commit secrets.
-    client_secret: "${OAUTH_CLIENT_SECRET}"
-    redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"  # backend endpoint (302s to SPA fragment). Use /oidc/callback for provider: oidc.
+    client_secret: ""                   # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET) or the Helm <release>-oauth Secret — never this file.
+    redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"  # backend endpoint (302s to SPA with session cookies). Use /oidc/callback for provider: oidc.
     allowed_orgs: ["acme"]             # github: org membership; oidc: groups-claim intersection; empty = allow all.
     default_group: ""                  # new OAuth users auto-join this group (must exist); empty = none.
     cookie_secure: false               # force the Secure flag on the oauth_state cookie; set true when TLS terminates at an ingress/proxy in front of the supervisor.
@@ -73,13 +74,25 @@ auth:
     username_claim: "preferred_username"   # fallback: "email"; error if both absent.
     groups_claim: "groups"              # claim holding group names; array or single string; absent = no groups.
 
+  # Session cookies (SPA auth). Access/refresh JWTs are delivered in httpOnly
+  # cookies instead of localStorage (CWE-922). Bearer auth for CI is unaffected
+  # (additive). SameSite=Lax, Path=/ are always set.
+  cookie:
+    access_name: "dagger_kubernetes_access"   # httpOnly access-JWT cookie name.
+    refresh_name: "dagger_kubernetes_refresh" # httpOnly refresh-JWT cookie name.
+    secure: false                             # force the Secure flag; set true when TLS terminates at an ingress/proxy in front of the supervisor.
+
+  # Cross-origin access for split-UI deployments (same-origin needs no config).
+  cors:
+    allowed_origins: []                       # exact-match Origin allowlist; empty = same-origin only (no Access-Control-Allow-Origin header).
+
 # --- Database ----------------------------------------------------------------
 # Raft data directory: holds raft.db (boltdb log+stable), snapshots/, node-id.
 # Persist on a volume (PVC / bind-mount) in production.
 # NOTE: this is a fresh-start store. There is NO migration from legacy SQLite
 # data; existing SQLite data is intentionally not carried over.
 database:
-  dir: "/var/lib/dagger-cache"
+  dir: "/var/lib/dagger-kubernetes"
 
 # --- Raft (distributed store) ------------------------------------------------
 # Raft ALWAYS runs, even for a single-node deployment. For single-node, leave
@@ -104,8 +117,8 @@ raft:
     # - id: "node-2"
     #   address: "supervisor-1.supervisor-headless:8081"
   replicas: 1              # StatefulSet replica count for DNS peer discovery.
-  statefulset_name: ""     # e.g. "dagger-cache-supervisor" (DNS discovery).
-  headless_service: ""     # e.g. "dagger-cache-headless" (DNS discovery).
+  statefulset_name: ""     # e.g. "dagger-kubernetes-supervisor" (DNS discovery).
+  headless_service: ""     # e.g. "dagger-kubernetes-headless" (DNS discovery).
   namespace: ""            # K8s namespace for pod DNS (default = release ns).
   cluster_domain: "cluster.local"
   apply_timeout: "5s"
@@ -117,7 +130,7 @@ raft:
     enabled: false         # binary default (plaintext single-node dev/test). Helm chart sets true.
     dir: ""                # "" = <database.dir>/tls
     validity: "8760h"      # leaf cert TTL (1y).
-    organization: "dagger-cache-raft"
+    organization: "dagger-kubernetes-raft"
     ca_cert: ""            # manual mode: path to CA cert PEM.
     cert: ""               # manual mode: path to leaf cert PEM.
     key: ""                # manual mode: path to leaf key PEM.
@@ -127,7 +140,7 @@ raft:
 
 # --- Telemetry backend endpoints --------------------------------------------
 # Used by the Supervisor to query traces/logs/metrics for the UI and to
-# forward Dagger CLI OTLP when DAGGER_CACHE_OTEL_OTLP_ENDPOINT is empty.
+# forward Dagger CLI OTLP when DAGGER_KUBERNETES_OTEL_OTLP_ENDPOINT is empty.
 telemetry:
   collector_url: "http://otel-collector:4318"   # OTLP/HTTP collector.
   tempo_url: "http://tempo:3200"                # Tempo traces API.
@@ -142,16 +155,22 @@ cache:
                                     # Defaults to cache.<server.public_url host>. Must differ from the control-plane host.
   internal_addr: ""                 # legacy single backend address (used when registries: [] is empty).
   auth_token: ""                    # bearer the Supervisor accepts from engines on the cache proxy.
-                                    # Empty = read from the engine-registry-auth K8s secret (key "token"). Never logged.
+                                    # Empty = read from the engine-registry-auth K8s secret (key "token"). Never set here in production. Never logged.
   registries: []                    # multi-backend list for load balancing. Empty = single-backend mode (legacy).
     # - id: "reg-1"
     #   internal_addr: "registry-1:5000"
     #   username: ""
-    #   password: ""
+    #   password: ""                 # set directly ONLY for non-K8s deploys. In production use password_secret:
+    #   password_secret:
+    #     name: "cache-registry-1-auth"   # K8s Secret in the fleet namespace
+    #     key: "password"                 # key holding the password (empty = "password")
     # - id: "reg-2"
     #   internal_addr: "registry-2:5000"
     #   username: ""
     #   password: ""
+    #   password_secret:
+    #     name: "cache-registry-2-auth"
+    #     key: "password"
   s3:                                # used only when backend == "s3".
     bucket: ""
     region: ""
@@ -178,7 +197,7 @@ history:
 
 # --- Engine fleet (Kubernetes) ----------------------------------------------
 fleet:
-  namespace: "dagger-cache"                # namespace engines run in.
+  namespace: "dagger-kubernetes"                # namespace engines run in.
   min_replicas_per_version: 0              # floor for the per-version autoscaler.
   max_replicas_per_version: 3              # ceiling for the per-version autoscaler.
   max_sessions_per_replica: 8              # sessions pinned to one engine pod.
@@ -232,9 +251,9 @@ ca:
 tls:
   provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external".
   server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key (legacy; unused by embedded/cert-manager auto-wiring).
-  ca_path: "/var/lib/dagger-cache/ca"   # path to persist the embedded minting CA (Docker bind-mount or PVC); also a local cache of the shared Secret.
-  cert_path: "/etc/dagger-cache/tls/tls.crt"  # PEM cert path for the cert-manager/external providers (the Helm chart auto-wires cert-manager to /etc/dagger-kubernetes/data-tls/tls.crt).
-  key_path: "/etc/dagger-cache/tls/tls.key"   # PEM key path for the cert-manager/external providers.
+  ca_path: "/var/lib/dagger-kubernetes/ca"   # path to persist the embedded minting CA (Docker bind-mount or PVC); also a local cache of the shared Secret.
+  cert_path: "/etc/dagger-kubernetes/tls/tls.crt"  # PEM cert path for the cert-manager/external providers (the Helm chart auto-wires cert-manager to /etc/dagger-kubernetes/data-tls/tls.crt).
+  key_path: "/etc/dagger-kubernetes/tls/tls.key"   # PEM key path for the cert-manager/external providers.
 
 # --- Lease -------------------------------------------------------------------
 lease_ttl: "2m"   # TTL of a client's engine lease; renew before this expires.

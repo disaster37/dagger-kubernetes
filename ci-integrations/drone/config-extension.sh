@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DAGGER_CACHE_SERVER="${PLUGIN_SERVER_URL:-${DAGGER_CACHE_SERVER:-}}"
-DAGGER_CACHE_TOKEN="${PLUGIN_TOKEN:-${DAGGER_CACHE_TOKEN:-}}"
-DAGGER_CACHE_UI="${PLUGIN_UI_URL:-${DAGGER_CACHE_UI:-$DAGGER_CACHE_SERVER}}"
+DAGGER_KUBERNETES_SERVER="${PLUGIN_SERVER_URL:-${DAGGER_KUBERNETES_SERVER:-}}"
+DAGGER_KUBERNETES_TOKEN="${PLUGIN_TOKEN:-${DAGGER_KUBERNETES_TOKEN:-}}"
+DAGGER_KUBERNETES_UI="${PLUGIN_UI_URL:-${DAGGER_KUBERNETES_UI:-$DAGGER_KUBERNETES_SERVER}}"
 DAGGER_TAG="${PLUGIN_VERSION:-${DAGGER_TAG:-}}"
 
-if [ -z "$DAGGER_CACHE_SERVER" ] || [ -z "$DAGGER_CACHE_TOKEN" ]; then
+if [ -z "$DAGGER_KUBERNETES_SERVER" ] || [ -z "$DAGGER_KUBERNETES_TOKEN" ]; then
   echo "Error: server_url and token required" >&2
   exit 1
 fi
 
-export DAGGER_CLOUD_URL="$DAGGER_CACHE_SERVER"
-export DAGGER_CLOUD_TOKEN="$DAGGER_CACHE_TOKEN"
+export DAGGER_CLOUD_URL="$DAGGER_KUBERNETES_SERVER"
+export DAGGER_CLOUD_TOKEN="$DAGGER_KUBERNETES_TOKEN"
 export _EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self
 
 if [ -n "$DAGGER_TAG" ]; then
@@ -27,13 +27,13 @@ if [ -f "$INPUT_FILE" ]; then
   cat >> "$OUTPUT_FILE" << 'YAML'
 
 steps:
-  - name: dagger-cache-summary
+  - name: dagger-kubernetes-summary
     image: alpine:3
     commands:
-      - echo "Dagger Cache Pipeline View: $${DAGGER_CACHE_UI}/traces/latest"
+      - echo "Dagger Kubernetes Pipeline View: $${DAGGER_KUBERNETES_UI}/traces/latest"
     environment:
-      DAGGER_CACHE_UI:
-        from_secret: dagger_cache_ui
+      DAGGER_KUBERNETES_UI:
+        from_secret: dagger_kubernetes_ui
 YAML
 fi
 

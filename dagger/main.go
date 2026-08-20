@@ -1,4 +1,4 @@
-// dagger-cache is the local Dagger CI module for the dagger-kubernetes project.
+// dagger-kubernetes is the local Dagger CI module for the dagger-kubernetes project.
 //
 // It delegates lint and build to the golang module and helm lint to the helm
 // module from github.com/disaster37/dagger-library-go (pinned at 2.0.10). Test,
@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"strings"
 
-	"dagger/dagger-cache/internal/dagger"
+	"dagger/dagger-kubernetes/internal/dagger"
 )
 
 const (
@@ -32,7 +32,7 @@ var binaries = []struct {
 	out  string
 }{
 	{main: "./cmd/api/", out: "bin/supervisor"},
-	{main: "./cmd/ci/", out: "bin/dagger-cache-ci"},
+	{main: "./cmd/ci/", out: "bin/dagger-kubernetes-ci"},
 }
 
 // helmTemplateMatrix lists the --set combinations from the original CI.
@@ -49,25 +49,25 @@ var helmTemplateMatrix = [][]string{
 	},
 }
 
-// DaggerCache is the root type for the dagger-cache module.
-type DaggerCache struct {
+// DaggerKubernetes is the root type for the dagger-kubernetes module.
+type DaggerKubernetes struct {
 	// Src is the repository root provided as source.
 	Src *dagger.Directory
 }
 
-// New initializes the dagger-cache module with the repository root as source.
+// New initializes the dagger-kubernetes module with the repository root as source.
 func New(
 	// The repository root directory.
 	src *dagger.Directory,
-) *DaggerCache {
-	return &DaggerCache{Src: src}
+) *DaggerKubernetes {
+	return &DaggerKubernetes{Src: src}
 }
 
 // Lint runs golangci-lint against the Go source.
 //
 // It delegates to the golang module with a custom base container that has
 // golangci-lint preinstalled, preserving the CI version pin.
-func (m *DaggerCache) Lint(ctx context.Context) (string, error) {
+func (m *DaggerKubernetes) Lint(ctx context.Context) (string, error) {
 	install := fmt.Sprintf(
 		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C $(go env GOPATH)/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 golangci-lint-%s-linux-amd64/golangci-lint && rm /tmp/golangci-lint.tar.gz",
 		golangciLintVersion, strings.TrimPrefix(golangciLintVersion, "v"), strings.TrimPrefix(golangciLintVersion, "v"),
@@ -88,7 +88,7 @@ func (m *DaggerCache) Lint(ctx context.Context) (string, error) {
 // Implemented locally because the upstream golang module hardcodes test flags
 // (no -race, -vet=off). -race requires CGO, so a debian (not alpine) image is
 // used and CGO_ENABLED is not set to 0.
-func (m *DaggerCache) Test(ctx context.Context) (*dagger.File, error) {
+func (m *DaggerKubernetes) Test(ctx context.Context) (*dagger.File, error) {
 	ctr := dag.Container().
 		From(golangImage).
 		WithMountedDirectory("/src", m.Src).
@@ -113,7 +113,7 @@ func (m *DaggerCache) Test(ctx context.Context) (*dagger.File, error) {
 //
 // Implemented locally because the upstream golang module has no UI support.
 // Mirrors the Dockerfile: npm ci || npm install, typecheck, build.
-func (m *DaggerCache) Ui(ctx context.Context) (*dagger.Directory, error) {
+func (m *DaggerKubernetes) Ui(ctx context.Context) (*dagger.Directory, error) {
 	ctr := dag.Container().
 		From(nodeImage).
 		WithMountedDirectory("/ui", m.Src.Directory("ui")).
@@ -129,12 +129,12 @@ func (m *DaggerCache) Ui(ctx context.Context) (*dagger.Directory, error) {
 	return ctr.Directory("dist"), nil
 }
 
-// Build compiles both Go binaries (supervisor and dagger-cache-ci) and returns
+// Build compiles both Go binaries (supervisor and dagger-kubernetes-ci) and returns
 // a directory containing them under bin/.
 //
 // Delegates to the golang module's Build function (CGO_ENABLED=0, default
 // ldflags ["-s","-w"]) for each binary, then merges both into one directory.
-func (m *DaggerCache) Build(ctx context.Context) (*dagger.Directory, error) {
+func (m *DaggerKubernetes) Build(ctx context.Context) (*dagger.Directory, error) {
 	g := dag.Golang(m.Src)
 
 	bin := dag.Directory()
@@ -151,7 +151,7 @@ func (m *DaggerCache) Build(ctx context.Context) (*dagger.Directory, error) {
 // Implemented locally because the upstream golang module has no Dockerfile
 // support. The image entrypoint is `supervisor`, so `-h` exercises the
 // urfave/cli help path.
-func (m *DaggerCache) Docker(ctx context.Context) (*dagger.Container, error) {
+func (m *DaggerKubernetes) Docker(ctx context.Context) (*dagger.Container, error) {
 	ctr := m.Src.DockerBuild().
 		WithExec([]string{"-h"}, dagger.ContainerWithExecOpts{UseEntrypoint: true})
 
@@ -164,7 +164,7 @@ func (m *DaggerCache) Docker(ctx context.Context) (*dagger.Container, error) {
 
 // Helm lints the chart (delegated to the helm module) and runs the template
 // matrix locally with the three --set combos from the original CI.
-func (m *DaggerCache) Helm(ctx context.Context) error {
+func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 	chart := m.Src.Directory(chartDir)
 
 	if _, err := dag.Helm(chart).Lint(ctx); err != nil {
@@ -193,7 +193,7 @@ func (m *DaggerCache) Helm(ctx context.Context) error {
 // version tag. Registry credentials are required for authentication.
 //
 // Returns the fully-qualified image reference with digest on success.
-func (m *DaggerCache) Publish(
+func (m *DaggerKubernetes) Publish(
 	ctx context.Context,
 	// semver release tag (e.g. "v0.0.1-alpha4")
 	// +required
@@ -237,9 +237,9 @@ func (m *DaggerCache) Publish(
 
 // Ci runs the full pipeline: Lint, Test, Ui, Build, Docker, Helm.
 //
-// Returns a directory containing bin/supervisor, bin/dagger-cache-ci, and
+// Returns a directory containing bin/supervisor, bin/dagger-kubernetes-ci, and
 // coverage.out.
-func (m *DaggerCache) Ci(ctx context.Context) (*dagger.Directory, error) {
+func (m *DaggerKubernetes) Ci(ctx context.Context) (*dagger.Directory, error) {
 	if _, err := m.Lint(ctx); err != nil {
 		return nil, err
 	}

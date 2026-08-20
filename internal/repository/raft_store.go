@@ -230,7 +230,7 @@ func NewInmemRaftStore(nodeID string, logger *logrus.Logger, applyTimeout time.D
 // withDefaults fills unset config fields with production defaults.
 func withDefaults(cfg RaftStoreConfig) RaftStoreConfig {
 	if cfg.Dir == "" {
-		cfg.Dir = "/var/lib/dagger-cache"
+		cfg.Dir = "/var/lib/dagger-kubernetes"
 	}
 	if cfg.BindAddr == "" {
 		cfg.BindAddr = ":8081"

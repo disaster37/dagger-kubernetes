@@ -167,7 +167,7 @@ func (s *GitHubOAuthService) getJSON(ctx context.Context, path, accessToken stri
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", accessToken))
 	req.Header.Set("Accept", "application/vnd.github+json")
-	req.Header.Set("User-Agent", "dagger-cache")
+	req.Header.Set("User-Agent", "dagger-kubernetes")
 
 	resp, err := s.http.Do(req)
 	if err != nil {

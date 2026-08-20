@@ -1,4 +1,4 @@
-# dagger-cache
+# dagger-kubernetes
 
 A self-hosted, Dagger-Cloud-compatible platform: remote shared cache,
 auto-scaling engine fleets, live pipeline UI, and drop-in CI integration.
@@ -18,11 +18,11 @@ Quick links:
 | Path                | Contents                                              |
 |---------------------|-------------------------------------------------------|
 | `cmd/api`           | The Supervisor server (control + data plane + OTLP). |
-| `cmd/ci`, `scripts/dagger-cache.sh` | CI helper + client wrapper.           |
+| `cmd/ci`, `scripts/dagger-kubernetes.sh` | CI helper + client wrapper.           |
 | `internal/`         | Layered clean architecture: `domain`, `service`, `repository`, `handler`, `observ`. |
 | `config/`           | Viper config loader + `config.app.yaml` / sample.    |
 | `dagger/`           | Local Dagger module — CI pipeline.                   |
-| `scripts/`          | Dev scripts (`dagger-cache.sh`, `update-helm-docs.sh`). |
+| `scripts/`          | Dev scripts (`dagger-kubernetes.sh`, `update-helm-docs.sh`). |
 | `deploy/docker`     | Local dev compose stack.                              |
 | `deploy/k8s`        | Kubernetes manifests.                                 |
 | `deploy/helm`       | Helm chart.                                           |

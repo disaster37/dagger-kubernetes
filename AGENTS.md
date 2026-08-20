@@ -1,4 +1,4 @@
-# AGENTS.md — dagger-cache coding conventions for AI agents
+# AGENTS.md — dagger-kubernetes coding conventions for AI agents
 
 ## Project identity
 Module: `github.com/disaster/dagger-kubernetes`
@@ -10,7 +10,7 @@ Before deploying or updating this application on the local Kubernetes
 cluster, read `AGENTS.local.md`. It is the machine-specific source of truth for:
 
 - cluster access (kubeconfig `/home/user/.kube/home`, context `home`),
-- the live release (`dagger-cache-test`) and its image
+- the live release (`dagger-kubernetes-test`) and its image
   (`docker.io/disaster/dagger-kubernetes:dev`),
 - the build → push → helm-upgrade → rollout workflow,
 - the mandatory agent + human verification steps.
@@ -103,7 +103,7 @@ This project does not use gRPC. If gRPC is introduced, use `github.com/cloudwego
 func main() {
     app := &cli.App{
         Name:  "supervisor",
-        Usage: "dagger-cache control plane",
+        Usage: "dagger-kubernetes control plane",
         Flags: []cli.Flag{
             &cli.StringFlag{
                 Name:  "config",
@@ -122,7 +122,7 @@ func main() {
 ### Viper config
 - Use `mapstructure` tags on config structs
 - Every field needs `v.SetDefault()` in `config.Load()`
-- Env prefix: `DAGGER_CACHE_`
+- Env prefix: `DAGGER_KUBERNETES_`
 - Gracefully handle missing config file (skip if `ConfigFileNotFoundError`)
 
 ### Testing
@@ -136,7 +136,7 @@ func main() {
 ### Project structure
 ```
 cmd/api/main.go                 — urfave/cli entry point (control plane API server, binary name `supervisor`)
-cmd/ci/main.go                  — urfave/cli entry point (CI wrapper, binary name `dagger-cache-ci`)
+cmd/ci/main.go                  — urfave/cli entry point (CI wrapper, binary name `dagger-kubernetes-ci`)
 config/loader.go                — Viper config loading + defaults (root package, returns *domain.Config)
 config/config.app.yaml          — sample/default config
 internal/domain/                — pure entities + interfaces (stdlib ONLY)
@@ -145,7 +145,7 @@ internal/repository/            — infrastructure implementations (imports doma
 internal/handler/               — Hertz HTTP/SSE/L4 handlers (imports service, repository, domain, observ)
 internal/observ/                — logrus logger factory + Prometheus metrics (cross-cutting)
 dagger/                         — local Dagger module (CI pipeline)
-scripts/                        — dev scripts (dagger-cache.sh, update-helm-docs.sh)
+scripts/                        — dev scripts (dagger-kubernetes.sh, update-helm-docs.sh)
 deploy/helm/                    — Helm chart
 tests/integration/              — black-box integration tests
 docs/design/                    — architecture decision records

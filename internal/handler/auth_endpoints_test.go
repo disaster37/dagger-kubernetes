@@ -27,12 +27,26 @@ func TestHandleLoginSuccess(t *testing.T) {
 	if err := json.Unmarshal(resp.Result().Body(), &out); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if out["access_token"] == nil || out["refresh_token"] == nil {
-		t.Fatal("missing tokens")
+	if out["access_token"] != nil || out["refresh_token"] != nil {
+		t.Fatal("tokens must not be in the login body (httpOnly cookies only)")
 	}
-	user := out["user"].(map[string]any)
-	if user["username"] != "admin" || user["role"] != "admin" {
-		t.Fatalf("user = %v", user)
+	if out["username"] != "admin" || out["role"] != "admin" {
+		t.Fatalf("user = %v", out)
+	}
+	cookies := responseSetCookies(resp)
+	for _, name := range []string{"dagger_kubernetes_access", "dagger_kubernetes_refresh"} {
+		setCookie, ok := cookies[name]
+		if !ok {
+			t.Fatalf("missing %s cookie in %v", name, cookies)
+		}
+		for _, attr := range []string{"HttpOnly", "SameSite=Lax", "Path=/"} {
+			if !cookieHeaderContains(setCookie, attr) {
+				t.Fatalf("%s = %q, want %s", name, setCookie, attr)
+			}
+		}
+		if cookieHeaderContains(setCookie, "Secure") {
+			t.Fatalf("%s = %q, want no Secure flag on plain http", name, setCookie)
+		}
 	}
 }
 
@@ -63,25 +77,50 @@ func TestHandleRefreshRotation(t *testing.T) {
 	env := newTestEnv(t)
 	e := newAuthEngine(env.server)
 
-	// Login to get a refresh token.
+	// Login to get the refresh cookie.
 	body := `{"username":"admin","password":"password123"}`
 	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/login", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
-	var loginOut map[string]any
-	json.Unmarshal(resp.Result().Body(), &loginOut)
-	refresh := loginOut["refresh_token"].(string)
+	cookies := responseSetCookies(resp)
+	refresh := cookieValueFromSetCookie(cookies["dagger_kubernetes_refresh"], "dagger_kubernetes_refresh")
+	if refresh == "" {
+		t.Fatal("missing refresh cookie")
+	}
 
-	// Refresh.
-	body = `{"refresh_token":"` + refresh + `"}`
-	resp = ut.PerformRequest(e, "POST", "/api/v1/auth/refresh", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
-		ut.Header{Key: "Content-Type", Value: "application/json"})
-	if resp.Result().StatusCode() != http.StatusOK {
+	// Refresh with the cookie (no body).
+	resp = ut.PerformRequest(e, "POST", "/api/v1/auth/refresh", nil,
+		ut.Header{Key: "Cookie", Value: fmt.Sprintf("dagger_kubernetes_refresh=%s", refresh)})
+	if resp.Result().StatusCode() != http.StatusNoContent {
 		t.Fatalf("refresh: %d", resp.Result().StatusCode())
 	}
-	var out map[string]any
-	json.Unmarshal(resp.Result().Body(), &out)
-	if out["access_token"] == nil || out["refresh_token"] == nil {
-		t.Fatal("missing rotated tokens")
+	if len(resp.Result().Body()) != 0 {
+		t.Fatalf("refresh body must be empty, got %q", resp.Result().Body())
+	}
+	rotated := responseSetCookies(resp)
+	if _, ok := rotated["dagger_kubernetes_access"]; !ok {
+		t.Fatal("refresh must set a new access cookie")
+	}
+	if _, ok := rotated["dagger_kubernetes_refresh"]; !ok {
+		t.Fatal("refresh must rotate the refresh cookie")
+	}
+}
+
+func TestHandleRefreshFromBody(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+
+	body := `{"username":"admin","password":"password123"}`
+	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/login", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	cookies := responseSetCookies(resp)
+	refresh := cookieValueFromSetCookie(cookies["dagger_kubernetes_refresh"], "dagger_kubernetes_refresh")
+
+	// Backwards-compat: refresh token supplied in the JSON body still works.
+	body = fmt.Sprintf(`{"refresh_token":%q}`, refresh)
+	resp = ut.PerformRequest(e, "POST", "/api/v1/auth/refresh", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusNoContent {
+		t.Fatalf("refresh from body: %d", resp.Result().StatusCode())
 	}
 }
 
@@ -399,8 +438,19 @@ func TestOAuthCallbackSuccess(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusFound {
 		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
 	}
-	if loc := string(resp.Result().Header.Peek("Location")); !strings.HasPrefix(loc, "/auth/callback#access_token=") {
-		t.Fatalf("Location = %q, want fragment redirect with access token", loc)
+	if loc := string(resp.Result().Header.Peek("Location")); !strings.HasPrefix(loc, "/auth/callback?redirect=") {
+		t.Fatalf("Location = %q, want query redirect (no fragment)", loc)
+	}
+	loc := string(resp.Result().Header.Peek("Location"))
+	if strings.Contains(loc, "access_token") || strings.Contains(loc, "refresh_token") {
+		t.Fatalf("Location = %q must not carry tokens", loc)
+	}
+	cookies := responseSetCookies(resp)
+	if _, ok := cookies["dagger_kubernetes_access"]; !ok {
+		t.Fatal("oauth callback must set the access cookie")
+	}
+	if _, ok := cookies["dagger_kubernetes_refresh"]; !ok {
+		t.Fatal("oauth callback must set the refresh cookie")
 	}
 }
 
@@ -463,6 +513,189 @@ func TestOAuthLoginCookieNotSecure(t *testing.T) {
 	if cookieHeaderContains(setCookie, "Secure") {
 		t.Fatalf("Set-Cookie = %q, want no Secure flag on a non-TLS request with oauthCookieSecure=false", setCookie)
 	}
+}
+
+// TestHandleLoginCookieSecure verifies the Secure flag is forced on both auth
+// cookies when auth.cookie.secure is true (TLS-terminating proxy).
+func TestHandleLoginCookieSecure(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.cookieCfg.Secure = true
+	e := newAuthEngine(env.server)
+
+	body := `{"username":"admin","password":"password123"}`
+	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/login", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("login: %d", resp.Result().StatusCode())
+	}
+	cookies := responseSetCookies(resp)
+	for _, name := range []string{"dagger_kubernetes_access", "dagger_kubernetes_refresh"} {
+		setCookie, ok := cookies[name]
+		if !ok {
+			t.Fatalf("missing %s cookie", name)
+		}
+		if !cookieHeaderContains(setCookie, "Secure") {
+			t.Fatalf("%s = %q, want Secure flag when cookieCfg.Secure=true", name, setCookie)
+		}
+	}
+}
+
+// TestHandleLoginCookieSecureHTTPS verifies the Secure flag is auto-set when
+// the request arrives over https (requestIsTLS).
+func TestHandleLoginCookieSecureHTTPS(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+
+	body := `{"username":"admin","password":"password123"}`
+	resp := ut.PerformRequest(e, "POST", "https://localhost/api/v1/auth/login", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("login: %d", resp.Result().StatusCode())
+	}
+	cookies := responseSetCookies(resp)
+	for _, name := range []string{"dagger_kubernetes_access", "dagger_kubernetes_refresh"} {
+		setCookie, ok := cookies[name]
+		if !ok {
+			t.Fatalf("missing %s cookie", name)
+		}
+		if !cookieHeaderContains(setCookie, "Secure") {
+			t.Fatalf("%s = %q, want Secure flag on an https request", name, setCookie)
+		}
+	}
+}
+
+// TestHandleLogoutClearsCookies verifies logout expires both auth cookies.
+func TestHandleLogoutClearsCookies(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/logout", nil)
+	if resp.Result().StatusCode() != http.StatusNoContent {
+		t.Fatalf("logout: %d", resp.Result().StatusCode())
+	}
+	cookies := responseSetCookies(resp)
+	for _, name := range []string{"dagger_kubernetes_access", "dagger_kubernetes_refresh"} {
+		setCookie, ok := cookies[name]
+		if !ok {
+			t.Fatalf("missing cleared %s cookie in %v", name, cookies)
+		}
+		for _, attr := range []string{"max-age=0", "HttpOnly", "SameSite=Lax", "Path=/"} {
+			if !cookieHeaderContains(setCookie, attr) {
+				t.Fatalf("%s = %q, want %s", name, setCookie, attr)
+			}
+		}
+	}
+}
+
+// TestResolveIdentityCookieFallback verifies the access cookie authenticates
+// when no Authorization header is present (header stays primary for CI).
+func TestResolveIdentityCookieFallback(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+
+	// Login to obtain the access cookie.
+	body := `{"username":"admin","password":"password123"}`
+	resp := ut.PerformRequest(e, "POST", "/api/v1/auth/login", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	cookies := responseSetCookies(resp)
+	access := cookieValueFromSetCookie(cookies["dagger_kubernetes_access"], "dagger_kubernetes_access")
+	if access == "" {
+		t.Fatal("missing access cookie")
+	}
+
+	resp = ut.PerformRequest(e, "GET", "/api/v1/auth/me", nil,
+		ut.Header{Key: "Cookie", Value: fmt.Sprintf("dagger_kubernetes_access=%s", access)})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("me with cookie: %d, want 200", resp.Result().StatusCode())
+	}
+	var out map[string]any
+	if err := json.Unmarshal(resp.Result().Body(), &out); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if out["username"] != "admin" {
+		t.Fatalf("me = %v", out)
+	}
+}
+
+// TestCORSAllowDeny verifies the CORS middleware echoes an allowed origin (with
+// credentials) and stays silent for disallowed/no origins.
+func TestCORSAllowDeny(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.corsAllowedOrigins = []string{"https://ui.example.com"}
+	e := newAuthEngine(env.server)
+
+	// Allowed origin -> ACAO echoed + credentials + Vary.
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil,
+		ut.Header{Key: "Origin", Value: "https://ui.example.com"})
+	if got := resp.Result().Header.Get("Access-Control-Allow-Origin"); got != "https://ui.example.com" {
+		t.Fatalf("ACAO = %q, want echoed origin", got)
+	}
+	if got := resp.Result().Header.Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("ACAC = %q, want true", got)
+	}
+	if got := resp.Result().Header.Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want Origin", got)
+	}
+
+	// Disallowed origin -> no CORS headers, never "*".
+	resp = ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil,
+		ut.Header{Key: "Origin", Value: "https://evil.example.com"})
+	if got := resp.Result().Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("ACAO = %q, want empty for disallowed origin", got)
+	}
+	// Vary: Origin must still be set so a shared cache cannot reuse this
+	// response for a different (allowed) origin (CWE-349).
+	if got := resp.Result().Header.Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want Origin even for disallowed origin", got)
+	}
+
+	// No origin -> same-origin, no CORS headers.
+	resp = ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil)
+	if got := resp.Result().Header.Get("Access-Control-Allow-Origin"); got != "" {
+		t.Fatalf("ACAO = %q, want empty when no origin", got)
+	}
+}
+
+// TestCORSPreflight verifies OPTIONS preflight for an allowed origin is
+// answered with 204 + allow methods/headers.
+func TestCORSPreflight(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.corsAllowedOrigins = []string{"https://ui.example.com"}
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "OPTIONS", "/api/v1/auth/me", nil,
+		ut.Header{Key: "Origin", Value: "https://ui.example.com"})
+	if resp.Result().StatusCode() != http.StatusNoContent {
+		t.Fatalf("preflight: %d, want 204", resp.Result().StatusCode())
+	}
+	if got := resp.Result().Header.Get("Access-Control-Allow-Methods"); got != "GET,POST,PUT,DELETE,OPTIONS" {
+		t.Fatalf("ACAM = %q", got)
+	}
+	if got := resp.Result().Header.Get("Access-Control-Allow-Headers"); got != "Authorization, Content-Type" {
+		t.Fatalf("ACAH = %q", got)
+	}
+}
+
+// responseSetCookies returns the response's Set-Cookie values keyed by cookie
+// name (via VisitAllCookie, which iterates cookies set with SetCookie).
+func responseSetCookies(resp *ut.ResponseRecorder) map[string]string {
+	out := map[string]string{}
+	resp.Result().Header.VisitAllCookie(func(key, value []byte) {
+		out[string(key)] = string(value)
+	})
+	return out
+}
+
+// cookieValueFromSetCookie extracts name=value from a Set-Cookie header value.
+func cookieValueFromSetCookie(setCookie, name string) string {
+	prefix := name + "="
+	for _, part := range strings.Split(setCookie, ";") {
+		part = strings.TrimSpace(part)
+		if strings.HasPrefix(part, prefix) {
+			return strings.TrimPrefix(part, prefix)
+		}
+	}
+	return ""
 }
 
 // cookieHeaderContains reports whether the Set-Cookie response header contains

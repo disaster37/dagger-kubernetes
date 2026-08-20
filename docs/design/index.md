@@ -1,7 +1,7 @@
-# Architecture Decision Records — dagger-cache
+# Architecture Decision Records — dagger-kubernetes
 
 This directory contains Architecture Decision Records (ADRs) for the
-dagger-cache supervisor control plane. Each ADR documents a significant
+dagger-kubernetes supervisor control plane. Each ADR documents a significant
 architectural choice, the alternatives considered, and the rationale for
 the decision.
 

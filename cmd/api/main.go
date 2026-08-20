@@ -39,7 +39,7 @@ import (
 func main() {
 	app := &cli.App{
 		Name:  "supervisor",
-		Usage: "dagger-cache control plane",
+		Usage: "dagger-kubernetes control plane",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:  "config",
@@ -91,7 +91,7 @@ func run(c *cli.Context) error {
 		"data_addr":    cfg.Server.DataAddr,
 		"public_url":   cfg.Server.PublicURL,
 		"tls_provider": cfg.TLS.Provider,
-	}).Info("dagger-cache supervisor starting")
+	}).Info("dagger-kubernetes supervisor starting")
 
 	// Resolve the pipeline-view base URL (server.pipeline_url, else
 	// server.public_url). config.Load already validated the configured shape,
@@ -122,6 +122,13 @@ func run(c *cli.Context) error {
 	clientset, err := newK8sClientset()
 	if err != nil {
 		logger.WithError(err).Warn("k8s clientset unavailable; raft TLS auto-mode, minting CA sharing, and fleet provider will fall back")
+	}
+
+	// Resolve per-backend password_secret refs into Password (best-effort;
+	// mirrors loadCacheTokenFromSecret). A missing secret leaves Password empty
+	// (the backend will 401, which is observable) and never fails startup.
+	if err := resolveRegistryBackendSecrets(c.Context, clientset, cfg.Fleet.Namespace, cacheBackends, logger); err != nil {
+		logger.WithError(err).Warn("resolve registry backend secrets failed")
 	}
 
 	tlsProvider, err := selectTLSProvider(cfg, clientset)
@@ -285,6 +292,8 @@ func run(c *cli.Context) error {
 		Auth:                 authSvc,
 		InternalAuthEnabled:  cfg.Auth.Internal.Enabled,
 		OAuthCookieSecure:    cfg.Auth.OAuth.CookieSecure,
+		CookieCfg:            cfg.Auth.Cookie,
+		CORSAllowedOrigins:   cfg.Auth.CORS.AllowedOrigins,
 		Users:                usersSvc,
 		Groups:               groupsSvc,
 		Projects:             projectsSvc,
@@ -957,7 +966,7 @@ func isMintingCAOnPerPodStorage(cfg *domain.Config) bool {
 	if err != nil {
 		return false
 	}
-	// caPath is under dbDir (e.g. /var/lib/dagger-cache/ca under /var/lib/dagger-cache).
+	// caPath is under dbDir (e.g. /var/lib/dagger-kubernetes/ca under /var/lib/dagger-kubernetes).
 	return rel != "." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
@@ -1002,9 +1011,9 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 // refuse at StatefulSet admission (duplicate container env names) or that is
 // internally inconsistent. Called once at startup (fail fast).
 func validateFleetEnv(fleet *domain.FleetConfig) error {
-	// DAGGER_CACHE_TOKEN is always injected from a secret; SSL_CERT_FILE and
+	// DAGGER_KUBERNETES_TOKEN is always injected from a secret; SSL_CERT_FILE and
 	// NODE_EXTRA_CA_CERTS are injected when CA injection is enabled.
-	reserved := map[string]bool{"DAGGER_CACHE_TOKEN": true}
+	reserved := map[string]bool{"DAGGER_KUBERNETES_TOKEN": true}
 	if fleet.EngineCASecret != "" {
 		reserved["SSL_CERT_FILE"] = true
 		reserved["NODE_EXTRA_CA_CERTS"] = true
@@ -1149,6 +1158,65 @@ func hostOf(rawURL string) string {
 	return u.Hostname()
 }
 
+// resolveRegistryBackendSecrets fills Password from each backend's
+// password_secret ref (mirrors loadCacheTokenFromSecret). A missing
+// clientset/secret leaves Password empty (non-K8s deployments must set
+// Password directly in config). Resolution is per-backend best-effort: a
+// missing/unreadable Secret for one backend logs a WARN and leaves that
+// backend's Password empty (the backend will 401, which is observable) so
+// the remaining backends still resolve. The returned error aggregates any
+// per-backend failures so the caller can surface them; startup never fails.
+// Secret values are never logged.
+func resolveRegistryBackendSecrets(ctx context.Context, clientset kubernetes.Interface, namespace string, backends []domain.RegistryBackend, logger *logrus.Logger) error {
+	var errs []error
+	for i := range backends {
+		ref := backends[i].PasswordSecret
+		if ref == nil || backends[i].Password != "" {
+			continue // nothing to resolve, or explicit password wins
+		}
+		if ref.Name == "" {
+			logger.WithFields(logrus.Fields{
+				"backend_id":  backends[i].ID,
+				"secret_name": ref.Name,
+			}).Warn("cache backend password_secret: empty name; skipping")
+			continue
+		}
+		if clientset == nil {
+			logger.WithFields(logrus.Fields{
+				"backend_id":  backends[i].ID,
+				"secret_name": ref.Name,
+			}).Warn("cache backend password_secret: k8s clientset unavailable; set cache.registries[].password directly")
+			continue
+		}
+		ns := namespace
+		if ns == "" {
+			ns = "dagger-kubernetes"
+		}
+		secret, err := clientset.CoreV1().Secrets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
+		if err != nil {
+			logger.WithFields(logrus.Fields{
+				"backend_id":  backends[i].ID,
+				"secret_name": ref.Name,
+			}).WithError(err).Warn("cache backend password_secret: read failed; leaving password empty")
+			errs = append(errs, fmt.Errorf("read password secret %q for backend %q: %w", ref.Name, backends[i].ID, err))
+			continue
+		}
+		key := ref.Key
+		if key == "" {
+			key = "password"
+		}
+		backends[i].Password = string(secret.Data[key])
+		if backends[i].Password == "" {
+			logger.WithFields(logrus.Fields{
+				"backend_id":  backends[i].ID,
+				"secret_name": ref.Name,
+				"secret_key":  key,
+			}).Warn("cache backend password_secret resolved to empty password")
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // loadCacheTokenFromSecret reads the engine→Supervisor-proxy bearer token from
 // the engine-registry-auth K8s secret. Returns "" (with a WARN) when K8s is
 // unavailable or the secret/key is missing.
@@ -1158,7 +1226,7 @@ func loadCacheTokenFromSecret(ctx context.Context, clientset kubernetes.Interfac
 		return ""
 	}
 	if namespace == "" {
-		namespace = "dagger-cache"
+		namespace = "dagger-kubernetes"
 	}
 	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "engine-registry-auth", metav1.GetOptions{})
 	if err != nil {

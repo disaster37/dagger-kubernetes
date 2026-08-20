@@ -10,7 +10,7 @@
 Enterprise operators needed to run Dagger engines behind a corporate HTTP
 proxy, trust a private CA, and tune the engine's own logging/registry-mirror
 configuration. The supervisor's engine pod template had no hooks for any of
-these: env vars were limited to the supervisor-injected `DAGGER_CACHE_TOKEN`,
+these: env vars were limited to the supervisor-injected `DAGGER_KUBERNETES_TOKEN`,
 there was no CA injection, and the engine's `engine.toml` was never mounted.
 
 A related concern: authenticated proxies require credentials inside

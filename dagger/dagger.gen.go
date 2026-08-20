@@ -17,7 +17,7 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.40.0"
 	"go.opentelemetry.io/otel/trace"
 
-	"dagger/dagger-cache/internal/dagger"
+	"dagger/dagger-kubernetes/internal/dagger"
 
 	"github.com/dagger/querybuilder"
 )
@@ -59,7 +59,7 @@ func convertSlice[I any, O any](in []I, f func(I) O) []O {
 	return out
 }
 
-func (r DaggerCache) MarshalJSON() ([]byte, error) {
+func (r DaggerKubernetes) MarshalJSON() ([]byte, error) {
 	var concrete struct {
 		Src *dagger.Directory
 	}
@@ -67,7 +67,7 @@ func (r DaggerCache) MarshalJSON() ([]byte, error) {
 	return json.Marshal(&concrete)
 }
 
-func (r *DaggerCache) UnmarshalJSON(bs []byte) error {
+func (r *DaggerKubernetes) UnmarshalJSON(bs []byte) error {
 	var concrete struct {
 		Src *dagger.Directory
 	}
@@ -196,59 +196,94 @@ func dispatch(ctx context.Context) (rerr error) {
 func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName string, inputArgs map[string][]byte) (_ any, err error) {
 	_ = inputArgs
 	switch parentName {
-	case "DaggerCache":
+	case "DaggerKubernetes":
 		switch fnName {
 		case "Build":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*DaggerCache).Build(&parent, ctx)
+			return (*DaggerKubernetes).Build(&parent, ctx)
 		case "Ci":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*DaggerCache).Ci(&parent, ctx)
+			return (*DaggerKubernetes).Ci(&parent, ctx)
 		case "Docker":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*DaggerCache).Docker(&parent, ctx)
+			return (*DaggerKubernetes).Docker(&parent, ctx)
 		case "Helm":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return nil, (*DaggerCache).Helm(&parent, ctx)
+			return nil, (*DaggerKubernetes).Helm(&parent, ctx)
 		case "Lint":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*DaggerCache).Lint(&parent, ctx)
+			return (*DaggerKubernetes).Lint(&parent, ctx)
+		case "Publish":
+			var parent DaggerKubernetes
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var version string
+			if inputArgs["version"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["version"]), &version)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg version", err))
+				}
+			}
+			var registry string
+			if inputArgs["registry"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["registry"]), &registry)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg registry", err))
+				}
+			}
+			var registryUsername string
+			if inputArgs["registryUsername"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["registryUsername"]), &registryUsername)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg registryUsername", err))
+				}
+			}
+			var registryPassword *dagger.Secret
+			if inputArgs["registryPassword"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["registryPassword"]), &registryPassword)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg registryPassword", err))
+				}
+			}
+			return (*DaggerKubernetes).Publish(&parent, ctx, version, registry, registryUsername, registryPassword)
 		case "Test":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*DaggerCache).Test(&parent, ctx)
+			return (*DaggerKubernetes).Test(&parent, ctx)
 		case "Ui":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			return (*DaggerCache).Ui(&parent, ctx)
+			return (*DaggerKubernetes).Ui(&parent, ctx)
 		case "":
-			var parent DaggerCache
+			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))

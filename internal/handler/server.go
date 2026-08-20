@@ -153,7 +153,7 @@ var errBackendAuth = errors.New("cache backend auth failed")
 
 // cacheProxyBackendIDKey is the RequestContext key holding the chosen backend
 // ID (read by the proxy error handler to mark the backend down).
-const cacheProxyBackendIDKey = "dagger_cache_backend_id"
+const cacheProxyBackendIDKey = "dagger_kubernetes_backend_id"
 
 // OCI request-path regexes (defense vs path traversal / SSRF — the target is
 // always from config, but the path is forwarded, so validate its shape).
@@ -208,6 +208,8 @@ type Deps struct {
 	Auth                 *service.AuthService
 	InternalAuthEnabled  bool // mirrors cfg.Auth.Internal.Enabled
 	OAuthCookieSecure    bool // mirrors cfg.Auth.OAuth.CookieSecure
+	CookieCfg            domain.CookieConfig
+	CORSAllowedOrigins   []string
 	Users                *service.UserService
 	Groups               *service.GroupService
 	Projects             *service.ProjectService
@@ -268,6 +270,8 @@ type Server struct {
 	auth                *service.AuthService
 	internalAuthEnabled bool
 	oauthCookieSecure   bool
+	cookieCfg           domain.CookieConfig
+	corsAllowedOrigins  []string
 	users               *service.UserService
 	groups              *service.GroupService
 	projects            *service.ProjectService
@@ -314,6 +318,8 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		auth:                deps.Auth,
 		internalAuthEnabled: deps.InternalAuthEnabled,
 		oauthCookieSecure:   deps.OAuthCookieSecure,
+		cookieCfg:           deps.CookieCfg,
+		corsAllowedOrigins:  deps.CORSAllowedOrigins,
 		users:               deps.Users,
 		groups:              deps.Groups,
 		projects:            deps.Projects,
@@ -449,6 +455,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 
 	h.Use(s.requestLog())
 	h.Use(s.securityHeaders())
+	h.Use(s.corsMiddleware())
 
 	if s.cacheProxy != nil {
 		h.Use(s.cacheHostMiddleware())
@@ -474,6 +481,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 	// Auth (public + self).
 	h.POST("/api/v1/auth/login", s.handleLogin)
 	h.POST("/api/v1/auth/refresh", s.handleRefresh)
+	h.POST("/api/v1/auth/logout", s.handleLogout)
 	h.GET("/api/v1/auth/providers", s.handleProviders)
 	h.GET("/api/v1/auth/oauth/github/login", s.handleOAuthLogin)
 	h.GET("/api/v1/auth/oauth/github/callback", s.handleOAuthCallback)
@@ -1058,9 +1066,9 @@ func (s *Server) serveCacheHost(ctx context.Context, c *app.RequestContext) {
 	}
 	// Stash backend target + creds on the inbound request headers; the
 	// director reads and deletes them. Credentials never logged.
-	c.Request.Header.Set("X-Dagger-Cache-Target", backend.InternalAddr)
-	c.Request.Header.Set("X-Dagger-Cache-User", backend.Username)
-	c.Request.Header.Set("X-Dagger-Cache-Pass", backend.Password)
+	c.Request.Header.Set("X-Dagger-Kubernetes-Target", backend.InternalAddr)
+	c.Request.Header.Set("X-Dagger-Kubernetes-User", backend.Username)
+	c.Request.Header.Set("X-Dagger-Kubernetes-Pass", backend.Password)
 	c.Set(cacheProxyBackendIDKey, backend.ID)
 
 	s.cacheProxy.ServeHTTP(ctx, c)
@@ -1300,12 +1308,12 @@ func (s *Server) cacheProxyDirector() func(*protocol.Request) {
 		// Never forward the engine's supervisor token to the backend.
 		req.Header.Del("Authorization")
 
-		target := string(req.Header.Peek("X-Dagger-Cache-Target"))
-		user := string(req.Header.Peek("X-Dagger-Cache-User"))
-		pass := string(req.Header.Peek("X-Dagger-Cache-Pass"))
-		req.Header.Del("X-Dagger-Cache-Target")
-		req.Header.Del("X-Dagger-Cache-User")
-		req.Header.Del("X-Dagger-Cache-Pass")
+		target := string(req.Header.Peek("X-Dagger-Kubernetes-Target"))
+		user := string(req.Header.Peek("X-Dagger-Kubernetes-User"))
+		pass := string(req.Header.Peek("X-Dagger-Kubernetes-Pass"))
+		req.Header.Del("X-Dagger-Kubernetes-Target")
+		req.Header.Del("X-Dagger-Kubernetes-User")
+		req.Header.Del("X-Dagger-Kubernetes-Pass")
 
 		if target == "" {
 			return // leave default target; errorHandler will surface 502
@@ -1426,6 +1434,50 @@ func (s *Server) securityHeaders() app.HandlerFunc {
 		c.Response.Header.Set("Referrer-Policy", "no-referrer")
 		c.Next(ctx)
 	}
+}
+
+// corsMiddleware adds permissive CORS headers only when the request Origin
+// exactly matches an entry in the configured allowlist (empty = same-origin
+// only, no Access-Control-Allow-Origin). Never emits "*" with credentials.
+// OPTIONS preflight requests for allowed origins are answered directly with
+// 204 + the allowed methods/headers. Vary: Origin is emitted whenever an
+// Origin header is present (allowed or not) so a shared/intermediate cache
+// cannot serve a response computed for one origin to a different origin
+// (cross-origin response confusion, CWE-349 / OWASP A05).
+func (s *Server) corsMiddleware() app.HandlerFunc {
+	return func(ctx context.Context, c *app.RequestContext) {
+		origin := string(c.Request.Header.Peek("Origin"))
+		if origin == "" {
+			c.Next(ctx)
+			return
+		}
+		// An Origin header is present: the response varies by origin regardless
+		// of whether this origin is allowed, so caches must key on it.
+		c.Response.Header.Add("Vary", "Origin")
+		if s.originAllowed(origin) {
+			c.Response.Header.Set("Access-Control-Allow-Origin", origin)
+			c.Response.Header.Set("Access-Control-Allow-Credentials", "true")
+			if string(c.Method()) == "OPTIONS" {
+				c.Response.Header.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
+				c.Response.Header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				c.SetStatusCode(consts.StatusNoContent)
+				c.Abort()
+				return
+			}
+		}
+		c.Next(ctx)
+	}
+}
+
+// originAllowed reports whether origin exactly matches an entry in the CORS
+// allowlist.
+func (s *Server) originAllowed(origin string) bool {
+	for _, allowed := range s.corsAllowedOrigins {
+		if allowed == origin {
+			return true
+		}
+	}
+	return false
 }
 
 func writeError(c *app.RequestContext, status int, message string) {

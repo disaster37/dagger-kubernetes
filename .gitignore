@@ -46,8 +46,9 @@ npm-debug.log
 yarn-error.log
 
 # Local build artifacts
-/dagger-cache-ci
+/dagger-kubernetes-ci
 /supervisor
+/api
 bin/
 out/
 /ui-dist/

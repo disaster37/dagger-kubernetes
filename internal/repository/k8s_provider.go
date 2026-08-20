@@ -27,16 +27,16 @@ const (
 	engineLabelVersion = "version"
 	enginePort         = 9999
 
-	engineConfigMapName  = "dagger-engine-config"
-	engineTOMLKey        = "engine.toml"
-	engineTOMLPath       = "/etc/dagger-config/engine.toml"
-	engineCAMountPath    = "/etc/ssl/certs/custom-ca.pem"
-	engineAuthSecretName = "engine-registry-auth" // holds the cache token; mounted as /etc/dagger
-	caCertFileName       = "ca.crt"               // normalized file name of the CA bundle in engine pods
-	volumeDaggerCache    = "dagger-cache"
-	volumeEngineConfig   = "engine-config"
-	volumeDaggerConfig   = "dagger-config"
-	volumeCABundle       = "ca-bundle"
+	engineConfigMapName    = "dagger-engine-config"
+	engineTOMLKey          = "engine.toml"
+	engineTOMLPath         = "/etc/dagger-config/engine.toml"
+	engineCAMountPath      = "/etc/ssl/certs/custom-ca.pem"
+	engineAuthSecretName   = "engine-registry-auth" // holds the cache token; mounted as /etc/dagger
+	caCertFileName         = "ca.crt"               // normalized file name of the CA bundle in engine pods
+	volumeDaggerKubernetes = "dagger-kubernetes"
+	volumeEngineConfig     = "engine-config"
+	volumeDaggerConfig     = "dagger-config"
+	volumeCABundle         = "ca-bundle"
 )
 
 type K8sProviderConfig struct {
@@ -77,7 +77,7 @@ var _ domain.FleetProvider = (*K8sProvider)(nil)
 //nolint:gocritic // hugeParam: value param preserved for API stability
 func NewK8sProvider(clientset kubernetes.Interface, cfg K8sProviderConfig) *K8sProvider {
 	if cfg.Namespace == "" {
-		cfg.Namespace = "dagger-cache"
+		cfg.Namespace = "dagger-kubernetes"
 	}
 	if cfg.ImageRegistry == "" {
 		cfg.ImageRegistry = "registry.dagger.io/engine"
@@ -250,7 +250,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 			VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
 				{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:   volumeDaggerCache, // must match the container volume mount name
+						Name:   volumeDaggerKubernetes, // must match the container volume mount name
 						Labels: labelMap,
 					},
 					Spec: vctSpec,
@@ -269,7 +269,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 // secret-sourced vars (each group sorted by name for deterministic specs),
 // and finally the CA bundle pointers when CA injection is enabled.
 func (p *K8sProvider) engineEnv() []corev1.EnvVar {
-	env := []corev1.EnvVar{secretEnvVar("DAGGER_CACHE_TOKEN", engineAuthSecretName, "token")}
+	env := []corev1.EnvVar{secretEnvVar("DAGGER_KUBERNETES_TOKEN", engineAuthSecretName, "token")}
 	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
 		env = append(env, corev1.EnvVar{Name: name, Value: p.cfg.ExtraEnv[name]})
 	}
@@ -306,7 +306,7 @@ func secretEnvVar(name, secretName, key string) corev1.EnvVar {
 // enabled (an empty daggerTOML omits the latter).
 func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
-		{Name: volumeDaggerCache, MountPath: "/var/lib/dagger"},
+		{Name: volumeDaggerKubernetes, MountPath: "/var/lib/dagger"},
 		{Name: volumeEngineConfig, MountPath: "/etc/dagger"},
 	}
 	if p.cfg.CASecret != "" {

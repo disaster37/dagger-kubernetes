@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DAGGER_CACHE_SERVER="${DAGGER_CACHE_SERVER:-https://supv.example.com}"
-DAGGER_CACHE_UI="${DAGGER_CACHE_UI:-$DAGGER_CACHE_SERVER}"
+DAGGER_KUBERNETES_SERVER="${DAGGER_KUBERNETES_SERVER:-https://supv.example.com}"
+DAGGER_KUBERNETES_UI="${DAGGER_KUBERNETES_UI:-$DAGGER_KUBERNETES_SERVER}"
 CACHE_REGISTRY="${CACHE_REGISTRY:-cache.reg/dagger-cache}"
 
 if [ -z "${DAGGER_CLOUD_TOKEN:-}" ]; then
@@ -10,7 +10,7 @@ if [ -z "${DAGGER_CLOUD_TOKEN:-}" ]; then
   exit 1
 fi
 
-export DAGGER_CLOUD_URL="$DAGGER_CACHE_SERVER"
+export DAGGER_CLOUD_URL="$DAGGER_KUBERNETES_SERVER"
 export _EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self
 
 DAGGER_TAG="${DAGGER_TAG:-}"
@@ -27,7 +27,7 @@ if [ -n "$DAGGER_TAG" ]; then
   export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=${CACHE_REF},mode=max"
 fi
 
-echo "Dagger Cache: $DAGGER_CACHE_SERVER (version: ${DAGGER_TAG:-auto})" >&2
+echo "Dagger Kubernetes: $DAGGER_KUBERNETES_SERVER (version: ${DAGGER_TAG:-auto})" >&2
 
 TEMP_LOG=$(mktemp)
 
@@ -50,9 +50,9 @@ fi
 if [ -n "$TRACE_ID" ]; then
   echo "" >&2
   echo "┌─────────────────────────────────────────────────────────┐" >&2
-  echo "│  Pipeline View: $DAGGER_CACHE_UI/traces/$TRACE_ID" >&2
+  echo "│  Pipeline View: $DAGGER_KUBERNETES_UI/traces/$TRACE_ID" >&2
   echo "└─────────────────────────────────────────────────────────┘" >&2
-  echo "TRACE_URL=$DAGGER_CACHE_UI/traces/$TRACE_ID" >> "$TEMP_LOG"
+  echo "TRACE_URL=$DAGGER_KUBERNETES_UI/traces/$TRACE_ID" >> "$TEMP_LOG"
 fi
 
 rm -f "$TEMP_LOG"

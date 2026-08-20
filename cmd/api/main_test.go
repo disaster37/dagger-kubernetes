@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -224,10 +225,10 @@ func TestValidateFleetEnv(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "DAGGER_CACHE_TOKEN in engine_extra_env",
+			name: "DAGGER_KUBERNETES_TOKEN in engine_extra_env",
 			fleet: domain.FleetConfig{
 				EngineExtraEnv: map[string]string{
-					"DAGGER_CACHE_TOKEN": "should-not-be-set",
+					"DAGGER_KUBERNETES_TOKEN": "should-not-be-set",
 				},
 			},
 			wantErr: true,
@@ -281,7 +282,7 @@ func TestValidateFleetEnv(t *testing.T) {
 			name: "reserved name in engine_extra_env_from",
 			fleet: domain.FleetConfig{
 				EngineExtraEnvFrom: map[string]domain.EnvVarSource{
-					"DAGGER_CACHE_TOKEN": {SecretName: "s", Key: "k"},
+					"DAGGER_KUBERNETES_TOKEN": {SecretName: "s", Key: "k"},
 				},
 			},
 			wantErr: true,
@@ -522,6 +523,101 @@ func TestHostOfStripsPort(t *testing.T) {
 	}
 }
 
+func TestResolveRegistryBackendSecrets(t *testing.T) {
+	logger := observ.NewTestLogger()
+	ctx := context.Background()
+	clientset := fake.NewSimpleClientset(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "reg-auth", Namespace: "ns"},
+		Data:       map[string][]byte{"password": []byte("s3cr3t")},
+	})
+
+	tests := []struct {
+		name      string
+		clientset kubernetes.Interface
+		namespace string
+		backends  []domain.RegistryBackend
+		wantPass  []string
+		wantErr   bool
+	}{
+		{
+			name:      "resolves password from secret",
+			clientset: clientset,
+			namespace: "ns",
+			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}}},
+			wantPass:  []string{"s3cr3t"},
+		},
+		{
+			name:      "explicit password wins",
+			clientset: clientset,
+			namespace: "ns",
+			backends:  []domain.RegistryBackend{{ID: "b1", Password: "direct", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}}},
+			wantPass:  []string{"direct"},
+		},
+		{
+			name:      "nil ref skipped",
+			clientset: clientset,
+			namespace: "ns",
+			backends:  []domain.RegistryBackend{{ID: "b1"}},
+			wantPass:  []string{""},
+		},
+		{
+			name:      "empty secret name skipped",
+			clientset: clientset,
+			namespace: "ns",
+			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: ""}}},
+			wantPass:  []string{""},
+		},
+		{
+			name:      "missing secret errors but leaves password empty",
+			clientset: clientset,
+			namespace: "ns",
+			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "nope", Key: "password"}}},
+			wantPass:  []string{""},
+			wantErr:   true,
+		},
+		{
+			// One missing Secret must NOT abort resolution for the rest
+			// (availability/degradation): the failing backend is left
+			// empty (it will 401) while subsequent backends still resolve.
+			name:      "missing secret for one backend does not block the rest",
+			clientset: clientset,
+			namespace: "ns",
+			backends: []domain.RegistryBackend{
+				{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "nope", Key: "password"}},
+				{ID: "b2", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}},
+			},
+			wantPass: []string{"", "s3cr3t"},
+			wantErr:  true,
+		},
+		{
+			name:      "nil clientset leaves password empty",
+			clientset: nil,
+			namespace: "ns",
+			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}}},
+			wantPass:  []string{""},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := resolveRegistryBackendSecrets(ctx, tc.clientset, tc.namespace, tc.backends, logger)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for i, want := range tc.wantPass {
+				if tc.backends[i].Password != want {
+					t.Fatalf("backend %d password = %q, want %q", i, tc.backends[i].Password, want)
+				}
+			}
+		})
+	}
+}
+
 func TestWaitForMetaSecret(t *testing.T) {
 	t.Run("returns existing value", func(t *testing.T) {
 		ms := newMetaStore(t)
@@ -645,28 +741,28 @@ func TestRaftCABootstrap(t *testing.T) {
 			name:     "ordinal zero auto-detected",
 			tlsCfg:   domain.RaftTLSConfig{},
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-0",
+			hostname: "dagger-kubernetes-supervisor-0",
 			want:     true,
 		},
 		{
 			name:     "higher ordinal not bootstrap",
 			tlsCfg:   domain.RaftTLSConfig{},
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-1",
+			hostname: "dagger-kubernetes-supervisor-1",
 			want:     false,
 		},
 		{
 			name:     "two digit ordinal not bootstrap",
 			tlsCfg:   domain.RaftTLSConfig{},
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-10",
+			hostname: "dagger-kubernetes-supervisor-10",
 			want:     false,
 		},
 		{
 			name:     "explicit ca_bootstrap wins",
 			tlsCfg:   domain.RaftTLSConfig{CABootstrap: true},
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-1",
+			hostname: "dagger-kubernetes-supervisor-1",
 			want:     true,
 		},
 		{
@@ -711,19 +807,19 @@ func TestMintingCABootstrap(t *testing.T) {
 		{
 			name:     "ordinal zero auto-detected",
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-0",
+			hostname: "dagger-kubernetes-supervisor-0",
 			want:     true,
 		},
 		{
 			name:     "higher ordinal not bootstrap",
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-1",
+			hostname: "dagger-kubernetes-supervisor-1",
 			want:     false,
 		},
 		{
 			name:     "two digit ordinal not bootstrap",
 			replicas: 3,
-			hostname: "dagger-cache-supervisor-10",
+			hostname: "dagger-kubernetes-supervisor-10",
 			want:     false,
 		},
 		{
@@ -978,12 +1074,12 @@ func TestIsMintingCAOnPerPodStorage(t *testing.T) {
 		dbDir  string
 		want   bool
 	}{
-		{"default under db dir", "/var/lib/dagger-cache/ca", "/var/lib/dagger-cache", true},
-		{"nested under db dir", "/var/lib/dagger-cache/sub/ca", "/var/lib/dagger-cache", true},
-		{"outside db dir", "/etc/dagger-cache/ca", "/var/lib/dagger-cache", false},
-		{"empty ca path", "", "/var/lib/dagger-cache", false},
-		{"empty db dir", "/var/lib/dagger-cache/ca", "", false},
-		{"same path", "/var/lib/dagger-cache", "/var/lib/dagger-cache", false},
+		{"default under db dir", "/var/lib/dagger-kubernetes/ca", "/var/lib/dagger-kubernetes", true},
+		{"nested under db dir", "/var/lib/dagger-kubernetes/sub/ca", "/var/lib/dagger-kubernetes", true},
+		{"outside db dir", "/etc/dagger-kubernetes/ca", "/var/lib/dagger-kubernetes", false},
+		{"empty ca path", "", "/var/lib/dagger-kubernetes", false},
+		{"empty db dir", "/var/lib/dagger-kubernetes/ca", "", false},
+		{"same path", "/var/lib/dagger-kubernetes", "/var/lib/dagger-kubernetes", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

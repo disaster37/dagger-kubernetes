@@ -1,4 +1,4 @@
-# Contributing to dagger-cache
+# Contributing to dagger-kubernetes
 
 ## Tooling & Dependencies
 
@@ -91,7 +91,7 @@ import "github.com/cloudwego/hertz/pkg/protocol/sse"
 Project does not use gRPC. If introduced, use `github.com/cloudwego/kitex`.
 
 ### Configuration (Viper)
-Config structs use `mapstructure` tags. Every field must have a default set via `v.SetDefault()`. Env vars use `DAGGER_CACHE_` prefix.
+Config structs use `mapstructure` tags. Every field must have a default set via `v.SetDefault()`. Env vars use `DAGGER_KUBERNETES_` prefix.
 
 ```go
 type ServerConfig struct {
@@ -148,7 +148,7 @@ golangci-lint run ./...
 dagger call -m ./dagger --src . ci export --path out
 ```
 
-The CI pipeline is a local Dagger module in `dagger/` (module name `dagger-cache`).
+The CI pipeline is a local Dagger module in `dagger/` (module name `dagger-kubernetes`).
 It delegates lint and build to the `golang` module and helm lint to the `helm`
 module from `github.com/disaster37/dagger-library-go` (pinned at `2.0.10`); test,
 UI, docker, and the helm template matrix are implemented locally because the
@@ -171,7 +171,7 @@ dagger call -m ./dagger --src . helm
 ## Project structure
 ```
 cmd/api/             Main server entry point (urfave/cli, binary `supervisor`)
-cmd/ci/              CI helper binary (urfave/cli, binary `dagger-cache-ci`)
+cmd/ci/              CI helper binary (urfave/cli, binary `dagger-kubernetes-ci`)
 config/              Viper config loader + config.app.yaml / sample
 internal/domain/     Pure entities + interfaces (stdlib only)
 internal/service/    Business logic (imports domain, observ)
@@ -179,7 +179,7 @@ internal/repository/ Infrastructure implementations (imports domain + drivers)
 internal/handler/    Hertz HTTP/SSE/L4 handlers (imports service, repository, domain, observ)
 internal/observ/     logrus logger factory + Prometheus metrics (cross-cutting)
 dagger/              Local Dagger module — CI pipeline (delegates to dagger-library-go golang/helm)
-scripts/             Dev scripts (dagger-cache.sh client wrapper, update-helm-docs.sh)
+scripts/             Dev scripts (dagger-kubernetes.sh client wrapper, update-helm-docs.sh)
 tests/integration/   Black-box integration tests
 docs/design/         Architecture decision records
 ui/                  Vue 3 SPA (Vite + TypeScript); embeds via internal/handler/ui-dist/
@@ -238,11 +238,11 @@ When adding a config key:
 Outdated docs are a bug. Documentation changes are part of the same PR as the code change.
 
 ### Wrapper script sync
-`scripts/dagger-cache.sh` and `ci-integrations/gha/dagger-cache.sh` must stay
+`scripts/dagger-kubernetes.sh` and `ci-integrations/gha/dagger-kubernetes.sh` must stay
 byte-identical. The copy in `ci-integrations/gha/` exists so the GitHub Actions
 composite action (`ci-integrations/gha/action.yml`) can invoke it from its own
 directory. When editing one, copy it verbatim to the other and verify with
-`cmp scripts/dagger-cache.sh ci-integrations/gha/dagger-cache.sh`.
+`cmp scripts/dagger-kubernetes.sh ci-integrations/gha/dagger-kubernetes.sh`.
 
 ## PR checklist
 - [ ] `dagger call -m ./dagger --src . ci export --path out` passes locally

@@ -271,16 +271,16 @@ func TestCacheProxyDirector(t *testing.T) {
 
 	req := protocol.NewRequest("GET", "http://example.com/v2/dagger-cache/manifests/v0-21-4", nil)
 	req.Header.Set("Authorization", "Bearer client-token")
-	req.Header.Set("X-Dagger-Cache-Target", "backend:5000")
-	req.Header.Set("X-Dagger-Cache-User", "user")
-	req.Header.Set("X-Dagger-Cache-Pass", "pass")
+	req.Header.Set("X-Dagger-Kubernetes-Target", "backend:5000")
+	req.Header.Set("X-Dagger-Kubernetes-User", "user")
+	req.Header.Set("X-Dagger-Kubernetes-Pass", "pass")
 
 	director(req)
 
 	if got := string(req.Header.Peek("Authorization")); got != basicAuthHeader("user", "pass") {
 		t.Fatalf("Authorization = %q, want backend basic auth", got)
 	}
-	for _, h := range []string{"X-Dagger-Cache-Target", "X-Dagger-Cache-User", "X-Dagger-Cache-Pass"} {
+	for _, h := range []string{"X-Dagger-Kubernetes-Target", "X-Dagger-Kubernetes-User", "X-Dagger-Kubernetes-Pass"} {
 		if req.Header.Peek(h) != nil {
 			t.Fatalf("internal header %s not stripped", h)
 		}
@@ -300,9 +300,9 @@ func TestCacheProxyDirectorRejectsUnknownTarget(t *testing.T) {
 
 	req := protocol.NewRequest("GET", "http://example.com/v2/", nil)
 	req.Header.Set("Authorization", "Bearer client-token")
-	req.Header.Set("X-Dagger-Cache-Target", "evil.example:5000")
-	req.Header.Set("X-Dagger-Cache-User", "user")
-	req.Header.Set("X-Dagger-Cache-Pass", "pass")
+	req.Header.Set("X-Dagger-Kubernetes-Target", "evil.example:5000")
+	req.Header.Set("X-Dagger-Kubernetes-User", "user")
+	req.Header.Set("X-Dagger-Kubernetes-Pass", "pass")
 	director(req)
 
 	if got := string(req.Header.Peek("Authorization")); got != "" {
@@ -321,7 +321,7 @@ func TestCacheProxyDirectorNoCredsStripsAuth(t *testing.T) {
 
 	req := protocol.NewRequest("GET", "http://example.com/v2/", nil)
 	req.Header.Set("Authorization", "Bearer client-token")
-	req.Header.Set("X-Dagger-Cache-Target", "backend:5000")
+	req.Header.Set("X-Dagger-Kubernetes-Target", "backend:5000")
 	director(req)
 
 	if got := string(req.Header.Peek("Authorization")); got != "" {

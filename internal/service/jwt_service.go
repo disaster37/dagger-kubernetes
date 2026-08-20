@@ -45,6 +45,12 @@ func NewJWTService(secret []byte, accessTTL, refreshTTL time.Duration) *JWTServi
 	}
 }
 
+// AccessTTL returns the configured access-token TTL.
+func (s *JWTService) AccessTTL() time.Duration { return s.accessTTL }
+
+// RefreshTTL returns the configured refresh-token TTL.
+func (s *JWTService) RefreshTTL() time.Duration { return s.refreshTTL }
+
 // IssuePair returns signed access + refresh tokens for the user.
 func (s *JWTService) IssuePair(u *domain.User, groupIDs []string) (access, refresh string, err error) {
 	access, err = s.issue(u, groupIDs, typAccess, s.accessTTL)

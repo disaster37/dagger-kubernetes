@@ -102,7 +102,7 @@ supervisor:
       pipelineUrl: ""
 ## @param supervisor.config.database.dir Raft data directory (raft.db, snapshots/, node-id). Fresh-start store; no migration from legacy SQLite.
     database:
-      dir: "/var/lib/dagger-cache"
+      dir: "/var/lib/dagger-kubernetes"
 ## @param supervisor.config.raft.nodeId Raft node ID ("" = derive from the StatefulSet pod name).
 ## @param supervisor.config.raft.bindAddr Dedicated Raft transport bind address.
 ## @param supervisor.config.raft.advertiseAddr Routable advertise host:port ("" = derive from <hostname>.<headless_service>.<namespace>.svc.<cluster_domain>).
@@ -150,7 +150,7 @@ supervisor:
         enabled: true
         dir: ""
         validity: "8760h"
-        organization: "dagger-cache-raft"
+        organization: "dagger-kubernetes-raft"
         caCert: ""
         cert: ""
         key: ""
@@ -160,21 +160,21 @@ supervisor:
 ## @param supervisor.config.auth.internal.enabled Enable internal token authentication.
 ## @param supervisor.config.auth.internal.tokensFile Path to the static tokens file.
 ## @param supervisor.config.auth.bootstrapAdmin.username Bootstrap admin username.
-## @param supervisor.config.auth.bootstrapAdmin.password Bootstrap admin password (empty = random password logged once at first boot).
-## @param supervisor.config.auth.jwt.secret JWT signing secret (empty = auto-generated and persisted in DB).
+## @param supervisor.config.auth.bootstrapAdmin.password Bootstrap admin password (empty = random password logged once at first boot). The Helm chart ignores this key; set `auth.adminPassword` (rendered into the `<release>-admin-password` Secret) instead.
+## @param supervisor.config.auth.jwt.secret JWT signing secret (empty = auto-generated and persisted in DB). The Helm chart ignores this key; set `auth.jwtSecret` (rendered into the `<release>-jwt` Secret, injected as `DAGGER_KUBERNETES_AUTH_JWT_SECRET`) instead.
 ## @param supervisor.config.auth.jwt.accessTtl JWT access token TTL.
 ## @param supervisor.config.auth.jwt.refreshTtl JWT refresh token TTL.
 ## @param supervisor.config.auth.oauth.enabled Enable OAuth2 authentication.
 ## @param supervisor.config.auth.oauth.provider OAuth2 provider (e.g. github).
 ## @param supervisor.config.auth.oauth.clientId OAuth2 client ID.
-## @param supervisor.config.auth.oauth.clientSecret OAuth2 client secret.
+## @param supervisor.config.auth.oauth.clientSecret OAuth2 client secret. The Helm chart ignores this key; set `auth.oauthClientSecret` (rendered into the `<release>-oauth` Secret, injected as `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`) instead.
 ## @param supervisor.config.auth.oauth.redirectUrl OAuth2 redirect URL.
 ## @param supervisor.config.auth.oauth.allowedOrgs [array] Allowed OAuth organizations.
 ## @param supervisor.config.auth.oauth.defaultGroup Default group for OAuth users.
     auth:
       internal:
         enabled: true
-        tokensFile: "/etc/dagger-cache/tokens"
+        tokensFile: "/etc/dagger-kubernetes/tokens"
       bootstrapAdmin:
         username: "admin"
         password: ""
@@ -186,10 +186,20 @@ supervisor:
         enabled: false
         provider: "github"
         clientId: "${OAUTH_CLIENT_ID}"
-        clientSecret: "${OAUTH_CLIENT_SECRET}"
+        clientSecret: ""
         redirectUrl: "https://supv.example.com/api/v1/auth/oauth/github/callback"
         allowedOrgs: ["acme"]
         defaultGroup: ""
+## @param supervisor.config.auth.cookie.accessName Access-JWT session cookie name (httpOnly).
+## @param supervisor.config.auth.cookie.refreshName Refresh-JWT session cookie name (httpOnly).
+## @param supervisor.config.auth.cookie.secure Force the Secure flag on session cookies (set true when TLS terminates at an ingress in front of the supervisor).
+## @param supervisor.config.auth.cors.allowedOrigins [array] Exact-match Origin allowlist for cross-origin API access (empty = same-origin only, no ACAO header).
+      cookie:
+        accessName: "dagger_kubernetes_access"
+        refreshName: "dagger_kubernetes_refresh"
+        secure: false
+      cors:
+        allowedOrigins: []
 ## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired when otelCollector enabled).
 ## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries.
 ## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries.
@@ -203,8 +213,10 @@ supervisor:
 ## @param supervisor.config.cache.registry Cache registry ref (auto-wired public ref `<cachePublicHost>/dagger-cache`).
 ## @param supervisor.config.cache.publicHost Dedicated cache vhost engines push/pull through (empty = derived `cache.<server.publicUrl host>`). Must differ from the control-plane host.
 ## @param supervisor.config.cache.internalAddr Legacy single backend address (empty = auto-wired `<release>-registry:5000` when tools.registry enabled).
-## @param supervisor.config.cache.authToken Engine→proxy bearer (empty = read from the engine-registry-auth secret key `token`).
-## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password} (empty = single-backend mode).
+## @param supervisor.config.cache.authToken Engine→proxy bearer. The Helm chart ignores this key and always renders an empty value; the supervisor reads the token from the `engine-registry-auth` Secret (key `token`, set via `auth.engineToken`) instead.
+## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password, passwordSecret} (empty = single-backend mode). password must stay empty in Helm; use passwordSecret to reference a K8s Secret.
+## @param supervisor.config.cache.registries[].passwordSecret.name K8s Secret name holding the backend password (rendered as a reference, never the secret itself).
+## @param supervisor.config.cache.registries[].passwordSecret.key Key inside the Secret holding the password (empty = "password").
 ## @param supervisor.config.cache.refPerVersion Enable per-version cache references.
 ## @param supervisor.config.cache.s3.bucket S3 bucket name (when backend=s3).
 ## @param supervisor.config.cache.s3.region S3 region (when backend=s3).
@@ -320,12 +332,14 @@ supervisor:
 ## @param auth.engineToken Token for engine cache registry auth (engine-registry-auth secret). Empty = "placeholder".
 ## @param auth.engineDockerConfig Base64-encoded Docker config.json for engine image pulls (private registries).
 ## @param auth.jwtSecret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
+## @param auth.oauthClientSecret OAuth2 client secret (rendered into the <release>-oauth Secret; injected as DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET).
 auth:
   tokens: []
   adminPassword: ""
   engineToken: ""
   engineDockerConfig: ""
   jwtSecret: ""
+  oauthClientSecret: ""
 
 ## @section Minting CA and TLS
 

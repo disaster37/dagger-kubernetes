@@ -27,7 +27,7 @@ sed -i \
 MARKER="<!-- version-marker -->"
 
 if grep -q "${MARKER}" "${README}"; then
-  sed -i "/${MARKER}/{n;s/^.*\$/   [^1]: Latest released version: \`${VERSION}\`/}" "${README}"
+  sed -i "/${MARKER}/{n;s/^.*\$/[^1]: Latest released version: \`${VERSION}\`/}" "${README}"
 else
   # Insert marker + version line after the description paragraph (line 4)
   sed -i "4a ${MARKER}\n[^1]: Latest released version: \`${VERSION}\`\n" "${README}"

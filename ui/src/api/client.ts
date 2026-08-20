@@ -10,13 +10,11 @@ import type {
   HistoryInfo,
   HistoryPurgeRequest,
   HistoryPurgeResult,
-  LoginResponse,
   PlatformStatus,
   Project,
   Providers,
   PurgeRequest,
   PurgeResult,
-  RefreshResponse,
   TokenMeta,
   TraceDetail,
   TraceLogEntry,
@@ -27,14 +25,7 @@ import type {
 const api = axios.create({
   baseURL: '/',
   timeout: 30000,
-})
-
-api.interceptors.request.use((config) => {
-  const auth = useAuthStore()
-  if (auth.token) {
-    config.headers.Authorization = `Bearer ${auth.token}`
-  }
-  return config
+  withCredentials: true,
 })
 
 api.interceptors.response.use(
@@ -44,16 +35,21 @@ api.interceptors.response.use(
       const auth = useAuthStore()
       const url = error.config?.url ?? ''
       const isAuthEndpoint = url.includes('/api/v1/auth/login') || url.includes('/api/v1/auth/refresh')
-      if (!isAuthEndpoint && auth.refreshToken) {
+      // Retry at most once: a successful refresh followed by another 401 must
+      // not loop refresh→retry indefinitely (CWE-400, token-issuance storm).
+      // The _retried flag is set on the config before retrying; a second 401
+      // on the retried request skips the refresh path and surfaces the error.
+      const retried = (error.config as (AxiosRequestConfig & { _retried?: boolean }) | undefined)?._retried
+      if (!isAuthEndpoint && !retried && error.config) {
         const ok = await auth.refreshSession()
-        if (ok && error.config) {
-          // Retry the original request once with the new token.
-          const retryConfig: AxiosRequestConfig = { ...error.config }
-          retryConfig.headers = { ...error.config.headers, Authorization: `Bearer ${auth.token}` }
+        if (ok) {
+          // Retry the original request once; the cookie is sent automatically.
+          const retryConfig = error.config as AxiosRequestConfig & { _retried?: boolean }
+          retryConfig._retried = true
           return api.request(retryConfig)
         }
       }
-      auth.logout()
+      await auth.logout()
       if (typeof window !== 'undefined') {
         window.location.href = '/auth/login'
       }
@@ -73,13 +69,15 @@ export async function fetchMe(): Promise<AuthUser> {
   const { data } = await api.get('/api/v1/auth/me')
   return data
 }
-export async function loginRequest(username: string, password: string): Promise<LoginResponse> {
+export async function loginRequest(username: string, password: string): Promise<AuthUser> {
   const { data } = await api.post('/api/v1/auth/login', { username, password })
   return data
 }
-export async function refreshRequest(refreshToken: string): Promise<RefreshResponse> {
-  const { data } = await api.post('/api/v1/auth/refresh', { refresh_token: refreshToken })
-  return data
+export async function refreshRequest(): Promise<void> {
+  await api.post('/api/v1/auth/refresh')
+}
+export async function logoutRequest(): Promise<void> {
+  await api.post('/api/v1/auth/logout')
 }
 export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
   await api.put('/api/v1/auth/password', { current_password: currentPassword, new_password: newPassword })
@@ -231,9 +229,7 @@ export async function fetchConnectEnv(version?: string, reveal?: boolean): Promi
   return data as ConnectEnvSnapshot
 }
 
-// SSE live trace stream (EventSource cannot set headers; use ?token= query param).
+// SSE live trace stream (same-origin EventSource sends the session cookie).
 export function connectLiveTrace(id: string): EventSource {
-  const auth = useAuthStore()
-  const token = encodeURIComponent(auth.token ?? '')
-  return new EventSource(`/api/v1/traces/${id}/live?token=${token}`)
+  return new EventSource(`/api/v1/traces/${id}/live`)
 }

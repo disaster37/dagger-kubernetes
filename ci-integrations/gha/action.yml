@@ -1,8 +1,8 @@
-name: 'dagger-cache'
+name: 'dagger-kubernetes'
 description: 'Run Dagger with remote shared cache and live pipeline view'
 inputs:
   server-url:
-    description: 'Dagger Cache server URL'
+    description: 'Dagger Kubernetes server URL'
     required: true
   token:
     description: 'Dagger Cloud token'
@@ -26,11 +26,11 @@ runs:
     - name: Run Dagger with Cache
       shell: bash
       run: |
-        "${GITHUB_ACTION_PATH}/dagger-cache.sh" run "${DC_MODULE}" ${DC_ARGS}
+        "${GITHUB_ACTION_PATH}/dagger-kubernetes.sh" run "${DC_MODULE}" ${DC_ARGS}
       env:
         DC_MODULE: ${{ inputs.module }}
         DC_ARGS: ${{ inputs.args }}
-        DAGGER_CACHE_SERVER: ${{ inputs.server-url }}
-        DAGGER_CACHE_UI: ${{ inputs.ui-url || inputs.server-url }}
+        DAGGER_KUBERNETES_SERVER: ${{ inputs.server-url }}
+        DAGGER_KUBERNETES_UI: ${{ inputs.ui-url || inputs.server-url }}
         DAGGER_CLOUD_TOKEN: ${{ inputs.token }}
         DAGGER_TAG: ${{ inputs.version }}

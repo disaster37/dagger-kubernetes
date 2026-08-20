@@ -13,17 +13,27 @@ import (
 const identityKey = "auth_identity"
 
 // resolveIdentity resolves the request identity via AuthService and stores it
-// on the context. A missing or unparseable bearer results in an
-// unauthenticated error (401).
+// on the context. Credentials are read from the Authorization header first
+// (bearer stays primary for CI), then the access cookie. A missing or
+// unparseable credential results in an unauthenticated error (401).
 func (s *Server) resolveIdentity(c *app.RequestContext) (*domain.Identity, bool) {
-	bearer, _ := extractToken(c)
-	id, err := s.auth.Resolve(context.Background(), bearer)
+	id, err := s.auth.Resolve(context.Background(), s.bearerFromRequest(c))
 	if err != nil {
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
 		return nil, false
 	}
 	c.Set(identityKey, id)
 	return id, true
+}
+
+// bearerFromRequest returns the bearer credential from the Authorization header
+// first (primary for CI), then the access cookie (SPA sessions).
+func (s *Server) bearerFromRequest(c *app.RequestContext) string {
+	bearer, _ := extractToken(c)
+	if bearer == "" && s.cookieCfg.AccessName != "" {
+		bearer = string(c.Cookie(s.cookieCfg.AccessName))
+	}
+	return bearer
 }
 
 // requireAuth resolves the identity and writes 401 on failure. Returns the
@@ -35,11 +45,12 @@ func (s *Server) requireAuth(c *app.RequestContext) bool {
 }
 
 // requireAuthWithQueryFallback resolves the identity from the Authorization
-// header or, failing that, the ?token= query param (D14). Only the SSE /live
-// route uses this: EventSource clients cannot set headers, and tokens in URLs
-// leak via logs/referrers, so query-param auth is limited to that one route.
+// header, then the access cookie, then the ?token= query param (D14). Only the
+// SSE /live route uses this: EventSource clients cannot set headers, and tokens
+// in URLs leak via logs/referrers, so query-param auth is limited to that one
+// route.
 func (s *Server) requireAuthWithQueryFallback(c *app.RequestContext) bool {
-	bearer, _ := extractToken(c)
+	bearer := s.bearerFromRequest(c)
 	if bearer == "" {
 		bearer = c.Query("token")
 	}

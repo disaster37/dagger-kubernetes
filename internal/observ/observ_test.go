@@ -97,7 +97,7 @@ func TestNewMetricsRegisters(t *testing.T) {
 
 	found := false
 	for _, f := range fam {
-		if f.GetName() == "dagger_cache_pipeline_disconnect_failed_total" {
+		if f.GetName() == "dagger_kubernetes_pipeline_disconnect_failed_total" {
 			found = true
 			if len(f.GetMetric()) != 2 {
 				t.Fatalf("pipeline disconnect metric has %d series, want 2", len(f.GetMetric()))

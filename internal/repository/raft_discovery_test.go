@@ -49,17 +49,17 @@ func TestDNSPeerResolverResolve(t *testing.T) {
 		{
 			name: "three replicas",
 			cfg: RaftDiscoveryConfig{
-				StatefulSetName: "dagger-cache-supervisor",
-				HeadlessService: "dagger-cache-headless",
-				Namespace:       "dagger-cache",
+				StatefulSetName: "dagger-kubernetes-supervisor",
+				HeadlessService: "dagger-kubernetes-headless",
+				Namespace:       "dagger-kubernetes",
 				ClusterDomain:   "cluster.local",
 				Replicas:        3,
 				RaftPort:        8081,
 			},
 			want: []RaftPeer{
-				{ID: "dagger-cache-supervisor-0", Address: "dagger-cache-supervisor-0.dagger-cache-headless.dagger-cache.svc.cluster.local:8081"},
-				{ID: "dagger-cache-supervisor-1", Address: "dagger-cache-supervisor-1.dagger-cache-headless.dagger-cache.svc.cluster.local:8081"},
-				{ID: "dagger-cache-supervisor-2", Address: "dagger-cache-supervisor-2.dagger-cache-headless.dagger-cache.svc.cluster.local:8081"},
+				{ID: "dagger-kubernetes-supervisor-0", Address: "dagger-kubernetes-supervisor-0.dagger-kubernetes-headless.dagger-kubernetes.svc.cluster.local:8081"},
+				{ID: "dagger-kubernetes-supervisor-1", Address: "dagger-kubernetes-supervisor-1.dagger-kubernetes-headless.dagger-kubernetes.svc.cluster.local:8081"},
+				{ID: "dagger-kubernetes-supervisor-2", Address: "dagger-kubernetes-supervisor-2.dagger-kubernetes-headless.dagger-kubernetes.svc.cluster.local:8081"},
 			},
 		},
 		{

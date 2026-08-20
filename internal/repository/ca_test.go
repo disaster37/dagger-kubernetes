@@ -120,7 +120,7 @@ func TestMintingCAIssuePeerCertificate(t *testing.T) {
 
 	dnsNames := []string{"localhost", "node-0.headless.ns.svc.cluster.local"}
 	ipAddrs := []net.IP{net.ParseIP("127.0.0.1")}
-	certPEM, keyPEM, err := ca.IssuePeerCertificate("node-0", "dagger-cache-raft", dnsNames, ipAddrs, 24*time.Hour)
+	certPEM, keyPEM, err := ca.IssuePeerCertificate("node-0", "dagger-kubernetes-raft", dnsNames, ipAddrs, 24*time.Hour)
 	if err != nil {
 		t.Fatalf("IssuePeerCertificate: %v", err)
 	}

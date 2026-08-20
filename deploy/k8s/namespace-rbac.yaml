@@ -1,47 +1,55 @@
 apiVersion: v1
 kind: Namespace
 metadata:
-  name: dagger-cache
+  name: dagger-kubernetes
 ---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: supervisor
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
+kind: Role
 metadata:
   name: supervisor-role
+  namespace: dagger-kubernetes
 rules:
   - apiGroups: ["apps"]
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["services", "pods", "pods/exec", "pods/log"]
+    resources: ["services", "pods", "pods/log"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["persistentvolumeclaims", "configmaps", "secrets"]
+    resources: ["pods/exec"]
+    verbs: ["get", "create"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
+kind: RoleBinding
 metadata:
   name: supervisor-binding
+  namespace: dagger-kubernetes
 roleRef:
   apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
+  kind: Role
   name: supervisor-role
 subjects:
   - kind: ServiceAccount
     name: supervisor
-    namespace: dagger-cache
+    namespace: dagger-kubernetes
 ---
 apiVersion: v1
 kind: Secret
 metadata:
   name: supervisor-minting-ca
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 type: Opaque
 data:
   ca.crt: ""
@@ -51,7 +59,7 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: supervisor-tls
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 type: kubernetes.io/tls
 data:
   tls.crt: ""
@@ -66,17 +74,29 @@ apiVersion: v1
 kind: Secret
 metadata:
   name: engine-registry-auth
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 type: Opaque
 data:
   token: "cGxhY2Vob2xkZXI="  # base64("placeholder"); engine→proxy bearer, must match cache.auth_token
   .dockerconfigjson: ""       # optional: engine image-pull auth (dockerconfigjson)
 ---
+# supervisor-tokens: static bearer tokens (one per line) mounted at
+# auth.internal.tokens_file. Optional (optional: true in supervisor.yaml) so the
+# pod starts with an empty token file in dev; paste one token per line to enable.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: supervisor-tokens
+  namespace: dagger-kubernetes
+type: Opaque
+stringData:
+  tokens: ""   # operator: paste one bearer token per line
+---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: supervisor-config
-  namespace: dagger-cache
+  namespace: dagger-kubernetes
 data:
   config.app.yaml: |
     server:
@@ -87,7 +107,7 @@ data:
     auth:
       internal:
         enabled: true
-        tokens_file: "/etc/dagger-cache/tokens"
+        tokens_file: "/etc/dagger-kubernetes/tokens"
     telemetry:
       collector_url: "http://otel-collector:4318"
       tempo_url: "http://tempo:3200"
@@ -98,10 +118,10 @@ data:
       registry: "cache-registry:5000/dagger-cache"   # internal backend ref (repo path)
       public_host: "cache.supv.example.com"          # dedicated cache vhost (engine pushes/pulls through Supervisor)
       internal_addr: "cache-registry:5000"           # internal registry Service (backend)
-      auth_token: "change-me"                        # engine→proxy bearer; must match engine-registry-auth secret token
+      auth_token: ""                                 # engine→proxy bearer; empty = read from the engine-registry-auth Secret (key "token")
       ref_per_version: true
     fleet:
-      namespace: "dagger-cache"
+      namespace: "dagger-kubernetes"
       max_replicas_per_version: 3
       max_sessions_per_replica: 8
       replica_idle_ttl: "5m"

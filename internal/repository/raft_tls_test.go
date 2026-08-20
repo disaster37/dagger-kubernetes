@@ -20,7 +20,7 @@ func testRaftTLSCfg(dir string) RaftTLSConfig {
 		Enabled:      true,
 		Dir:          dir,
 		Validity:     8760 * time.Hour,
-		Organization: "dagger-cache-raft",
+		Organization: "dagger-kubernetes-raft",
 		ClientAuth:   true,
 	}
 }

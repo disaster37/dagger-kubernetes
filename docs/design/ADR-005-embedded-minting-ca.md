@@ -1,6 +1,6 @@
 # ADR-005: Embedded Minting CA
 
-**Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-cache team
+**Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-kubernetes team
 
 ## Context
 
@@ -45,7 +45,7 @@ startup and persists it:
 - CA persistence path must be a writable volume (bind-mount or PVC).
 - The CA certificate is distributed to clients as part of the lease
   response (`SerializableCertificate`).
-- The `ca_path` defaults to `/var/lib/dagger-cache/ca`.
+- The `ca_path` defaults to `/var/lib/dagger-kubernetes/ca`.
 - In multi-node, the `ca.minting_ca_secret` Secret holds the CA **private
   key** (any pod may mint client certs) and must be RBAC-restricted to the
   supervisor ServiceAccount.

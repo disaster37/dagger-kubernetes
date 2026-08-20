@@ -18,7 +18,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetConfigFile(configFile)
 	v.SetConfigType("yaml")
 
-	v.SetEnvPrefix("DAGGER_CACHE")
+	v.SetEnvPrefix("DAGGER_KUBERNETES")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 
 	v.SetDefault("server.control_addr", ":8080")
@@ -28,7 +28,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("server.pipeline_url", "")
 
 	v.SetDefault("auth.internal.enabled", true)
-	v.SetDefault("auth.internal.tokens_file", "/etc/dagger-cache/tokens")
+	v.SetDefault("auth.internal.tokens_file", "/etc/dagger-kubernetes/tokens")
 	v.SetDefault("auth.oauth.enabled", false)
 	v.SetDefault("auth.oauth.provider", "github")
 	v.SetDefault("auth.oauth.client_id", "")
@@ -51,7 +51,12 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.bootstrap_admin.username", "admin")
 	v.SetDefault("auth.bootstrap_admin.password", "")
 
-	v.SetDefault("database.dir", "/var/lib/dagger-cache")
+	v.SetDefault("auth.cookie.access_name", "dagger_kubernetes_access")
+	v.SetDefault("auth.cookie.refresh_name", "dagger_kubernetes_refresh")
+	v.SetDefault("auth.cookie.secure", false)
+	v.SetDefault("auth.cors.allowed_origins", []string{})
+
+	v.SetDefault("database.dir", "/var/lib/dagger-kubernetes")
 
 	v.SetDefault("raft.node_id", "")
 	v.SetDefault("raft.bind_addr", ":8081")
@@ -70,7 +75,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("raft.tls.enabled", false)
 	v.SetDefault("raft.tls.dir", "")
 	v.SetDefault("raft.tls.validity", 8760*time.Hour)
-	v.SetDefault("raft.tls.organization", "dagger-cache-raft")
+	v.SetDefault("raft.tls.organization", "dagger-kubernetes-raft")
 	v.SetDefault("raft.tls.ca_cert", "")
 	v.SetDefault("raft.tls.cert", "")
 	v.SetDefault("raft.tls.key", "")
@@ -108,7 +113,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("pipeline.stale_sweep.schedule", time.Minute)
 	v.SetDefault("pipeline.stale_sweep.stale_after", 5*time.Minute)
 
-	v.SetDefault("fleet.namespace", "dagger-cache")
+	v.SetDefault("fleet.namespace", "dagger-kubernetes")
 	v.SetDefault("fleet.max_replicas_per_version", 3)
 	v.SetDefault("fleet.max_sessions_per_replica", 8)
 	v.SetDefault("fleet.replica_idle_ttl", 5*time.Minute)
@@ -142,9 +147,9 @@ func Load(configFile string) (*domain.Config, error) {
 
 	v.SetDefault("tls.server_cert_secret", "supervisor-tls")
 	v.SetDefault("tls.provider", "embedded")
-	v.SetDefault("tls.ca_path", "/var/lib/dagger-cache/ca")
-	v.SetDefault("tls.cert_path", "/etc/dagger-cache/tls/tls.crt")
-	v.SetDefault("tls.key_path", "/etc/dagger-cache/tls/tls.key")
+	v.SetDefault("tls.ca_path", "/var/lib/dagger-kubernetes/ca")
+	v.SetDefault("tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")
+	v.SetDefault("tls.key_path", "/etc/dagger-kubernetes/tls/tls.key")
 
 	v.SetDefault("version.floor", "v0.19.0")
 	v.SetDefault("version.allowlist", []string{})

@@ -36,8 +36,8 @@ func NewMintingCA(clientCertTTL time.Duration) (*MintingCA, error) {
 	template := &x509.Certificate{
 		SerialNumber: big.NewInt(1),
 		Subject: pkix.Name{
-			CommonName:   "dagger-cache-minting-ca",
-			Organization: []string{"dagger-cache"},
+			CommonName:   "dagger-kubernetes-minting-ca",
+			Organization: []string{"dagger-kubernetes"},
 		},
 		NotBefore:             time.Now(),
 		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),

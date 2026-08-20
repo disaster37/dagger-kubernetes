@@ -224,14 +224,14 @@ func (p *EmbeddedProvider) writeLocalCA(certPEM, keyPEM []byte) error {
 // returns PEM cert+key.
 func newMintingCAWithGoca() (certPEM, keyPEM []byte, err error) {
 	identity := goca.Identity{
-		Organization:       "dagger-cache",
+		Organization:       "dagger-kubernetes",
 		OrganizationalUnit: "engineering",
 		Country:            "US",
 		Locality:           "San Francisco",
 		Province:           "California",
 	}
 
-	caInstance, err := goca.New("dagger-cache-minting-ca", identity)
+	caInstance, err := goca.New("dagger-kubernetes-minting-ca", identity)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create goca CA: %w", err)
 	}
@@ -268,7 +268,7 @@ func (p *EmbeddedProvider) loadCA(certPath, keyPath string) (*MintingCA, error) 
 }
 
 func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
-	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-cache.svc"}
+	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
 	sans = append(sans, p.extraSANs...)
 	// Direct pod access (CWE-295): cover this pod's hostname and loopback so
 	// the data-plane cert verifies when dialed directly by pod name/IP. The
@@ -281,7 +281,7 @@ func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath stri
 	// so 127.0.0.1 is carried as an IP SAN. It also sets ExtKeyUsageServerAuth,
 	// so the cert remains a valid server cert.
 	certPEM, keyPEM, err := ca.IssuePeerCertificate(
-		"supervisor-server", "dagger-cache",
+		"supervisor-server", "dagger-kubernetes",
 		sans,
 		[]net.IP{net.ParseIP("127.0.0.1")},
 		5*365*24*time.Hour)
@@ -298,7 +298,7 @@ func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath stri
 }
 
 // fileCAProvider serves the server TLS certificate from PEM files managed
-// outside of dagger-cache (cert-manager or external tooling). The minting CA
+// outside of dagger-kubernetes (cert-manager or external tooling). The minting CA
 // is always auto-bootstrapped by the embedded provider (K8s Secret or local
 // files), independent of where the server certificate comes from — the
 // minting CA signs short-lived engine client certs and is an internal CA that

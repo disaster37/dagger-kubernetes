@@ -122,7 +122,7 @@ The following hardening is part of this design (security audit 2026-08-10):
 - **Negative**: SQLite is single-node; horizontal supervisor scaling requires
   either pinning the DB to one replica or migrating to Postgres (future ADR).
   The `readOnlyRootFilesystem` security context requires a writable volume
-  mount at `/var/lib/dagger-cache`.
+  mount at `/var/lib/dagger-kubernetes`.
 - **Risk**: Multi-group quota double-counting may surprise operators; mitigated
   by the admin Groups view showing live `active_sessions / max` and README
   documentation.

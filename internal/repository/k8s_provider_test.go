@@ -16,7 +16,7 @@ import (
 
 func defaultK8sProvider(extra ...func(*K8sProviderConfig)) (*K8sProvider, *fake.Clientset) {
 	cfg := K8sProviderConfig{
-		Namespace:           "dagger-cache",
+		Namespace:           "dagger-kubernetes",
 		ImageRegistry:       "registry.dagger.io/engine",
 		StorageClass:        "fast-ssd",
 		StorageSize:         "50Gi",
@@ -47,7 +47,7 @@ func ensureEngineSet(t *testing.T, p *K8sProvider, cs *fake.Clientset) *appsv1.S
 	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
 		t.Fatalf("EnsureStatefulSet: %v", err)
 	}
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -57,7 +57,7 @@ func ensureEngineSet(t *testing.T, p *K8sProvider, cs *fake.Clientset) *appsv1.S
 // engineConfigMap fetches the fleet-wide engine ConfigMap or fails the test.
 func engineConfigMap(t *testing.T, cs *fake.Clientset) *corev1.ConfigMap {
 	t.Helper()
-	cm, err := cs.CoreV1().ConfigMaps("dagger-cache").Get(context.Background(), engineConfigMapName, metav1.GetOptions{})
+	cm, err := cs.CoreV1().ConfigMaps("dagger-kubernetes").Get(context.Background(), engineConfigMapName, metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get configmap: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestK8sEnsureStatefulSet(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset failed: %v", err)
 	}
@@ -176,8 +176,8 @@ func TestK8sEnsureStatefulSet(t *testing.T) {
 	}
 
 	vct := sts.Spec.VolumeClaimTemplates[0]
-	if vct.Name != "dagger-cache" {
-		t.Errorf("expected PVC name 'dagger-cache', got %q", vct.Name)
+	if vct.Name != "dagger-kubernetes" {
+		t.Errorf("expected PVC name 'dagger-kubernetes', got %q", vct.Name)
 	}
 	if vct.Spec.StorageClassName == nil || *vct.Spec.StorageClassName != "fast-ssd" {
 		t.Errorf("expected storage class 'fast-ssd', got %v", vct.Spec.StorageClassName)
@@ -212,7 +212,7 @@ func TestK8sEnsureStatefulSetWithTolerations(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-21-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-21-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -239,7 +239,7 @@ func TestK8sEnsureStatefulSetWithNodeSelector(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-21-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-21-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -259,7 +259,7 @@ func TestK8sEnsureStatefulSetWithoutStorageClass(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -278,7 +278,7 @@ func TestK8sEnsureService(t *testing.T) {
 		t.Fatalf("EnsureService failed: %v", err)
 	}
 
-	svc, err := cs.CoreV1().Services("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	svc, err := cs.CoreV1().Services("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get service failed: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestK8sGetReplicas(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "dagger-engine-v0-20-0-0",
-				Namespace: "dagger-cache",
+				Namespace: "dagger-kubernetes",
 				Labels:    labels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "e"}}},
@@ -322,7 +322,7 @@ func TestK8sGetReplicas(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "dagger-engine-v0-20-0-1",
-				Namespace: "dagger-cache",
+				Namespace: "dagger-kubernetes",
 				Labels:    labels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "e"}}},
@@ -337,7 +337,7 @@ func TestK8sGetReplicas(t *testing.T) {
 	}
 
 	for _, pod := range pods {
-		_, err := cs.CoreV1().Pods("dagger-cache").Create(context.Background(), pod, metav1.CreateOptions{})
+		_, err := cs.CoreV1().Pods("dagger-kubernetes").Create(context.Background(), pod, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("create pod: %v", err)
 		}
@@ -381,7 +381,7 @@ func TestK8sScaleUp(t *testing.T) {
 		t.Fatalf("ScaleUp failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestK8sScaleDown(t *testing.T) {
 		t.Fatalf("ScaleDown failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -437,7 +437,7 @@ func TestK8sScaleDownToZero(t *testing.T) {
 		t.Fatalf("ScaleDown failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestK8sGetReadyReplicaIP(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dagger-engine-v0-20-0-0",
-			Namespace: "dagger-cache",
+			Namespace: "dagger-kubernetes",
 			Labels:    labels,
 		},
 		Status: corev1.PodStatus{
@@ -495,7 +495,7 @@ func TestK8sGetReadyReplicaIP(t *testing.T) {
 		},
 	}
 
-	_, err := cs.CoreV1().Pods("dagger-cache").Create(context.Background(), pod, metav1.CreateOptions{})
+	_, err := cs.CoreV1().Pods("dagger-kubernetes").Create(context.Background(), pod, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("create pod: %v", err)
 	}
@@ -535,11 +535,11 @@ func TestK8sAllVersions(t *testing.T) {
 		sts := &appsv1.StatefulSet{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      domain.StsName(v),
-				Namespace: "dagger-cache",
+				Namespace: "dagger-kubernetes",
 				Labels:    labels,
 			},
 		}
-		_, err := cs.AppsV1().StatefulSets("dagger-cache").Create(context.Background(), sts, metav1.CreateOptions{})
+		_, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Create(context.Background(), sts, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("create sts: %v", err)
 		}
@@ -591,7 +591,7 @@ func TestK8sDeleteStatefulSet(t *testing.T) {
 		t.Fatalf("DeleteStatefulSet failed: %v", err)
 	}
 
-	_, err = cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	_, err = cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err == nil {
 		t.Fatal("expected statefulset to be deleted")
 	}
@@ -610,7 +610,7 @@ func TestK8sDeleteService(t *testing.T) {
 		t.Fatalf("DeleteService failed: %v", err)
 	}
 
-	_, err = cs.CoreV1().Services("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	_, err = cs.CoreV1().Services("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err == nil {
 		t.Fatal("expected service to be deleted")
 	}
@@ -626,7 +626,7 @@ func TestK8sExtraArgs(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet failed: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -655,8 +655,8 @@ func TestK8sProviderDefaults(t *testing.T) {
 	cs := fake.NewSimpleClientset()
 	p := NewK8sProvider(cs, K8sProviderConfig{})
 
-	if p.cfg.Namespace != "dagger-cache" {
-		t.Errorf("expected default namespace 'dagger-cache', got %q", p.cfg.Namespace)
+	if p.cfg.Namespace != "dagger-kubernetes" {
+		t.Errorf("expected default namespace 'dagger-kubernetes', got %q", p.cfg.Namespace)
 	}
 	if p.cfg.StorageSize != "50Gi" {
 		t.Errorf("expected default storage '50Gi', got %q", p.cfg.StorageSize)
@@ -694,7 +694,7 @@ func TestK8sEnsureStatefulSetPreservesReplicaCountOnUpdate(t *testing.T) {
 		t.Fatalf("second EnsureStatefulSet: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -782,7 +782,7 @@ func TestK8sGetReplicasSkipsTerminatingPods(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "dagger-engine-v0-20-0-0",
-				Namespace: "dagger-cache",
+				Namespace: "dagger-kubernetes",
 				Labels:    labels,
 			},
 			Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "engine", Image: "e"}}},
@@ -798,7 +798,7 @@ func TestK8sGetReplicasSkipsTerminatingPods(t *testing.T) {
 		{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:              "dagger-engine-v0-20-0-1",
-				Namespace:         "dagger-cache",
+				Namespace:         "dagger-kubernetes",
 				Labels:            labels,
 				DeletionTimestamp: &terminating,
 			},
@@ -815,7 +815,7 @@ func TestK8sGetReplicasSkipsTerminatingPods(t *testing.T) {
 	}
 
 	for _, pod := range pods {
-		_, err := cs.CoreV1().Pods("dagger-cache").Create(context.Background(), pod, metav1.CreateOptions{})
+		_, err := cs.CoreV1().Pods("dagger-kubernetes").Create(context.Background(), pod, metav1.CreateOptions{})
 		if err != nil {
 			t.Fatalf("create pod: %v", err)
 		}
@@ -844,7 +844,7 @@ func TestK8sGetReplicasFiltersOtherVersions(t *testing.T) {
 	podV20 := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dagger-engine-v0-20-0-0",
-			Namespace: "dagger-cache",
+			Namespace: "dagger-kubernetes",
 			Labels:    labelsV20,
 		},
 		Status: corev1.PodStatus{
@@ -859,7 +859,7 @@ func TestK8sGetReplicasFiltersOtherVersions(t *testing.T) {
 	podV21 := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "dagger-engine-v0-21-0-0",
-			Namespace: "dagger-cache",
+			Namespace: "dagger-kubernetes",
 			Labels:    labelsV21,
 		},
 		Status: corev1.PodStatus{
@@ -872,8 +872,8 @@ func TestK8sGetReplicasFiltersOtherVersions(t *testing.T) {
 		},
 	}
 
-	_, _ = cs.CoreV1().Pods("dagger-cache").Create(context.Background(), podV20, metav1.CreateOptions{})
-	_, _ = cs.CoreV1().Pods("dagger-cache").Create(context.Background(), podV21, metav1.CreateOptions{})
+	_, _ = cs.CoreV1().Pods("dagger-kubernetes").Create(context.Background(), podV20, metav1.CreateOptions{})
+	_, _ = cs.CoreV1().Pods("dagger-kubernetes").Create(context.Background(), podV21, metav1.CreateOptions{})
 
 	replicas, err := p.GetReplicas("v0.20.0")
 	if err != nil {
@@ -901,7 +901,7 @@ func TestK8sSetReplicas(t *testing.T) {
 		t.Fatalf("setReplicas: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -924,7 +924,7 @@ func TestK8sEnsureStatefulSetWithCustomResourceRequirements(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -958,7 +958,7 @@ func TestK8sVolumeClaimTemplatesRetentionPolicy(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -998,7 +998,7 @@ func TestK8sEngineEnvironVariables(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-20-0", metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -1007,15 +1007,15 @@ func TestK8sEngineEnvironVariables(t *testing.T) {
 
 	hasTokenEnv := false
 	for _, env := range container.Env {
-		if env.Name == "DAGGER_CACHE_TOKEN" {
+		if env.Name == "DAGGER_KUBERNETES_TOKEN" {
 			hasTokenEnv = true
 			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil || env.ValueFrom.SecretKeyRef.Name != "engine-registry-auth" {
-				t.Error("DAGGER_CACHE_TOKEN should reference secret engine-registry-auth")
+				t.Error("DAGGER_KUBERNETES_TOKEN should reference secret engine-registry-auth")
 			}
 		}
 	}
 	if !hasTokenEnv {
-		t.Error("expected DAGGER_CACHE_TOKEN environment variable")
+		t.Error("expected DAGGER_KUBERNETES_TOKEN environment variable")
 	}
 
 	hasConfigMount := false
@@ -1042,9 +1042,9 @@ func TestK8sEngineExtraEnv(t *testing.T) {
 
 	// Token first, then the literal operator env sorted by name
 	// (HTTPS_PROXY before https_proxy: uppercase sorts first).
-	requireEnvNames(t, container.Env, []string{"DAGGER_CACHE_TOKEN", "HTTPS_PROXY", "https_proxy"})
+	requireEnvNames(t, container.Env, []string{"DAGGER_KUBERNETES_TOKEN", "HTTPS_PROXY", "https_proxy"})
 	if token := container.Env[0]; token.ValueFrom == nil || token.ValueFrom.SecretKeyRef == nil {
-		t.Error("DAGGER_CACHE_TOKEN must be secret-sourced")
+		t.Error("DAGGER_KUBERNETES_TOKEN must be secret-sourced")
 	}
 	for _, name := range []string{"HTTPS_PROXY", "https_proxy"} {
 		if env := envByName(container.Env, name); env == nil || env.Value != proxyURL {
@@ -1065,7 +1065,7 @@ func TestK8sEngineExtraEnvFrom(t *testing.T) {
 
 	// Token first, then the secret-sourced env sorted by name
 	// (HTTPS_PROXY before HTTP_PROXY: "S" 0x53 < "_" 0x5f).
-	requireEnvNames(t, container.Env, []string{"DAGGER_CACHE_TOKEN", "HTTPS_PROXY", "HTTP_PROXY"})
+	requireEnvNames(t, container.Env, []string{"DAGGER_KUBERNETES_TOKEN", "HTTPS_PROXY", "HTTP_PROXY"})
 	for name, wantKey := range map[string]string{"HTTP_PROXY": "http_proxy", "HTTPS_PROXY": "https_proxy"} {
 		env := envByName(container.Env, name)
 		if env == nil {
@@ -1099,7 +1099,7 @@ func TestK8sEngineExtraEnvCombinedOrder(t *testing.T) {
 	// Deterministic order: token → sorted literal envs → sorted secret-sourced
 	// envs → CA envs.
 	requireEnvNames(t, container.Env, []string{
-		"DAGGER_CACHE_TOKEN",
+		"DAGGER_KUBERNETES_TOKEN",
 		"NO_PROXY",
 		"HTTP_PROXY",
 		"SSL_CERT_FILE",
@@ -1211,10 +1211,10 @@ func TestK8sEngineTOMLEmpty(t *testing.T) {
 	p, cs := defaultK8sProvider()
 
 	// Pre-create a stale ConfigMap to verify deletion.
-	_, err := cs.CoreV1().ConfigMaps("dagger-cache").Create(context.Background(), &corev1.ConfigMap{
+	_, err := cs.CoreV1().ConfigMaps("dagger-kubernetes").Create(context.Background(), &corev1.ConfigMap{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      engineConfigMapName,
-			Namespace: "dagger-cache",
+			Namespace: "dagger-kubernetes",
 		},
 		Data: map[string]string{engineTOMLKey: "stale"},
 	}, metav1.CreateOptions{})
@@ -1225,7 +1225,7 @@ func TestK8sEngineTOMLEmpty(t *testing.T) {
 	sts := ensureEngineSet(t, p, cs)
 
 	// ConfigMap should be deleted.
-	if _, err := cs.CoreV1().ConfigMaps("dagger-cache").Get(context.Background(), engineConfigMapName, metav1.GetOptions{}); err == nil {
+	if _, err := cs.CoreV1().ConfigMaps("dagger-kubernetes").Get(context.Background(), engineConfigMapName, metav1.GetOptions{}); err == nil {
 		t.Error("expected stale configmap to be deleted")
 	}
 

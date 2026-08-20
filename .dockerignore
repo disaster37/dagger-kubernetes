@@ -8,7 +8,7 @@
 *.exe
 *.test
 *.out
-dagger-cache-ci
+dagger-kubernetes-ci
 dist/
 bin/
 

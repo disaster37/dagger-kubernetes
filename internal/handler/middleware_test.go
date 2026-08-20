@@ -20,8 +20,10 @@ import (
 // (mirroring configure(), including the adminOnly gate on admin routes).
 func newAuthEngine(s *Server) *route.Engine {
 	e := route.NewEngine(config.NewOptions(nil))
+	e.Use(s.corsMiddleware())
 	e.POST("/api/v1/auth/login", s.handleLogin)
 	e.POST("/api/v1/auth/refresh", s.handleRefresh)
+	e.POST("/api/v1/auth/logout", s.handleLogout)
 	e.GET("/api/v1/auth/providers", s.handleProviders)
 	e.GET("/api/v1/auth/me", s.handleMe)
 	e.PUT("/api/v1/auth/password", s.handleChangePassword)

@@ -187,7 +187,7 @@ func newThreeNodeTLSRaftCluster(t *testing.T) []*RaftStore {
 func buildTLSClusterNodes(t *testing.T, n int) []raftClusterNode {
 	t.Helper()
 
-	caCertPEM, caKeyPEM, err := createRaftCAWithGoca("test-raft-ca", "dagger-cache-raft")
+	caCertPEM, caKeyPEM, err := createRaftCAWithGoca("test-raft-ca", "dagger-kubernetes-raft")
 	if err != nil {
 		t.Fatalf("createRaftCAWithGoca: %v", err)
 	}
@@ -203,7 +203,7 @@ func buildTLSClusterNodes(t *testing.T, n int) []raftClusterNode {
 	nodes := make([]raftClusterNode, n)
 	for i := 0; i < n; i++ {
 		cn := fmt.Sprintf("node-%d", i)
-		leafCert, leafKey, err := ca.IssuePeerCertificate(cn, "dagger-cache-raft", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
+		leafCert, leafKey, err := ca.IssuePeerCertificate(cn, "dagger-kubernetes-raft", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
 		if err != nil {
 			t.Fatalf("IssuePeerCertificate: %v", err)
 		}

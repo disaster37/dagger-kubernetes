@@ -26,12 +26,12 @@ router.beforeEach(async (to) => {
   if (to.meta.public) {
     return true
   }
-  if (!auth.isAuthenticated) {
-    return { path: '/auth/login', query: { redirect: to.fullPath } }
-  }
-  // Bootstrap the user from the stored token on first navigation.
+  // Bootstrap the session from the httpOnly cookie on first navigation (/me).
   if (!auth.user) {
     await auth.loadUser()
+  }
+  if (!auth.isAuthenticated) {
+    return { path: '/auth/login', query: { redirect: to.fullPath } }
   }
   if (to.meta.admin && !auth.isAdmin) {
     return { path: '/pipelines' }

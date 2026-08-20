@@ -76,7 +76,7 @@ Ports exposed:
 | Cache registry | 5000 | `registry:2`, stores BuildKit blobs    |
 
 The compose file configures the Supervisor entirely through
-`DAGGER_CACHE_*` environment variables, so no `config.app.yaml` is mounted
+`DAGGER_KUBERNETES_*` environment variables, so no `config.app.yaml` is mounted
 in dev mode.
 
 ### Kubernetes (Helm)
@@ -157,7 +157,7 @@ adds a host rule for `supervisor.config.cache.publicHost` (or the derived
 to the `-control` Service, and appends it to `ingress.tls[].hosts`. Set
 `supervisor.config.cache.authToken` (or leave it empty to read the
 `engine-registry-auth` Secret key `token`); the same token is injected into
-engine pods as `DAGGER_CACHE_TOKEN`. The control-plane TLS certificate must
+engine pods as `DAGGER_KUBERNETES_TOKEN`. The control-plane TLS certificate must
 include the cache vhost as a SAN — the `embedded` provider adds it
 automatically; when using cert-manager, include `cache.<host>` in the
 certificate's `dnsNames`. For multiple backend registries, set
@@ -190,7 +190,7 @@ dagger call github.com/your-org/ci@v1.0.0 build
 Or skip the env-var juggling and use the wrapper:
 
 ```bash
-./scripts/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
+./scripts/dagger-kubernetes.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
 ### Connect your environment (UI)
@@ -217,7 +217,7 @@ explicitly pin a version.
 
 ```bash
 # 1. On the Connect page, check "Show token plaintext", click "Copy .bashrc snippet", paste into a shell.
-# 2. Reload your shell (or: source ~/.dagger-cache.env).
+# 2. Reload your shell (or: source ~/.dagger-kubernetes.env).
 dagger call github.com/your-org/ci@v1.0.0 build
 ```
 
@@ -309,18 +309,24 @@ $EDITOR config/config.app.yaml
 
 ### Environment variables
 
-All keys can be overridden by environment variables using the `DAGGER_CACHE_`
+All keys can be overridden by environment variables using the `DAGGER_KUBERNETES_`
 prefix, with dots replaced by underscores and upper-cased. Environment
 variables **take precedence** over the file. Examples:
 
-| YAML key                                  | Environment variable                                |
-|-------------------------------------------|-----------------------------------------------------|
-| `server.public_url`                       | `DAGGER_CACHE_SERVER_PUBLIC_URL`                    |
-| `server.pipeline_url`                     | `DAGGER_CACHE_SERVER_PIPELINE_URL`                  |
-| `cache.registry`                          | `DAGGER_CACHE_CACHE_REGISTRY`                       |
-| `fleet.max_replicas_per_version`          | `DAGGER_CACHE_FLEET_MAX_REPLICAS_PER_VERSION`       |
-| `log_level`                               | `DAGGER_CACHE_LOG_LEVEL`                            |
-| `otel.otlp_endpoint`                      | `DAGGER_CACHE_OTEL_OTLP_ENDPOINT`                   |
+| YAML key                         | Environment variable                               |
+| -------------------------------- | -------------------------------------------------- |
+| `server.public_url`              | `DAGGER_KUBERNETES_SERVER_PUBLIC_URL`              |
+| `server.pipeline_url`            | `DAGGER_KUBERNETES_SERVER_PIPELINE_URL`            |
+| `cache.registry`                 | `DAGGER_KUBERNETES_CACHE_REGISTRY`                 |
+| `fleet.max_replicas_per_version` | `DAGGER_KUBERNETES_FLEET_MAX_REPLICAS_PER_VERSION` |
+| `auth.jwt.secret`                | `DAGGER_KUBERNETES_AUTH_JWT_SECRET`                |
+| `auth.oauth.client_secret`       | `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`       |
+| `auth.bootstrap_admin.password`  | `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`  |
+| `auth.cookie.access_name`        | `DAGGER_KUBERNETES_AUTH_COOKIE_ACCESS_NAME`        |
+| `auth.cookie.refresh_name`       | `DAGGER_KUBERNETES_AUTH_COOKIE_REFRESH_NAME`       |
+| `auth.cookie.secure`             | `DAGGER_KUBERNETES_AUTH_COOKIE_SECURE`             |
+| `log_level`                      | `DAGGER_KUBERNETES_LOG_LEVEL`                      |
+| `otel.otlp_endpoint`             | `DAGGER_KUBERNETES_OTEL_OTLP_ENDPOINT`             |
 
 The Docker compose stack uses only environment variables — no YAML is
 mounted. Secrets (`OAUTH_CLIENT_ID`, `OAUTH_CLIENT_SECRET`) should always
@@ -328,105 +334,112 @@ come from env/secrets, never the file.
 
 > **Note:** map-valued config keys (`fleet.engine_extra_env`,
 > `fleet.engine_extra_env_from`, `fleet.engine_registry_mirrors`,
-> `fleet.engine_node_selector`) cannot be overridden via `DAGGER_CACHE_`
-> environment variables — Viper does not bind env vars to map types. Set
-> these in the YAML config file or Helm values instead.
+> `fleet.engine_node_selector`) cannot be overridden via `DAGGER_KUBERNETES_`
+> environment variables — Viper does not bind env vars to map types. The same
+> applies to slice/array keys (`auth.cors.allowed_origins`,
+> `cache.registries`). Set these in the YAML config file or Helm values instead.
+> `cache.registries[].password` (a slice element) is likewise not env-bindable:
+> use the `password_secret` K8s-Secret reference for multi-backend registries.
 
 ### Full reference
 
 See [`config/config.app.yaml.sample`](../config/config.app.yaml.sample) for every key with
 inline comments. The sections below summarise the most important ones.
 
-| Section      | Key (representative)        | Default                          | Notes                                            |
-|--------------|-----------------------------|----------------------------------|--------------------------------------------------|
-| `server`     | `control_addr`              | `:8080`                          | Hertz control API (TLS when cert/key configured). |
-|              | `data_addr`                 | `:8443`                          | mTLS L4 data proxy.                               |
-|              | `data_hostname`             | `data.supv.example.com`          | Public data-plane hostname.                       |
-|              | `public_url`                | `https://supv.example.com`       | Public control/UI URL.                            |
-|              | `pipeline_url`              | `""` (falls back to `public_url`) | Base URL for pipeline-view links (absolute http(s)); only scheme + host are used. |
-| `auth.internal` | `enabled`                | `true`                           | Username/password + legacy-token auth. `false` = OAuth-only (requires `auth.oauth` fully configured); auth is always enforced. |
-|              | `tokens_file`               | `/etc/dagger-cache/tokens`       | One token per line.                               |
-| `auth.oauth` | `enabled`                   | `false`                          | OAuth for UI login. Single active provider.       |
-|              | `provider`                  | `github`                         | `"github"` \| `"oidc"` (generic OIDC).           |
-|              | `allowed_orgs`              | —                                | Restrict login to members of these orgs (github) / groups-claim intersection (oidc). |
-|              | `issuer_url`                | `""`                             | OIDC issuer; required for `provider: oidc`.        |
-|              | `scopes`                    | `["openid","profile","email"]`   | OIDC scopes; `openid` always included.            |
-|              | `username_claim`            | `preferred_username`             | OIDC username claim; fallback `email`.            |
-|              | `groups_claim`              | `groups`                         | OIDC groups claim (array or single string).       |
-|              | `cookie_secure`             | `false`                          | Set `true` when TLS terminates in front of the supervisor so the `oauth_state` cookie is marked `Secure`. |
-| `auth.token` | `encryption_key`            | `""` (auto-generated)            | AES-256-GCM key (≥32 bytes) for token plaintext recovery (Connect page). |
-| `database`   | `dir`                       | `/var/lib/dagger-cache`          | Raft data dir: `raft.db`, `snapshots/`, `node-id`. Fresh-start store (no migration). |
-| `raft`       | `node_id`                   | `""` (auto-generated)            | Stable Raft node ID (persisted at `<dir>/node-id`). |
-|              | `bind_addr`                 | `:8081`                          | Dedicated Raft transport port. |
-|              | `advertise_addr`            | `""` (derived)                   | Routable `host:port`; empty = derived from `<hostname>.<headless_service>.<namespace>.svc.<cluster_domain>`. |
-|              | `peers`                     | `[]` (single-node)               | Explicit voter list `[{id, address}]`; empty = DNS discovery. |
-|              | `replicas`                  | `1`                              | Voter count for DNS peer discovery. |
-|              | `statefulset_name`          | `""`                             | StatefulSet name for DNS discovery. |
-|              | `headless_service`          | `""`                             | Headless Service name for stable pod DNS. |
-|              | `namespace`                 | `""` (fleet ns)                  | K8s namespace for pod DNS. |
-|              | `cluster_domain`            | `cluster.local`                  | K8s cluster DNS suffix. |
-|              | `apply_timeout`             | `5s`                             | `raft.Apply` enqueue timeout. |
-|              | `leader_wait_timeout`       | `30s`                            | Startup wait for leadership. |
-|              | `snapshot_threshold`        | `1000`                           | Raft log snapshot threshold. |
-|              | `snapshot_interval`         | `10m`                            | Raft snapshot interval. |
-|              | `trailing_logs`             | `256`                            | Raft trailing logs after snapshot. |
-|              | `tls.enabled`               | `false` (chart: `true`)          | mTLS for the Raft transport (recommended for multi-node). |
-|              | `tls.dir`                   | `<database.dir>/tls`             | Internal raft CA + per-pod leaf cert directory. |
-|              | `tls.validity`              | `8760h`                          | Leaf cert TTL. |
-|              | `tls.organization`          | `dagger-cache-raft`              | CA/leaf subject organization. |
-|              | `tls.ca_cert` / `tls.cert` / `tls.key` | `""`                   | Manual mode: pre-provisioned CA + leaf PEM paths (all three together). |
-|              | `tls.ca_secret`             | `""`                             | Auto/K8s mode: Secret name for sharing the internal CA. |
-|              | `tls.ca_bootstrap`          | `false`                          | Auto/K8s mode: force this node to generate + write the CA (auto-detects ordinal 0). |
-|              | `tls.client_auth`           | `true`                           | mTLS: require + verify peer client certs. |
-| `telemetry`  | `collector_url`             | `http://otel-collector:4318`     | OTLP/HTTP.                                         |
-|              | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc. | Backend query APIs (auto-wired by Helm).          |
-| `cache`      | `backend`                   | `registry`                       | `registry` (OCI) or `s3`.                         |
-|              | `registry`                  | `cache.reg/dagger-cache`          | OCI repository (legacy single-backend mode).      |
-|              | `internal_addr`             | `""`                             | Legacy single backend address (used when `registries` empty). |
-|              | `public_host`               | `cache.<public_url host>`         | Dedicated cache vhost (Supervisor proxy).         |
-|              | `auth_token`                | `""`                             | Engine→proxy bearer; empty reads `engine-registry-auth` secret. |
-|              | `registries`                | `[]`                             | Multi-backend list for load balancing.            |
-|              | `s3.bucket` / `s3.region`    | —                                | Used only when `backend=s3`.                      |
-|              | `ref_per_version`           | `true`                           | Tag cache refs `:V<maj>-<min>-<patch>`.           |
-|              | `gc.enabled`                | `false`                          | Master switch for the cache auto-clean sweeper.   |
-|              | `gc.max_age`                | `168h`                           | Purge tags older than this (7d).                  |
-|              | `gc.schedule`               | `1h`                             | Sweeper ticker interval.                          |
-|              | `gc.min_refs_to_keep`       | `3`                              | Keep at least this many most-recent tags per minor version. |
-|              | `gc.protect_active_versions`| `true`                           | Never purge tags for versions with active replicas. |
-| `history`    | `gc.enabled`                | `false`                          | Master switch for the history auto-purge sweeper. |
-|              | `gc.max_age`                | `720h`                           | Purge traces whose last update is older than this (30d). |
-|              | `gc.schedule`               | `1h`                             | History sweeper ticker interval.                  |
-| `pipeline`   | `disconnect_grace`          | `0s`                             | Linger window before a closed tunnel fails the trace; `0s` = immediate. |
-|              | `stale_sweep.enabled`       | `true`                           | Master switch for the pipeline stale-trace sweeper. |
-|              | `stale_sweep.schedule`      | `1m`                             | Stale sweeper ticker interval.                    |
-|              | `stale_sweep.stale_after`   | `5m`                             | Mark running traces with no active lease failed once older than this. |
-| `fleet`      | `namespace`                 | `dagger-cache`                   | K8s namespace for engine pods.                    |
-|              | `min_replicas_per_version`  | `0`                              | Autoscaler floor per version.                     |
-|              | `max_replicas_per_version`  | `3`                              | Autoscaler ceiling per version.                   |
-|              | `max_sessions_per_replica`  | `8`                              | Sessions pinned per pod.                          |
-|              | `replica_idle_ttl`          | `5m`                             | Idle pod TTL before scale-down.                   |
-|              | `version_retention`         | `24h`                            | Time a 0-replica StatefulSet lingers.             |
-|              | `engine_extra_env`          | `{}`                             | Extra env vars on engine pods (proxy vars etc.).  |
-|              | `engine_extra_env_from`     | `{}`                             | Env vars from Secret keys (proxy credentials).    |
-|              | `engine_ca_secret`          | `""`                             | Secret with custom CA PEM bundle; empty = off.    |
-|              | `engine_ca_secret_key`      | `ca.crt`                         | Key inside `engine_ca_secret`.                    |
-|              | `engine_debug`              | `false`                          | `engine.toml: debug = true`.                      |
-|              | `engine_log_format`         | `json`                           | `engine.toml: [log] format`; `""` omits.          |
-|              | `engine_registry_mirrors`   | `{}`                             | `engine.toml` registry mirrors.                   |
-| `ca`         | `minting_ca_secret`         | `supervisor-minting-ca`          | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `ca.crt`/`ca.key` to bring an existing CA. |
-|              | `client_cert_ttl`           | `2h`                             | TTL of minted client certs.                       |
-| `tls`        | `provider`                  | `embedded`                       | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Minting CA is auto-bootstrapped for all. |
-|              | `cert_path` / `key_path`    | see loader                      | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager). |
-|              | `server_cert_secret`        | `supervisor-tls`                 | K8s Secret with `tls.crt`/`tls.key`.              |
-|              | `lease_ttl`                 | `2m`                             | Lease TTL; clients renew before expiry.           |
-| `version`    | `floor`                     | `v0.19.0`                        | Minimum engine version.                           |
-|              | `allowlist`                 | —                                | `major.minor` prefixes to admit.                  |
-| `ci.github`  | `job_summary` / `check_runs`| `true` / `true`                  | CI niceties.                                       |
-| `ci.jenkins` | `dynamic_stages`            | `true`                           |                                                   |
-| `ci.drone`   | `config_extension`          | `true`                           |                                                   |
-| `log_level`  | —                           | `info`                           | `debug`/`info`/`warn`/`error`.                    |
-| `log_format` | —                           | `json`                           | Supervisor log format: `json` / `text`.           |
-| `otel`       | `otlp_endpoint`             | `""`                             | If set, the Supervisor exports its own OTLP here. |
+| Section         | Key (representative)                      | Default                                                  | Notes                                                                                                                                         |
+| --------------- | ----------------------------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `server`        | `control_addr`                            | `:8080`                                                  | Hertz control API (TLS when cert/key configured).                                                                                             |
+|                 | `data_addr`                               | `:8443`                                                  | mTLS L4 data proxy.                                                                                                                           |
+|                 | `data_hostname`                           | `data.supv.example.com`                                  | Public data-plane hostname.                                                                                                                   |
+|                 | `public_url`                              | `https://supv.example.com`                               | Public control/UI URL.                                                                                                                        |
+|                 | `pipeline_url`                            | `""` (falls back to `public_url`)                        | Base URL for pipeline-view links (absolute http(s)); only scheme + host are used.                                                             |
+| `auth.internal` | `enabled`                                 | `true`                                                   | Username/password + legacy-token auth. `false` = OAuth-only (requires `auth.oauth` fully configured); auth is always enforced.                |
+|                 | `tokens_file`                             | `/etc/dagger-kubernetes/tokens`                          | One token per line.                                                                                                                           |
+| `auth.oauth`    | `enabled`                                 | `false`                                                  | OAuth for UI login. Single active provider.                                                                                                   |
+|                 | `provider`                                | `github`                                                 | `"github"` \| `"oidc"` (generic OIDC).                                                                                                        |
+|                 | `allowed_orgs`                            | —                                                        | Restrict login to members of these orgs (github) / groups-claim intersection (oidc).                                                          |
+|                 | `issuer_url`                              | `""`                                                     | OIDC issuer; required for `provider: oidc`.                                                                                                   |
+|                 | `scopes`                                  | `["openid","profile","email"]`                           | OIDC scopes; `openid` always included.                                                                                                        |
+|                 | `username_claim`                          | `preferred_username`                                     | OIDC username claim; fallback `email`.                                                                                                        |
+|                 | `groups_claim`                            | `groups`                                                 | OIDC groups claim (array or single string).                                                                                                   |
+|                 | `cookie_secure`                           | `false`                                                  | Set `true` when TLS terminates in front of the supervisor so the `oauth_state` cookie is marked `Secure`.                                     |
+| `auth.token`    | `encryption_key`                          | `""` (auto-generated)                                    | AES-256-GCM key (≥32 bytes) for token plaintext recovery (Connect page).                                                                      |
+| `auth.cookie`   | `access_name` / `refresh_name`            | `dagger_kubernetes_access` / `dagger_kubernetes_refresh` | httpOnly session-cookie names (SPA auth).                                                                                                     |
+|                 | `secure`                                  | `false`                                                  | Force the `Secure` flag on session cookies (TLS-terminating proxy).                                                                           |
+| `auth.cors`     | `allowed_origins`                         | `[]` (same-origin)                                       | Exact-match `Origin` allowlist; empty = no `Access-Control-Allow-Origin`.                                                                     |
+| `database`      | `dir`                                     | `/var/lib/dagger-kubernetes`                             | Raft data dir: `raft.db`, `snapshots/`, `node-id`. Fresh-start store (no migration).                                                          |
+| `raft`          | `node_id`                                 | `""` (auto-generated)                                    | Stable Raft node ID (persisted at `<dir>/node-id`).                                                                                           |
+|                 | `bind_addr`                               | `:8081`                                                  | Dedicated Raft transport port.                                                                                                                |
+|                 | `advertise_addr`                          | `""` (derived)                                           | Routable `host:port`; empty = derived from `<hostname>.<headless_service>.<namespace>.svc.<cluster_domain>`.                                  |
+|                 | `peers`                                   | `[]` (single-node)                                       | Explicit voter list `[{id, address}]`; empty = DNS discovery.                                                                                 |
+|                 | `replicas`                                | `1`                                                      | Voter count for DNS peer discovery.                                                                                                           |
+|                 | `statefulset_name`                        | `""`                                                     | StatefulSet name for DNS discovery.                                                                                                           |
+|                 | `headless_service`                        | `""`                                                     | Headless Service name for stable pod DNS.                                                                                                     |
+|                 | `namespace`                               | `""` (fleet ns)                                          | K8s namespace for pod DNS.                                                                                                                    |
+|                 | `cluster_domain`                          | `cluster.local`                                          | K8s cluster DNS suffix.                                                                                                                       |
+|                 | `apply_timeout`                           | `5s`                                                     | `raft.Apply` enqueue timeout.                                                                                                                 |
+|                 | `leader_wait_timeout`                     | `30s`                                                    | Startup wait for leadership.                                                                                                                  |
+|                 | `snapshot_threshold`                      | `1000`                                                   | Raft log snapshot threshold.                                                                                                                  |
+|                 | `snapshot_interval`                       | `10m`                                                    | Raft snapshot interval.                                                                                                                       |
+|                 | `trailing_logs`                           | `256`                                                    | Raft trailing logs after snapshot.                                                                                                            |
+|                 | `tls.enabled`                             | `false` (chart: `true`)                                  | mTLS for the Raft transport (recommended for multi-node).                                                                                     |
+|                 | `tls.dir`                                 | `<database.dir>/tls`                                     | Internal raft CA + per-pod leaf cert directory.                                                                                               |
+|                 | `tls.validity`                            | `8760h`                                                  | Leaf cert TTL.                                                                                                                                |
+|                 | `tls.organization`                        | `dagger-kubernetes-raft`                                 | CA/leaf subject organization.                                                                                                                 |
+|                 | `tls.ca_cert` / `tls.cert` / `tls.key`    | `""`                                                     | Manual mode: pre-provisioned CA + leaf PEM paths (all three together).                                                                        |
+|                 | `tls.ca_secret`                           | `""`                                                     | Auto/K8s mode: Secret name for sharing the internal CA.                                                                                       |
+|                 | `tls.ca_bootstrap`                        | `false`                                                  | Auto/K8s mode: force this node to generate + write the CA (auto-detects ordinal 0).                                                           |
+|                 | `tls.client_auth`                         | `true`                                                   | mTLS: require + verify peer client certs.                                                                                                     |
+| `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP.                                                                                                                                    |
+|                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm).                                                                                                      |
+| `cache`         | `backend`                                 | `registry`                                               | `registry` (OCI) or `s3`.                                                                                                                     |
+|                 | `registry`                                | `cache.reg/dagger-cache`                                 | OCI repository (legacy single-backend mode).                                                                                                  |
+|                 | `internal_addr`                           | `""`                                                     | Legacy single backend address (used when `registries` empty).                                                                                 |
+|                 | `public_host`                             | `cache.<public_url host>`                                | Dedicated cache vhost (Supervisor proxy).                                                                                                     |
+|                 | `auth_token`                              | `""`                                                     | Engine→proxy bearer; empty reads `engine-registry-auth` secret.                                                                               |
+|                 | `registries`                              | `[]`                                                     | Multi-backend list for load balancing.                                                                                                        |
+|                 | `registries[].password_secret`            | —                                                        | `{name, key}` K8s-Secret ref for a backend password (env can't bind slice elements).                                                          |
+|                 | `s3.bucket` / `s3.region`                 | —                                                        | Used only when `backend=s3`.                                                                                                                  |
+|                 | `ref_per_version`                         | `true`                                                   | Tag cache refs `:V<maj>-<min>-<patch>`.                                                                                                       |
+|                 | `gc.enabled`                              | `false`                                                  | Master switch for the cache auto-clean sweeper.                                                                                               |
+|                 | `gc.max_age`                              | `168h`                                                   | Purge tags older than this (7d).                                                                                                              |
+|                 | `gc.schedule`                             | `1h`                                                     | Sweeper ticker interval.                                                                                                                      |
+|                 | `gc.min_refs_to_keep`                     | `3`                                                      | Keep at least this many most-recent tags per minor version.                                                                                   |
+|                 | `gc.protect_active_versions`              | `true`                                                   | Never purge tags for versions with active replicas.                                                                                           |
+| `history`       | `gc.enabled`                              | `false`                                                  | Master switch for the history auto-purge sweeper.                                                                                             |
+|                 | `gc.max_age`                              | `720h`                                                   | Purge traces whose last update is older than this (30d).                                                                                      |
+|                 | `gc.schedule`                             | `1h`                                                     | History sweeper ticker interval.                                                                                                              |
+| `pipeline`      | `disconnect_grace`                        | `0s`                                                     | Linger window before a closed tunnel fails the trace; `0s` = immediate.                                                                       |
+|                 | `stale_sweep.enabled`                     | `true`                                                   | Master switch for the pipeline stale-trace sweeper.                                                                                           |
+|                 | `stale_sweep.schedule`                    | `1m`                                                     | Stale sweeper ticker interval.                                                                                                                |
+|                 | `stale_sweep.stale_after`                 | `5m`                                                     | Mark running traces with no active lease failed once older than this.                                                                         |
+| `fleet`         | `namespace`                               | `dagger-kubernetes`                                      | K8s namespace for engine pods.                                                                                                                |
+|                 | `min_replicas_per_version`                | `0`                                                      | Autoscaler floor per version.                                                                                                                 |
+|                 | `max_replicas_per_version`                | `3`                                                      | Autoscaler ceiling per version.                                                                                                               |
+|                 | `max_sessions_per_replica`                | `8`                                                      | Sessions pinned per pod.                                                                                                                      |
+|                 | `replica_idle_ttl`                        | `5m`                                                     | Idle pod TTL before scale-down.                                                                                                               |
+|                 | `version_retention`                       | `24h`                                                    | Time a 0-replica StatefulSet lingers.                                                                                                         |
+|                 | `engine_extra_env`                        | `{}`                                                     | Extra env vars on engine pods (proxy vars etc.).                                                                                              |
+|                 | `engine_extra_env_from`                   | `{}`                                                     | Env vars from Secret keys (proxy credentials).                                                                                                |
+|                 | `engine_ca_secret`                        | `""`                                                     | Secret with custom CA PEM bundle; empty = off.                                                                                                |
+|                 | `engine_ca_secret_key`                    | `ca.crt`                                                 | Key inside `engine_ca_secret`.                                                                                                                |
+|                 | `engine_debug`                            | `false`                                                  | `engine.toml: debug = true`.                                                                                                                  |
+|                 | `engine_log_format`                       | `json`                                                   | `engine.toml: [log] format`; `""` omits.                                                                                                      |
+|                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
+| `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `ca.crt`/`ca.key` to bring an existing CA. |
+|                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
+| `tls`           | `provider`                                | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Minting CA is auto-bootstrapped for all.                  |
+|                 | `cert_path` / `key_path`                  | see loader                                               | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager).                                                        |
+|                 | `server_cert_secret`                      | `supervisor-tls`                                         | K8s Secret with `tls.crt`/`tls.key`.                                                                                                          |
+|                 | `lease_ttl`                               | `2m`                                                     | Lease TTL; clients renew before expiry.                                                                                                       |
+| `version`       | `floor`                                   | `v0.19.0`                                                | Minimum engine version.                                                                                                                       |
+|                 | `allowlist`                               | —                                                        | `major.minor` prefixes to admit.                                                                                                              |
+| `ci.github`     | `job_summary` / `check_runs`              | `true` / `true`                                          | CI niceties.                                                                                                                                  |
+| `ci.jenkins`    | `dynamic_stages`                          | `true`                                                   |                                                                                                                                               |
+| `ci.drone`      | `config_extension`                        | `true`                                                   |                                                                                                                                               |
+| `log_level`     | —                                         | `info`                                                   | `debug`/`info`/`warn`/`error`.                                                                                                                |
+| `log_format`    | —                                         | `json`                                                   | Supervisor log format: `json` / `text`.                                                                                                       |
+| `otel`          | `otlp_endpoint`                           | `""`                                                     | If set, the Supervisor exports its own OTLP here.                                                                                             |
 
 Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 
@@ -437,8 +450,8 @@ Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 From source:
 
 ```bash
-go build -o dagger-cache-ci ./cmd/ci    # CLI helper
-go build -o supervisor ./cmd/api                # server
+go build -trimpath -ldflags "-s -w" -o dagger-kubernetes-ci ./cmd/ci
+go build -trimpath -ldflags "-s -w" -o supervisor ./cmd/api
 ./supervisor --config=config/config.app.yaml
 ```
 
@@ -446,19 +459,19 @@ Or via the published Docker image from GHCR:
 
 ```bash
 docker run -p 8080:8080 -p 8443:8443 \
-  -v "$PWD/config/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
-  -v "$PWD/tokens:/etc/dagger-cache/tokens:ro" \
+  -v "$PWD/config/config.app.yaml:/etc/dagger-kubernetes/config.app.yaml:ro" \
+  -v "$PWD/tokens:/etc/dagger-kubernetes/tokens:ro" \
   ghcr.io/disaster/dagger-kubernetes:latest
 ```
 
 To build from source:
 
 ```bash
-docker build -t dagger-cache/supervisor:latest .
+docker build -t dagger-kubernetes/supervisor:latest .
 docker run -p 8080:8080 -p 8443:8443 \
-  -v "$PWD/config/config.app.yaml:/etc/dagger-cache/config.app.yaml:ro" \
-  -v "$PWD/tokens:/etc/dagger-cache/tokens:ro" \
-  dagger-cache/supervisor:latest
+  -v "$PWD/config/config.app.yaml:/etc/dagger-kubernetes/config.app.yaml:ro" \
+  -v "$PWD/tokens:/etc/dagger-kubernetes/tokens:ro" \
+  dagger-kubernetes/supervisor:latest
 ```
 
 Health endpoints (control port):
@@ -503,7 +516,7 @@ Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
   network without the proxy credentials anyway, so silent fallback is
   undesirable. The supervisor validates at startup that no env name is
   duplicated across `engine_extra_env` and `engine_extra_env_from`, and
-  that none collides with the supervisor-injected `DAGGER_CACHE_TOKEN` (or
+  that none collides with the supervisor-injected `DAGGER_KUBERNETES_TOKEN` (or
   `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS` when CA injection is enabled).
 - **Custom CA bundle** (`fleet.engine_ca_secret` + `engine_ca_secret_key`,
   default `ca.crt`) — references an existing K8s Secret holding a PEM CA
@@ -569,7 +582,7 @@ To spread cache "charge" across several registries, configure
 cache:
   backend: "registry"
   public_host: "cache.supv.example.com"
-  auth_token: ""                       # or set DAGGER_CACHE_CACHE_AUTH_TOKEN
+  auth_token: ""                       # or set DAGGER_KUBERNETES_CACHE_AUTH_TOKEN
   registries:
     - id: "reg-1"
       internal_addr: "registry-1:5000"
@@ -594,7 +607,7 @@ Routing strategy (see ADR-014):
 
 Backend credentials (`username`/`password`) are injected by the Supervisor and
 never reach the engine. The engine authenticates to the Supervisor cache proxy
-with `DAGGER_CACHE_TOKEN`, which must equal `cache.auth_token` (or, when
+with `DAGGER_KUBERNETES_TOKEN`, which must equal `cache.auth_token` (or, when
 `cache.auth_token` is empty, the Supervisor reads the `engine-registry-auth`
 K8s secret key `token` — the same secret already mounted into engine pods).
 
@@ -610,7 +623,7 @@ For S3-backed cache instead of OCI:
 cache:
   backend: "s3"
   s3:
-    bucket: "my-dagger-cache"
+    bucket: "my-dagger-kubernetes"
     region: "us-east-1"
 ```
 
@@ -781,7 +794,7 @@ auth:
     enabled: true
     provider: "oidc"
     issuer_url: "https://dex.example.com"
-    client_id: "dagger-cache"
+    client_id: "dagger-kubernetes"
     client_secret: "${OAUTH_CLIENT_SECRET}"
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/oidc/callback"
     allowed_orgs: ["devs"]   # matches the `groups` claim from Dex
@@ -834,16 +847,16 @@ rest so the Connect page can reveal them. The value is SHA-256-derived into a
 fixed 32-byte AES-256-GCM key before use, so any secret ≥ 32 bytes works. When
 empty, the supervisor auto-generates a 32-byte key on first boot and persists
 it in the Raft-backed `meta` store (dev mode, with a startup warning). Set it
-explicitly via env (`DAGGER_CACHE_AUTH_TOKEN_ENCRYPTION_KEY`) or a K8s Secret
+explicitly via env (`DAGGER_KUBERNETES_AUTH_TOKEN_ENCRYPTION_KEY`) or a K8s Secret
 in production so DB compromise alone does not yield token plaintexts — exactly
 as with the JWT secret.
 
 ### Configuration
 
 See the [Full reference](#full-reference) for all `auth.*`, `database.*`, and
-`raft.*` keys. Key env overrides: `DAGGER_CACHE_AUTH_JWT_SECRET`,
-`DAGGER_CACHE_DATABASE_DIR`, `DAGGER_CACHE_RAFT_BIND_ADDR`,
-`DAGGER_CACHE_AUTH_BOOTSTRAP_ADMIN_PASSWORD`.
+`raft.*` keys. Key env overrides: `DAGGER_KUBERNETES_AUTH_JWT_SECRET`,
+`DAGGER_KUBERNETES_DATABASE_DIR`, `DAGGER_KUBERNETES_RAFT_BIND_ADDR`,
+`DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`.
 
 ### Storage (Raft) & multi-user migration
 
@@ -918,6 +931,17 @@ subcommand remain (they import flat-file tokens, not SQLite data):
 - `auth.jwt.secret`, when set explicitly, must be at least 32 bytes (HS256,
   RFC 7518); shorter values are rejected at startup. When empty, a 32-byte
   random secret is generated and persisted in the database on first boot.
+- Secrets (`auth.jwt.secret`, `auth.oauth.client_secret`,
+  `auth.bootstrap_admin.password`, `cache.auth_token`,
+  `cache.registries[].password`) are **never rendered into the ConfigMap**.
+  In the Helm chart they are mounted as K8s Secrets and injected via env vars
+  (`DAGGER_KUBERNETES_AUTH_JWT_SECRET`,
+  `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`,
+  `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`); `cache.auth_token` is
+  read from the `engine-registry-auth` Secret, and multi-backend registry
+  passwords use the `cache.registries[].password_secret` reference. For
+  non-Helm deploys, set those keys via environment variables or the config
+  file directly.
 - The Raft data directory (`raft.db`, `snapshots/`, `node-id`) holds password
   hashes, token hashes/ciphertexts, the JWT secret, and the token-encryption
   key. `raft.db` and `node-id` are created with `0600` permissions; the
@@ -933,6 +957,33 @@ subcommand remain (they import flat-file tokens, not SQLite data):
   (set-once).
 - `?token=` query-param auth (D14) is limited to the SSE `/live` endpoint
   (EventSource cannot set headers).
+
+### Session cookies
+
+Browser (SPA) login delivers the access + refresh JWTs in **httpOnly cookies**
+(`dagger_kubernetes_access` / `dagger_kubernetes_refresh`) instead of
+`localStorage` (CWE-922: localStorage is readable by any XSS). Attributes:
+`HttpOnly=true`, `SameSite=Lax` (blocks cross-site POST/PUT/DELETE — the API is
+RESTful so no CSRF token is needed — while allowing the OAuth callback GET
+redirect), `Path=/`, `Secure` when the request is TLS or `auth.cookie.secure`
+is set (for TLS-terminating ingresses). `Max-Age` follows the JWT TTLs
+(`auth.jwt.access_ttl` / `auth.jwt.refresh_ttl`).
+
+- `POST /api/v1/auth/login` sets both cookies and returns **only** the user
+  object (no tokens in the response body).
+- `POST /api/v1/auth/refresh` reads the refresh cookie (falling back to the
+  JSON body), rotates both cookies, and returns `204 No Content`.
+- `POST /api/v1/auth/logout` clears both cookies (`Max-Age=0`).
+- Bearer auth (`Authorization: Bearer dct_…` / legacy tokens / JWTs) is
+  **unchanged and additive** — CI keeps working. The header is still tried
+  first, then the cookie, then `?token=` (SSE only).
+- CORS (`auth.cors.allowed_origins`) is opt-in for split-UI deployments; empty
+  means same-origin only. An allowed `Origin` is echoed with
+  `Access-Control-Allow-Credentials: true` + `Vary: Origin` (never `*` with
+  credentials).
+
+Existing localStorage sessions are invalidated by the cutover — users re-login
+once after upgrading.
 
 ---
 
@@ -1159,7 +1210,7 @@ self-hosted platform therefore cannot redirect the bare CLI's printed link —
 the platform supplies the self-hosted URL through the wrapper and a dedicated
 endpoint instead:
 
-- **`dagger-cache-ci` wrapper** (`cmd/ci`) wraps `dagger`, extracts the trace
+- **`dagger-kubernetes-ci` wrapper** (`cmd/ci`) wraps `dagger`, extracts the trace
   ID from its stderr, and prints `Pipeline View: <base>/pipelines/<id>` (the
   canonical UI route). The base is resolved with precedence `--ui-url` >
   `server.pipeline_url` (config) > `server.public_url` (config) > `--server`.
@@ -1209,11 +1260,11 @@ step summary with the trace link and Check Runs annotated with cache stats.
 
 ### Jenkins
 
-Shared library at `ci-integrations/jenkins/daggerCache.groovy`:
+Shared library at `ci-integrations/jenkins/daggerKubernetes.groovy`:
 
 ```groovy
-@Library('dagger-cache') _
-daggerCache(serverUrl: 'https://supv.example.com',
+@Library('dagger-kubernetes') _
+daggerKubernetes(serverUrl: 'https://supv.example.com',
             token: env.DAGGER_CLOUD_TOKEN,
             uiUrl: 'https://ui.supv.example.com',
             version: 'v0.21.4') {
@@ -1226,16 +1277,16 @@ daggerCache(serverUrl: 'https://supv.example.com',
 ### Drone
 
 Config extension at `ci-integrations/drone/config-extension.sh`, packaged
-as the `dagger-cache/drone-config-extension` plugin:
+as the `dagger-kubernetes/drone-config-extension` plugin:
 
 ```yaml
 steps:
-  - name: dagger-cache
-    image: dagger-cache/drone-config-extension
+  - name: dagger-kubernetes
+    image: dagger-kubernetes/drone-config-extension
     settings:
       server_url: https://supv.example.com
       token:
-        from_secret: dagger_cache_token
+        from_secret: dagger_kubernetes_token
       version: v0.21.4
 ```
 
@@ -1246,22 +1297,22 @@ appends a summary step with the trace link.
 
 ## Client wrapper script
 
-`scripts/dagger-cache.sh` wires up the standard env vars and prints the
+`scripts/dagger-kubernetes.sh` wires up the standard env vars and prints the
 pipeline-view link after the run:
 
 ```bash
-export DAGGER_CACHE_SERVER=https://supv.example.com
-export DAGGER_CACHE_UI=https://ui.supv.example.com
+export DAGGER_KUBERNETES_SERVER=https://supv.example.com
+export DAGGER_KUBERNETES_UI=https://ui.supv.example.com
 export DAGGER_CLOUD_TOKEN=<token>
 export DAGGER_TAG=v0.21.4          # optional
 
-./scripts/dagger-cache.sh call github.com/your-org/ci@v1.0.0 build
+./scripts/dagger-kubernetes.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
 It derives the cache ref (`cache.<public_host>/dagger-cache:V0-21-4`) from
 `DAGGER_TAG`, sets `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, runs `dagger "$@"`,
 then greps the run log for the trace ID and prints a boxed link to
-`$DAGGER_CACHE_UI/traces/<id>`. The GHA, Jenkins, and Drone integrations
+`$DAGGER_KUBERNETES_UI/traces/<id>`. The GHA, Jenkins, and Drone integrations
 all delegate to (or mirror) this script.
 
 ---
@@ -1329,7 +1380,7 @@ accordingly.
 
 ```bash
 # Build
-go build ./...
+go build -trimpath -ldflags "-s -w" ./...
 
 # Run unit + integration tests
 go test ./...

@@ -1,6 +1,6 @@
 # ADR-014: Registry proxy — token control + multi-registry load balancing
 
-**Status:** Accepted · **Date:** 2026-08-17 · **Author:** dagger-cache team
+**Status:** Accepted · **Date:** 2026-08-17 · **Author:** dagger-kubernetes team
 
 ## Context
 
@@ -8,7 +8,7 @@ The cache-ref emission previously exposed the raw registry address to the
 Dagger CLI and engine:
 
 ```
-type=registry,ref=dagger-cache-test-registry:5000/dagger-cache:v0-19-0,mode=max
+type=registry,ref=dagger-kubernetes-test-registry:5000/dagger-cache:v0-19-0,mode=max
 ```
 
 This violates two requirements: the Dagger client/engine must never speak
@@ -25,7 +25,7 @@ OCI correctness (cross-run hits and upload-session affinity).
    from the control-plane host. The engine reaches it over the existing TLS
    listener; cache traffic is selected by `Host` header equality.
 2. **Supervisor terminates engine auth.** The engine presents
-   `DAGGER_CACHE_TOKEN` (from the `engine-registry-auth` secret) as a bearer
+   `DAGGER_KUBERNETES_TOKEN` (from the `engine-registry-auth` secret) as a bearer
    token to the Supervisor proxy. The Supervisor validates it (constant-time)
    and injects per-backend `username`/`password`; credentials never reach the
    engine.

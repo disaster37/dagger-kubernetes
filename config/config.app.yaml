@@ -6,8 +6,8 @@
 # config/config.app.yaml and edit from there.
 #
 # Any value below can also be overridden by an environment variable using the
-# DAGGER_CACHE_ prefix, e.g. DAGGER_CACHE_LOG_LEVEL=debug or
-# DAGGER_CACHE_CACHE_BACKEND=s3. Environment variables take precedence over
+# DAGGER_KUBERNETES_ prefix, e.g. DAGGER_KUBERNETES_LOG_LEVEL=debug or
+# DAGGER_KUBERNETES_CACHE_BACKEND=s3. Environment variables take precedence over
 # this file.
 
 # --- Endpoints & public URLs (set these per deployment) ----------------------
@@ -16,12 +16,12 @@ server:
   data_addr: ":8443"            # mTLS L4 data-plane proxy
   data_hostname: "data.supv.example.com"
   public_url: "https://supv.example.com"
-  pipeline_url: ""            # Optional base for pipeline-view links (e.g. https://dagger-cache.example.com). Empty => use public_url.
+  pipeline_url: ""            # Optional base for pipeline-view links (e.g. https://dagger-kubernetes.example.com). Empty => use public_url.
 
 # --- Authentication ----------------------------------------------------------
 auth:
   internal:
-    tokens_file: "/etc/dagger-cache/tokens"   # DEPRECATED legacy fallback; migrate with `supervisor migrate-tokens` then remove.
+    tokens_file: "/etc/dagger-kubernetes/tokens"   # DEPRECATED legacy fallback; migrate with `supervisor migrate-tokens` then remove.
   bootstrap_admin:
     username: "admin"                         # created on first boot when no users exist.
     password: ""                               # empty = random password logged once at first boot.
@@ -46,7 +46,7 @@ auth:
 
 # --- Database ----------------------------------------------------------------
 database:
-  dir: "/var/lib/dagger-cache"  # Raft data dir (raft.db, snapshots/, node-id). Fresh-start store: no migration from legacy SQLite.
+  dir: "/var/lib/dagger-kubernetes"  # Raft data dir (raft.db, snapshots/, node-id). Fresh-start store: no migration from legacy SQLite.
 
 # --- Raft (distributed store) ------------------------------------------------
 raft:
@@ -55,8 +55,8 @@ raft:
   advertise_addr: ""           # "" = derive from <hostname>.<headless_service>.<namespace>.svc.<cluster_domain>.
   peers: []                    # single-node default (self is the only voter).
   replicas: 1                  # StatefulSet replica count for DNS peer discovery.
-  statefulset_name: ""         # e.g. "dagger-cache-supervisor" (DNS discovery).
-  headless_service: ""         # e.g. "dagger-cache-headless" (DNS discovery).
+  statefulset_name: ""         # e.g. "dagger-kubernetes-supervisor" (DNS discovery).
+  headless_service: ""         # e.g. "dagger-kubernetes-headless" (DNS discovery).
   namespace: ""                # K8s namespace for pod DNS (default = release ns).
   cluster_domain: "cluster.local"
   apply_timeout: "5s"
@@ -68,7 +68,7 @@ raft:
     enabled: false             # binary default. Helm chart sets true (mTLS).
     dir: ""                    # "" = <database.dir>/tls
     validity: "8760h"
-    organization: "dagger-cache-raft"
+    organization: "dagger-kubernetes-raft"
     ca_cert: ""                # manual mode: path to CA cert PEM.
     cert: ""                   # manual mode: path to leaf cert PEM.
     key: ""                    # manual mode: path to leaf key PEM.

@@ -36,6 +36,22 @@ type AuthConfig struct {
 	JWT            JWTConfig            `mapstructure:"jwt"`
 	Token          TokenConfig          `mapstructure:"token"`
 	BootstrapAdmin BootstrapAdminConfig `mapstructure:"bootstrap_admin"`
+	Cookie         CookieConfig         `mapstructure:"cookie"`
+	CORS           CORSConfig           `mapstructure:"cors"`
+}
+
+// CookieConfig configures the httpOnly session cookies (access + refresh JWTs)
+// used by the SPA. Bearer-token auth for CI is unaffected (additive).
+type CookieConfig struct {
+	AccessName  string `mapstructure:"access_name"`  // default dagger_kubernetes_access
+	RefreshName string `mapstructure:"refresh_name"` // default dagger_kubernetes_refresh
+	Secure      bool   `mapstructure:"secure"`       // force Secure; else auto-detect TLS
+}
+
+// CORSConfig configures cross-origin access for split UI deployments. An empty
+// allowlist means same-origin only (no Access-Control-Allow-Origin header).
+type CORSConfig struct {
+	AllowedOrigins []string `mapstructure:"allowed_origins"`
 }
 
 type InternalAuthConfig struct {
@@ -145,10 +161,17 @@ type TelemetryConfig struct {
 
 // RegistryBackend is one backend OCI registry the Supervisor proxies to.
 type RegistryBackend struct {
-	ID           string `mapstructure:"id"`
-	InternalAddr string `mapstructure:"internal_addr"` // host[:port], no scheme
-	Username     string `mapstructure:"username"`
-	Password     string `mapstructure:"password"`
+	ID             string     `mapstructure:"id"`
+	InternalAddr   string     `mapstructure:"internal_addr"` // host[:port], no scheme
+	Username       string     `mapstructure:"username"`
+	Password       string     `mapstructure:"password"`
+	PasswordSecret *SecretRef `mapstructure:"password_secret"` // K8s Secret ref; resolves Password when empty
+}
+
+// SecretRef names one key of a K8s Secret in the fleet namespace.
+type SecretRef struct {
+	Name string `mapstructure:"name"`
+	Key  string `mapstructure:"key"`
 }
 
 type CacheConfig struct {

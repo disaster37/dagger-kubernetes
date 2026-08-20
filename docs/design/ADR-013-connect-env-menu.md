@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-17
-- **Deciders:** dagger-cache maintainers
+- **Deciders:** dagger-kubernetes maintainers
 
 ## Context
 
@@ -29,7 +29,7 @@ when only the SHA-256 hash is persisted. We add a `token_ciphertext` column to
 the JWT secret:
 
 - Configurable via `auth.token.encryption_key`
-  (env `DAGGER_CACHE_AUTH_TOKEN_ENCRYPTION_KEY`).
+  (env `DAGGER_KUBERNETES_AUTH_TOKEN_ENCRYPTION_KEY`).
 - Auto-generated (32 random bytes, hex-encoded) and persisted in the SQLite
   `meta` table under key `token_encryption_key` when not configured, with a
   startup WARN.

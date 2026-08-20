@@ -1,6 +1,6 @@
 # ADR-006: OCI Registry Cache Backend
 
-**Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-cache team
+**Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-kubernetes team
 
 ## Context
 

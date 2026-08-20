@@ -355,7 +355,7 @@ func TestEmbeddedProviderServerCertSANs(t *testing.T) {
 	}
 
 	hostname, _ := os.Hostname()
-	requiredDNS := []string{"localhost", hostname, "data.example.com", "supervisor", "supervisor-control", "supervisor-control.dagger-cache.svc"}
+	requiredDNS := []string{"localhost", hostname, "data.example.com", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
 	for _, want := range requiredDNS {
 		found := false
 		for _, dns := range leaf.DNSNames {

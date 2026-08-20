@@ -39,7 +39,7 @@ func clientset(t *testing.T) kubernetes.Interface {
 		t.Fatalf("new clientset: %v", err)
 	}
 
-	ns := "dagger-cache-test"
+	ns := "dagger-kubernetes-test"
 	_, err = cs.CoreV1().Namespaces().Get(context.Background(), ns, metav1.GetOptions{})
 	if err != nil {
 		_, err = cs.CoreV1().Namespaces().Create(context.Background(), &corev1.Namespace{
@@ -55,7 +55,7 @@ func clientset(t *testing.T) kubernetes.Interface {
 
 func cleanupProvider(t *testing.T, cs kubernetes.Interface, version string) {
 	t.Helper()
-	ns := "dagger-cache-test"
+	ns := "dagger-kubernetes-test"
 	name := domain.StsName(version)
 	_ = cs.AppsV1().StatefulSets(ns).Delete(context.Background(), name, metav1.DeleteOptions{})
 	svcName := domain.ServiceName(version)
@@ -68,7 +68,7 @@ func TestRealK8sEnsureStatefulSetCreate(t *testing.T) {
 	defer cleanupProvider(t, cs, version)
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace:           "dagger-cache-test",
+		Namespace:           "dagger-kubernetes-test",
 		ImageRegistry:       "registry.dagger.io/engine",
 		StorageSize:         "1Gi",
 		CPURequest:          "100m",
@@ -85,7 +85,7 @@ func TestRealK8sEnsureStatefulSetCreate(t *testing.T) {
 		t.Fatalf("EnsureStatefulSet: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -120,8 +120,8 @@ func TestRealK8sEnsureStatefulSetCreate(t *testing.T) {
 	}
 
 	vct := sts.Spec.VolumeClaimTemplates[0]
-	if vct.Name != "dagger-cache" {
-		t.Errorf("expected PVC name 'dagger-cache', got %q", vct.Name)
+	if vct.Name != "dagger-kubernetes" {
+		t.Errorf("expected PVC name 'dagger-kubernetes', got %q", vct.Name)
 	}
 
 	storageReq := vct.Spec.Resources.Requests[corev1.ResourceStorage]
@@ -139,7 +139,7 @@ func TestRealK8sEnsureServiceCreate(t *testing.T) {
 	defer cleanupProvider(t, cs, version)
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace: "dagger-cache-test",
+		Namespace: "dagger-kubernetes-test",
 	})
 
 	err := p.EnsureService(version)
@@ -147,7 +147,7 @@ func TestRealK8sEnsureServiceCreate(t *testing.T) {
 		t.Fatalf("EnsureService: %v", err)
 	}
 
-	svc, err := cs.CoreV1().Services("dagger-cache-test").Get(context.Background(), domain.ServiceName(version), metav1.GetOptions{})
+	svc, err := cs.CoreV1().Services("dagger-kubernetes-test").Get(context.Background(), domain.ServiceName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get service: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestRealK8sScaleUpDown(t *testing.T) {
 	defer cleanupProvider(t, cs, version)
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace:           "dagger-cache-test",
+		Namespace:           "dagger-kubernetes-test",
 		StorageSize:         "1Gi",
 		CPURequest:          "100m",
 		CPULimit:            "500m",
@@ -194,7 +194,7 @@ func TestRealK8sScaleUpDown(t *testing.T) {
 		t.Fatalf("ScaleUp to 1: %v", err)
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -208,7 +208,7 @@ func TestRealK8sScaleUpDown(t *testing.T) {
 		t.Fatalf("ScaleDown: %v", err)
 	}
 
-	sts, err = cs.AppsV1().StatefulSets("dagger-cache-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
+	sts, err = cs.AppsV1().StatefulSets("dagger-kubernetes-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset after scale-down: %v", err)
 	}
@@ -228,7 +228,7 @@ func TestRealK8sVersionIsolation(t *testing.T) {
 	defer cleanupProvider(t, cs, v2)
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace:           "dagger-cache-test",
+		Namespace:           "dagger-kubernetes-test",
 		StorageSize:         "1Gi",
 		CPURequest:          "100m",
 		CPULimit:            "500m",
@@ -274,7 +274,7 @@ func TestRealK8sProviderIntegration(t *testing.T) {
 	defer cleanupProvider(t, cs, version)
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace:           "dagger-cache-test",
+		Namespace:           "dagger-kubernetes-test",
 		StorageSize:         "1Gi",
 		CPURequest:          "100m",
 		CPULimit:            "500m",
@@ -338,7 +338,7 @@ func TestRealK8sProviderIntegration(t *testing.T) {
 		t.Logf("Acquire timed out (engine image not pullable in this environment)")
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -346,7 +346,7 @@ func TestRealK8sProviderIntegration(t *testing.T) {
 		t.Error("statefulset should be scaled to at least 1 replica")
 	}
 
-	_, err = cs.CoreV1().Services("dagger-cache-test").Get(context.Background(), domain.ServiceName(version), metav1.GetOptions{})
+	_, err = cs.CoreV1().Services("dagger-kubernetes-test").Get(context.Background(), domain.ServiceName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Errorf("service should exist: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestRealK8sIdempotentCreate(t *testing.T) {
 	defer cleanupProvider(t, cs, version)
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace:           "dagger-cache-test",
+		Namespace:           "dagger-kubernetes-test",
 		StorageSize:         "1Gi",
 		CPURequest:          "100m",
 		CPULimit:            "500m",
@@ -389,7 +389,7 @@ func TestRealK8sIdempotentCreate(t *testing.T) {
 		}
 	}
 
-	sts, err := cs.AppsV1().StatefulSets("dagger-cache-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes-test").Get(context.Background(), domain.StsName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get statefulset: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestRealK8sIdempotentCreate(t *testing.T) {
 		t.Errorf("expected %q, got %q", domain.StsName(version), sts.Name)
 	}
 
-	svc, err := cs.CoreV1().Services("dagger-cache-test").Get(context.Background(), domain.ServiceName(version), metav1.GetOptions{})
+	svc, err := cs.CoreV1().Services("dagger-kubernetes-test").Get(context.Background(), domain.ServiceName(version), metav1.GetOptions{})
 	if err != nil {
 		t.Fatalf("get service: %v", err)
 	}
@@ -413,7 +413,7 @@ func TestRealK8sDeleteStatefulSetAndService(t *testing.T) {
 	version := "v0.20.0"
 
 	p := NewK8sProvider(cs, K8sProviderConfig{
-		Namespace:           "dagger-cache-test",
+		Namespace:           "dagger-kubernetes-test",
 		StorageSize:         "1Gi",
 		CPURequest:          "100m",
 		CPULimit:            "500m",
@@ -439,12 +439,12 @@ func TestRealK8sDeleteStatefulSetAndService(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, err := cs.AppsV1().StatefulSets("dagger-cache-test").Get(ctx, domain.StsName(version), metav1.GetOptions{})
+	_, err := cs.AppsV1().StatefulSets("dagger-kubernetes-test").Get(ctx, domain.StsName(version), metav1.GetOptions{})
 	if err == nil {
 		t.Error("statefulset should be deleted")
 	}
 
-	_, err = cs.CoreV1().Services("dagger-cache-test").Get(ctx, domain.ServiceName(version), metav1.GetOptions{})
+	_, err = cs.CoreV1().Services("dagger-kubernetes-test").Get(ctx, domain.ServiceName(version), metav1.GetOptions{})
 	if err == nil {
 		t.Error("service should be deleted")
 	}

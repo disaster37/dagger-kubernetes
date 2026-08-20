@@ -21,10 +21,10 @@ var traceIDRe = regexp.MustCompile(`[a-f0-9]{32,}`)
 
 func main() {
 	app := &cli.App{
-		Name:  "dagger-cache-ci",
-		Usage: "Dagger Cache CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
+		Name:  "dagger-kubernetes-ci",
+		Usage: "Dagger Kubernetes CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
 		Flags: []cli.Flag{
-			&cli.StringFlag{Name: "server", Usage: "Dagger Cache server URL (required unless server.public_url is set in --config)"},
+			&cli.StringFlag{Name: "server", Usage: "Dagger Kubernetes server URL (required unless server.public_url is set in --config)"},
 			&cli.StringFlag{Name: "token", Usage: "Dagger Cloud token (required)"},
 			&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.pipeline_url/server.public_url; links use /pipelines/<traceID>)"},
 			&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.pipeline_url/server.public_url fallbacks)"},
@@ -168,13 +168,13 @@ func emitGHAAnnotations(traceURL, traceID string) {
 }
 
 func emitJenkinsStages(traceURL, traceID string) {
-	fmt.Printf("[dagger-cache] Pipeline View: %s\n", traceURL)
+	fmt.Printf("[dagger-kubernetes] Pipeline View: %s\n", traceURL)
 	stageName := fmt.Sprintf("dagger: %s", traceID[:12])
 	fmt.Printf("stage('%s') { sh 'true' }\n", stageName)
 }
 
 func emitDroneAnnotations(traceURL string) {
-	fmt.Printf("[dagger-cache] Pipeline View: %s\n", traceURL)
+	fmt.Printf("[dagger-kubernetes] Pipeline View: %s\n", traceURL)
 }
 
 func pollSummary(traceURL string) {

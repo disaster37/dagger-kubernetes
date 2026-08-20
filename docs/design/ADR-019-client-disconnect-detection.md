@@ -2,7 +2,7 @@
 
 - **Status:** accepted
 - **Date:** 2026-08-19
-- **Deciders:** dagger-cache maintainers
+- **Deciders:** dagger-kubernetes maintainers
 
 ## Context
 
@@ -90,16 +90,16 @@ pipeline:
     stale_after: "5m"
 ```
 
-Env overrides: `DAGGER_CACHE_PIPELINE_DISCONNECT_GRACE`,
-`DAGGER_CACHE_PIPELINE_STALE_SWEEP_ENABLED`,
-`DAGGER_CACHE_PIPELINE_STALE_SWEEP_SCHEDULE`,
-`DAGGER_CACHE_PIPELINE_STALE_SWEEP_STALE_AFTER`.
+Env overrides: `DAGGER_KUBERNETES_PIPELINE_DISCONNECT_GRACE`,
+`DAGGER_KUBERNETES_PIPELINE_STALE_SWEEP_ENABLED`,
+`DAGGER_KUBERNETES_PIPELINE_STALE_SWEEP_SCHEDULE`,
+`DAGGER_KUBERNETES_PIPELINE_STALE_SWEEP_STALE_AFTER`.
 
 ### 7. Live UI update + metric
 
 On a successful transition, a `trace_update` SSE event is broadcast so connected
 viewers re-fetch immediately (the 5s poll fallback remains). A new
-`dagger_cache_pipeline_disconnect_failed_total` counter (label `source`:
+`dagger_kubernetes_pipeline_disconnect_failed_total` counter (label `source`:
 `tunnel_close` | `stale_sweep`) counts transitions.
 
 ## Consequences

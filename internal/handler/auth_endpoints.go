@@ -30,18 +30,7 @@ type loginRequest struct {
 	Password string `json:"password"`
 }
 
-type loginResponse struct {
-	AccessToken  string         `json:"access_token"`
-	RefreshToken string         `json:"refresh_token"`
-	User         authMeResponse `json:"user"`
-}
-
 type refreshRequest struct {
-	RefreshToken string `json:"refresh_token"`
-}
-
-type refreshResponse struct {
-	AccessToken  string `json:"access_token"`
 	RefreshToken string `json:"refresh_token"`
 }
 
@@ -69,8 +58,8 @@ type changePasswordRequest struct {
 	NewPassword     string `json:"new_password"`
 }
 
-// handleLogin authenticates a user and issues a JWT pair. Password attempts
-// are rate-limited per username + client IP (CWE-307).
+// handleLogin authenticates a user and issues a JWT pair in httpOnly cookies.
+// Password attempts are rate-limited per username + client IP (CWE-307).
 func (s *Server) handleLogin(_ context.Context, c *app.RequestContext) {
 	if !s.internalAuthEnabled {
 		writeError(c, consts.StatusNotFound, "internal auth disabled")
@@ -104,12 +93,9 @@ func (s *Server) handleLogin(_ context.Context, c *app.RequestContext) {
 		return
 	}
 	s.limiter.recordSuccess(key)
+	s.setAuthCookies(c, access, refresh)
 	groups, _ := s.groups.GroupsForUser(context.Background(), u.ID)
-	c.JSON(consts.StatusOK, loginResponse{
-		AccessToken:  access,
-		RefreshToken: refresh,
-		User:         toAuthMeResponse(u, groups),
-	})
+	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
 }
 
 // loginLimitKey builds the rate-limiter key for a password login attempt.
@@ -117,22 +103,34 @@ func loginLimitKey(username, clientIP string) string {
 	return fmt.Sprintf("login|%s|%s", strings.ToLower(username), clientIP)
 }
 
-// handleRefresh rotates a refresh token into a new pair.
+// handleRefresh rotates a refresh token (from the refresh cookie first, then
+// the JSON body for backwards compat) into a new pair and sets fresh cookies.
 func (s *Server) handleRefresh(_ context.Context, c *app.RequestContext) {
-	var req refreshRequest
-	if !decodeBody(c, &req) {
-		return
+	refresh := string(c.Cookie(s.cookieCfg.RefreshName))
+	if refresh == "" {
+		var req refreshRequest
+		if !decodeBody(c, &req) {
+			return
+		}
+		refresh = req.RefreshToken
 	}
-	if req.RefreshToken == "" {
+	if refresh == "" {
 		writeError(c, consts.StatusBadRequest, "refresh_token is required")
 		return
 	}
-	access, refresh, err := s.auth.Refresh(context.Background(), req.RefreshToken)
+	access, refreshed, err := s.auth.Refresh(context.Background(), refresh)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	c.JSON(consts.StatusOK, refreshResponse{AccessToken: access, RefreshToken: refresh})
+	s.setAuthCookies(c, access, refreshed)
+	c.SetStatusCode(consts.StatusNoContent)
+}
+
+// handleLogout clears the session cookies and returns 204.
+func (s *Server) handleLogout(_ context.Context, c *app.RequestContext) {
+	s.clearAuthCookies(c)
+	c.SetStatusCode(consts.StatusNoContent)
 }
 
 // handleMe returns the current user's profile + groups.
@@ -274,8 +272,8 @@ func (s *Server) startOAuthLogin(c *app.RequestContext) {
 	c.Redirect(consts.StatusFound, []byte(loginURL))
 }
 
-// handleOAuthCallback exchanges the GitHub code for tokens and redirects to
-// the SPA with the JWT pair in the URL fragment (never logged).
+// handleOAuthCallback exchanges the GitHub code for tokens, sets the session
+// cookies, and redirects to the SPA.
 func (s *Server) handleOAuthCallback(_ context.Context, c *app.RequestContext) {
 	if !s.requireOAuthProvider(c, "github") {
 		return
@@ -283,8 +281,8 @@ func (s *Server) handleOAuthCallback(_ context.Context, c *app.RequestContext) {
 	s.completeOAuthCallback(c)
 }
 
-// handleOAuthOIDCCallback exchanges the OIDC code for tokens and redirects to
-// the SPA with the JWT pair in the URL fragment (never logged).
+// handleOAuthOIDCCallback exchanges the OIDC code for tokens, sets the session
+// cookies, and redirects to the SPA.
 func (s *Server) handleOAuthOIDCCallback(_ context.Context, c *app.RequestContext) {
 	if !s.requireOAuthProvider(c, "oidc") {
 		return
@@ -293,7 +291,7 @@ func (s *Server) handleOAuthOIDCCallback(_ context.Context, c *app.RequestContex
 }
 
 // completeOAuthCallback is the shared OAuth callback flow (nonce verification,
-// state validation, code exchange, fragment redirect).
+// state validation, code exchange, cookie issuance, query redirect).
 func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 	code := c.Query("code")
 	state := c.Query("state")
@@ -322,16 +320,40 @@ func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 		return
 	}
 
+	s.setAuthCookies(c, access, refresh)
 	redirectPath := safeRedirectPath(stateClaims.Username)
-	// Hand tokens to the SPA via the fragment (not logged by proxies). The
-	// redirect path is percent-encoded so it cannot corrupt the fragment.
-	fragment := fmt.Sprintf("/auth/callback#access_token=%s&refresh_token=%s&redirect=%s", access, refresh, url.QueryEscape(redirectPath))
-	c.Redirect(consts.StatusFound, []byte(fragment))
+	// Hand tokens to the SPA via httpOnly cookies (no URL fragment); the
+	// redirect path is percent-encoded so it cannot corrupt the query.
+	target := fmt.Sprintf("/auth/callback?redirect=%s", url.QueryEscape(redirectPath))
+	c.Redirect(consts.StatusFound, []byte(target))
 }
 
 // clearOAuthStateCookie removes the login nonce cookie (best-effort).
 func (s *Server) clearOAuthStateCookie(c *app.RequestContext) {
 	c.SetCookie(oauthStateCookie, "", -1, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
+}
+
+// authCookiePath is the Path attribute shared by both session cookies.
+const authCookiePath = "/"
+
+// setAuthCookies sets httpOnly access+refresh cookies. Secure = cfg.secure ||
+// requestIsTLS. Max-Age is derived from the JWT TTLs.
+func (s *Server) setAuthCookies(c *app.RequestContext, access, refresh string) {
+	s.setAuthCookie(c, s.cookieCfg.AccessName, access, int(s.jwt.AccessTTL().Seconds()))
+	s.setAuthCookie(c, s.cookieCfg.RefreshName, refresh, int(s.jwt.RefreshTTL().Seconds()))
+}
+
+// clearAuthCookies expires both session cookies (Max-Age=-1).
+func (s *Server) clearAuthCookies(c *app.RequestContext) {
+	s.setAuthCookie(c, s.cookieCfg.AccessName, "", -1)
+	s.setAuthCookie(c, s.cookieCfg.RefreshName, "", -1)
+}
+
+// setAuthCookie writes one httpOnly, SameSite=Lax session cookie at Path "/".
+// Secure is forced by config or auto-detected from the request scheme.
+func (s *Server) setAuthCookie(c *app.RequestContext, name, value string, maxAge int) {
+	secure := s.cookieCfg.Secure || requestIsTLS(c)
+	c.SetCookie(name, value, maxAge, authCookiePath, "", protocol.CookieSameSiteLaxMode, secure, true)
 }
 
 // safeRedirectPath validates a post-login SPA redirect target. Only internal
