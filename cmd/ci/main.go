@@ -26,8 +26,8 @@ func main() {
 		Flags: []cli.Flag{
 			&cli.StringFlag{Name: "server", Usage: "Dagger Kubernetes server URL (required unless server.public_url is set in --config)"},
 			&cli.StringFlag{Name: "token", Usage: "Dagger Cloud token (required)"},
-			&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.pipeline_url/server.public_url; links use /pipelines/<traceID>)"},
-			&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.pipeline_url/server.public_url fallbacks)"},
+			&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
+			&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
 			&cli.StringFlag{Name: "cache-registry", Value: "cache.reg/dagger-cache", Usage: "Cache registry host/repo"},
 			&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
 			&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
@@ -50,9 +50,8 @@ func run(c *cli.Context) error {
 	// config.Load otherwise returns compiled-in defaults (e.g. the example
 	// public_url) that must not silently become the wrapper's target.
 	hasConfigFile := fileExists(c.String("config"))
-	var configPipelineURL, configPublicURL string
+	var configPublicURL string
 	if hasConfigFile {
-		configPipelineURL = cfg.Server.PipelineURL
 		configPublicURL = cfg.Server.PublicURL
 	}
 
@@ -66,7 +65,7 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("--server and --token required")
 	}
 
-	uiURL := resolveUIBase(c.String("ui-url"), c.String("server"), configPipelineURL, configPublicURL)
+	uiURL := resolveUIBase(c.String("ui-url"), c.String("server"), configPublicURL)
 
 	cacheRegistry := c.String("cache-registry")
 	version := c.String("version")
@@ -123,14 +122,13 @@ func run(c *cli.Context) error {
 }
 
 // resolveUIBase returns the effective pipeline-view base URL with the
-// precedence: uiURLFlag > configPipelineURL > configPublicURL > serverURLFlag.
-// The config precedence itself is delegated to domain.ResolvePipelineBase.
-func resolveUIBase(uiURLFlag, serverURLFlag, configPipelineURL, configPublicURL string) string {
+// precedence: uiURLFlag > configPublicURL > serverURLFlag.
+func resolveUIBase(uiURLFlag, serverURLFlag, configPublicURL string) string {
 	if uiURLFlag != "" {
 		return uiURLFlag
 	}
-	if base := domain.ResolvePipelineBase(configPublicURL, configPipelineURL); base != "" {
-		return base
+	if configPublicURL != "" {
+		return configPublicURL
 	}
 	return serverURLFlag
 }

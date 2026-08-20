@@ -34,25 +34,34 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 
 {{/* Resolve the OTLP collector URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.collectorUrl" -}}
-{{- if .Values.tools.otelCollector.enabled -}}
+{{- if index .Values "opentelemetry-collector" "enabled" -}}
 {{- printf "http://%s-opentelemetry-collector:4318" .Release.Name -}}
 {{- else -}}
 {{- default (printf "http://%s-opentelemetry-collector:4318" .Release.Name) .Values.supervisor.config.telemetry.collectorUrl -}}
 {{- end -}}
 {{- end -}}
 
+{{/* Resolve the OAuth2 redirect URL: explicit value wins, else derived from
+the computed public URL and the provider callback route. */}}
+{{- define "dagger-kubernetes.oauthRedirectUrl" -}}
+{{- if .Values.auth.oauth.redirectUrl -}}
+{{- .Values.auth.oauth.redirectUrl -}}
+{{- else -}}
+{{- printf "%s/api/v1/auth/oauth/%s/callback" (include "dagger-kubernetes.publicUrl" .) .Values.auth.oauth.provider -}}
+{{- end -}}
+{{- end -}}
+
 {{/* Resolve the cache public vhost (the host engines push/pull through the
 Supervisor proxy). Explicit value wins; otherwise derive `cache.<host>` from
-supervisor.config.server.publicUrl by stripping the scheme and any trailing
-path. Assumes publicUrl has no explicit port (the cache vhost must match the
-ingress Host header / TLS SAN, which never carry a port). */}}
+the computed public URL by stripping the scheme and any port/path. */}}
 {{- define "dagger-kubernetes.cachePublicHost" -}}
 {{- if .Values.supervisor.config.cache.publicHost -}}
 {{- .Values.supervisor.config.cache.publicHost -}}
 {{- else -}}
-{{- $u := trimPrefix "https://" .Values.supervisor.config.server.publicUrl -}}
+{{- $u := include "dagger-kubernetes.publicUrl" . -}}
+{{- $u = trimPrefix "https://" $u -}}
 {{- $u = trimPrefix "http://" $u -}}
-{{- $u = regexReplaceAll "/.*$" $u "" -}}
+{{- $u = regexReplaceAll "[:/].*$" $u "" -}}
 {{- printf "cache.%s" $u -}}
 {{- end -}}
 {{- end -}}
@@ -63,19 +72,17 @@ ingress Host header / TLS SAN, which never carry a port). */}}
 {{- printf "%s/dagger-cache" (include "dagger-kubernetes.cachePublicHost" .) -}}
 {{- end -}}
 
-{{/* Resolve the internal cache backend address (host[:port], no scheme): the
-explicit legacy value, else the in-cluster registry Service when enabled. */}}
+{{/* Resolve the internal cache backend address (host[:port], no scheme):
+the in-cluster registry Service when the registry subchart is enabled. */}}
 {{- define "dagger-kubernetes.cacheInternalAddr" -}}
-{{- if .Values.supervisor.config.cache.internalAddr -}}
-{{- .Values.supervisor.config.cache.internalAddr -}}
-{{- else if .Values.tools.registry.enabled -}}
+{{- if .Values.registry.enabled -}}
 {{- printf "%s-registry:5000" .Release.Name -}}
 {{- end -}}
 {{- end -}}
 
 {{/* Resolve the Tempo URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.tempoUrl" -}}
-{{- if .Values.tools.tempo.enabled -}}
+{{- if .Values.tempo.enabled -}}
 {{- printf "http://%s-tempo:3200" .Release.Name -}}
 {{- else -}}
 {{- default "http://tempo:3200" .Values.supervisor.config.telemetry.tempoUrl -}}
@@ -84,42 +91,91 @@ explicit legacy value, else the in-cluster registry Service when enabled. */}}
 
 {{/* Resolve the Loki URL: use the dependency Service when enabled. */}}
 {{- define "dagger-kubernetes.lokiUrl" -}}
-{{- if .Values.tools.loki.enabled -}}
+{{- if .Values.loki.enabled -}}
 {{- printf "http://%s-loki:3100" .Release.Name -}}
 {{- else -}}
 {{- default "http://loki:3100" .Values.supervisor.config.telemetry.lokiUrl -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the data-plane hostname from the configured access method. */}}
+{{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled. */}}
+{{- define "dagger-kubernetes.victoriaUrl" -}}
+{{- if .Values.victoria.enabled -}}
+{{- printf "http://%s-victoria-server:8428" .Release.Name -}}
+{{- else -}}
+{{- default "http://victoria:8428" .Values.supervisor.config.telemetry.victoriaUrl -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the public control-plane URL (UI + API) from the exposition:
+- ingress: https when ingress.tls is set, http otherwise, host = first ingress host
+- LoadBalancer/NodePort: https://<service.control.host>[:port]
+- ClusterIP: internal https://<release>-control.<namespace>.svc:<port> */}}
+{{- define "dagger-kubernetes.publicUrl" -}}
+{{- if .Values.ingress.enabled -}}
+{{- $host := "" -}}
+{{- range .Values.ingress.hosts -}}
+{{- if not $host -}}{{- $host = .host -}}{{- end -}}
+{{- end -}}
+{{- $host = required "ingress.hosts is required when ingress.enabled" $host -}}
+{{- if .Values.ingress.tls -}}
+{{- printf "https://%s" $host -}}
+{{- else -}}
+{{- printf "http://%s" $host -}}
+{{- end -}}
+{{- else if or (eq .Values.service.control.type "LoadBalancer") (eq .Values.service.control.type "NodePort") -}}
+{{- $host := required "service.control.host is required when the control plane is exposed via LoadBalancer/NodePort without an ingress" .Values.service.control.host -}}
+{{- if eq (int .Values.service.control.port) 443 -}}
+{{- printf "https://%s" $host -}}
+{{- else -}}
+{{- printf "https://%s:%v" $host .Values.service.control.port -}}
+{{- end -}}
+{{- else -}}
+{{- printf "https://%s-control.%s.svc:%v" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) .Values.service.control.port -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the data-plane hostname (host[:port], no scheme — the supervisor
+appends :443 itself when no port is given) from the exposition:
+- dataIngress: the passthrough host (TLS, port 443)
+- LoadBalancer: <service.data.host>[:port]
+- NodePort: <service.data.host>:<service.data.nodePort> (nodePort required)
+- ClusterIP: internal <release>-data.<namespace>.svc:<port> */}}
 {{- define "dagger-kubernetes.dataHostname" -}}
 {{- if .Values.dataIngress.enabled -}}
 {{- .Values.dataIngress.host -}}
-{{- else if eq .Values.service.data.type "NodePort" -}}
-{{- printf "%s:%s" .Values.supervisor.config.server.dataHostname (.Values.service.data.nodePort | default "30443") -}}
+{{- else if eq .Values.service.data.type "LoadBalancer" -}}
+{{- $host := required "service.data.host is required when the data plane is exposed via LoadBalancer without dataIngress" .Values.service.data.host -}}
+{{- if eq (int .Values.service.data.port) 443 -}}
+{{- $host -}}
 {{- else -}}
-{{- printf "%s:443" .Values.supervisor.config.server.dataHostname -}}
+{{- printf "%s:%v" $host .Values.service.data.port -}}
+{{- end -}}
+{{- else if eq .Values.service.data.type "NodePort" -}}
+{{- $host := required "service.data.host is required when the data plane is exposed via NodePort without dataIngress" .Values.service.data.host -}}
+{{- $nodePort := required "service.data.nodePort is required when service.data.type=NodePort (the auto-assigned port is unknown to the chart)" .Values.service.data.nodePort -}}
+{{- printf "%s:%v" $host $nodePort -}}
+{{- else -}}
+{{- printf "%s-data.%s.svc:%v" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) .Values.service.data.port -}}
 {{- end -}}
 {{- end -}}
 
 {{/* Resolve the supervisor StatefulSet name used for raft DNS peer discovery
-(<sts>-<i>.<headless>.<ns>.svc.<clusterDomain>). Defaults to the chart fullname;
-an explicit override supports supervisors managed outside this chart. */}}
+(<sts>-<i>.<headless>.<ns>.svc.<clusterDomain>). */}}
 {{- define "dagger-kubernetes.supervisorStatefulSetName" -}}
-{{- default (include "dagger-kubernetes.fullname" .) .Values.supervisor.config.raft.statefulsetName -}}
+{{- include "dagger-kubernetes.fullname" . -}}
 {{- end -}}
 
 {{/* Resolve the raft headless Service name (clusterIP: None) whose DNS A records
-back the stable pod names used for discovery. Defaults to <fullname>-headless. */}}
+back the stable pod names used for discovery: <fullname>-headless. */}}
 {{- define "dagger-kubernetes.supervisorHeadlessService" -}}
-{{- default (printf "%s-headless" (include "dagger-kubernetes.fullname" .)) .Values.supervisor.config.raft.headlessService -}}
+{{- printf "%s-headless" (include "dagger-kubernetes.fullname" .) -}}
 {{- end -}}
 
-{{/* Resolve the internal raft CA Secret name (shared CA cert+key across pods).
-Defaults to <fullname>-raft-ca; an explicit override supports externally
-managed CAs. */}}
+{{/* Resolve the internal raft CA Secret name (shared CA cert+key across pods):
+<fullname>-raft-ca. */}}
 {{- define "dagger-kubernetes.supervisorRaftCASecret" -}}
-{{- default (printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .)) .Values.supervisor.config.raft.tls.caSecret -}}
+{{- printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .) -}}
 {{- end -}}
 
 {{/* Resolve the control/data-plane server TLS certificate path. The embedded
@@ -128,26 +184,17 @@ the path is unused. The cert-manager provider reads the cert-manager-issued
 keypair mounted at /etc/dagger-kubernetes/data-tls (tls.crt). The external
 provider uses the operator-supplied path. */}}
 {{- define "dagger-kubernetes.controlTLSCertPath" -}}
-{{- if eq (.Values.supervisor.config.tls.provider | default "embedded") "cert-manager" -}}
+{{- if eq (.Values.tls.provider | default "embedded") "cert-manager" -}}
 /etc/dagger-kubernetes/data-tls/tls.crt
 {{- else -}}
-{{- .Values.supervisor.config.tls.certPath | default "" -}}
+{{- .Values.tls.certPath | default "" -}}
 {{- end -}}
 {{- end -}}
 
 {{- define "dagger-kubernetes.controlTLSKeyPath" -}}
-{{- if eq (.Values.supervisor.config.tls.provider | default "embedded") "cert-manager" -}}
+{{- if eq (.Values.tls.provider | default "embedded") "cert-manager" -}}
 /etc/dagger-kubernetes/data-tls/tls.key
 {{- else -}}
-{{- .Values.supervisor.config.tls.keyPath | default "" -}}
-{{- end -}}
-{{- end -}}
-
-{{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled. */}}
-{{- define "dagger-kubernetes.victoriaUrl" -}}
-{{- if .Values.tools.victoria.enabled -}}
-{{- printf "http://%s-victoria-server:8428" .Release.Name -}}
-{{- else -}}
-{{- default "http://victoria:8428" .Values.supervisor.config.telemetry.victoriaUrl -}}
+{{- .Values.tls.keyPath | default "" -}}
 {{- end -}}
 {{- end -}}

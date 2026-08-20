@@ -1,3 +1,4 @@
+{{- if .Values.supervisor.enabled }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -11,71 +12,61 @@ data:
       control_addr: ":8080"
       data_addr: ":8443"
       data_hostname: {{ include "dagger-kubernetes.dataHostname" . | quote }}
-      public_url: {{ .Values.supervisor.config.server.publicUrl | quote }}
-      pipeline_url: {{ .Values.supervisor.config.server.pipelineUrl | quote }}
+      public_url: {{ include "dagger-kubernetes.publicUrl" . | quote }}
+      pipeline_url: ""
     auth:
       internal:
-        enabled: {{ .Values.supervisor.config.auth.internal.enabled }}
-        tokens_file: {{ .Values.supervisor.config.auth.internal.tokensFile | quote }}
+        enabled: true
+        tokens_file: "/etc/dagger-kubernetes/tokens"
       bootstrap_admin:
-        username: {{ .Values.supervisor.config.auth.bootstrapAdmin.username | quote }}
+        username: {{ .Values.auth.bootstrapAdmin.username | quote }}
       jwt:
         secret: ""
-        access_ttl: {{ .Values.supervisor.config.auth.jwt.accessTtl | quote }}
-        refresh_ttl: {{ .Values.supervisor.config.auth.jwt.refreshTtl | quote }}
+        access_ttl: {{ .Values.auth.jwt.accessTtl | quote }}
+        refresh_ttl: {{ .Values.auth.jwt.refreshTtl | quote }}
       oauth:
-        enabled: {{ .Values.supervisor.config.auth.oauth.enabled }}
-{{- with .Values.supervisor.config.auth.oauth }}
-        provider: {{ .provider | quote }}
-        client_id: {{ .clientId | quote }}
+        enabled: {{ .Values.auth.oauth.enabled }}
+        provider: {{ .Values.auth.oauth.provider | quote }}
+        client_id: {{ .Values.auth.oauth.clientId | quote }}
         client_secret: ""
-        redirect_url: {{ .redirectUrl | quote }}
+        redirect_url: {{ include "dagger-kubernetes.oauthRedirectUrl" . | quote }}
         allowed_orgs:
-{{ toYaml .allowedOrgs | indent 10 }}
-        default_group: {{ .defaultGroup | quote }}
-{{- end }}
+{{ toYaml .Values.auth.oauth.allowedOrgs | indent 10 }}
+        default_group: {{ .Values.auth.oauth.defaultGroup | quote }}
       cookie:
-        access_name: {{ .Values.supervisor.config.auth.cookie.accessName | quote }}
-        refresh_name: {{ .Values.supervisor.config.auth.cookie.refreshName | quote }}
-        secure: {{ .Values.supervisor.config.auth.cookie.secure }}
+        access_name: {{ .Values.auth.cookie.accessName | quote }}
+        refresh_name: {{ .Values.auth.cookie.refreshName | quote }}
+        secure: {{ .Values.auth.cookie.secure }}
       cors:
         allowed_origins:
-{{ toYaml .Values.supervisor.config.auth.cors.allowedOrigins | indent 10 }}
+{{ toYaml .Values.auth.cors.allowedOrigins | indent 10 }}
     database:
-      dir: {{ .Values.supervisor.config.database.dir | quote }}
+      dir: "/var/lib/dagger-kubernetes"
     raft:
-      node_id: {{ .Values.supervisor.config.raft.nodeId | quote }}
-      bind_addr: {{ .Values.supervisor.config.raft.bindAddr | quote }}
-      advertise_addr: {{ .Values.supervisor.config.raft.advertiseAddr | quote }}
-{{- if .Values.supervisor.config.raft.peers }}
-      peers:
-{{- range .Values.supervisor.config.raft.peers }}
-        - id: {{ .id | quote }}
-          address: {{ .address | quote }}
-{{- end }}
-{{- else }}
+      node_id: ""
+      bind_addr: ":8081"
+      advertise_addr: ""
       peers: []
-{{- end }}
       replicas: {{ .Values.supervisor.config.raft.replicas }}
       statefulset_name: {{ include "dagger-kubernetes.supervisorStatefulSetName" . | quote }}
       headless_service: {{ include "dagger-kubernetes.supervisorHeadlessService" . | quote }}
       namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
-      cluster_domain: {{ .Values.supervisor.config.raft.clusterDomain | quote }}
-      apply_timeout: {{ .Values.supervisor.config.raft.applyTimeout | quote }}
-      leader_wait_timeout: {{ .Values.supervisor.config.raft.leaderWaitTimeout | quote }}
-      snapshot_threshold: {{ .Values.supervisor.config.raft.snapshotThreshold }}
-      snapshot_interval: {{ .Values.supervisor.config.raft.snapshotInterval | quote }}
-      trailing_logs: {{ .Values.supervisor.config.raft.trailingLogs }}
+      cluster_domain: "cluster.local"
+      apply_timeout: "5s"
+      leader_wait_timeout: "30s"
+      snapshot_threshold: 1000
+      snapshot_interval: "10m"
+      trailing_logs: 256
       tls:
         enabled: {{ .Values.supervisor.config.raft.tls.enabled }}
-        dir: {{ .Values.supervisor.config.raft.tls.dir | quote }}
-        validity: {{ .Values.supervisor.config.raft.tls.validity | quote }}
-        organization: {{ .Values.supervisor.config.raft.tls.organization | quote }}
-        ca_cert: {{ .Values.supervisor.config.raft.tls.caCert | quote }}
-        cert: {{ .Values.supervisor.config.raft.tls.cert | quote }}
-        key: {{ .Values.supervisor.config.raft.tls.key | quote }}
+        dir: ""
+        validity: "8760h"
+        organization: "dagger-kubernetes-raft"
+        ca_cert: ""
+        cert: ""
+        key: ""
         ca_secret: {{ include "dagger-kubernetes.supervisorRaftCASecret" . | quote }}
-        ca_bootstrap: {{ .Values.supervisor.config.raft.tls.caBootstrap }}
+        ca_bootstrap: false
         client_auth: {{ .Values.supervisor.config.raft.tls.clientAuth }}
     telemetry:
       collector_url: {{ include "dagger-kubernetes.collectorUrl" . | quote }}
@@ -88,7 +79,6 @@ data:
       public_host: {{ include "dagger-kubernetes.cachePublicHost" . | quote }}
       internal_addr: {{ include "dagger-kubernetes.cacheInternalAddr" . | quote }}
       auth_token: ""
-      ref_per_version: {{ .Values.supervisor.config.cache.refPerVersion }}
 {{- if .Values.supervisor.config.cache.registries }}
       registries:
 {{- range .Values.supervisor.config.cache.registries }}
@@ -150,9 +140,9 @@ data:
 {{ toYaml .Values.supervisor.config.fleet.engineRegistryMirrors | indent 8 }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
-      client_cert_ttl: {{ .Values.supervisor.config.ca.clientCertTtl | quote }}
+      client_cert_ttl: {{ .Values.tls.clientCertTtl | quote }}
     tls:
-      provider: {{ .Values.supervisor.config.tls.provider | default "embedded" | quote }}
+      provider: {{ .Values.tls.provider | default "embedded" | quote }}
       cert_path: {{ include "dagger-kubernetes.controlTLSCertPath" . | quote }}
       key_path: {{ include "dagger-kubernetes.controlTLSKeyPath" . | quote }}
       server_cert_secret: {{ include "dagger-kubernetes.fullname" . }}-tls
@@ -166,4 +156,5 @@ data:
 {{- with .Values.supervisor.config.otel }}
     otel:
       otlp_endpoint: {{ .otlpEndpoint | quote }}
+{{- end }}
 {{- end }}

@@ -19,16 +19,19 @@ certificate generation is required (see
 [TLS & certificates](#tls--certificates)).
 
 ```bash
-# Create a values override for your environment
+# Create a values override for your environment: the UI and data-plane URLs
+# are computed automatically from the exposition (see "Exposition & URLs").
 cat > my-values.yaml <<'EOF'
 ingress:
   hosts:
     - supv.example.com
-supervisor:
-  config:
-    server:
-      dataHostname: data.your-domain.com
-      publicUrl: https://supv.example.com
+  tls:
+    - hosts: [supv.example.com]
+      secretName: my-tls-secret
+
+dataIngress:
+  enabled: true
+  host: data.supv.example.com
 EOF
 
 # Install directly from GHCR (no local clone needed). The embedded TLS provider
@@ -37,11 +40,10 @@ helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes
   --version 0.1.0 -f my-values.yaml \
   --namespace dagger-stack --create-namespace
 
-# Optionally pre-seed a legacy token (or create API tokens from the UI):
-TOKEN=$(openssl rand -hex 32)
+# Optionally pre-seed credentials (or create API tokens from the UI):
 helm upgrade dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
-  --set-string "auth.tokens[0]=$TOKEN"
+  --set auth.bootstrapAdmin.password="change-me"
 ```
 
 List available versions:
@@ -51,9 +53,44 @@ helm show chart oci://ghcr.io/disaster37/charts/dagger-kubernetes | grep version
 ```
 
 > For a publicly trusted server certificate (Let's Encrypt), set
-> `supervisor.config.tls.provider: cert-manager` and enable `dataCert` /
+> `tls.provider: cert-manager` and enable `dataCert` /
 > `dataIngress.tls.secretName` — see [TLS & certificates](#tls--certificates).
 > The minting CA is still auto-bootstrapped.
+
+## Exposition & URLs
+
+The chart never asks for URLs — `server.public_url` (UI + API) and
+`server.data_hostname` (engine data plane) are computed from the exposition:
+
+| Exposition | `public_url` | `data_hostname` |
+|---|---|---|
+| `ingress.enabled` | `https://<host>` with `ingress.tls`, `http://<host>` without | — |
+| `dataIngress.enabled` | — | `<dataIngress.host>` (TLS passthrough, port 443) |
+| `service.*.type: LoadBalancer` | `https://<service.control.host>[:<port>]` | `<service.data.host>[:<port>]` |
+| `service.*.type: NodePort` | `https://<service.control.host>[:<port>]` | `<service.data.host>:<service.data.nodePort>` |
+| `ClusterIP` only | internal `https://<release>-control.<ns>.svc:<port>` | internal `<release>-data.<ns>.svc:<port>` |
+
+`service.control.host` / `service.data.host` are required when the respective
+Service is exposed via LoadBalancer/NodePort without an ingress (the chart
+cannot know the LB hostname or the auto-assigned nodePort).
+
+The **cache vhost** (`server cache public_host`, the host engines push/pull
+through) is derived the same way: `cache.<control-plane host>` by default, or
+any explicit name via `supervisor.config.cache.publicHost`. When
+`ingress.enabled`, the chart automatically adds the cache host as a second
+Ingress host rule (routing to the `-control` Service) and appends it to
+`ingress.tls[].hosts` — you never list it in `ingress.hosts` yourself. Its DNS
+must resolve to the same ingress IP.
+
+> **Wildcard certificates:** the derived name `cache.<host>` is a
+> second-level subdomain (`cache.dagger.company.com`), which a single-level
+> wildcard certificate (`*.company.com`) does **not** cover. In that case set
+> `supervisor.config.cache.publicHost` to a one-level name, e.g.
+> `dagger-cache.company.com` — the override is free-form.
+
+Container paths and ports are fixed (control `:8080`, data `:8443`, raft
+`:8081`, data dir `/var/lib/dagger-kubernetes`) — only the Service ports are
+configurable (`service.control.port`, `service.data.port`).
 
 ## Required tools (chart dependencies)
 
@@ -66,22 +103,22 @@ helm show chart oci://ghcr.io/disaster37/charts/dagger-kubernetes | grep version
 | VictoriaMetrics | `victoria-metrics-single` ([victoriametrics](https://victoriametrics.github.io/helm-charts/)) | enabled | PromQL-compatible metrics backend |
 | Grafana | `grafana` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Unified dashboards with auto-provisioned datasources |
 
-Disable any tool (and point the supervisor elsewhere) via:
+Disable any tool (and point the supervisor elsewhere) via its own `enabled`
+flag:
 
 ```yaml
-tools:
-  otelCollector:
-    enabled: false
-  registry:
-    enabled: false
-  tempo:
-    enabled: false
-  loki:
-    enabled: false
-  victoria:
-    enabled: false
-  grafana:
-    enabled: false
+opentelemetry-collector:
+  enabled: false
+registry:
+  enabled: false
+tempo:
+  enabled: false
+loki:
+  enabled: false
+victoria:
+  enabled: false
+grafana:
+  enabled: false
 
 supervisor:
   config:
@@ -91,7 +128,9 @@ supervisor:
       lokiUrl: "http://my-loki:3100"
       victoriaUrl: "http://my-victoria:8428"
     cache:
-      registry: "my-registry:5000/dagger-cache"
+      registries:
+        - id: my-registry
+          internalAddr: "my-registry:5000"
 ```
 
 ## Install from source (local development)
@@ -108,8 +147,7 @@ helm dependency build deploy/helm/dagger-kubernetes
 
 # 2. Copy and edit the values file
 cp deploy/helm/dagger-kubernetes/values.yaml my-values.yaml
-#   ... edit supervisor.config.server.{dataHostname,publicUrl} ...
-#   ... set ingress.hosts to your domain ...
+#   ... set ingress.hosts to your domain (URLs are computed automatically) ...
 #   ... (grafana.adminPassword is auto-generated by default; set it only with a rotation workflow) ...
 
 # 3. Install. No certificate generation needed: the minting CA + Raft CA are
@@ -117,7 +155,7 @@ cp deploy/helm/dagger-kubernetes/values.yaml my-values.yaml
 helm install dagger-kubernetes deploy/helm/dagger-kubernetes \
   -f my-values.yaml \
   --namespace dagger-stack --create-namespace \
-  --set-string "auth.tokens[0]=$TOKEN"
+  --set auth.bootstrapAdmin.password="change-me"
 ```
 
 ## TLS & certificates
@@ -127,14 +165,14 @@ require manual generation** in a standard Helm install:
 
 | Certificate | Auto-bootstrapped | Notes |
 |---|---|---|
-| **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Set `ca.crt`/`ca.key` only to bring an existing CA. |
+| **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Set `tls.caCrt`/`tls.caKey` only to bring an existing CA. |
 | **Raft transport CA** (`<release>-raft-ca`) | Yes | Internal mTLS for the Raft transport. Same bootstrap pattern (see [Raft](#raft-distributed-store)). |
 | **Server certificate** (control + data plane) | `embedded` (default) | Issued by the minting CA, self-signed. SANs cover the data host, cache vhost, and pod names automatically. |
 
 ### TLS providers
 
-`supervisor.config.tls.provider` selects where the server certificate comes
-from. The minting CA is auto-bootstrapped for **every** provider.
+`tls.provider` selects where the server certificate comes from. The minting
+CA is auto-bootstrapped for **every** provider.
 
 - **`embedded` (default)** — the minting CA issues a self-signed server
   certificate. Zero config; no public trust, but mTLS authentication is
@@ -145,8 +183,8 @@ from. The minting CA is auto-bootstrapped for **every** provider.
   `dataIngress.tls.secretName` (Let's Encrypt via the Ingress annotation). The
   chart auto-wires `certPath`/`keyPath` to the mounted Secret
   (`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`).
-- **`external`** — bring your own PEM files via
-  `supervisor.config.tls.certPath`/`keyPath`.
+- **`external`** — bring your own PEM files via `tls.certPath`/`keyPath`
+  (paths inside the supervisor container).
 
 ### cert-manager example
 
@@ -172,7 +210,7 @@ EOF
 # 2. Install with the cert-manager provider (chart-rendered Certificate)
 helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
-  --set supervisor.config.tls.provider=cert-manager \
+  --set tls.provider=cert-manager \
   --set dataCert.enabled=true \
   --set dataCert.issuerName=letsencrypt-prod \
   --set dataIngress.enabled=true \
@@ -180,10 +218,12 @@ helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes
 ```
 
 > **Cache vhost SAN:** the cache proxy shares the control-plane TLS listener,
-> so the server certificate must include `cache.<server.publicUrl host>` as a
-> SAN. The `embedded` provider adds it automatically; the chart's `dataCert`
-> template only adds `dataIngress.host`, so when using cert-manager add the
-> cache host to the `Certificate` `dnsNames` (via a custom `Certificate`).
+> so the server certificate must include the cache vhost (derived
+> `cache.<control-plane host>` or the `supervisor.config.cache.publicHost`
+> override) as a SAN. The `embedded` provider adds it automatically; the
+> chart's `dataCert` template only adds `dataIngress.host`, so when using
+> cert-manager add the cache host to the `Certificate` `dnsNames` (via a
+> custom `Certificate`) or use a wildcard certificate.
 
 ## Production recommendations
 
@@ -315,7 +355,7 @@ grafana:
 - The minting CA and Raft CA are auto-bootstrapped on first boot (see
   [TLS & certificates](#tls--certificates)); back up the resulting
   `<release>-minting-ca` and `<release>-raft-ca` Secrets, or set
-  `ca.crt`/`ca.key` explicitly to reuse a known CA.
+  `tls.caCrt`/`tls.caKey` explicitly to reuse a known CA.
 - Configure `ingress.tls` for the control-plane Ingress; the default ships
   with no TLS (`tls: []`) to avoid binding a placeholder secret.
 
@@ -340,6 +380,7 @@ grafana:
 
 | Key | Description | Default |
 |---|---|---|
+| `supervisor.enabled` | Enable the supervisor (control plane + data plane) and its resources | `true` |
 | `supervisor.image.repository` | Supervisor image | `ghcr.io/disaster37/dagger-kubernetes` |
 | `supervisor.image.tag` | Image tag (defaults to `Chart.appVersion`) | `""` |
 | `supervisor.replicaCount` | Supervisor replicas (mirrors `supervisor.config.raft.replicas`) | `3` |
@@ -351,27 +392,35 @@ grafana:
 | `supervisor.podSecurityContext` | Pod-level security context | see `values.yaml` |
 | `supervisor.securityContext` | Container-level security context | see `values.yaml` |
 | `namespace` | Target namespace (empty = release namespace) | `""` |
-| `supervisor.config.*` | Supervisor runtime config | see `values.yaml` |
-| `auth.tokens` | Static bearer tokens | `[]` |
-| `ca.crt` / `ca.key` | Minting CA (PEM). Empty = **auto-bootstrap** on first boot | `""` |
-| `tls.crt` / `tls.key` | Data-plane TLS (PEM, only `external`/legacy). cert-manager auto-wires this | `""` |
-| `supervisor.config.tls.provider` | Server cert source: `embedded` \| `cert-manager` \| `external` | `embedded` |
+| `supervisor.config.*` | Supervisor runtime config (see `values.yaml`; URLs are computed, see [Exposition & URLs](#exposition--urls)) | see `values.yaml` |
+| `auth.bootstrapAdmin.username` / `.password` | Bootstrap admin credentials (password empty = random, logged once) | `admin` / `""` |
+| `auth.jwt.secret` | JWT signing secret (empty = auto-generated, persisted in DB) | `""` |
+| `auth.jwt.*` | JWT access/refresh TTLs | `15m` / `168h` |
+| `auth.oauth.*` | OAuth2 provider config (github/oidc) | see `values.yaml` |
+| `auth.cookie.*` | Session cookie names + Secure flag | see `values.yaml` |
+| `auth.cors.allowedOrigins` | Cross-origin Origin allowlist | `[]` |
+| `tls.provider` | Server cert source: `embedded` \| `cert-manager` \| `external` | `embedded` |
+| `tls.clientCertTtl` | Engine client cert TTL | `2h` |
+| `tls.caCrt` / `tls.caKey` | Minting CA (PEM). Empty = **auto-bootstrap** on first boot | `""` |
+| `tls.crt` / `tls.key` | Server cert/key PEM (only `external` provider). cert-manager auto-wires this | `""` |
 | `dataCert.enabled` | Render a cert-manager `Certificate` for the data plane | `false` |
 | `dataIngress.tls.secretName` | cert-manager (Let's Encrypt) secret for the data plane | `""` |
 | `ingress.enabled` | Enable control-plane Ingress | `true` |
-| `ingress.cacheHost` | Cache vhost hostname (empty = derived from `cachePublicHost`) | `""` |
+| `service.control.host` / `service.data.host` | Routable hostname when exposed via LoadBalancer/NodePort (no ingress) | `""` |
 | `serviceMonitor.enabled` | Enable Prometheus ServiceMonitor | `false` |
 
 ### Tool toggles
 
+Each dependency is toggled with its own `enabled` flag:
+
 | Key | Default | Description |
 |---|---|---|
-| `tools.otelCollector.enabled` | `true` | OTel Collector for OTLP ingest |
-| `tools.registry.enabled` | `true` | OCI registry for cache storage |
-| `tools.tempo.enabled` | `true` | Grafana Tempo for traces |
-| `tools.loki.enabled` | `true` | Grafana Loki for logs |
-| `tools.victoria.enabled` | `true` | VictoriaMetrics for metrics |
-| `tools.grafana.enabled` | `true` | Grafana dashboards |
+| `opentelemetry-collector.enabled` | `true` | OTel Collector for OTLP ingest |
+| `registry.enabled` | `true` | OCI registry for cache storage |
+| `tempo.enabled` | `true` | Grafana Tempo for traces |
+| `loki.enabled` | `true` | Grafana Loki for logs |
+| `victoria.enabled` | `true` | VictoriaMetrics for metrics |
+| `grafana.enabled` | `true` | Grafana dashboards |
 
 ### Auto-wiring
 
@@ -384,8 +433,10 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 | `telemetry.tempoUrl` | `dagger-kubernetes.tempoUrl` | `<release>-tempo:3100` |
 | `telemetry.lokiUrl` | `dagger-kubernetes.lokiUrl` | `<release>-loki:3100` |
 | `telemetry.victoriaUrl` | `dagger-kubernetes.victoriaUrl` | `<release>-victoria-metrics-single:8428` |
-| `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<server.publicUrl host>` |
-| `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `supervisor.config.cache.internalAddr`, else `<release>-registry:5000` (when `tools.registry.enabled`) |
+| `server.public_url` | `dagger-kubernetes.publicUrl` | computed from ingress / service exposition |
+| `server.data_hostname` | `dagger-kubernetes.dataHostname` | computed from dataIngress / service exposition |
+| `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<control-plane host>` |
+| `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `<release>-registry:5000` (when `registry.enabled`) |
 | `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (public ref emitted to clients) |
 
 ### Raft (distributed store)
@@ -399,30 +450,16 @@ give each pod a stable identity for peer discovery.
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.config.database.dir` | `/var/lib/dagger-kubernetes` | Raft data dir (`raft.db`, `snapshots/`, `node-id`, `tls/`). Mounted from the per-pod `db` volume. |
 | `supervisor.replicaCount` | `3` | Supervisor pod count (mirrors `supervisor.config.raft.replicas`). |
-| `supervisor.config.raft.nodeId` | `""` | Stable node ID; the chart injects the StatefulSet pod name (`<sts>-<ordinal>`) via downward-API. |
-| `supervisor.config.raft.bindAddr` | `:8081` | Dedicated Raft transport port (exposed as the `raft` container port). |
-| `supervisor.config.raft.advertiseAddr` | `""` | Routable `host:port`; empty = derived from `<hostname>.<headless_service>.<namespace>.svc.<cluster_domain>`. |
-| `supervisor.config.raft.peers` | `[]` | Explicit voter list of `{id, address}` (non-K8s/testing); empty = DNS discovery. |
-| `supervisor.config.raft.replicas` | `3` | Voter count for DNS discovery. Keep in sync with `supervisor.replicaCount`. |
-| `supervisor.config.raft.statefulsetName` | `""` | StatefulSet name for DNS discovery (defaults to the chart's StatefulSet name). |
-| `supervisor.config.raft.headlessService` | `""` | Headless Service name for stable pod DNS (defaults to `<release>-headless`). |
-| `supervisor.config.raft.namespace` | `""` | K8s namespace for pod DNS (defaults to the release namespace). |
-| `supervisor.config.raft.clusterDomain` | `cluster.local` | K8s cluster DNS suffix. |
-| `supervisor.config.raft.applyTimeout` | `5s` | `raft.Apply` enqueue timeout. |
-| `supervisor.config.raft.leaderWaitTimeout` | `30s` | Startup wait for leadership (also bounds the CA Secret poll). |
-| `supervisor.config.raft.snapshotThreshold` | `1000` | Snapshot log threshold. |
-| `supervisor.config.raft.snapshotInterval` | `10m` | Snapshot interval. |
-| `supervisor.config.raft.trailingLogs` | `256` | Trailing logs after a snapshot. |
+| `supervisor.config.raft.replicas` | `3` | Voter count for DNS peer discovery. Keep in sync with `supervisor.replicaCount`. |
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
-| `supervisor.config.raft.tls.dir` | `""` | Internal raft CA + leaf directory (defaults to `<database.dir>/tls`). |
-| `supervisor.config.raft.tls.validity` | `8760h` | Leaf cert TTL. |
-| `supervisor.config.raft.tls.organization` | `dagger-kubernetes-raft` | CA/leaf subject organization. |
-| `supervisor.config.raft.tls.caCert` / `cert` / `key` | `""` | Manual mode: pre-provisioned CA + leaf PEM paths (all three together). |
-| `supervisor.config.raft.tls.caSecret` | `""` | Auto mode: Secret name for the shared internal CA (defaults to `<release>-raft-ca`). |
-| `supervisor.config.raft.tls.caBootstrap` | `false` | Auto mode: force this node to generate + write the CA Secret (ordinal 0 is auto-detected). |
 | `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
+
+Everything else is **fixed or derived by the chart**: the data dir is
+`/var/lib/dagger-kubernetes` (per-pod PVC), the Raft transport binds `:8081`
+and advertises `<pod>.<headless>.<ns>.svc.cluster.local`, node IDs are the
+StatefulSet pod names (downward-API), peers are discovered via DNS from the
+headless Service, and the internal CA lives in the `<release>-raft-ca` Secret.
 
 **TLS auto-CA:** pod-0 generates the internal CA with `goca`, writes it to the
 `<release>-raft-ca` Secret, and issues itself a leaf; pods 1..N-1 poll the
@@ -455,16 +492,14 @@ cache registry(ies). Configure it under `supervisor.config.cache`:
 | Value | Default | Description |
 |---|---|---|
 | `supervisor.config.cache.backend` | `registry` | `registry` (OCI) or `s3`. |
-| `supervisor.config.cache.registry` | `""` | Public cache ref; auto-wired to `<cachePublicHost>/dagger-cache`. |
-| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<server.publicUrl host>`. Must differ from the control-plane host. |
-| `supervisor.config.cache.internalAddr` | `""` | Legacy single backend address. Empty ⇒ `<release>-registry:5000` when `tools.registry.enabled`. |
-| `supervisor.config.cache.authToken` | `""` | Engine→proxy bearer. Empty ⇒ read from the `engine-registry-auth` Secret key `token`. |
-| `supervisor.config.cache.registries` | `[]` | Multi-backend list of `{id, internalAddr, username, password}`. Empty ⇒ single-backend mode. |
-| `supervisor.config.cache.refPerVersion` | `true` | Tag cache refs per engine version. |
+| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The emitted public ref is always `<publicHost>/dagger-cache`, tagged per engine version (`:V<maj>-<min>-<patch>`). |
+| `supervisor.config.cache.registries` | `[]` | Multi-backend list of `{id, internalAddr, username, password, passwordSecret}`. The proxy load-balances least-charged first (registry cache size). Empty ⇒ single-backend mode (the bundled registry at `<release>-registry:5000`). |
 
 When `ingress.enabled`, the chart adds a second Ingress host rule for the cache
-vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts`.
-Override the vhost with `ingress.cacheHost` (empty = derived). The control-plane
+vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts`
+— no need to list the cache host in `ingress.hosts`. Override the vhost with
+`supervisor.config.cache.publicHost` (empty = derived `cache.<control-plane
+host>`; any format works, e.g. `dagger-cache.company.com`). The control-plane
 TLS certificate must include the cache vhost as a SAN.
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a

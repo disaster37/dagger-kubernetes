@@ -111,39 +111,3 @@ func TestPipelineViewURL(t *testing.T) {
 		})
 	}
 }
-
-func TestResolvePipelineBase(t *testing.T) {
-	tests := []struct {
-		name        string
-		publicURL   string
-		pipelineURL string
-		want        string
-	}{
-		{
-			name:        "pipeline url wins",
-			publicURL:   "https://public.example.com",
-			pipelineURL: "https://pipeline.example.com",
-			want:        "https://pipeline.example.com",
-		},
-		{
-			name:        "falls back to public url",
-			publicURL:   "https://public.example.com",
-			pipelineURL: "",
-			want:        "https://public.example.com",
-		},
-		{
-			name:        "both empty",
-			publicURL:   "",
-			pipelineURL: "",
-			want:        "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := ResolvePipelineBase(tt.publicURL, tt.pipelineURL); got != tt.want {
-				t.Fatalf("ResolvePipelineBase(%q, %q) = %q, want %q", tt.publicURL, tt.pipelineURL, got, tt.want)
-			}
-		})
-	}
-}

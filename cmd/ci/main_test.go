@@ -100,44 +100,31 @@ func TestExtractTraceID(t *testing.T) {
 
 func TestResolveUIBase(t *testing.T) {
 	tests := []struct {
-		name              string
-		uiURLFlag         string
-		serverURLFlag     string
-		configPipelineURL string
-		configPublicURL   string
-		want              string
+		name            string
+		uiURLFlag       string
+		serverURLFlag   string
+		configPublicURL string
+		want            string
 	}{
 		{
-			name:              "ui-url flag wins",
-			uiURLFlag:         "https://ui.example.com",
-			serverURLFlag:     "https://server.example.com",
-			configPipelineURL: "https://pipeline.example.com",
-			configPublicURL:   "https://public.example.com",
-			want:              "https://ui.example.com",
+			name:            "ui-url flag wins",
+			uiURLFlag:       "https://ui.example.com",
+			serverURLFlag:   "https://server.example.com",
+			configPublicURL: "https://public.example.com",
+			want:            "https://ui.example.com",
 		},
 		{
-			name:              "config pipeline_url wins over public_url and server",
-			uiURLFlag:         "",
-			serverURLFlag:     "https://server.example.com",
-			configPipelineURL: "https://pipeline.example.com",
-			configPublicURL:   "https://public.example.com",
-			want:              "https://pipeline.example.com",
+			name:            "config public_url wins over server flag",
+			uiURLFlag:       "",
+			serverURLFlag:   "https://server.example.com",
+			configPublicURL: "https://public.example.com",
+			want:            "https://public.example.com",
 		},
 		{
-			name:              "config public_url wins over server flag",
-			uiURLFlag:         "",
-			serverURLFlag:     "https://server.example.com",
-			configPipelineURL: "",
-			configPublicURL:   "https://public.example.com",
-			want:              "https://public.example.com",
-		},
-		{
-			name:              "server flag is last fallback",
-			uiURLFlag:         "",
-			serverURLFlag:     "https://server.example.com",
-			configPipelineURL: "",
-			configPublicURL:   "",
-			want:              "https://server.example.com",
+			name:          "server flag is last fallback",
+			uiURLFlag:     "",
+			serverURLFlag: "https://server.example.com",
+			want:          "https://server.example.com",
 		},
 		{
 			name: "all empty",
@@ -147,7 +134,7 @@ func TestResolveUIBase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := resolveUIBase(tt.uiURLFlag, tt.serverURLFlag, tt.configPipelineURL, tt.configPublicURL); got != tt.want {
+			if got := resolveUIBase(tt.uiURLFlag, tt.serverURLFlag, tt.configPublicURL); got != tt.want {
 				t.Fatalf("resolveUIBase = %q, want %q", got, tt.want)
 			}
 		})

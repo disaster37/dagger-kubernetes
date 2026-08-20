@@ -93,11 +93,8 @@ func run(c *cli.Context) error {
 		"tls_provider": cfg.TLS.Provider,
 	}).Info("dagger-kubernetes supervisor starting")
 
-	// Resolve the pipeline-view base URL (server.pipeline_url, else
-	// server.public_url). config.Load already validated the configured shape,
-	// so the resolved value is a valid absolute http(s) URL.
-	pipelineBase := domain.ResolvePipelineBase(cfg.Server.PublicURL, cfg.Server.PipelineURL)
-
+	// The pipeline-view base URL is server.public_url. config.Load already
+	// validated it as an absolute http(s) URL.
 	cacheHost, cacheBackends, err := validateCacheConfig(cfg)
 	if err != nil {
 		return fmt.Errorf("validate cache config: %w", err)
@@ -280,7 +277,7 @@ func run(c *cli.Context) error {
 		VictoriaURL:  cfg.Telemetry.VictoriaURL,
 		CertPath:     controlTLSCertPath,
 		KeyPath:      controlTLSKeyPath,
-		PipelineURL:  pipelineBase,
+		PipelineURL:  cfg.Server.PublicURL,
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,

@@ -1,3 +1,4 @@
+{{- if .Values.supervisor.enabled }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -39,51 +40,34 @@ spec:
           env:
             - name: DAGGER_KUBERNETES_LOG_LEVEL
               value: {{ .Values.supervisor.config.logLevel | quote }}
-            - name: DAGGER_KUBERNETES_DATABASE_DIR
-              value: {{ .Values.supervisor.config.database.dir | quote }}
             # Stable node ID = StatefulSet pod name (<sts>-<ordinal>), which
-            # matches the DNS peer IDs derived from raft.statefulset_name.
+            # matches the DNS peer IDs derived from the fixed
+            # raft.statefulset_name / headless_service config.
             - name: DAGGER_KUBERNETES_RAFT_NODE_ID
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: DAGGER_KUBERNETES_RAFT_BIND_ADDR
-              value: {{ .Values.supervisor.config.raft.bindAddr | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_ADVERTISE_ADDR
-              value: {{ .Values.supervisor.config.raft.advertiseAddr | quote }}
             - name: DAGGER_KUBERNETES_RAFT_REPLICAS
               value: {{ .Values.supervisor.config.raft.replicas | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_STATEFULSET_NAME
-              value: {{ include "dagger-kubernetes.supervisorStatefulSetName" . | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_HEADLESS_SERVICE
-              value: {{ include "dagger-kubernetes.supervisorHeadlessService" . | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_NAMESPACE
-              value: {{ include "dagger-kubernetes.namespace" . | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_CLUSTER_DOMAIN
-              value: {{ .Values.supervisor.config.raft.clusterDomain | quote }}
             - name: DAGGER_KUBERNETES_RAFT_TLS_ENABLED
               value: {{ .Values.supervisor.config.raft.tls.enabled | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_TLS_CA_SECRET
-              value: {{ include "dagger-kubernetes.supervisorRaftCASecret" . | quote }}
-            - name: DAGGER_KUBERNETES_RAFT_TLS_CA_BOOTSTRAP
-              value: {{ .Values.supervisor.config.raft.tls.caBootstrap | quote }}
             - name: DAGGER_KUBERNETES_RAFT_TLS_CLIENT_AUTH
               value: {{ .Values.supervisor.config.raft.tls.clientAuth | quote }}
-            {{- if .Values.auth.adminPassword }}
+            {{- if .Values.auth.bootstrapAdmin.password }}
             - name: DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dagger-kubernetes.fullname" . }}-admin-password
                   key: password
             {{- end }}
-            {{- if .Values.auth.jwtSecret }}
+            {{- if .Values.auth.jwt.secret }}
             - name: DAGGER_KUBERNETES_AUTH_JWT_SECRET
               valueFrom:
                 secretKeyRef:
                   name: {{ include "dagger-kubernetes.fullname" . }}-jwt
                   key: secret
             {{- end }}
-            {{- if .Values.auth.oauthClientSecret }}
+            {{- if .Values.auth.oauth.clientSecret }}
             - name: DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
@@ -104,10 +88,6 @@ spec:
             - name: config
               mountPath: /etc/dagger-kubernetes/config.app.yaml
               subPath: config.app.yaml
-              readOnly: true
-            - name: tokens
-              mountPath: /etc/dagger-kubernetes/tokens
-              subPath: tokens
               readOnly: true
             - name: tls
               mountPath: /etc/dagger-kubernetes/tls
@@ -143,10 +123,6 @@ spec:
         - name: config
           configMap:
             name: {{ include "dagger-kubernetes.fullname" . }}-config
-        - name: tokens
-          secret:
-            secretName: {{ include "dagger-kubernetes.fullname" . }}-tokens
-            optional: true
         - name: tls
           secret:
             secretName: {{ include "dagger-kubernetes.fullname" . }}-tls
@@ -189,3 +165,4 @@ spec:
         storageClassName: {{ . | quote }}
         {{- end }}
   {{- end }}
+{{- end }}

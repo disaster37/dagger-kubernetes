@@ -1,5 +1,5 @@
 {{- if .Values.ingress.enabled }}
-{{- $cacheHost := trim (.Values.ingress.cacheHost | default (include "dagger-kubernetes.cachePublicHost" .)) }}
+{{- $cacheHost := trim (include "dagger-kubernetes.cachePublicHost" .) }}
 {{- $cacheHostInRules := false }}
 {{- range .Values.ingress.hosts }}
 {{- if eq .host $cacheHost }}

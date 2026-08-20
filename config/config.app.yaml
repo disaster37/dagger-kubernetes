@@ -15,8 +15,7 @@ server:
   control_addr: ":8080"        # Hertz control API (TLS enabled when cert/key configured)
   data_addr: ":8443"            # mTLS L4 data-plane proxy
   data_hostname: "data.supv.example.com"
-  public_url: "https://supv.example.com"
-  pipeline_url: ""            # Optional base for pipeline-view links (e.g. https://dagger-kubernetes.example.com). Empty => use public_url.
+  public_url: "https://supv.example.com"  # Public base URL (control plane + API + UI; also the pipeline-view link base).
 
 # --- Authentication ----------------------------------------------------------
 auth:

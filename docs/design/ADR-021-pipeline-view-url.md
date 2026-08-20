@@ -1,6 +1,6 @@
 # ADR-021: Self-hosted pipeline view URL (replace dagger.cloud in client output)
 
-- **Status:** accepted
+- **Status:** accepted (amended 2026-08-20: `server.pipeline_url` removed)
 - **Date:** 2026-08-19
 - **Deciders:** dagger-kubernetes maintainers
 
@@ -43,9 +43,9 @@ endpoint**, with a single shared helper for URL construction.
 ### 1. Wrapper (`dagger-kubernetes-ci`) — correct path + config-driven base
 
 - Use the canonical UI path `/pipelines/<traceID>`.
-- Derive the URL base with precedence `--ui-url` > `server.pipeline_url`
-  (config) > `server.public_url` (config) > `--server`. `--ui-url`/`--server`
-  remain as backward-compatible overrides.
+- Derive the URL base with precedence `--ui-url` > `server.public_url`
+  (config) > `--server`. `--ui-url`/`--server` remain as backward-compatible
+  overrides.
 - Add a `--config` flag (default `config.app.yaml`) and load config via
   `config.Load` (which already skips a missing file).
 
@@ -68,28 +68,31 @@ the UI and clients fetching the full tree get the URL for free (best-effort; a
 misconfigured base logs a WARN and omits the field rather than failing the
 request).
 
-### 4. Config key
+### 4. Config key — amended 2026-08-20
 
-New optional `server.pipeline_url` (default `""` = fall back to
+~~New optional `server.pipeline_url` (default `""` = fall back to
 `server.public_url`), narrowly scoped to "the base URL used to build
-pipeline-view links". This deliberately does **not** reintroduce the dropped
-`server.ui_url`; the UI is still served from the control plane.
+pipeline-view links".~~ **Removed**: the base is always `server.public_url`.
+A separate pipeline URL was unnecessary — the UI, API and pipeline views are
+all served from the same control-plane host, and links always open the same
+authenticated UI. The CI wrapper's `--ui-url` flag remains the only override
+(for CI environments where the printed link must use a different host than
+the API endpoint).
 
 ### 5. Centralized helper
 
 `internal/domain/pipeline_url.go` (stdlib only) is the single source of truth:
 
 - `PipelineViewURL(base, traceID) (string, error)`
-- `ResolvePipelineBase(publicURL, pipelineURL) string`
 
-`config.Load` validates the resolved base via `validateServerConfig` (fails
+`config.Load` validates `server.public_url` via `validateServerConfig` (fails
 fast at startup when it is not an absolute http(s) URL with a host). The
 handler and the wrapper both rely on `PipelineViewURL` (defense-in-depth).
 
 ## URL construction rules
 
 - Path template: `<scheme>://<host>/pipelines/<traceID>` (matches the UI route).
-- `base` = `server.pipeline_url` if non-empty, else `server.public_url`.
+- `base` = `server.public_url`.
 - Only the scheme + host are taken from `base`; any path/query/fragment is
   dropped — links stay stable behind proxies/TLS-terminating ingresses.
 - `traceID` must match `^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$` (mirrors
@@ -114,6 +117,5 @@ handler and the wrapper both rely on `PipelineViewURL` (defense-in-depth).
 - Switching `/traces/<id>` → `/pipelines/<id>` is a behavior change; any
   consumer that string-matched the old (broken) path needs updating. Low risk:
   the old path 404'd in the UI.
-- `server.public_url` must remain set (or `server.pipeline_url` must be set):
-  the supervisor refuses to start otherwise, since it cannot derive a
-  pipeline-view URL.
+- `server.public_url` must remain set: the supervisor refuses to start
+  otherwise, since it cannot derive a pipeline-view URL.

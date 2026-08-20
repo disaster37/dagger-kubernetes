@@ -25,7 +25,6 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("server.data_addr", ":8443")
 	v.SetDefault("server.data_hostname", "data.supv.example.com")
 	v.SetDefault("server.public_url", "https://supv.example.com")
-	v.SetDefault("server.pipeline_url", "")
 
 	v.SetDefault("auth.internal.enabled", true)
 	v.SetDefault("auth.internal.tokens_file", "/etc/dagger-kubernetes/tokens")
@@ -96,7 +95,6 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cache.registries", []domain.RegistryBackend{})
 	v.SetDefault("cache.s3.bucket", "")
 	v.SetDefault("cache.s3.region", "")
-	v.SetDefault("cache.ref_per_version", true)
 
 	v.SetDefault("cache.gc.enabled", false)
 	v.SetDefault("cache.gc.max_age", "168h") // 7d
@@ -189,16 +187,16 @@ func Load(configFile string) (*domain.Config, error) {
 	return &cfg, nil
 }
 
-// validateServerConfig ensures the resolved pipeline-view base URL is an
-// absolute http(s) URL with a host (validated via PipelineViewURL with a
-// placeholder trace ID). Fails fast at startup when it is not.
+// validateServerConfig ensures server.public_url is an absolute http(s) URL
+// with a host (validated via PipelineViewURL with a placeholder trace ID),
+// since it doubles as the pipeline-view base URL. Fails fast at startup when
+// it is not.
 func validateServerConfig(cfg *domain.Config) error {
-	base := domain.ResolvePipelineBase(cfg.Server.PublicURL, cfg.Server.PipelineURL)
-	if base == "" {
+	if cfg.Server.PublicURL == "" {
 		return fmt.Errorf("server.public_url must be set so a pipeline view URL can be derived")
 	}
-	if _, err := domain.PipelineViewURL(base, "traceid-placeholder"); err != nil {
-		return fmt.Errorf("server.pipeline_url/public_url: %w", err)
+	if _, err := domain.PipelineViewURL(cfg.Server.PublicURL, "traceid-placeholder"); err != nil {
+		return fmt.Errorf("server.public_url: %w", err)
 	}
 	return nil
 }

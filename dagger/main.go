@@ -38,14 +38,15 @@ var binaries = []struct {
 // helmTemplateMatrix lists the --set combinations from the original CI.
 var helmTemplateMatrix = [][]string{
 	{},
-	{"--set", "tools.otelCollector.enabled=false", "--set", "tools.registry.enabled=false"},
+	{"--set", "supervisor.enabled=false"},
+	{"--set", "opentelemetry-collector.enabled=false", "--set", "registry.enabled=false"},
 	{
-		"--set", "tools.otelCollector.enabled=false",
-		"--set", "tools.registry.enabled=false",
-		"--set", "tools.tempo.enabled=false",
-		"--set", "tools.loki.enabled=false",
-		"--set", "tools.victoria.enabled=false",
-		"--set", "tools.grafana.enabled=false",
+		"--set", "opentelemetry-collector.enabled=false",
+		"--set", "registry.enabled=false",
+		"--set", "tempo.enabled=false",
+		"--set", "loki.enabled=false",
+		"--set", "victoria.enabled=false",
+		"--set", "grafana.enabled=false",
 	},
 }
 

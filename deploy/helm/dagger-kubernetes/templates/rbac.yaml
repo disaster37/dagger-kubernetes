@@ -1,3 +1,4 @@
+{{- if .Values.supervisor.enabled }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -72,3 +73,4 @@ subjects:
   - kind: ServiceAccount
     name: {{ include "dagger-kubernetes.fullname" . }}
     namespace: {{ include "dagger-kubernetes.namespace" . }}
+{{- end }}

@@ -42,13 +42,3 @@ func PipelineViewURL(base, traceID string) (string, error) {
 	}
 	return fmt.Sprintf("%s://%s%s%s", u.Scheme, u.Host, pipelineViewPath, traceID), nil
 }
-
-// ResolvePipelineBase returns the effective pipeline-view base URL:
-// pipelineURL when non-empty, else publicURL. Used by config-load validation
-// and the CI wrapper.
-func ResolvePipelineBase(publicURL, pipelineURL string) string {
-	if pipelineURL != "" {
-		return pipelineURL
-	}
-	return publicURL
-}

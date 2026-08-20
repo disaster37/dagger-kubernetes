@@ -7,7 +7,6 @@
 # Every value can also be set via an environment variable using the
 # DAGGER_KUBERNETES_ prefix (dots -> underscores, uppercase). Examples:
 #   server.public_url        -> DAGGER_KUBERNETES_SERVER_PUBLIC_URL
-#   server.pipeline_url      -> DAGGER_KUBERNETES_SERVER_PIPELINE_URL
 #   cache.registry           -> DAGGER_KUBERNETES_CACHE_REGISTRY
 #   fleet.max_replicas_per_version -> DAGGER_KUBERNETES_FLEET_MAX_REPLICAS_PER_VERSION
 # Environment variables take precedence over this file.
@@ -25,8 +24,7 @@ server:
   control_addr: ":8080"        # Address the Hertz control API listens on (TLS enabled when cert/key configured).
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
-  public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI).
-  pipeline_url: ""  # Optional base URL for pipeline-view links printed by the dagger-kubernetes-ci wrapper and returned by GET /api/v1/traces/:id/url. Empty => fall back to public_url. Must be an absolute http(s) URL when set.
+  public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI and is the base for pipeline-view links: /pipelines/<traceID>).
 
 # --- Authentication ----------------------------------------------------------
 auth:
@@ -150,13 +148,13 @@ telemetry:
 # --- Remote shared cache -----------------------------------------------------
 cache:
   backend: "registry"               # "registry" (OCI) or "s3".
-  registry: "cache.reg/dagger-cache" # legacy single-registry ref (used when registries: [] is empty).
+  registry: "cache.reg/dagger-cache" # single-registry ref emitted to clients (host/repo); the emitted ref is always tagged per engine version (:V<major>-<minor>-<patch>).
   public_host: ""                   # dedicated cache vhost engines push/pull through (Supervisor proxy).
                                     # Defaults to cache.<server.public_url host>. Must differ from the control-plane host.
-  internal_addr: ""                 # legacy single backend address (used when registries: [] is empty).
+  internal_addr: ""                 # single backend address (host[:port], no scheme) used when registries: [] is empty.
   auth_token: ""                    # bearer the Supervisor accepts from engines on the cache proxy.
                                     # Empty = read from the engine-registry-auth K8s secret (key "token"). Never set here in production. Never logged.
-  registries: []                    # multi-backend list for load balancing. Empty = single-backend mode (legacy).
+  registries: []                    # multi-backend list for load balancing (least-charged first, by registry cache size). Empty = single-backend mode.
     # - id: "reg-1"
     #   internal_addr: "registry-1:5000"
     #   username: ""
@@ -174,7 +172,6 @@ cache:
   s3:                                # used only when backend == "s3".
     bucket: ""
     region: ""
-  ref_per_version: true              # tag cache refs per engine version (V<major>-<minor>-<patch>).
   gc:                                # auto-clean (GC) sweeper for cache blobs (see ADR-012).
     enabled: false                   # master switch; disabled by default.
     max_age: "168h"                  # purge tags whose manifest is older than this (7d).

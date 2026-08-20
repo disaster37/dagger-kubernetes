@@ -19,26 +19,26 @@ dependencies:
   - name: opentelemetry-collector
     version: "0.108.0"
     repository: https://open-telemetry.github.io/opentelemetry-helm-charts
-    condition: tools.otelCollector.enabled
+    condition: opentelemetry-collector.enabled
   - name: docker-registry
     alias: registry
     version: "1.9.6"
     repository: https://charts.helm.sh/stable
-    condition: tools.registry.enabled
+    condition: registry.enabled
   - name: tempo
     version: "1.24.4"
     repository: https://grafana.github.io/helm-charts
-    condition: tools.tempo.enabled
+    condition: tempo.enabled
   - name: loki
     version: "7.2.0"
     repository: https://grafana.github.io/helm-charts
-    condition: tools.loki.enabled
+    condition: loki.enabled
   - name: victoria-metrics-single
     alias: victoria
     version: "0.44.0"
     repository: https://victoriametrics.github.io/helm-charts/
-    condition: tools.victoria.enabled
+    condition: victoria.enabled
   - name: grafana
     version: "10.5.15"
     repository: https://grafana.github.io/helm-charts
-    condition: tools.grafana.enabled
+    condition: grafana.enabled

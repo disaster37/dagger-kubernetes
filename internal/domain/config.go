@@ -27,7 +27,6 @@ type ServerConfig struct {
 	DataAddr    string `mapstructure:"data_addr"`
 	DataHost    string `mapstructure:"data_hostname"`
 	PublicURL   string `mapstructure:"public_url"`
-	PipelineURL string `mapstructure:"pipeline_url"` // base for pipeline-view links; "" => fall back to PublicURL
 }
 
 type AuthConfig struct {
@@ -175,15 +174,14 @@ type SecretRef struct {
 }
 
 type CacheConfig struct {
-	Backend       string            `mapstructure:"backend"`       // "registry" | "s3"
-	Registry      string            `mapstructure:"registry"`      // legacy single ref "host/repo"
-	PublicHost    string            `mapstructure:"public_host"`   // dedicated cache vhost
-	InternalAddr  string            `mapstructure:"internal_addr"` // legacy single backend addr
-	AuthToken     string            `mapstructure:"auth_token"`    // engine→proxy bearer
-	Registries    []RegistryBackend `mapstructure:"registries"`    // multi-backend list
-	S3            S3Config          `mapstructure:"s3"`
-	RefPerVersion bool              `mapstructure:"ref_per_version"`
-	GC            GCConfig          `mapstructure:"gc"`
+	Backend      string            `mapstructure:"backend"`       // "registry" | "s3"
+	Registry     string            `mapstructure:"registry"`      // legacy single ref "host/repo"
+	PublicHost   string            `mapstructure:"public_host"`   // dedicated cache vhost
+	InternalAddr string            `mapstructure:"internal_addr"` // legacy single backend addr
+	AuthToken    string            `mapstructure:"auth_token"`    // engine→proxy bearer
+	Registries   []RegistryBackend `mapstructure:"registries"`    // multi-backend list
+	S3           S3Config          `mapstructure:"s3"`
+	GC           GCConfig          `mapstructure:"gc"`
 }
 
 type S3Config struct {

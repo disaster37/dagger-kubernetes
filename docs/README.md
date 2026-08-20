@@ -88,16 +88,18 @@ you no longer need to generate certificates by hand (see
 [TLS & client certificates](#tls--client-certificates)).
 
 ```bash
-# 1. Create a values override
+# 1. Create a values override. UI and data-plane URLs are computed
+#    automatically from the exposition (ingress / services).
 cat > my-values.yaml <<'EOF'
 ingress:
   hosts:
     - supv.example.com
-supervisor:
-  config:
-    server:
-      dataHostname: data.your-domain.com
-      publicUrl: https://supv.example.com
+  tls:
+    - hosts: [supv.example.com]
+      secretName: my-tls-secret
+dataIngress:
+  enabled: true
+  host: data.supv.example.com
 EOF
 
 # 2. Install from the GHCR OCI repository. No certificate generation needed:
@@ -107,11 +109,11 @@ helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
   -f my-values.yaml \
   --namespace dagger-stack --create-namespace
 
-# 3. Create an API token from the UI (Settings page) or import a legacy token:
-TOKEN=$(openssl rand -hex 32)
+# 3. Create an API token from the UI (Settings page), or pre-seed the
+#    bootstrap admin password:
 helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
-  --set-string "auth.tokens[0]=$TOKEN"
+  --set auth.bootstrapAdmin.password="change-me"
 ```
 
 > **Public certificates via cert-manager (optional):** the default `embedded`
@@ -147,21 +149,32 @@ The Helm chart deploys:
 - **Grafana** — dashboards with auto-provisioned datasources
 - **OCI Registry** — remote shared cache backend
 
-Every tool is toggleable individually (`tools.<name>.enabled: false`). When
-disabled, you provide your own endpoint in `supervisor.config.telemetry` and
-`supervisor.config.cache`.
+Every tool is toggleable with its own `enabled` flag (e.g.
+`grafana.enabled: false`). When disabled, you provide your own endpoint in
+`supervisor.config.telemetry` and `supervisor.config.cache`. The supervisor
+itself is toggled with `supervisor.enabled`.
+
+The chart never asks for URLs: `server.public_url` (UI + API) and
+`server.data_hostname` (engine data plane) are computed from the exposition
+(ingress host + TLS presence, `dataIngress.host`, LoadBalancer/NodePort
+`service.*.host`, or the internal `<release>-*.<namespace>.svc` URLs).
 
 The chart also wires the **cache vhost**: when `ingress.enabled`, the Ingress
-adds a host rule for `supervisor.config.cache.publicHost` (or the derived
-`cache.<server.publicUrl host>`, overridable via `ingress.cacheHost`) routing
-to the `-control` Service, and appends it to `ingress.tls[].hosts`. Set
-`supervisor.config.cache.authToken` (or leave it empty to read the
-`engine-registry-auth` Secret key `token`); the same token is injected into
+automatically adds a host rule for the cache vhost (derived
+`cache.<control-plane host>`, or any explicit name via
+`supervisor.config.cache.publicHost` — no need to list it in `ingress.hosts`)
+routing to the `-control` Service, and appends it to `ingress.tls[].hosts`.
+The cache host DNS must resolve to the same ingress IP. Note the derived
+`cache.<host>` is a second-level subdomain, which a single-level wildcard
+certificate (`*.company.com`) does not cover — set `publicHost` to a
+one-level name (`dagger-cache.company.com`) in that case. The
+engine→proxy bearer is read from the `engine-registry-auth` Secret key
+`token` (set via `supervisor.config.cache.authToken`); the same token is injected into
 engine pods as `DAGGER_KUBERNETES_TOKEN`. The control-plane TLS certificate must
 include the cache vhost as a SAN — the `embedded` provider adds it
-automatically; when using cert-manager, include `cache.<host>` in the
-certificate's `dnsNames`. For multiple backend registries, set
-`supervisor.config.cache.registries` (list of
+automatically; when using cert-manager, include the cache host in the
+certificate's `dnsNames` or use a wildcard certificate. For multiple backend
+registries, set `supervisor.config.cache.registries` (list of
 `{id, internalAddr, username, password}`).
 
 See [`deploy/helm/dagger-kubernetes/README.md`](../deploy/helm/dagger-kubernetes/README.md)
@@ -181,7 +194,7 @@ export _EXPERIMENTAL_DAGGER_TAG=v0.21.4
 
 # Remote shared cache ref. The Supervisor rewrites the ref to its dedicated
 # cache vhost (cache.public_host), so the CLI/engine never talks to the raw
-# registry. With ref_per_version=true the tag is per version (V0-21-4 here).
+# registry. Refs are always tagged per engine version (V0-21-4 here).
 export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=cache.supv.example.com/dagger-cache:V0-21-4,mode=max"
 
 dagger call github.com/your-org/ci@v1.0.0 build
@@ -316,7 +329,6 @@ variables **take precedence** over the file. Examples:
 | YAML key                         | Environment variable                               |
 | -------------------------------- | -------------------------------------------------- |
 | `server.public_url`              | `DAGGER_KUBERNETES_SERVER_PUBLIC_URL`              |
-| `server.pipeline_url`            | `DAGGER_KUBERNETES_SERVER_PIPELINE_URL`            |
 | `cache.registry`                 | `DAGGER_KUBERNETES_CACHE_REGISTRY`                 |
 | `fleet.max_replicas_per_version` | `DAGGER_KUBERNETES_FLEET_MAX_REPLICAS_PER_VERSION` |
 | `auth.jwt.secret`                | `DAGGER_KUBERNETES_AUTH_JWT_SECRET`                |
@@ -351,8 +363,7 @@ inline comments. The sections below summarise the most important ones.
 | `server`        | `control_addr`                            | `:8080`                                                  | Hertz control API (TLS when cert/key configured).                                                                                             |
 |                 | `data_addr`                               | `:8443`                                                  | mTLS L4 data proxy.                                                                                                                           |
 |                 | `data_hostname`                           | `data.supv.example.com`                                  | Public data-plane hostname.                                                                                                                   |
-|                 | `public_url`                              | `https://supv.example.com`                               | Public control/UI URL.                                                                                                                        |
-|                 | `pipeline_url`                            | `""` (falls back to `public_url`)                        | Base URL for pipeline-view links (absolute http(s)); only scheme + host are used.                                                             |
+|                 | `public_url`                              | `https://supv.example.com`                               | Public control/UI URL; also the base for pipeline-view links (`/pipelines/<traceID>`).                                                        |
 | `auth.internal` | `enabled`                                 | `true`                                                   | Username/password + legacy-token auth. `false` = OAuth-only (requires `auth.oauth` fully configured); auth is always enforced.                |
 |                 | `tokens_file`                             | `/etc/dagger-kubernetes/tokens`                          | One token per line.                                                                                                                           |
 | `auth.oauth`    | `enabled`                                 | `false`                                                  | OAuth for UI login. Single active provider.                                                                                                   |
@@ -393,14 +404,13 @@ inline comments. The sections below summarise the most important ones.
 | `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP.                                                                                                                                    |
 |                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm).                                                                                                      |
 | `cache`         | `backend`                                 | `registry`                                               | `registry` (OCI) or `s3`.                                                                                                                     |
-|                 | `registry`                                | `cache.reg/dagger-cache`                                 | OCI repository (legacy single-backend mode).                                                                                                  |
-|                 | `internal_addr`                           | `""`                                                     | Legacy single backend address (used when `registries` empty).                                                                                 |
+|                 | `registry`                                | `cache.reg/dagger-cache`                                 | OCI repository emitted to clients (single-backend mode); always tagged per engine version `:V<maj>-<min>-<patch>`.                            |
+|                 | `internal_addr`                           | `""`                                                     | Single backend address (used when `registries` empty).                                                                                        |
 |                 | `public_host`                             | `cache.<public_url host>`                                | Dedicated cache vhost (Supervisor proxy).                                                                                                     |
 |                 | `auth_token`                              | `""`                                                     | Engine→proxy bearer; empty reads `engine-registry-auth` secret.                                                                               |
-|                 | `registries`                              | `[]`                                                     | Multi-backend list for load balancing.                                                                                                        |
+|                 | `registries`                              | `[]`                                                     | Multi-backend list; the proxy load-balances least-charged first (registry cache size).                                                       |
 |                 | `registries[].password_secret`            | —                                                        | `{name, key}` K8s-Secret ref for a backend password (env can't bind slice elements).                                                          |
 |                 | `s3.bucket` / `s3.region`                 | —                                                        | Used only when `backend=s3`.                                                                                                                  |
-|                 | `ref_per_version`                         | `true`                                                   | Tag cache refs `:V<maj>-<min>-<patch>`.                                                                                                       |
 |                 | `gc.enabled`                              | `false`                                                  | Master switch for the cache auto-clean sweeper.                                                                                               |
 |                 | `gc.max_age`                              | `168h`                                                   | Purge tags older than this (7d).                                                                                                              |
 |                 | `gc.schedule`                             | `1h`                                                     | Sweeper ticker interval.                                                                                                                      |
@@ -568,7 +578,7 @@ In single-backend mode (the default), the Supervisor proxies to
 `cache.internal_addr` is empty). With `cache.registries[]` configured, it
 load-balances across all of them instead.
 
-With `cache.ref_per_version: true` (default), the wrapper script
+Refs are always tagged per engine version: the wrapper script
 automatically derives the `:V<maj>-<min>-<patch>` tag from
 `_EXPERIMENTAL_DAGGER_TAG`, giving each engine version its own cache
 namespace and avoiding cross-version cache poisoning.
@@ -1050,7 +1060,7 @@ EOF
 # 2. Install with the cert-manager provider
 helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
-  --set supervisor.config.tls.provider=cert-manager \
+  --set tls.provider=cert-manager \
   --set dataIngress.enabled=true \
   --set dataIngress.host=data.your-domain.com \
   --set dataIngress.annotations.cert-manager.io/cluster-issuer=letsencrypt-prod \
@@ -1063,12 +1073,12 @@ to the mounted Secret (`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`).
 The `dataIngress` (nginx `ssl-passthrough`) forwards the raw mTLS handshake to
 the supervisor, which serves the cert-manager certificate.
 
-> The certificate must include the **cache vhost** (`cache.<public_url host>`)
-> as a SAN alongside the data host, because the cache proxy shares the
-> control-plane TLS listener. Add both to the `Certificate` `dnsNames` (the
-> chart's `dataCert` template only adds `dataIngress.host`; include the cache
-> host via a custom `Certificate` or set `ingress.cacheHost` and add it to the
-> issuer's request).
+> The certificate must include the **cache vhost** (`cache.<public_url host>`,
+> or the `supervisor.config.cache.publicHost` override) as a SAN alongside the
+> data host, because the cache proxy shares the control-plane TLS listener.
+> Add both to the `Certificate` `dnsNames` (the chart's `dataCert` template
+> only adds `dataIngress.host`; include the cache host via a custom
+> `Certificate`).
 
 For local dev (Docker compose) mTLS is relaxed; in Kubernetes the minting CA
 and Raft CA are auto-bootstrapped, and the server cert is either auto-issued
@@ -1213,7 +1223,7 @@ endpoint instead:
 - **`dagger-kubernetes-ci` wrapper** (`cmd/ci`) wraps `dagger`, extracts the trace
   ID from its stderr, and prints `Pipeline View: <base>/pipelines/<id>` (the
   canonical UI route). The base is resolved with precedence `--ui-url` >
-  `server.pipeline_url` (config) > `server.public_url` (config) > `--server`.
+  `server.public_url` (config) > `--server`.
 - **`GET /api/v1/traces/:id/url`** returns
   `{"trace_id":"<id>","url":"<base>/pipelines/<id>"}`, auth-gated by the same
   visibility rules as the trace detail endpoint (owner/member/admin; unknown
@@ -1221,21 +1231,16 @@ endpoint instead:
   self-hosted URL without parsing CLI output. The same URL is also returned as
   the `url` field of `GET /api/v1/traces/:id`.
 
-The base URL is `server.pipeline_url` when set, otherwise `server.public_url`.
-It must be an absolute `http(s)` URL; only its scheme + host are used (the
-path `/pipelines/<id>` is fixed, and any path/query/fragment on the configured
-base is dropped, so links stay stable behind proxies and TLS-terminating
-ingresses). Set it explicitly to point pipeline-view links at a different
-public host than the control plane:
+The base URL is always `server.public_url`. It must be an absolute `http(s)`
+URL; only its scheme + host are used (the path `/pipelines/<id>` is fixed,
+and any path/query/fragment on the configured base is dropped, so links stay
+stable behind proxies and TLS-terminating ingresses). Pipeline-view links
+therefore point at the same host as the control plane, UI and API — the
+`--ui-url` flag of the CI wrapper is the only override (for CI environments
+where the printed link must use a different host than the API endpoint).
 
-```yaml
-server:
-  public_url: "https://supv.example.com"            # control plane + API + UI
-  pipeline_url: "https://dagger.supv.example.com"   # optional; pipeline-view links only
-```
-
-If `server.public_url` is also empty, the supervisor refuses to start (it
-cannot derive a pipeline-view URL). See
+If `server.public_url` is empty, the supervisor refuses to start (it cannot
+derive a pipeline-view URL). See
 [ADR-021](design/ADR-021-pipeline-view-url.md).
 
 ---

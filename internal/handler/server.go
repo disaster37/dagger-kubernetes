@@ -245,7 +245,7 @@ type ServerConfig struct {
 	VictoriaURL  string
 	CertPath     string
 	KeyPath      string
-	PipelineURL  string // resolved base for pipeline-view links (absolute http(s) URL)
+	PipelineURL  string // base for pipeline-view links (= server.public_url, absolute http(s))
 }
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.

@@ -14,11 +14,13 @@ namespace: ""
 
 ## @section Supervisor (control-plane pod)
 
+## @param supervisor.enabled Enable the supervisor (control plane + data plane) and its resources.
 ## @param supervisor.image.repository Supervisor container image repository.
 ## @param supervisor.image.tag Image tag (empty defaults to Chart.appVersion).
 ## @param supervisor.image.pullPolicy Image pull policy.
 ## @param supervisor.image.pullSecrets [array] Image pull secrets for private registries.
 supervisor:
+  enabled: true
   image:
     repository: ghcr.io/disaster37/dagger-kubernetes
     tag: ""
@@ -92,142 +94,56 @@ supervisor:
 
 ## @section Supervisor configuration
 
-## @param supervisor.config.server.dataHostname Data-plane hostname for engine fleets.
-## @param supervisor.config.server.publicUrl Public URL of the supervisor.
-## @param supervisor.config.server.pipelineUrl Optional base URL for pipeline-view links (empty = use publicUrl). Must be absolute http(s) when set.
-  config:
-    server:
-      dataHostname: "data.supv.example.com"
-      publicUrl: "https://supv.example.com"
-      pipelineUrl: ""
-## @param supervisor.config.database.dir Raft data directory (raft.db, snapshots/, node-id). Fresh-start store; no migration from legacy SQLite.
-    database:
-      dir: "/var/lib/dagger-kubernetes"
-## @param supervisor.config.raft.nodeId Raft node ID ("" = derive from the StatefulSet pod name).
-## @param supervisor.config.raft.bindAddr Dedicated Raft transport bind address.
-## @param supervisor.config.raft.advertiseAddr Routable advertise host:port ("" = derive from <hostname>.<headless_service>.<namespace>.svc.<cluster_domain>).
-## @param supervisor.config.raft.peers [array] Explicit Raft voter override (empty = DNS discovery from the StatefulSet). Each entry is {id, address}.
-## @param supervisor.config.raft.replicas Voter count for DNS peer discovery. Keep in sync with supervisor.replicaCount.
-## @param supervisor.config.raft.statefulsetName StatefulSet name for DNS discovery ("" = the chart's StatefulSet name).
-## @param supervisor.config.raft.headlessService Headless Service name for stable pod DNS ("" = <release>-headless).
-## @param supervisor.config.raft.namespace K8s namespace for pod DNS ("" = release namespace).
-## @param supervisor.config.raft.clusterDomain K8s cluster DNS suffix.
-## @param supervisor.config.raft.applyTimeout Raft apply timeout.
-## @param supervisor.config.raft.leaderWaitTimeout Startup wait for Raft leadership.
-## @param supervisor.config.raft.snapshotThreshold Raft snapshot log threshold.
-## @param supervisor.config.raft.snapshotInterval Raft snapshot interval.
-## @param supervisor.config.raft.trailingLogs Raft trailing logs after snapshot.
-## @param supervisor.config.raft.tls.enabled Enable mTLS for the Raft transport (recommended for multi-node).
-## @param supervisor.config.raft.tls.dir Directory for the internal raft CA + per-pod leaf cert ("" = <database.dir>/tls).
-## @param supervisor.config.raft.tls.validity Leaf cert TTL.
-## @param supervisor.config.raft.tls.organization Organization in the internal CA/leaf subjects.
-## @param supervisor.config.raft.tls.caCert Manual mode: path to a pre-provisioned CA cert PEM.
-## @param supervisor.config.raft.tls.cert Manual mode: path to a pre-provisioned leaf cert PEM.
-## @param supervisor.config.raft.tls.key Manual mode: path to a pre-provisioned leaf key PEM.
-## @param supervisor.config.raft.tls.caSecret K8s Secret name for sharing the internal raft CA ("" = <release>-raft-ca).
-##   SECURITY: this Secret holds the raft CA PRIVATE KEY (any pod may issue peer certs) and the
-##   <release>-minting-ca Secret holds the engine-client minting CA private key. Both are written
-##   by the supervisor ServiceAccount; the RBAC in rbac.yaml already restricts `secrets` to the
-##   release namespace, so do NOT broaden it or grant other workloads access to these Secrets.
-## @param supervisor.config.raft.tls.caBootstrap Force this node to generate + write the CA Secret (auto-detects ordinal 0 otherwise).
+## @descriptionStart
+## URLs are NOT asked — they are computed from the exposition:
+## - `server.public_url` (UI + API): `https://<ingress host>` when the ingress
+##   has TLS, `http://<ingress host>` without TLS; `<service.control.host>`
+##   for LoadBalancer/NodePort; else the internal
+##   `https://<release>-control.<namespace>.svc:<port>`.
+## - `server.data_hostname` (engine data plane): `<dataIngress.host>` when the
+##   data ingress is enabled, `<service.data.host>` for LoadBalancer/NodePort,
+##   else `<release>-data.<namespace>.svc:<port>`.
+## - `server.pipeline_url` is dropped: pipeline-view links use the same URL as
+##   the UI.
+## Container paths/ports are fixed (control :8080, data :8443, raft :8081,
+## data dir /var/lib/dagger-kubernetes); only the Service ports are
+## configurable.
+## @descriptionEnd
+
+## @param supervisor.config.raft.replicas Raft voter count for DNS peer discovery. Keep in sync with supervisor.replicaCount.
+## @param supervisor.config.raft.tls.enabled Enable mTLS for the Raft transport.
 ## @param supervisor.config.raft.tls.clientAuth Require and verify peer client certs (mTLS).
+##   Everything else is derived automatically: node IDs come from the
+##   StatefulSet pod names, peer discovery from the headless Service DNS, and
+##   the internal CA is auto-bootstrapped in the <release>-raft-ca Secret.
+  config:
     raft:
-      nodeId: ""
-      bindAddr: ":8081"
-      advertiseAddr: ""
-      peers: []
       replicas: 3
-      statefulsetName: ""
-      headlessService: ""
-      namespace: ""
-      clusterDomain: "cluster.local"
-      applyTimeout: "5s"
-      leaderWaitTimeout: "30s"
-      snapshotThreshold: 1000
-      snapshotInterval: "10m"
-      trailingLogs: 256
       tls:
         enabled: true
-        dir: ""
-        validity: "8760h"
-        organization: "dagger-kubernetes-raft"
-        caCert: ""
-        cert: ""
-        key: ""
-        caSecret: ""
-        caBootstrap: false
         clientAuth: true
-## @param supervisor.config.auth.internal.enabled Enable internal token authentication.
-## @param supervisor.config.auth.internal.tokensFile Path to the static tokens file.
-## @param supervisor.config.auth.bootstrapAdmin.username Bootstrap admin username.
-## @param supervisor.config.auth.bootstrapAdmin.password Bootstrap admin password (empty = random password logged once at first boot). The Helm chart ignores this key; set `auth.adminPassword` (rendered into the `<release>-admin-password` Secret) instead.
-## @param supervisor.config.auth.jwt.secret JWT signing secret (empty = auto-generated and persisted in DB). The Helm chart ignores this key; set `auth.jwtSecret` (rendered into the `<release>-jwt` Secret, injected as `DAGGER_KUBERNETES_AUTH_JWT_SECRET`) instead.
-## @param supervisor.config.auth.jwt.accessTtl JWT access token TTL.
-## @param supervisor.config.auth.jwt.refreshTtl JWT refresh token TTL.
-## @param supervisor.config.auth.oauth.enabled Enable OAuth2 authentication.
-## @param supervisor.config.auth.oauth.provider OAuth2 provider (e.g. github).
-## @param supervisor.config.auth.oauth.clientId OAuth2 client ID.
-## @param supervisor.config.auth.oauth.clientSecret OAuth2 client secret. The Helm chart ignores this key; set `auth.oauthClientSecret` (rendered into the `<release>-oauth` Secret, injected as `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`) instead.
-## @param supervisor.config.auth.oauth.redirectUrl OAuth2 redirect URL.
-## @param supervisor.config.auth.oauth.allowedOrgs [array] Allowed OAuth organizations.
-## @param supervisor.config.auth.oauth.defaultGroup Default group for OAuth users.
-    auth:
-      internal:
-        enabled: true
-        tokensFile: "/etc/dagger-kubernetes/tokens"
-      bootstrapAdmin:
-        username: "admin"
-        password: ""
-      jwt:
-        secret: ""
-        accessTtl: "15m"
-        refreshTtl: "168h"
-      oauth:
-        enabled: false
-        provider: "github"
-        clientId: "${OAUTH_CLIENT_ID}"
-        clientSecret: ""
-        redirectUrl: "https://supv.example.com/api/v1/auth/oauth/github/callback"
-        allowedOrgs: ["acme"]
-        defaultGroup: ""
-## @param supervisor.config.auth.cookie.accessName Access-JWT session cookie name (httpOnly).
-## @param supervisor.config.auth.cookie.refreshName Refresh-JWT session cookie name (httpOnly).
-## @param supervisor.config.auth.cookie.secure Force the Secure flag on session cookies (set true when TLS terminates at an ingress in front of the supervisor).
-## @param supervisor.config.auth.cors.allowedOrigins [array] Exact-match Origin allowlist for cross-origin API access (empty = same-origin only, no ACAO header).
-      cookie:
-        accessName: "dagger_kubernetes_access"
-        refreshName: "dagger_kubernetes_refresh"
-        secure: false
-      cors:
-        allowedOrigins: []
-## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired when otelCollector enabled).
-## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries.
-## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries.
-## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries.
+## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled).
+## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries (auto-wired when the tempo subchart is enabled).
+## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries (auto-wired when the loki subchart is enabled).
+## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries (auto-wired when the victoria subchart is enabled).
     telemetry:
       collectorUrl: ""
-      tempoUrl: "http://tempo:3200"
-      lokiUrl: "http://loki:3100"
-      victoriaUrl: "http://victoria:8428"
+      tempoUrl: ""
+      lokiUrl: ""
+      victoriaUrl: ""
 ## @param supervisor.config.cache.backend Cache backend type: registry (OCI) or s3.
-## @param supervisor.config.cache.registry Cache registry ref (auto-wired public ref `<cachePublicHost>/dagger-cache`).
-## @param supervisor.config.cache.publicHost Dedicated cache vhost engines push/pull through (empty = derived `cache.<server.publicUrl host>`). Must differ from the control-plane host.
-## @param supervisor.config.cache.internalAddr Legacy single backend address (empty = auto-wired `<release>-registry:5000` when tools.registry enabled).
-## @param supervisor.config.cache.authToken Engine→proxy bearer. The Helm chart ignores this key and always renders an empty value; the supervisor reads the token from the `engine-registry-auth` Secret (key `token`, set via `auth.engineToken`) instead.
-## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password, passwordSecret} (empty = single-backend mode). password must stay empty in Helm; use passwordSecret to reference a K8s Secret.
+## @param supervisor.config.cache.publicHost Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`, itself computed from the ingress/service exposition). Must differ from the control-plane host. Free-form: set a one-level name (e.g. `dagger-cache.company.com`) when your wildcard certificate does not cover the derived sub-subdomain. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled.
+## @param supervisor.config.cache.authToken Engine→proxy bearer for the cache. Rendered into the engine-registry-auth Secret (key `token`); the supervisor reads it from there. Empty = "placeholder".
+## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password, passwordSecret}. Empty = single-backend mode (the bundled registry). The proxy load-balances across backends least-charged first (registry cache size). password must stay empty in Helm; use passwordSecret to reference a K8s Secret.
 ## @param supervisor.config.cache.registries[].passwordSecret.name K8s Secret name holding the backend password (rendered as a reference, never the secret itself).
 ## @param supervisor.config.cache.registries[].passwordSecret.key Key inside the Secret holding the password (empty = "password").
-## @param supervisor.config.cache.refPerVersion Enable per-version cache references.
 ## @param supervisor.config.cache.s3.bucket S3 bucket name (when backend=s3).
 ## @param supervisor.config.cache.s3.region S3 region (when backend=s3).
     cache:
       backend: "registry"
-      registry: ""
       publicHost: ""
-      internalAddr: ""
       authToken: ""
       registries: []
-      refPerVersion: true
       s3:
         bucket: ""
         region: ""
@@ -258,9 +174,10 @@ supervisor:
 ## @param supervisor.config.fleet.engineTolerations [array] Tolerations for engine pods.
 ## @param supervisor.config.fleet.engineExtraArgs [array] Additional CLI args passed to the engine.
 ## @param supervisor.config.fleet.engineExtraEnv [object] Extra env vars on engine pods.
-## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods.
+## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods: map of env name -> {secret_name, key} (snake_case keys, rendered verbatim into the app config).
 ## @param supervisor.config.fleet.engineCaSecret Secret with custom CA PEM bundle for engines (empty = disabled).
 ## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
+## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json for engine image pulls (private registries). Rendered into the engine-registry-auth Secret (.dockerconfigjson), mounted into engine pods.
 ## @param supervisor.config.fleet.engineDebug Enable engine.toml [debug].
 ## @param supervisor.config.fleet.engineLogFormat Engine log format (json, text; empty omits).
 ## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}).
@@ -283,37 +200,38 @@ supervisor:
       engineNodeSelector: {}
       engineTolerations: []
       engineExtraArgs: []
+      # engineExtraEnv: extra env vars for engine pods, e.g. proxy settings:
+      # engineExtraEnv:
+      #   HTTP_PROXY: "http://proxy.corp.example:3128"
+      #   HTTPS_PROXY: "http://proxy.corp.example:3128"
+      #   NO_PROXY: "localhost,127.0.0.1,.svc,.cluster.local"
       engineExtraEnv: {}
+      # engineExtraEnvFrom: env vars sourced from K8s Secret keys
+      # (map: env name -> {secret_name, key}; rendered verbatim into the app
+      # config). Use for credentials that must never appear in plaintext
+      # config, e.g. an authenticated proxy:
+      # engineExtraEnvFrom:
+      #   HTTP_PROXY:
+      #     secret_name: "proxy-credentials"
+      #     key: "http_proxy"            # secret value: "http://user:pass@proxy.corp.example:3128"
+      #   HTTPS_PROXY:
+      #     secret_name: "proxy-credentials"
+      #     key: "https_proxy"
       engineExtraEnvFrom: {}
       engineCaSecret: ""
       engineCaSecretKey: "ca.crt"
+      engineDockerConfig: ""
       engineDebug: false
       engineLogFormat: "json"
+      # engineRegistryMirrors: engine.toml registry mirrors (quote registry
+      # names containing dots, or YAML nests them):
+      # engineRegistryMirrors:
+      #   "docker.io": ["mirror.gcr.io", "my-mirror.corp.example"]
       engineRegistryMirrors: {}
-## @param supervisor.config.ca.clientCertTtl Client certificate TTL.
-##   The engine-client minting CA is shared across supervisor pods via the
-##   <release>-minting-ca Secret (ca.minting_ca_secret), which holds the CA
-##   private key — RBAC-restrict it to the supervisor ServiceAccount. The CA is
-##   AUTO-BOOTSTRAPPED on first boot (ordinal 0 generates it, other pods poll):
-##   no manual certificate generation is required. Only set ca.crt/ca.key (below)
-##   to bring an existing CA.
-    ca:
-      clientCertTtl: "2h"
-## @param supervisor.config.tls.provider TLS provider for the server certificate:
-##   "embedded" (default, minting CA issues a self-signed server cert),
-##   "cert-manager" (cert-manager issues the server cert, see dataCert/dataIngress below),
-##   or "external" (operator-managed PEM files at certPath/keyPath).
-##   The minting CA is auto-bootstrapped for every provider.
-## @param supervisor.config.tls.certPath Server certificate path (only "external"). cert-manager auto-wires the mounted data-tls secret.
-## @param supervisor.config.tls.keyPath Server key path (only "external"). cert-manager auto-wires the mounted data-tls secret.
-    tls:
-      provider: "embedded"
-      certPath: ""
-      keyPath: ""
 ## @param supervisor.config.leaseTtl Engine session lease TTL.
     leaseTtl: "2m"
 ## @param supervisor.config.version.floor Minimum supported Dagger engine version.
-## @param supervisor.config.version.allowlist [array] Allowed Dagger versions (segments).
+## @param supervisor.config.version.allowlist [array] Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor).
     version:
       floor: "v0.19.0"
       allowlist: ["0.19", "0.20", "0.21"]
@@ -327,53 +245,93 @@ supervisor:
 
 ## @section Authentication
 
-## @param auth.tokens [array] Static bearer tokens (DEPRECATED: legacy fallback, migrate with supervisor migrate-tokens).
-## @param auth.adminPassword Bootstrap admin password. When empty, a random password is generated and logged once at first boot.
-## @param auth.engineToken Token for engine cache registry auth (engine-registry-auth secret). Empty = "placeholder".
-## @param auth.engineDockerConfig Base64-encoded Docker config.json for engine image pulls (private registries).
-## @param auth.jwtSecret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
-## @param auth.oauthClientSecret OAuth2 client secret (rendered into the <release>-oauth Secret; injected as DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET).
+## @param auth.bootstrapAdmin.username Bootstrap admin username.
+## @param auth.bootstrapAdmin.password Bootstrap admin password. When empty, a random password is generated and logged once at first boot.
+## @param auth.jwt.secret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
+## @param auth.jwt.accessTtl JWT access token TTL.
+## @param auth.jwt.refreshTtl JWT refresh token TTL.
+## @param auth.oauth.enabled Enable OAuth2 authentication.
+## @param auth.oauth.provider OAuth2 provider: "github" or "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
+## @param auth.oauth.clientId OAuth2 client ID.
+## @param auth.oauth.clientSecret OAuth2 client secret (rendered into the <release>-oauth Secret; injected as DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET).
+## @param auth.oauth.redirectUrl OAuth2 redirect URL (empty = computed `<publicUrl>/api/v1/auth/oauth/<provider>/callback`).
+## @param auth.oauth.allowedOrgs [array] Allowed OAuth organizations (github: org membership; oidc: groups-claim intersection).
+## @param auth.oauth.defaultGroup Default group for OAuth users.
+## @param auth.cookie.accessName Access-JWT session cookie name (httpOnly).
+## @param auth.cookie.refreshName Refresh-JWT session cookie name (httpOnly).
+## @param auth.cookie.secure Force the Secure flag on session cookies (set true when TLS terminates at an ingress in front of the supervisor).
+## @param auth.cors.allowedOrigins [array] Exact-match Origin allowlist for cross-origin API access (empty = same-origin only, no ACAO header).
 auth:
-  tokens: []
-  adminPassword: ""
-  engineToken: ""
-  engineDockerConfig: ""
-  jwtSecret: ""
-  oauthClientSecret: ""
+  bootstrapAdmin:
+    username: "admin"
+    password: ""
+  jwt:
+    secret: ""
+    accessTtl: "15m"
+    refreshTtl: "168h"
+  oauth:
+    enabled: false
+    provider: "github"
+    clientId: ""
+    clientSecret: ""
+    redirectUrl: ""
+    allowedOrgs: ["acme"]
+    defaultGroup: ""
+  cookie:
+    accessName: "dagger_kubernetes_access"
+    refreshName: "dagger_kubernetes_refresh"
+    secure: false
+  cors:
+    allowedOrigins: []
 
-## @section Minting CA and TLS
+## @section TLS and certificates
 
-## @param ca.crt [optional] PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot.
-## @param ca.key [optional] PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot.
+## @param tls.provider TLS provider for the server certificate:
+##   "embedded" (default, minting CA issues a self-signed server cert),
+##   "cert-manager" (cert-manager issues the server cert, see dataCert/dataIngress below),
+##   or "external" (operator-managed PEM files at certPath/keyPath).
+##   The minting CA is auto-bootstrapped for every provider.
+## @param tls.certPath Server certificate path (only "external"). cert-manager auto-wires the mounted data-tls secret.
+## @param tls.keyPath Server key path (only "external"). cert-manager auto-wires the mounted data-tls secret.
+## @param tls.clientCertTtl Client certificate TTL (engine session certs minted from the CA).
+## @param tls.caCrt [optional] PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot.
+## @param tls.caKey [optional] PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot.
 ##   When both are empty (the default), the supervisor generates the minting CA
 ##   on first boot and stores it in the <release>-minting-ca Secret. Only set
 ##   these to bring an existing CA (e.g. migrating from a prior deployment).
-ca:
-  crt: ""
-  key: ""
-## @param tls.crt [optional] PEM-encoded data-plane server certificate (only needed for provider "external" / legacy). cert-manager auto-wires this.
-## @param tls.key [optional] PEM-encoded data-plane server private key (only needed for provider "external" / legacy). cert-manager auto-wires this.
+## @param tls.crt [optional] PEM-encoded server certificate (only needed for provider "external").
+## @param tls.key [optional] PEM-encoded server private key (only needed for provider "external").
 tls:
+  provider: "embedded"
+  certPath: ""
+  keyPath: ""
+  clientCertTtl: "2h"
+  caCrt: ""
+  caKey: ""
   crt: ""
   key: ""
 
 ## @section Services
 
 ## @param service.control.type Control-plane service type.
-## @param service.control.port Control-plane service port.
+## @param service.control.port Control-plane service port (maps to the fixed supervisor :8080).
 ## @param service.control.nodePort Control-plane service node port (when type=NodePort).
+## @param service.control.host Routable hostname/IP for the control plane when exposed via LoadBalancer/NodePort (required then; unused with ingress or ClusterIP).
 service:
   control:
     type: ClusterIP
     port: 80
     nodePort: ""
+    host: ""
 ## @param service.data.type Data-plane service type. ClusterIP when using ingress.
-## @param service.data.port Data-plane service port (maps to supervisor :8443).
-## @param service.data.nodePort Data-plane node port (when type=NodePort and no ingress).
+## @param service.data.port Data-plane service port (maps to the fixed supervisor :8443).
+## @param service.data.nodePort Data-plane node port (when type=NodePort and no ingress; required then, auto-assigned ports are unknown to the chart).
+## @param service.data.host Routable hostname/IP for the data plane when exposed via LoadBalancer/NodePort (required then; unused with dataIngress or ClusterIP).
   data:
     type: ClusterIP
     port: 443
     nodePort: ""
+    host: ""
 
 ## @section Ingress
 
@@ -384,7 +342,6 @@ service:
 ## @param ingress.hosts[].host Hostname for the ingress rule.
 ## @param ingress.hosts[].paths[].path URL path for the ingress rule.
 ## @param ingress.hosts[].paths[].pathType Path matching type (Prefix, Exact, ImplementationSpecific).
-## @param ingress.cacheHost Cache vhost hostname (empty = derived from the cachePublicHost helper). A second host rule + TLS SAN entry is added for it.
 ## @param ingress.tls [array] Ingress TLS configuration.
 ingress:
   enabled: true
@@ -395,7 +352,6 @@ ingress:
       paths:
         - path: /
           pathType: Prefix
-  cacheHost: ""
   tls: []
 
 ## @section Data-plane Ingress (mTLS passthrough)
@@ -425,7 +381,7 @@ dataIngress:
 
 ## @param dataCert.enabled Provision a certificate for the data plane via
 ##   cert-manager (e.g. Let's Encrypt). Requires cert-manager to be installed
-##   in the cluster and `supervisor.config.tls.provider: "cert-manager"`. The
+##   in the cluster and `tls.provider: "cert-manager"`. The
 ##   resulting Secret is mounted as the supervisor's server certificate; the
 ##   chart auto-wires certPath/keyPath to it. The minting CA is still
 ##   auto-bootstrapped (it never needs a public issuer).
@@ -450,36 +406,17 @@ serviceMonitor:
   interval: 30s
   scrapeTimeout: 10s
 
-## @section Observability tools
-
-## @param tools.otelCollector.enabled Install OpenTelemetry Collector subchart.
-## @param tools.registry.enabled Install Docker Registry subchart (cache backend).
-## @param tools.tempo.enabled Install Grafana Tempo subchart (traces).
-## @param tools.loki.enabled Install Grafana Loki subchart (logs).
-## @param tools.victoria.enabled Install VictoriaMetrics subchart (metrics).
-## @param tools.grafana.enabled Install Grafana subchart (dashboards).
-tools:
-  otelCollector:
-    enabled: true
-  registry:
-    enabled: true
-  tempo:
-    enabled: true
-  loki:
-    enabled: true
-  victoria:
-    enabled: true
-  grafana:
-    enabled: true
-
 ## @section Subchart overrides
 ## @descriptionStart
-## Subchart defaults forwarded to each dependency. All PVC-bearing subcharts
-## support storageClassName (empty = cluster default StorageClass).
+## Subchart defaults forwarded to each dependency. Each dependency is toggled
+## with its own `enabled` flag directly in its section. All PVC-bearing
+## subcharts support storageClassName (empty = cluster default StorageClass).
 ## @descriptionEnd
 
 ## @skip opentelemetry-collector
+## @param opentelemetry-collector.enabled Install OpenTelemetry Collector subchart.
 opentelemetry-collector:
+  enabled: true
   mode: deployment
   replicaCount: 1
   image:
@@ -535,7 +472,9 @@ opentelemetry-collector:
           exporters: [prometheusremotewrite]
 
 ## @skip registry
+## @param registry.enabled Install Docker Registry subchart (cache backend).
 registry:
+  enabled: true
   replicaCount: 1
   persistence:
     enabled: true
@@ -548,7 +487,9 @@ registry:
       memory: 128Mi
 
 ## @skip tempo
+## @param tempo.enabled Install Grafana Tempo subchart (traces).
 tempo:
+  enabled: true
   persistence:
     enabled: true
     size: 20Gi
@@ -569,7 +510,9 @@ tempo:
         memory: 256Mi
 
 ## @skip loki
+## @param loki.enabled Install Grafana Loki subchart (logs).
 loki:
+  enabled: true
   deploymentMode: SingleBinary
   singleBinary:
     replicas: 1
@@ -613,7 +556,9 @@ loki:
         ruler: ruler
 
 ## @skip victoria
+## @param victoria.enabled Install VictoriaMetrics subchart (metrics).
 victoria:
+  enabled: true
   server:
     persistentVolume:
       enabled: true
