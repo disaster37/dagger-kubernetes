@@ -70,6 +70,23 @@ advertises its pod FQDN, and followers serve stale reads while returning
   (per-pod PVC), a headless Service, `podManagementPolicy: Parallel`, and TLS
   env wiring. The existing control/data Services stay (ClusterIP, select all
   Ready pods).
+- **Single source of truth for the cluster size (2026-08-21 revision):** the
+  chart's `supervisor.replicaCount` is the only size knob — the Raft voter
+  count is derived from it (one supervisor pod = one voter), injected as
+  `DAGGER_KUBERNETES_RAFT_REPLICAS`. The separate
+  `supervisor.config.raft.replicas` value was removed because a drift between
+  the two knobs produced a cluster that could never form quorum (e.g. a
+  1-pod StatefulSet configured for 3 voters). Outside the chart (bare
+  binary/Docker) `raft.replicas` remains a valid config key.
+- **HPA removed:** the chart's `supervisor.autoscaling` HPA was removed in the
+  same revision. A quorum-based Raft store cannot follow HPA-driven scaling:
+  the voter count must equal the pod count exactly, membership changes are
+  explicit (`raft.AddVoter`/`raft.RemoveServer` via the joinLoop), quorum
+  needs an odd voter count, and an HPA scale-out of a 1-voter cluster would
+  start N independent single-voter clusters (split brain). Dynamic voter
+  counts are therefore not possible without a membership-operator that
+  performs quorum-safe joins/leaves — out of scope. Scaling is a manual
+  `supervisor.replicaCount` change + rolling restart.
 
 ### TLS PKI modes
 
@@ -92,6 +109,7 @@ advertises its pod FQDN, and followers serve stale reads while returning
 | D7 | Leader-only `joinLoop` reconciles membership via `raft.AddVoter`/`raft.RemoveServer`. |
 | D8 | Single-node remains a degenerate one-voter cluster (identical behavior plus TLS). |
 | D9 | The engine-client minting CA (ADR-005) is shared across pods via the `<release>-minting-ca` Secret when the embedded TLS provider is used in multi-node (CWE-295). |
+| D10 | `supervisor.replicaCount` is the single source of truth for the Raft voter count; the separate `raft.replicas` chart value and the supervisor HPA were removed (quorum-safe dynamic scaling is not possible without a membership operator). |
 
 ## Consequences
 
@@ -100,9 +118,10 @@ advertises its pod FQDN, and followers serve stale reads while returning
   PVCs are stable across restarts; scale-up/down is automatic via the
   joinLoop; followers add read capacity.
 - **Negative**: writes behind a load-balanced Service may hit a follower and
-  return 503 (client retries); scale-up requires bumping `replicaCount` +
-  `raft.replicas` and a rolling restart; CA rotation is out of scope (10-year
-  goca CA); `migrate-tokens` still assumes single-node (it must write).
+  return 503 (client retries); scale-up requires bumping `replicaCount` and a
+  rolling restart (the voter count follows `replicaCount`); CA rotation is out
+  of scope (10-year goca CA); `migrate-tokens` still assumes single-node (it
+  must write); no supervisor HPA (see D10).
 - **Operational notes**: shrinking the cluster requires deleting the removed
   pod after the joinLoop calls `RemoveServer`; a pod that loses its PVC
   (`<dir>/node-id`) becomes a new node that must re-join.

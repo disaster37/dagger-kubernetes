@@ -227,6 +227,64 @@ func TestK8sEnsureStatefulSetWithTolerations(t *testing.T) {
 	}
 }
 
+func TestK8sEnsureStatefulSetPVCLabels(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.PVCLabels = map[string]string{"backup": "weekly", "team": "platform"}
+	})
+
+	err := p.EnsureStatefulSet("v0.21.0", "registry.dagger.io/engine:v0.21.0")
+	if err != nil {
+		t.Fatalf("EnsureStatefulSet failed: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-21-0", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+
+	if len(sts.Spec.VolumeClaimTemplates) != 1 {
+		t.Fatalf("expected 1 volume claim template, got %d", len(sts.Spec.VolumeClaimTemplates))
+	}
+
+	labels := sts.Spec.VolumeClaimTemplates[0].Labels
+	if labels["backup"] != "weekly" {
+		t.Errorf("expected PVC label backup=weekly, got %q", labels["backup"])
+	}
+	if labels["team"] != "platform" {
+		t.Errorf("expected PVC label team=platform, got %q", labels["team"])
+	}
+	if labels[engineLabelApp] != engineLabelValue {
+		t.Errorf("expected managed label app=dagger-engine, got %q", labels[engineLabelApp])
+	}
+	if labels[engineLabelVersion] != "v0.21.0" {
+		t.Errorf("expected managed label version=v0.21.0, got %q", labels[engineLabelVersion])
+	}
+}
+
+func TestK8sEnsureStatefulSetPVCManagedLabelsWin(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.PVCLabels = map[string]string{engineLabelApp: "override", engineLabelVersion: "override"}
+	})
+
+	err := p.EnsureStatefulSet("v0.21.0", "registry.dagger.io/engine:v0.21.0")
+	if err != nil {
+		t.Fatalf("EnsureStatefulSet failed: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), "dagger-engine-v0-21-0", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+
+	labels := sts.Spec.VolumeClaimTemplates[0].Labels
+	if labels[engineLabelApp] != engineLabelValue {
+		t.Errorf("expected managed label app=dagger-engine to win, got %q", labels[engineLabelApp])
+	}
+	if labels[engineLabelVersion] != "v0.21.0" {
+		t.Errorf("expected managed label version=v0.21.0 to win, got %q", labels[engineLabelVersion])
+	}
+}
+
 func TestK8sEnsureStatefulSetWithNodeSelector(t *testing.T) {
 	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
 		cfg.NodeSelector = map[string]string{
@@ -1250,5 +1308,168 @@ func TestK8sEngineConfigMapIdempotent(t *testing.T) {
 	wantTOML := "[log]\n  format = \"json\"\n"
 	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
 		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	}
+}
+
+func TestK8sVersionIdleSinceAbsent(t *testing.T) {
+	p, _ := defaultK8sProvider()
+	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	got, ok, err := p.VersionIdleSince(testEngineVersion)
+	if err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	}
+	if ok {
+		t.Fatalf("ok = true, want false for absent annotation")
+	}
+	if !got.IsZero() {
+		t.Fatalf("idle since = %v, want zero time", got)
+	}
+}
+
+func TestK8sSetAndGetVersionIdleSince(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	stamp := time.Date(2026, 8, 21, 14, 0, 0, 0, time.FixedZone("CEST", 2*3600))
+	if err := p.SetVersionIdleSince(testEngineVersion, stamp); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+
+	got, ok, err := p.VersionIdleSince(testEngineVersion)
+	if err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	}
+	if !ok {
+		t.Fatal("ok = false, want true")
+	}
+	want := stamp.UTC()
+	if !got.Equal(want) {
+		t.Fatalf("idle since = %v, want %v (UTC)", got, want)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if got := sts.Annotations[engineIdleSinceAnnotation]; got != want.Format(time.RFC3339) {
+		t.Fatalf("annotation = %q, want %q", got, want.Format(time.RFC3339))
+	}
+}
+
+func TestK8sClearVersionIdleSince(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	stamp := time.Now().Add(-time.Hour)
+	if err := p.SetVersionIdleSince(testEngineVersion, stamp); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	if err := p.SetVersionIdleSince(testEngineVersion, time.Time{}); err != nil {
+		t.Fatalf("SetVersionIdleSince clear: %v", err)
+	}
+
+	got, ok, err := p.VersionIdleSince(testEngineVersion)
+	if err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	}
+	if ok {
+		t.Fatal("ok = true, want false after clear")
+	}
+	if !got.IsZero() {
+		t.Fatalf("idle since = %v, want zero time", got)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if _, exists := sts.Annotations[engineIdleSinceAnnotation]; exists {
+		t.Fatalf("annotation %s should be absent after clear", engineIdleSinceAnnotation)
+	}
+}
+
+func TestK8sVersionIdleSinceMalformed(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
+	}
+	sts.Annotations[engineIdleSinceAnnotation] = "not-a-time"
+	if _, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Update(context.Background(), sts, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update statefulset: %v", err)
+	}
+
+	got, ok, err := p.VersionIdleSince(testEngineVersion)
+	if err == nil {
+		t.Fatal("VersionIdleSince = nil, want parse error")
+	}
+	if !ok {
+		t.Fatal("ok = false, want true for malformed annotation")
+	}
+	if !got.IsZero() {
+		t.Fatalf("idle since = %v, want zero time", got)
+	}
+}
+
+func TestK8sVersionIdleSinceMissingSTS(t *testing.T) {
+	p, _ := defaultK8sProvider()
+
+	got, ok, err := p.VersionIdleSince("v9.9.9")
+	if err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	}
+	if ok {
+		t.Fatal("ok = true, want false for missing STS")
+	}
+	if !got.IsZero() {
+		t.Fatalf("idle since = %v, want zero time", got)
+	}
+}
+
+func TestK8sSetVersionIdleSinceMissingSTSNoop(t *testing.T) {
+	p, _ := defaultK8sProvider()
+
+	if err := p.SetVersionIdleSince("v9.9.9", time.Now()); err != nil {
+		t.Fatalf("SetVersionIdleSince on missing STS = %v, want nil", err)
+	}
+}
+
+func TestK8sSetVersionIdleSincePreservesLabels(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	if err := p.EnsureStatefulSet(testEngineVersion, testEngineImage); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	stamp := time.Now().Add(-time.Hour)
+	if err := p.SetVersionIdleSince(testEngineVersion, stamp); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	if err := p.SetVersionIdleSince(testEngineVersion, time.Time{}); err != nil {
+		t.Fatalf("SetVersionIdleSince clear: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if sts.Labels[engineLabelApp] != engineLabelValue {
+		t.Errorf("label app = %q, want %q", sts.Labels[engineLabelApp], engineLabelValue)
+	}
+	if sts.Labels[engineLabelVersion] != testEngineVersion {
+		t.Errorf("label version = %q, want %q", sts.Labels[engineLabelVersion], testEngineVersion)
 	}
 }

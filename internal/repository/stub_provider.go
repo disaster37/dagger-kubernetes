@@ -17,6 +17,7 @@ type StubProvider struct {
 type stubSTS struct {
 	replicasM map[string]*domain.Replica
 	nextIP    int
+	idleSince time.Time // zero = unset
 }
 
 var _ domain.FleetProvider = (*StubProvider)(nil)
@@ -148,4 +149,27 @@ func (p *StubProvider) AllVersions() ([]string, error) {
 		versions = append(versions, v)
 	}
 	return versions, nil
+}
+
+func (p *StubProvider) VersionIdleSince(version string) (time.Time, bool, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	sts, ok := p.versions[version]
+	if !ok || sts.idleSince.IsZero() {
+		return time.Time{}, false, nil
+	}
+	return sts.idleSince, true, nil
+}
+
+func (p *StubProvider) SetVersionIdleSince(version string, idleSince time.Time) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	sts, ok := p.versions[version]
+	if !ok {
+		return nil // version already gone
+	}
+	sts.idleSince = idleSince
+	return nil
 }

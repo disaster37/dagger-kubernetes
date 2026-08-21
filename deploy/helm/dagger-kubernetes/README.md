@@ -326,12 +326,9 @@ grafana:
   goca CA shared via the `<release>-raft-ca` Secret). See
   [Raft (distributed store)](#raft-distributed-store) below. Sessions are
   in-memory and shift on pod restart; clients reconnect automatically.
-  The optional `supervisor.autoscaling` HPA targets this **StatefulSet**
-  (`scaleTargetRef.kind: StatefulSet`), not a Deployment — and is **only safe
-  with a single-node Raft cluster** (`supervisor.config.raft.replicas=1`). The
-  chart fails-closed: it refuses to render when autoscaling is enabled together
-  with `supervisor.config.raft.replicas > 1`, because letting an HPA scale a
-  multi-replica Raft cluster disturbs quorum and risks availability loss.
+  There is **no HPA**: the supervisor is a quorum-based Raft store, so the
+  voter count must follow `supervisor.replicaCount` exactly and cannot track
+  an autoscaler.
 - **Loki**: use `deploymentMode: SimpleScalable` with S3/GCS object storage for
   multi-replica setups. SingleBinary is sufficient for up to ~20 GB/day.
 - **Tempo**: use object storage (S3/GCS) for persistence beyond pod lifetime.
@@ -388,10 +385,9 @@ grafana:
 | `supervisor.enabled` | Enable the supervisor (control plane + data plane) and its resources | `true` |
 | `supervisor.image.repository` | Supervisor image | `ghcr.io/disaster37/dagger-kubernetes` |
 | `supervisor.image.tag` | Image tag (defaults to `Chart.appVersion`) | `""` |
-| `supervisor.replicaCount` | Supervisor replicas (mirrors `supervisor.config.raft.replicas`) | `3` |
+| `supervisor.replicaCount` | Supervisor pods = Raft voters (single source of truth) | `3` |
 | `supervisor.persistence.enabled` | Enable per-pod PVC for the Raft data directory (StatefulSet volumeClaimTemplate) | `true` |
 | `supervisor.resources` | Supervisor container resources | see `values.yaml` |
-| `supervisor.autoscaling.enabled` | Enable HPA for supervisor (only safe with `supervisor.config.raft.replicas=1`) | `false` |
 | `supervisor.serviceAccount.annotations` | ServiceAccount annotations | `{}` |
 | `supervisor.serviceAccount.clusterScope` | Use ClusterRole instead of namespaced Role | `false` |
 | `supervisor.podSecurityContext` | Pod-level security context | see `values.yaml` |
@@ -455,8 +451,7 @@ give each pod a stable identity for peer discovery.
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.replicaCount` | `3` | Supervisor pod count (mirrors `supervisor.config.raft.replicas`). |
-| `supervisor.config.raft.replicas` | `3` | Voter count for DNS peer discovery. Keep in sync with `supervisor.replicaCount`. |
+| `supervisor.replicaCount` | `3` | Supervisor pod count = Raft voter count (derived, single source of truth). Use an odd number ≥ 3 for fault tolerance. |
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
 
@@ -481,8 +476,8 @@ local reads; writes on a follower return `ErrNotLeader` (503) and clients retry.
 
 **Scale-up / scale-down:** the leader reconciles membership (`raft.AddVoter` /
 `raft.RemoveServer`) automatically. To scale up, bump `supervisor.replicaCount`
-**and** `supervisor.config.raft.replicas` together and rolling-restart. To
-scale down, shrink both, rolling-restart, then delete the removed pod.
+(the voter count follows it) and rolling-restart. To scale down, shrink it,
+rolling-restart, then delete the removed pod.
 
 > **Fresh start:** the Raft store starts empty on first boot. There is **no
 > migration** from any prior SQLite-backed release — existing SQLite data is
@@ -541,7 +536,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.image.tag` | string | `""` | Image tag (empty defaults to Chart.appVersion). |
 | `supervisor.image.pullPolicy` | string | `IfNotPresent` | Image pull policy. |
 | `supervisor.image.pullSecrets` | array | `[]` | Image pull secrets for private registries. |
-| `supervisor.replicaCount` | int | `3` | Number of supervisor replicas. Multi-node Raft requires an odd number >= 3 for quorum fault tolerance. Keep in sync with `supervisor.config.raft.replicas`. |
+| `supervisor.replicaCount` | int | `3` | Number of supervisor pods. Single source of truth for the Raft cluster size: each supervisor pod is one Raft voter, so the voter count is derived from this value (never asked separately). Use an odd number >= 3 for quorum fault tolerance (a 2-node cluster has no failure tolerance). |
 | `supervisor.resources.requests.cpu` | string | `250m` | Supervisor CPU request. |
 | `supervisor.resources.requests.memory` | string | `256Mi` | Supervisor memory request. |
 | `supervisor.resources.limits.cpu` | string | `1000m` | Supervisor CPU limit. |
@@ -560,11 +555,6 @@ Configure it under `supervisor.config.history`:
 | `supervisor.nodeSelector` | object | `{}` | Node selector for supervisor pod scheduling. |
 | `supervisor.tolerations` | array | `[]` | Tolerations for supervisor pod scheduling. |
 | `supervisor.affinity` | object | `{}` | Affinity rules for supervisor pod scheduling. |
-| `supervisor.autoscaling.enabled` | bool | `false` | Enable HPA for supervisor (targets the supervisor StatefulSet). Only safe with a single-node Raft cluster (`supervisor.config.raft.replicas=1`); the chart fails-closed when combined with `supervisor.config.raft.replicas > 1`. |
-| `supervisor.autoscaling.minReplicas` | int | `2` | Minimum replicas for HPA. |
-| `supervisor.autoscaling.maxReplicas` | int | `6` | Maximum replicas for HPA. |
-| `supervisor.autoscaling.targetCPUUtilizationPercentage` | int | `80` | Target CPU utilization for HPA. |
-| `supervisor.autoscaling.targetMemoryUtilizationPercentage` | string | `""` | Target memory utilization for HPA. |
 | `supervisor.serviceAccount.annotations` | object | `{}` | Annotations for the supervisor ServiceAccount. |
 | `supervisor.serviceAccount.clusterScope` | bool | `false` | Use ClusterRole instead of namespaced Role/RoleBinding (cluster-wide access - security-sensitive). |
 | `supervisor.extraEnv` | array | `[]` | Extra environment variables for the supervisor container. |
@@ -573,7 +563,6 @@ Configure it under `supervisor.config.history`:
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `supervisor.config.raft.replicas` | int | `3` | Raft voter count for DNS peer discovery. Keep in sync with `supervisor.replicaCount`. |
 | `supervisor.config.raft.tls.enabled` | bool | `true` | Enable mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | bool | `true` | Require and verify peer client certs (mTLS). |
 | `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled). |
@@ -594,9 +583,11 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.fleet.maxReplicasPerVersion` | int | `3` | Maximum engine replicas per Dagger version. |
 | `supervisor.config.fleet.maxSessionsPerReplica` | int | `8` | Maximum concurrent sessions per engine replica. |
 | `supervisor.config.fleet.replicaIdleTtl` | string | `"5m"` | Idle TTL before scaling down an engine replica. |
+| `supervisor.config.fleet.versionRetention` | string | `"24h"` | Idle version GC: delete a version's StatefulSet + Service after this long with zero replicas and no pinned sessions (`<= 0` disables; positive values `< 1m` rejected). |
 | `supervisor.config.fleet.engineImageRegistry` | string | `"registry.dagger.io/engine"` | Engine container image registry. |
 | `supervisor.config.fleet.engineStorageClass` | string | `""` | StorageClass for engine PVCs (empty = cluster default). |
 | `supervisor.config.fleet.engineStorageSize` | string | `"50Gi"` | PVC size for each engine. |
+| `supervisor.config.fleet.enginePvcLabels` | object | `{}` | Extra labels added to engine PVCs (merged with managed labels app/version, which take precedence). |
 | `supervisor.config.fleet.engineCPURequest` | string | `"500m"` | Engine CPU request. |
 | `supervisor.config.fleet.engineCPULimit` | string | `"2000m"` | Engine CPU limit. |
 | `supervisor.config.fleet.engineMemoryRequest` | string | `"1Gi"` | Engine memory request. |
@@ -608,7 +599,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.fleet.engineTolerations` | array | `[]` | Tolerations for engine pods. |
 | `supervisor.config.fleet.engineExtraArgs` | array | `[]` | Additional CLI args passed to the engine. |
 | `supervisor.config.fleet.engineExtraEnv` | object | `{}` | Extra env vars on engine pods. |
-| `supervisor.config.fleet.engineExtraEnvFrom` | object | `{}` | Extra env vars sourced from Secret keys on engine pods: map of env name -> {secret_name, key}. |
+| `supervisor.config.fleet.engineExtraEnvFrom` | object | `{}` | Extra env vars sourced from Secret keys on engine pods: map of env name -> {secretName, key}. |
 | `supervisor.config.fleet.engineCaSecret` | string | `""` | Secret with custom CA PEM bundle for engines (empty = disabled). |
 | `supervisor.config.fleet.engineCaSecretKey` | string | `"ca.crt"` | Key inside engineCaSecret containing the CA cert. |
 | `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the engine-registry-auth Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
@@ -724,12 +715,29 @@ Configure it under `supervisor.config.history`:
 
 ## Upgrading
 
+### Breaking: HPA removed, raft voter count derived from `supervisor.replicaCount`
+
+- `supervisor.autoscaling` (HPA) has been **removed**. The supervisor is a
+  quorum-based Raft store: its voter count must equal the pod count exactly
+  and cannot track an HPA (scaling down disturbs quorum, scaling up would
+  spawn independent single-voter clusters). The chart fails-closed and
+  refuses to render if your values still carry `supervisor.autoscaling.enabled:
+  true` — delete the `supervisor.autoscaling` block.
+- `supervisor.config.raft.replicas` has been **removed**. The Raft voter
+  count is now derived from `supervisor.replicaCount` (each supervisor pod is
+  one voter) and injected as `DAGGER_KUBERNETES_RAFT_REPLICAS`. The chart
+  fails-closed if your values still set `supervisor.config.raft.replicas` —
+  delete the key; to change the cluster size, change
+  `supervisor.replicaCount` (odd number ≥ 3 for fault tolerance) and
+  rolling-restart.
+
 ### Breaking: supervisor pod values moved under `supervisor:` (v0.2.0)
 
 The following top-level keys have been moved under the `supervisor:` block:
 `image`, `replicaCount`, `resources`, `persistence`, `podAnnotations`,
 `podSecurityContext`, `securityContext`, `nodeSelector`, `tolerations`,
-`affinity`, `autoscaling`, `serviceAccount`.
+`affinity`, `serviceAccount` (`autoscaling` was moved too but has since been
+removed entirely — see above).
 
 **You must prefix these keys with `supervisor:` in your values override files.**
 Helm will **silently ignore** old top-level keys, causing the supervisor to fall

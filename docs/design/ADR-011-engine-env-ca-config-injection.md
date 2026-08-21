@@ -46,13 +46,16 @@ at supervisor startup and rendered into the engine StatefulSet pod template:
    Supervisor-wide concern, separate from the engine's own `[log] format`
    in `engine.toml`.
 5. **D7 — Secret-sourced env vars** (`fleet.engine_extra_env_from`,
-   `map[string]domain.EnvVarSource` with fields `secret_name`, `key`):
+   `map[string]domain.EnvVarSource` with fields `secretName`, `key`):
    each entry is injected as `corev1.EnvVar{Name, ValueFrom.SecretKeyRef}`
    on the engine container, sorted by name, after the literal
    `engine_extra_env` entries. `SecretKeyRef` is NOT `Optional`. The
    `EnvVarSource` type lives in `domain` (stdlib-only per the dependency
    rule) and is reused as-is by `K8sProviderConfig.ExtraEnvFrom` — no
    duplicate `repository.EnvVarSource`, no conversion in `main.go`.
+   (The field was originally `secret_name`; renamed to `secretName` to
+   match the camelCase convention of every other key rendered by the Helm
+   chart into the app config.)
 6. **D6 — Validation location**: `createProvider` (package main) gains an
    `error` return and calls `validateFleetEnv` before provider
    construction. Duplicate container env names (which K8s would reject at

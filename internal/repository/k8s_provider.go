@@ -37,6 +37,8 @@ const (
 	volumeEngineConfig     = "engine-config"
 	volumeDaggerConfig     = "dagger-config"
 	volumeCABundle         = "ca-bundle"
+
+	engineIdleSinceAnnotation = "dagger-kubernetes.io/idle-since"
 )
 
 type K8sProviderConfig struct {
@@ -44,6 +46,7 @@ type K8sProviderConfig struct {
 	ImageRegistry       string
 	StorageClass        string
 	StorageSize         string
+	PVCLabels           map[string]string // extra labels added to engine PVCs
 	CPURequest          string
 	CPULimit            string
 	MemoryRequest       string
@@ -221,6 +224,14 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 		vctSpec.StorageClassName = &p.cfg.StorageClass
 	}
 
+	pvcLabels := make(map[string]string, len(labelMap)+len(p.cfg.PVCLabels))
+	for key, value := range p.cfg.PVCLabels {
+		pvcLabels[key] = value
+	}
+	for key, value := range labelMap {
+		pvcLabels[key] = value
+	}
+
 	return &appsv1.StatefulSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -251,7 +262,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 				{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:   volumeDaggerKubernetes, // must match the container volume mount name
-						Labels: labelMap,
+						Labels: pvcLabels,
 					},
 					Spec: vctSpec,
 				},
@@ -641,6 +652,63 @@ func (p *K8sProvider) AllVersions() ([]string, error) {
 		}
 	}
 	return versions, nil
+}
+
+// VersionIdleSince returns the idle-since annotation value. ok is true when the
+// annotation exists (including a malformed value, which returns ok=true plus a
+// parse error); ok is false when the StatefulSet is missing or has no annotation.
+func (p *K8sProvider) VersionIdleSince(version string) (time.Time, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	name := domain.StsName(version)
+	sts, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return time.Time{}, false, nil
+		}
+		return time.Time{}, false, fmt.Errorf("get statefulset %s: %w", name, err)
+	}
+
+	raw, ok := sts.Annotations[engineIdleSinceAnnotation]
+	if !ok || raw == "" {
+		return time.Time{}, false, nil
+	}
+	t, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		return time.Time{}, true, fmt.Errorf("parse idle-since annotation %q: %w", raw, err)
+	}
+	return t, true, nil
+}
+
+// SetVersionIdleSince writes (or, when idleSince is zero, clears) the
+// idle-since annotation. A missing StatefulSet is a no-op (already deleted).
+func (p *K8sProvider) SetVersionIdleSince(version string, idleSince time.Time) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	name := domain.StsName(version)
+	sts, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("get statefulset %s: %w", name, err)
+	}
+
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
+	}
+	if idleSince.IsZero() {
+		delete(sts.Annotations, engineIdleSinceAnnotation)
+	} else {
+		sts.Annotations[engineIdleSinceAnnotation] = idleSince.UTC().Format(time.RFC3339)
+	}
+
+	if _, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Update(ctx, sts, metav1.UpdateOptions{}); err != nil {
+		return fmt.Errorf("update statefulset %s: %w", name, err)
+	}
+	return nil
 }
 
 func (p *K8sProvider) isPodReady(pod *corev1.Pod) bool {

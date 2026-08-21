@@ -23,11 +23,13 @@ Use a **per-version StatefulSet** model:
 - Garbage collection: versions with zero replicas for `version_retention`
   have their StatefulSet deleted.
 
-> **Superseded (2026-08-20):** the `version_retention` garbage-collection
-> behavior above was never implemented; the `fleet.version_retention` config key
-> was removed. The historical record is preserved as-is; see the current
-> `internal/service/fleet.go` for the implemented autoscaling behavior
-> (scale-up/scale-down only).
+> **Implemented (2026-08-21):** the `version_retention` garbage-collection
+> behavior above is now implemented. `Sweep` deletes a version's StatefulSet
+> (and its headless Service) once it has had zero replicas and no pinned
+> sessions for `fleet.version_retention` (default `24h`; `<= 0` disables GC).
+> "Idle since" is tracked durably as the `dagger-kubernetes.io/idle-since`
+> annotation (RFC3339, UTC) on the engine StatefulSet — no Raft FSM table is
+> added. See `internal/service/fleet.go`.
 
 ## Rationale
 

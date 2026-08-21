@@ -179,6 +179,10 @@ func (p *stubFleetProvider) GetReadyReplicaIP(string, string) (string, error) { 
 func (p *stubFleetProvider) WaitForReady(string, string) error                { return nil }
 func (p *stubFleetProvider) GetEngineImage(v string) string                   { return v }
 func (p *stubFleetProvider) AllVersions() ([]string, error)                   { return p.versions, p.allErr }
+func (p *stubFleetProvider) VersionIdleSince(string) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+func (p *stubFleetProvider) SetVersionIdleSince(string, time.Time) error { return nil }
 
 var _ domain.FleetProvider = (*stubFleetProvider)(nil)
 

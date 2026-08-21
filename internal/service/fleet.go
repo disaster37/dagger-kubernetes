@@ -19,6 +19,7 @@ type Manager struct {
 	maxReplicasPerVersion int
 	maxSessionsPerReplica int
 	replicaIdleTTL        time.Duration
+	versionRetention      time.Duration
 	logger                *logrus.Logger
 }
 
@@ -26,6 +27,7 @@ type ManagerConfig struct {
 	MaxReplicasPerVersion int
 	MaxSessionsPerReplica int
 	ReplicaIdleTTL        time.Duration
+	VersionRetention      time.Duration
 }
 
 func NewManager(provider domain.FleetProvider, sessions domain.SessionStore, cfg ManagerConfig, logger *logrus.Logger, metrics *observ.Metrics) *Manager {
@@ -36,6 +38,7 @@ func NewManager(provider domain.FleetProvider, sessions domain.SessionStore, cfg
 		maxReplicasPerVersion: cfg.MaxReplicasPerVersion,
 		maxSessionsPerReplica: cfg.MaxSessionsPerReplica,
 		replicaIdleTTL:        cfg.ReplicaIdleTTL,
+		versionRetention:      cfg.VersionRetention,
 		logger:                logger,
 	}
 }
@@ -190,7 +193,97 @@ func (m *Manager) sweepVersion(version string) error {
 		break
 	}
 
+	if m.versionRetention <= 0 {
+		// Feature disabled: run only the scale-down loop above. No idle-since
+		// reads/writes and no GC (semantics table §1).
+		return nil
+	}
+
+	if len(replicas) > 0 {
+		// Version is active (has pods); clear any stale idle-since stamp.
+		return m.clearIdleSinceIfPresent(version)
+	}
+
+	// Zero replicas: run idle tracking + GC.
+	return m.gcIdleVersion(version)
+}
+
+// clearIdleSinceIfPresent removes the idle-since annotation when it exists.
+func (m *Manager) clearIdleSinceIfPresent(version string) error {
+	_, ok, err := m.provider.VersionIdleSince(version)
+	if err != nil {
+		return fmt.Errorf("get idle since: %w", err)
+	}
+	if !ok {
+		return nil
+	}
+	if err := m.provider.SetVersionIdleSince(version, time.Time{}); err != nil {
+		return fmt.Errorf("clear idle since: %w", err)
+	}
 	return nil
+}
+
+// gcIdleVersion evaluates idle-since tracking and, once version_retention
+// elapses, deletes the idle version's Service then StatefulSet.
+func (m *Manager) gcIdleVersion(version string) error {
+	if m.versionRetention <= 0 {
+		return nil // feature disabled
+	}
+
+	if m.versionHasPinnedSessions(version) {
+		// Stale sessions still pin this (dead) version; be conservative and
+		// restart the idle clock so GC does not fire prematurely once the
+		// sessions are reaped.
+		return m.clearIdleSinceIfPresent(version)
+	}
+
+	idleSince, ok, err := m.provider.VersionIdleSince(version)
+	if err != nil {
+		if ok {
+			// Malformed annotation: log + reset to now, do not crash.
+			m.logger.WithField("version", version).WithError(err).Warn("resetting malformed idle-since annotation")
+			if setErr := m.provider.SetVersionIdleSince(version, time.Now()); setErr != nil {
+				return fmt.Errorf("reset idle since: %w", setErr)
+			}
+			return nil
+		}
+		return fmt.Errorf("get idle since: %w", err)
+	}
+
+	now := time.Now()
+	if !ok {
+		// First idle observation: stamp and wait for version_retention.
+		if err := m.provider.SetVersionIdleSince(version, now); err != nil {
+			return fmt.Errorf("set idle since: %w", err)
+		}
+		return nil
+	}
+
+	if now.Sub(idleSince) < m.versionRetention {
+		return nil
+	}
+
+	// Delete the Service first (self-healing: if the STS delete fails, the
+	// next sweep still lists the STS and retries), then the StatefulSet.
+	if err := m.provider.DeleteService(version); err != nil {
+		return fmt.Errorf("delete service %s: %w", version, err)
+	}
+	if err := m.provider.DeleteStatefulSet(version); err != nil {
+		return fmt.Errorf("delete statefulset %s: %w", version, err)
+	}
+	m.logger.WithField("version", version).Info("deleted idle engine fleet version")
+	return nil
+}
+
+// versionHasPinnedSessions reports whether any session still pins a replica of
+// the given version.
+func (m *Manager) versionHasPinnedSessions(version string) bool {
+	for _, l := range m.sessions.List() {
+		if l.Version == version {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) replicaHasActiveSessions(podName string) bool {

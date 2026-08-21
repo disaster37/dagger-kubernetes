@@ -43,6 +43,14 @@ type FleetProvider interface {
 	WaitForReady(version string, podName string) error
 	GetEngineImage(version string) string
 	AllVersions() ([]string, error)
+	// VersionIdleSince returns the RFC3339 UTC time the version was first
+	// observed idle (zero replicas, no pinned sessions), or ok=false when the
+	// StatefulSet is missing or carries no idle-since annotation. A malformed
+	// annotation returns ok=true with a parse error.
+	VersionIdleSince(version string) (time.Time, bool, error)
+	// SetVersionIdleSince stamps (or, when idleSince is the zero time, clears)
+	// the idle-since annotation on the version's StatefulSet.
+	SetVersionIdleSince(version string, idleSince time.Time) error
 }
 
 func VersionSlug(version string) string {

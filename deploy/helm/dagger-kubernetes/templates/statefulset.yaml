@@ -1,4 +1,10 @@
 {{- if .Values.supervisor.enabled }}
+{{- if and .Values.supervisor.autoscaling .Values.supervisor.autoscaling.enabled }}
+{{- fail "supervisor.autoscaling was removed: a quorum-based Raft cluster cannot follow HPA-driven scaling (quorum disturbance on scale-down, split-brain single-voter clusters on scale-out). Delete the supervisor.autoscaling keys from your values; the Raft voter count follows supervisor.replicaCount." }}
+{{- end }}
+{{- if hasKey .Values.supervisor.config.raft "replicas" }}
+{{- fail "supervisor.config.raft.replicas was removed: the Raft voter count is now derived from supervisor.replicaCount (each supervisor pod is one Raft voter). Delete the supervisor.config.raft.replicas key from your values." }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -48,7 +54,7 @@ spec:
                 fieldRef:
                   fieldPath: metadata.name
             - name: DAGGER_KUBERNETES_RAFT_REPLICAS
-              value: {{ .Values.supervisor.config.raft.replicas | quote }}
+              value: {{ .Values.supervisor.replicaCount | quote }}
             - name: DAGGER_KUBERNETES_RAFT_TLS_ENABLED
               value: {{ .Values.supervisor.config.raft.tls.enabled | quote }}
             - name: DAGGER_KUBERNETES_RAFT_TLS_CLIENT_AUTH

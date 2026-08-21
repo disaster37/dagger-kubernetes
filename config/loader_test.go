@@ -136,6 +136,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Fleet.EngineRegistryMirrors == nil || len(cfg.Fleet.EngineRegistryMirrors) != 0 {
 		t.Fatalf("fleet.engine_registry_mirrors default should be non-nil and empty, got %v", cfg.Fleet.EngineRegistryMirrors)
 	}
+	if cfg.Fleet.VersionRetention != 24*time.Hour {
+		t.Fatalf("fleet.version_retention default = %v, want 24h", cfg.Fleet.VersionRetention)
+	}
 	if cfg.Cache.GC.Enabled {
 		t.Fatal("cache.gc.enabled default should be false")
 	}
@@ -171,12 +174,13 @@ server:
 fleet:
   namespace: "custom-ns"
   max_replicas_per_version: 7
+  version_retention: "2h"
   engine_extra_env:
     http_proxy: "http://proxy.corp.example:3128"
     https_proxy: "http://proxy.corp.example:3128"
   engine_extra_env_from:
     http_proxy:
-      secret_name: "proxy-credentials"
+      secretName: "proxy-credentials"
       key: "http_proxy"
   engine_registry_mirrors:
     acme-registry:
@@ -206,6 +210,9 @@ log_format: "text"
 	}
 	if cfg.Fleet.MaxReplicasPerVersion != 7 {
 		t.Fatalf("max_replicas_per_version = %d, want 7", cfg.Fleet.MaxReplicasPerVersion)
+	}
+	if cfg.Fleet.VersionRetention != 2*time.Hour {
+		t.Fatalf("version_retention = %v, want 2h", cfg.Fleet.VersionRetention)
 	}
 	if cfg.LogLevel != "debug" {
 		t.Fatalf("log_level = %q, want debug", cfg.LogLevel)
@@ -248,6 +255,7 @@ func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("DAGGER_KUBERNETES_SERVER_CONTROL_ADDR", ":7070")
 	t.Setenv("DAGGER_KUBERNETES_LOG_LEVEL", "error")
 	t.Setenv("DAGGER_KUBERNETES_CACHE_GC_ENABLED", "true")
+	t.Setenv("DAGGER_KUBERNETES_FLEET_VERSION_RETENTION", "90m")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
@@ -262,6 +270,9 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if !cfg.Cache.GC.Enabled {
 		t.Fatal("env override cache.gc.enabled = false, want true")
+	}
+	if cfg.Fleet.VersionRetention != 90*time.Minute {
+		t.Fatalf("env override fleet.version_retention = %v, want 90m", cfg.Fleet.VersionRetention)
 	}
 }
 
@@ -513,6 +524,59 @@ func TestLoadPublicURLValid(t *testing.T) {
 
 	if _, err := Load(path); err != nil {
 		t.Fatalf("Load: %v", err)
+	}
+}
+
+func TestLoadVersionRetentionRejectsTinyPositive(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "unquoted integer decodes to nanoseconds", content: "fleet:\n  version_retention: 24\n"},
+		{name: "quoted nanosecond string", content: "fleet:\n  version_retention: \"1ns\"\n"},
+		{name: "seconds below floor", content: "fleet:\n  version_retention: \"30s\"\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.app.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load = nil, want validation error")
+			}
+			if !strings.Contains(err.Error(), "fleet.version_retention") ||
+				!strings.Contains(err.Error(), "too small") {
+				t.Fatalf("Load error = %q, want version_retention validation message", err.Error())
+			}
+		})
+	}
+}
+
+func TestLoadVersionRetentionDisabledAndValid(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "zero disables", content: "fleet:\n  version_retention: \"0s\"\n"},
+		{name: "negative disables", content: "fleet:\n  version_retention: \"-1h\"\n"},
+		{name: "valid duration", content: "fleet:\n  version_retention: \"2h\"\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.app.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			if _, err := Load(path); err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+		})
 	}
 }
 

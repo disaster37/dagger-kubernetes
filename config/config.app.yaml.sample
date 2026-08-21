@@ -100,6 +100,9 @@ database:
 #   - set raft.replicas + raft.statefulset_name + raft.headless_service so the
 #     supervisor derives the peer list from the StatefulSet's stable pod DNS
 #     names (<sts>-<i>.<headless>.<ns>.svc.<cluster-domain>) — no K8s API calls.
+#     (In the Helm chart raft.replicas is NOT asked: it derives from
+#     supervisor.replicaCount, one pod = one voter. This key is for non-Helm
+#     deployments.)
 #
 # SECURITY: enable raft.tls.enabled (mTLS) before running multi-node. The Helm
 # chart enables it by default and shares the internal raft CA via a K8s Secret.
@@ -198,11 +201,13 @@ fleet:
   max_replicas_per_version: 3              # ceiling for the per-version autoscaler.
   max_sessions_per_replica: 8              # sessions pinned to one engine pod.
   replica_idle_ttl: "5m"                    # idle pod TTL before scale-down.
+  version_retention: "24h"                   # idle version GC: delete a version's StatefulSet+Service after this long with zero replicas and no pinned sessions (<= 0 disables; positive values < 1m are rejected).
 
   # --- Engine pod template ---------------------------------------------------
   engine_image_registry: "registry.dagger.io/engine"  # base registry for engine images.
   engine_storage_class: ""                            # StorageClass for engine PVCs (default uses default).
   engine_storage_size: "50Gi"                         # local cache disk per engine pod.
+  engine_pvc_labels: {}                               # extra labels added to engine PVCs (map; managed app/version labels take precedence).
   engine_cpu_request: "500m"                          # CPU request per engine pod.
   engine_cpu_limit: "2000m"                           # CPU limit per engine pod.
   engine_memory_request: "1Gi"                        # memory request per engine pod.
@@ -220,13 +225,13 @@ fleet:
     # http_proxy: "http://proxy.corp.example:3128"
     # https_proxy: "http://proxy.corp.example:3128"
     # no_proxy: "localhost,127.0.0.1,.svc,.cluster.local"
-  engine_extra_env_from: {}                       # env vars sourced from K8s Secret keys (map: env name -> {secret_name, key}).
+  engine_extra_env_from: {}                       # env vars sourced from K8s Secret keys (map: env name -> {secretName, key}).
     # Use for credentials that must never appear in plaintext config, e.g. an authenticated proxy:
     # HTTP_PROXY:
-    #   secret_name: "proxy-credentials"
+    #   secretName: "proxy-credentials"
     #   key: "http_proxy"            # secret value: "http://user:pass@proxy.corp.example:3128"
     # HTTPS_PROXY:
-    #   secret_name: "proxy-credentials"
+    #   secretName: "proxy-credentials"
     #   key: "https_proxy"
   engine_ca_secret: ""                            # K8s Secret with a custom CA PEM bundle for engine pods; empty = disabled.
   engine_ca_secret_key: "ca.crt"                  # key inside engine_ca_secret holding the PEM bundle.

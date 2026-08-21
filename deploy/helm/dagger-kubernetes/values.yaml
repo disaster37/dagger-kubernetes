@@ -26,9 +26,7 @@ supervisor:
     tag: ""
     pullPolicy: IfNotPresent
     pullSecrets: []
-## @param supervisor.replicaCount Number of supervisor replicas. Multi-node Raft
-## requires an odd number >= 3 for quorum fault tolerance (a 2-node cluster has
-## no failure tolerance). Keep in sync with supervisor.config.raft.replicas.
+## @param supervisor.replicaCount Number of supervisor pods. Single source of truth for the Raft cluster size: each supervisor pod is one Raft voter, so the voter count is derived from this value (never asked separately). Use an odd number >= 3 for quorum fault tolerance (a 2-node cluster has no failure tolerance).
   replicaCount: 3
 ## @param supervisor.resources.requests.cpu Supervisor CPU request.
 ## @param supervisor.resources.requests.memory Supervisor memory request.
@@ -73,17 +71,6 @@ supervisor:
   tolerations: []
 ## @param supervisor.affinity [object] Affinity rules for supervisor pod scheduling.
   affinity: {}
-## @param supervisor.autoscaling.enabled Enable HPA for supervisor. ONLY safe with a single-node Raft cluster (supervisor.config.raft.replicas=1): scaling a multi-replica Raft cluster with an HPA can break quorum, so the chart fails-closed when this is enabled together with supervisor.config.raft.replicas > 1.
-## @param supervisor.autoscaling.minReplicas Minimum replicas for HPA.
-## @param supervisor.autoscaling.maxReplicas Maximum replicas for HPA.
-## @param supervisor.autoscaling.targetCPUUtilizationPercentage Target CPU utilization for HPA.
-## @param supervisor.autoscaling.targetMemoryUtilizationPercentage Target memory utilization for HPA.
-  autoscaling:
-    enabled: false
-    minReplicas: 2
-    maxReplicas: 6
-    targetCPUUtilizationPercentage: 80
-    targetMemoryUtilizationPercentage: ""
 ## @param supervisor.serviceAccount.annotations [object] Annotations for the supervisor ServiceAccount.
 ## @param supervisor.serviceAccount.clusterScope Use ClusterRole instead of namespaced Role/RoleBinding (cluster-wide access - security-sensitive).
   serviceAccount:
@@ -110,15 +97,14 @@ supervisor:
 ## configurable.
 ## @descriptionEnd
 
-## @param supervisor.config.raft.replicas Raft voter count for DNS peer discovery. Keep in sync with supervisor.replicaCount.
 ## @param supervisor.config.raft.tls.enabled Enable mTLS for the Raft transport.
 ## @param supervisor.config.raft.tls.clientAuth Require and verify peer client certs (mTLS).
+##   The Raft voter count is NOT asked: it is derived from supervisor.replicaCount.
 ##   Everything else is derived automatically: node IDs come from the
 ##   StatefulSet pod names, peer discovery from the headless Service DNS, and
 ##   the internal CA is auto-bootstrapped in the <release>-raft-ca Secret.
   config:
     raft:
-      replicas: 3
       tls:
         enabled: true
         clientAuth: true
@@ -158,9 +144,11 @@ supervisor:
 ## @param supervisor.config.fleet.maxReplicasPerVersion Maximum engine replicas per Dagger version.
 ## @param supervisor.config.fleet.maxSessionsPerReplica Maximum concurrent sessions per engine replica.
 ## @param supervisor.config.fleet.replicaIdleTtl Idle TTL before scaling down an engine replica.
+## @param supervisor.config.fleet.versionRetention Idle version GC: delete a version's StatefulSet + Service after this long with zero replicas and no pinned sessions (<= 0 disables; positive values < 1m rejected).
 ## @param supervisor.config.fleet.engineImageRegistry Engine container image registry.
 ## @param supervisor.config.fleet.engineStorageClass StorageClass for engine PVCs (empty = cluster default).
 ## @param supervisor.config.fleet.engineStorageSize PVC size for each engine.
+## @param supervisor.config.fleet.enginePvcLabels [object] Extra labels added to engine PVCs (merged with managed labels app/version, which take precedence).
 ## @param supervisor.config.fleet.engineCPURequest Engine CPU request.
 ## @param supervisor.config.fleet.engineCPULimit Engine CPU limit.
 ## @param supervisor.config.fleet.engineMemoryRequest Engine memory request.
@@ -176,7 +164,7 @@ supervisor:
 ## @param supervisor.config.fleet.engineTolerations [array] Tolerations for engine pods.
 ## @param supervisor.config.fleet.engineExtraArgs [array] Additional CLI args passed to the engine.
 ## @param supervisor.config.fleet.engineExtraEnv [object] Extra env vars on engine pods.
-## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods: map of env name -> {secret_name, key} (snake_case keys, rendered verbatim into the app config).
+## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods: map of env name -> {secretName, key} (camelCase keys, rendered verbatim into the app config).
 ## @param supervisor.config.fleet.engineCaSecret Secret with custom CA PEM bundle for engines (empty = disabled).
 ## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
 ## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json
@@ -195,9 +183,11 @@ supervisor:
       maxReplicasPerVersion: 3
       maxSessionsPerReplica: 8
       replicaIdleTtl: "5m"
+      versionRetention: "24h"
       engineImageRegistry: "registry.dagger.io/engine"
       engineStorageClass: ""
       engineStorageSize: "50Gi"
+      enginePvcLabels: {}
       engineCPURequest: "500m"
       engineCPULimit: "2000m"
       engineMemoryRequest: "1Gi"
@@ -215,15 +205,15 @@ supervisor:
       #   NO_PROXY: "localhost,127.0.0.1,.svc,.cluster.local"
       engineExtraEnv: {}
       # engineExtraEnvFrom: env vars sourced from K8s Secret keys
-      # (map: env name -> {secret_name, key}; rendered verbatim into the app
+      # (map: env name -> {secretName, key}; rendered verbatim into the app
       # config). Use for credentials that must never appear in plaintext
       # config, e.g. an authenticated proxy:
       # engineExtraEnvFrom:
       #   HTTP_PROXY:
-      #     secret_name: "proxy-credentials"
+      #     secretName: "proxy-credentials"
       #     key: "http_proxy"            # secret value: "http://user:pass@proxy.corp.example:3128"
       #   HTTPS_PROXY:
-      #     secret_name: "proxy-credentials"
+      #     secretName: "proxy-credentials"
       #     key: "https_proxy"
       engineExtraEnvFrom: {}
       engineCaSecret: ""

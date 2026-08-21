@@ -53,7 +53,7 @@ data:
       bind_addr: ":8081"
       advertise_addr: ""
       peers: []
-      replicas: {{ .Values.supervisor.config.raft.replicas }}
+      replicas: {{ .Values.supervisor.replicaCount }}
       statefulset_name: {{ include "dagger-kubernetes.supervisorStatefulSetName" . | quote }}
       headless_service: {{ include "dagger-kubernetes.supervisorHeadlessService" . | quote }}
       namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
@@ -116,9 +116,12 @@ data:
       max_replicas_per_version: {{ .Values.supervisor.config.fleet.maxReplicasPerVersion }}
       max_sessions_per_replica: {{ .Values.supervisor.config.fleet.maxSessionsPerReplica }}
       replica_idle_ttl: {{ .Values.supervisor.config.fleet.replicaIdleTtl | quote }}
+      version_retention: {{ .Values.supervisor.config.fleet.versionRetention | quote }}
       engine_image_registry: {{ .Values.supervisor.config.fleet.engineImageRegistry | quote }}
       engine_storage_class: {{ .Values.supervisor.config.fleet.engineStorageClass | quote }}
       engine_storage_size: {{ .Values.supervisor.config.fleet.engineStorageSize | quote }}
+      engine_pvc_labels:
+{{ toYaml .Values.supervisor.config.fleet.enginePvcLabels | indent 8 }}
       engine_cpu_request: {{ .Values.supervisor.config.fleet.engineCPURequest | quote }}
       engine_cpu_limit: {{ .Values.supervisor.config.fleet.engineCPULimit | quote }}
       engine_memory_request: {{ .Values.supervisor.config.fleet.engineMemoryRequest | quote }}

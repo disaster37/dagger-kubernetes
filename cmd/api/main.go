@@ -233,6 +233,7 @@ func run(c *cli.Context) error {
 		MaxReplicasPerVersion: cfg.Fleet.MaxReplicasPerVersion,
 		MaxSessionsPerReplica: cfg.Fleet.MaxSessionsPerReplica,
 		ReplicaIdleTTL:        cfg.Fleet.ReplicaIdleTTL,
+		VersionRetention:      cfg.Fleet.VersionRetention,
 	}, logger, metrics)
 
 	traces := repository.NewSpanTreeReconstructor(cfg.Telemetry.TempoURL)
@@ -968,6 +969,7 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 		ImageRegistry:       cfg.Fleet.EngineImageRegistry,
 		StorageClass:        cfg.Fleet.EngineStorageClass,
 		StorageSize:         cfg.Fleet.EngineStorageSize,
+		PVCLabels:           cfg.Fleet.EnginePVCLabels,
 		CPURequest:          cfg.Fleet.EngineCPURequest,
 		CPULimit:            cfg.Fleet.EngineCPULimit,
 		MemoryRequest:       cfg.Fleet.EngineMemoryRequest,
@@ -1014,7 +1016,7 @@ func validateFleetEnv(fleet *domain.FleetConfig) error {
 			return fmt.Errorf("env var %s is set in both fleet.engine_extra_env and fleet.engine_extra_env_from", name)
 		}
 		if src.SecretName == "" {
-			return fmt.Errorf("fleet.engine_extra_env_from.%s: secret_name must not be empty", name)
+			return fmt.Errorf("fleet.engine_extra_env_from.%s: secretName must not be empty", name)
 		}
 		if src.Key == "" {
 			return fmt.Errorf("fleet.engine_extra_env_from.%s: key must not be empty", name)

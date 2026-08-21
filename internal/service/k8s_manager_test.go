@@ -8,6 +8,7 @@ import (
 
 	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
 
@@ -105,5 +106,96 @@ func TestK8sProviderWithManagerIntegration(t *testing.T) {
 	_, err = cs.CoreV1().Services("dagger-kubernetes").Get(context.Background(), domain.ServiceName("v0.20.0"), metav1.GetOptions{})
 	if err != nil {
 		t.Errorf("expected service to exist: %v", err)
+	}
+}
+
+func newK8sGCManager(t *testing.T) (*Manager, *repository.K8sProvider, *fake.Clientset, *Store) {
+	t.Helper()
+	cs := fake.NewSimpleClientset()
+	p := repository.NewK8sProvider(cs, repository.K8sProviderConfig{
+		Namespace:           "dagger-kubernetes",
+		ImageRegistry:       "registry.dagger.io/engine",
+		StorageSize:         "10Gi",
+		CPURequest:          "200m",
+		CPULimit:            "1",
+		MemoryRequest:       "256Mi",
+		MemoryLimit:         "1Gi",
+		TerminationGraceSec: 120,
+		Privileged:          true,
+		PullPolicy:          corev1.PullIfNotPresent,
+	})
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	sessions := NewStore(5 * time.Minute)
+	manager := NewManager(p, sessions, ManagerConfig{
+		MaxReplicasPerVersion: 2,
+		MaxSessionsPerReplica: 2,
+		ReplicaIdleTTL:        5 * time.Minute,
+		VersionRetention:      30 * time.Minute,
+	}, logger, nil)
+	return manager, p, cs, sessions
+}
+
+func TestK8sManagerSweepGCDeletesIdleVersion(t *testing.T) {
+	manager, p, cs, _ := newK8sGCManager(t)
+
+	if err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	if err := p.EnsureService("v0.20.0"); err != nil {
+		t.Fatalf("EnsureService: %v", err)
+	}
+	if err := p.SetVersionIdleSince("v0.20.0", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+
+	if err := manager.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	_, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName("v0.20.0"), metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("statefulset Get err = %v, want IsNotFound", err)
+	}
+	_, err = cs.CoreV1().Services("dagger-kubernetes").Get(context.Background(), domain.ServiceName("v0.20.0"), metav1.GetOptions{})
+	if !apierrors.IsNotFound(err) {
+		t.Fatalf("service Get err = %v, want IsNotFound", err)
+	}
+}
+
+func TestK8sManagerSweepGCMalformedAnnotationResets(t *testing.T) {
+	manager, p, cs, _ := newK8sGCManager(t)
+
+	if err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName("v0.20.0"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if sts.Annotations == nil {
+		sts.Annotations = map[string]string{}
+	}
+	sts.Annotations["dagger-kubernetes.io/idle-since"] = "garbage"
+	if _, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Update(context.Background(), sts, metav1.UpdateOptions{}); err != nil {
+		t.Fatalf("update statefulset: %v", err)
+	}
+
+	if err := manager.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	sts, err = cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName("v0.20.0"), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("statefulset should still exist after malformed annotation reset: %v", err)
+	}
+	raw := sts.Annotations["dagger-kubernetes.io/idle-since"]
+	parsed, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("annotation %q does not parse as RFC3339 after reset: %v", raw, err)
+	}
+	if d := time.Since(parsed); d < 0 || d > time.Minute {
+		t.Fatalf("annotation %q is not within a minute of now (delta %v)", raw, d)
 	}
 }

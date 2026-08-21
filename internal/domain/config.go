@@ -232,7 +232,7 @@ type PipelineStaleSweep struct {
 // EnvVarSource selects one key of a Kubernetes Secret as the value of an
 // engine container env var (fleet.engine_extra_env_from).
 type EnvVarSource struct {
-	SecretName string `mapstructure:"secret_name"`
+	SecretName string `mapstructure:"secretName"`
 	Key        string `mapstructure:"key"`
 }
 
@@ -241,9 +241,11 @@ type FleetConfig struct {
 	MaxReplicasPerVersion  int                     `mapstructure:"max_replicas_per_version"`
 	MaxSessionsPerReplica  int                     `mapstructure:"max_sessions_per_replica"`
 	ReplicaIdleTTL         time.Duration           `mapstructure:"replica_idle_ttl"`
+	VersionRetention       time.Duration           `mapstructure:"version_retention"`
 	EngineImageRegistry    string                  `mapstructure:"engine_image_registry"`
 	EngineStorageClass     string                  `mapstructure:"engine_storage_class"`
 	EngineStorageSize      string                  `mapstructure:"engine_storage_size"`
+	EnginePVCLabels        map[string]string       `mapstructure:"engine_pvc_labels"`
 	EngineCPURequest       string                  `mapstructure:"engine_cpu_request"`
 	EngineCPULimit         string                  `mapstructure:"engine_cpu_limit"`
 	EngineMemoryRequest    string                  `mapstructure:"engine_memory_request"`

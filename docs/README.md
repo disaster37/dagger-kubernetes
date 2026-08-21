@@ -346,10 +346,11 @@ come from env/secrets, never the file.
 
 > **Note:** map-valued config keys (`fleet.engine_extra_env`,
 > `fleet.engine_extra_env_from`, `fleet.engine_registry_mirrors`,
-> `fleet.engine_node_selector`) cannot be overridden via `DAGGER_KUBERNETES_`
-> environment variables — Viper does not bind env vars to map types. The same
-> applies to slice/array keys (`auth.cors.allowed_origins`,
-> `cache.registries`). Set these in the YAML config file or Helm values instead.
+> `fleet.engine_node_selector`, `fleet.engine_pvc_labels`) cannot be overridden
+> via `DAGGER_KUBERNETES_` environment variables — Viper does not bind env vars
+> to map types. The same applies to slice/array keys
+> (`auth.cors.allowed_origins`, `cache.registries`). Set these in the YAML
+> config file or Helm values instead.
 > `cache.registries[].password` (a slice element) is likewise not env-bindable:
 > use the `password_secret` K8s-Secret reference for multi-backend registries.
 
@@ -427,6 +428,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `max_replicas_per_version`                | `3`                                                      | Autoscaler ceiling per version.                                                                                                               |
 |                 | `max_sessions_per_replica`                | `8`                                                      | Sessions pinned per pod.                                                                                                                      |
 |                 | `replica_idle_ttl`                        | `5m`                                                     | Idle pod TTL before scale-down.                                                                                                               |
+|                 | `version_retention`                       | `24h`                                                    | Idle version GC: delete a version's StatefulSet + Service after this long with zero replicas and no pinned sessions (`<= 0` disables; positive values `< 1m` rejected). |
 |                 | `engine_extra_env`                        | `{}`                                                     | Extra env vars on engine pods (proxy vars etc.).                                                                                              |
 |                 | `engine_extra_env_from`                   | `{}`                                                     | Env vars from Secret keys (proxy credentials).                                                                                                |
 |                 | `engine_ca_secret`                        | `""`                                                     | Secret with custom CA PEM bundle; empty = off.                                                                                                |
@@ -493,11 +495,22 @@ Health endpoints (control port):
 Engines run as a **per-version Kubernetes StatefulSet**, e.g.
 `dagger-engine-v0-21-4`. The autoscaler (configured under `fleet:`) scales
 each StatefulSet up to `max_replicas_per_version` based on active leases; pods
-with no active sessions for `replica_idle_ttl` are scaled down.
+with no active sessions for `replica_idle_ttl` are scaled down. A version that
+has zero replicas and no pinned sessions for `version_retention` (default
+`24h`; `<= 0` disables, positive values below `1m` are rejected) is garbage
+collected: the supervisor deletes its
+Service and StatefulSet (the StatefulSet PVC retention policy removes its
+disk).
 
 The fleet provider contains both a stub (in-memory, for testing) and a real
 Kubernetes provider (`internal/repository/k8s_provider.go`) that manages StatefulSets,
 Services, Pods, PVCs, and ConfigMaps.
+
+Each engine pod gets its own PVC (`volumeClaimTemplate`, storage class
+`fleet.engine_storage_class`, size `fleet.engine_storage_size`). Extra labels
+can be added to those PVCs via `fleet.engine_pvc_labels` (map, e.g.
+`{"backup": "weekly"}`); they are merged with the managed
+`app=dagger-engine`/`version=<v>` labels, which take precedence on conflicts.
 
 ### Enterprise engine environment
 
@@ -510,7 +523,7 @@ Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
   their lowercase variants, plus any future env (e.g.
   `KUBERNETES_SERVICE_HOST`).
 - **Secret-sourced env vars** (`fleet.engine_extra_env_from`,
-  `map[string]{secret_name, key}`) — each entry is injected as an env var
+  `map[string]{secretName, key}`) — each entry is injected as an env var
   sourced from a Kubernetes Secret key (`SecretKeyRef`, not `Optional`).
   Use this for credentials that must never appear in plaintext config or
   Helm values, e.g. an authenticated proxy whose `HTTP_PROXY` value is
@@ -876,9 +889,12 @@ dependency has been removed from the project entirely.
   Peers are discovered from the StatefulSet's stable pod DNS names
   (`<sts>-<i>.<headless>.<ns>.svc.cluster.local:8081` for `i=0..replicas-1`) —
   pure DNS arithmetic, no K8s API calls. Each pod advertises its pod FQDN, not
-  `127.0.0.1`. Set `raft.replicas` (and the chart's `supervisor.replicaCount`)
-  to an **odd number ≥ 3** for quorum fault tolerance; a 2-node cluster loses
-  quorum on a single failure.
+  `127.0.0.1`. In the chart the voter count is derived from
+  `supervisor.replicaCount` (each supervisor pod is one voter; there is no
+  separate `raft.replicas` knob). Set it to an **odd number ≥ 3** for quorum
+  fault tolerance; a 2-node cluster loses quorum on a single failure.
+  Outside the chart (bare binary / Docker) set `raft.replicas` + 
+  `raft.statefulset_name` + `raft.headless_service` yourself.
 - **Transport TLS:** the Raft transport is **mTLS** when `raft.tls.enabled` is
   true (the Helm chart default). A self-signed internal CA is generated with
   `goca` and shared across pods via the `<release>-raft-ca` Kubernetes Secret;
@@ -898,17 +914,16 @@ dependency has been removed from the project entirely.
   meta keys to replicate to their local FSM before becoming Ready.
 - **Scale-up / scale-down:** the leader runs a `joinLoop` that reconciles the
   cluster membership with the discovered voter list (`raft.AddVoter` /
-  `raft.RemoveServer`). Scale-up: bump `replicaCount` + `raft.replicas` and
-  rolling-restart. Scale-down: shrink both, rolling-restart, then delete the
-  removed pod. A pod that loses its PVC (`<dir>/node-id`) becomes a new node
-  that must re-join.
-- **No HPA on multi-node Raft:** do **not** enable the chart's
-  `supervisor.autoscaling` HPA on a multi-replica Raft cluster — horizontal
-  autoscaling of a quorum-based store can disturb quorum and cause availability
-  loss. The chart **fails-closed**: it refuses to render when
-  `supervisor.autoscaling.enabled=true` and `supervisor.config.raft.replicas > 1`.
-  The HPA remains available only for single-node deployments
-  (`supervisor.config.raft.replicas=1`).
+  `raft.RemoveServer`). Scale-up: bump the chart's `supervisor.replicaCount`
+  (the voter count follows it) and rolling-restart. Scale-down: shrink it,
+  rolling-restart, then delete the removed pod. A pod that loses its PVC
+  (`<dir>/node-id`) becomes a new node that must re-join.
+- **No HPA:** the chart deliberately offers **no** supervisor autoscaling —
+  the Raft voter count must equal the pod count exactly, and an HPA cannot
+  honor that (scale-down disturbs quorum; scale-out would start independent
+  one-voter clusters, i.e. split brain). The HPA concept was removed from the
+  chart; scaling is a manual `supervisor.replicaCount` change + rolling
+  restart (see ADR-016).
 - **Data directory** `database.dir` holds `raft.db` (bolt log + stable store),
   `snapshots/`, `node-id`, and `tls/` (CA + leaf). Persist it on a per-pod PVC.
 - The bootstrap-admin flow provisions a fresh admin when the user count is 0,
@@ -1339,7 +1354,8 @@ all delegate to (or mirror) this script.
   (`ca.client_cert_ttl`).
 - **Tune the autoscaler:** `fleet.max_replicas_per_version` (cost ceiling),
   `fleet.max_sessions_per_replica` (per-pod density),
-  `fleet.replica_idle_ttl` (scale-down aggressiveness).
+  `fleet.replica_idle_ttl` (scale-down aggressiveness),
+  `fleet.version_retention` (idle-version GC horizon).
 - **Health:** `GET /healthz` and `GET /readyz` on the control port are
   wired to the K8s probes.
 - **Backups:** the cache registry and telemetry backends use persistent

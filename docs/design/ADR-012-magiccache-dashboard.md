@@ -95,9 +95,11 @@ AWS SDK v2 and amend AGENTS.md.
   replicas, even if `fleet.version_retention` would otherwise allow STS
   deletion — preventing purging cache an engine pod might still pull.
 
-  > **Superseded (2026-08-20):** `fleet.version_retention` was never
-  > implemented and the config key has been removed; the GC protection above
-  > is unchanged, but the `version_retention` reference is historical only.
+  > **Implemented (2026-08-21):** `fleet.version_retention` is now implemented.
+  > When it deletes an idle version's StatefulSet (and Service), that version's
+  > cache tags become unprotected (no active replicas) and may be purged by the
+  > cache GC on its next run — the intended interaction with
+  > `cache.gc.protect_active_versions`.
 - The registry must enable delete for purge/GC; otherwise the UI surfaces a
   clear 409 message and no state changes.
 - No new third-party dependencies were introduced (stdlib `net/http` for the

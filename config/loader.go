@@ -115,9 +115,11 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("fleet.max_replicas_per_version", 3)
 	v.SetDefault("fleet.max_sessions_per_replica", 8)
 	v.SetDefault("fleet.replica_idle_ttl", 5*time.Minute)
+	v.SetDefault("fleet.version_retention", 24*time.Hour)
 	v.SetDefault("fleet.engine_image_registry", "registry.dagger.io/engine")
 	v.SetDefault("fleet.engine_storage_class", "")
 	v.SetDefault("fleet.engine_storage_size", "50Gi")
+	v.SetDefault("fleet.engine_pvc_labels", map[string]string{})
 	v.SetDefault("fleet.engine_cpu_request", "500m")
 	v.SetDefault("fleet.engine_cpu_limit", "2000m")
 	v.SetDefault("fleet.engine_memory_request", "1Gi")
@@ -181,6 +183,10 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("validate server config: %w", err)
 	}
 
+	if err := validateFleetConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate fleet config: %w", err)
+	}
+
 	return &cfg, nil
 }
 
@@ -226,6 +232,20 @@ func validateAuthConfig(cfg *domain.Config) error {
 		return fmt.Errorf("auth.internal.enabled: false requires auth.oauth.enabled: true with a fully configured provider")
 	}
 
+	return nil
+}
+
+// validateFleetConfig guards against a misconfigured version_retention that
+// would silently cause irreversible engine-fleet deletion (StatefulSet +
+// Service, and its PVCs via the StatefulSet retention policy). version_retention
+// <= 0 is the documented "disabled" value; a positive value below one minute is
+// almost always a unit mistake — in particular, an unquoted YAML integer (e.g.
+// `version_retention: 24`) is decoded by Viper/mapstructure as *nanoseconds*,
+// not hours, which would GC idle fleets within one sweep tick.
+func validateFleetConfig(cfg *domain.Config) error {
+	if cfg.Fleet.VersionRetention > 0 && cfg.Fleet.VersionRetention < time.Minute {
+		return fmt.Errorf("fleet.version_retention = %v is too small; use a duration with an explicit unit of at least 1m (or <= 0 to disable GC)", cfg.Fleet.VersionRetention)
+	}
 	return nil
 }
 

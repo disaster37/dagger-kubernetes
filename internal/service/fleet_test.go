@@ -3,10 +3,12 @@ package service
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
@@ -271,5 +273,296 @@ func TestAllFleetInfoJSONTags(t *testing.T) {
 		if _, ok := replica[key]; ok {
 			t.Errorf("PascalCase replica key %q should be absent in %s", key, string(raw))
 		}
+	}
+}
+
+// newGCManager builds a Manager wired for idle-version GC testing with the
+// given version_retention.
+func newGCManager(t *testing.T, provider domain.FleetProvider, sessions *Store, retention time.Duration) *Manager {
+	t.Helper()
+	return NewManager(provider, sessions, ManagerConfig{
+		MaxReplicasPerVersion: 3,
+		MaxSessionsPerReplica: 8,
+		ReplicaIdleTTL:        5 * time.Minute,
+		VersionRetention:      retention,
+	}, observ.NewTestLogger(), observ.NewMetrics(nil))
+}
+
+func TestSweepGCDisabled(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 0)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if _, ok, err := provider.VersionIdleSince("v0.21.4"); err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	} else if ok {
+		t.Fatal("idle-since should not be stamped when GC is disabled")
+	}
+
+	versions, err := provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions: %v", err)
+	}
+	if len(versions) != 1 || versions[0] != "v0.21.4" {
+		t.Fatalf("versions = %v, want [v0.21.4]", versions)
+	}
+}
+
+// TestSweepGCDisabledActiveVersionKeepsIdleSince guards the semantics-table §1
+// rule "version_retention <= 0 ⇒ no idle-since reads/writes": an active version
+// (replicas > 0) must NOT have its idle-since annotation cleared when GC is
+// disabled.
+func TestSweepGCDisabledActiveVersionKeepsIdleSince(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 0)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	stamp := time.Now().Add(-time.Hour)
+	if err := provider.SetVersionIdleSince("v0.21.4", stamp); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	if err := provider.ScaleUp("v0.21.4", 1); err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	got, ok, err := provider.VersionIdleSince("v0.21.4")
+	if err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	}
+	if !ok {
+		t.Fatal("idle-since should be preserved (not cleared) when GC is disabled")
+	}
+	if !got.Equal(stamp) {
+		t.Fatalf("idle-since = %v, want %v (unchanged)", got, stamp)
+	}
+}
+
+func TestSweepGCStampsFirstThenDeletes(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 30*time.Minute)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	// First sweep: no idle-since yet -> stamp, do not delete.
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep 1: %v", err)
+	}
+	if _, ok, err := provider.VersionIdleSince("v0.21.4"); err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	} else if !ok {
+		t.Fatal("idle-since should be stamped on first idle observation")
+	}
+	versions, err := provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions = %v, want 1 (still present after stamp)", versions)
+	}
+
+	// Second sweep with a fresh stamp: retention not yet elapsed -> no-op.
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep 2 (waiting): %v", err)
+	}
+	if _, ok, err := provider.VersionIdleSince("v0.21.4"); err != nil {
+		t.Fatalf("VersionIdleSince after waiting sweep: %v", err)
+	} else if !ok {
+		t.Fatal("idle-since should still be stamped while retention is pending")
+	}
+	versions, err = provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions after waiting sweep: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions = %v, want 1 (still waiting)", versions)
+	}
+
+	// Backdate the idle-since beyond retention, then sweep -> delete.
+	if err := provider.SetVersionIdleSince("v0.21.4", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep 3: %v", err)
+	}
+
+	versions, err = provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions after GC: %v", err)
+	}
+	if len(versions) != 0 {
+		t.Fatalf("versions = %v, want empty after GC", versions)
+	}
+	replicas, _ := provider.GetReplicas("v0.21.4")
+	if len(replicas) != 0 {
+		t.Fatalf("replicas = %d, want 0", len(replicas))
+	}
+}
+
+func TestSweepGCSkipsWhenPinnedSessionsExist(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 30*time.Minute)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	if err := provider.SetVersionIdleSince("v0.21.4", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	sessions.Register("fp", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	versions, err := provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions = %v, want 1 (pinned sessions protect version)", versions)
+	}
+	if _, ok, err := provider.VersionIdleSince("v0.21.4"); err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	} else if ok {
+		t.Fatal("idle-since should be cleared while pinned sessions exist")
+	}
+}
+
+func TestSweepGCClearsIdleSinceWhenActive(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 30*time.Minute)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	if err := provider.SetVersionIdleSince("v0.21.4", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	if err := provider.ScaleUp("v0.21.4", 1); err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	versions, err := provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions = %v, want 1 (active version not deleted)", versions)
+	}
+	if _, ok, err := provider.VersionIdleSince("v0.21.4"); err != nil {
+		t.Fatalf("VersionIdleSince: %v", err)
+	} else if ok {
+		t.Fatal("idle-since should be cleared once the version is active again")
+	}
+}
+
+type malformedIdleProvider struct {
+	*repository.StubProvider
+	setCalls int
+	lastSet  time.Time
+}
+
+func (p *malformedIdleProvider) VersionIdleSince(string) (time.Time, bool, error) {
+	return time.Time{}, true, errors.New("parse idle-since annotation: bad value")
+}
+
+func (p *malformedIdleProvider) SetVersionIdleSince(version string, idleSince time.Time) error {
+	p.setCalls++
+	p.lastSet = idleSince
+	return p.StubProvider.SetVersionIdleSince(version, idleSince)
+}
+
+func TestSweepGCMalformedAnnotationResets(t *testing.T) {
+	provider := &malformedIdleProvider{StubProvider: repository.NewStubProvider()}
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 30*time.Minute)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	versions, err := provider.AllVersions()
+	if err != nil {
+		t.Fatalf("AllVersions: %v", err)
+	}
+	if len(versions) != 1 {
+		t.Fatalf("versions = %v, want 1 (no delete on malformed annotation)", versions)
+	}
+	if provider.setCalls == 0 {
+		t.Fatal("SetVersionIdleSince should have been called to reset the malformed annotation")
+	}
+	if provider.lastSet.IsZero() {
+		t.Fatal("SetVersionIdleSince should have been called with a non-zero time")
+	}
+}
+
+type recordingProvider struct {
+	*repository.StubProvider
+	calls []string
+}
+
+func (p *recordingProvider) DeleteService(version string) error {
+	p.calls = append(p.calls, "DeleteService")
+	return p.StubProvider.DeleteService(version)
+}
+
+func (p *recordingProvider) DeleteStatefulSet(version string) error {
+	p.calls = append(p.calls, "DeleteStatefulSet")
+	return p.StubProvider.DeleteStatefulSet(version)
+}
+
+func TestSweepGCDeletesServiceThenStatefulSet(t *testing.T) {
+	provider := &recordingProvider{StubProvider: repository.NewStubProvider()}
+	sessions := NewStore(5 * time.Minute)
+
+	m := newGCManager(t, provider, sessions, 30*time.Minute)
+
+	if err := provider.EnsureStatefulSet("v0.21.4", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	if err := provider.SetVersionIdleSince("v0.21.4", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	if len(provider.calls) != 2 || provider.calls[0] != "DeleteService" || provider.calls[1] != "DeleteStatefulSet" {
+		t.Fatalf("calls = %v, want [DeleteService DeleteStatefulSet]", provider.calls)
 	}
 }
