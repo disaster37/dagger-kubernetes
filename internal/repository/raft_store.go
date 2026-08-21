@@ -57,7 +57,7 @@ type RaftStoreConfig struct {
 	SnapshotThreshold uint64
 	SnapshotInterval  time.Duration
 	TrailingLogs      uint64
-	TLS               *tls.Config // now actually used (was rejected before)
+	TLS               *tls.Config
 }
 
 // NewRaftStore constructs and starts a Raft node. It loads/generates a stable

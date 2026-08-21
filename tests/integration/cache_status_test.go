@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,7 +25,7 @@ func registryStub(t *testing.T) *httptest.Server {
 	manifest := `{"config":{"digest":"sha256:cfg","size":10},"layers":[{"digest":"sha256:l1","size":20},{"digest":"sha256:l2","size":30}]}`
 	// Valid sha256:<64 hex> digest used as the manifest digest so the client's
 	// digest-shape validation accepts it and the DELETE path matches.
-	dgst := "sha256:" + strings.Repeat("a", 64)
+	dgst := fmt.Sprintf("sha256:%s", strings.Repeat("a", 64))
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/v2/":
@@ -41,7 +42,7 @@ func registryStub(t *testing.T) *httptest.Server {
 		case r.Method == http.MethodHead && r.URL.Path == "/v2/dagger-cache/manifests/v0-21-4":
 			w.Header().Set("Docker-Content-Digest", dgst)
 			w.WriteHeader(http.StatusOK)
-		case r.Method == http.MethodDelete && r.URL.Path == "/v2/dagger-cache/manifests/"+dgst:
+		case r.Method == http.MethodDelete && r.URL.Path == fmt.Sprintf("/v2/dagger-cache/manifests/%s", dgst):
 			w.WriteHeader(http.StatusAccepted)
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -93,6 +94,9 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	router := service.NewRegistryRouter(
 		[]domain.RegistryBackend{{ID: "default", InternalAddr: ts.Listener.Addr().String()}},
 		repository.NewCacheRoutesRepo(store),
+		func(b domain.RegistryBackend) domain.RegistryClient {
+			return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+		},
 		logger,
 	)
 	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{
@@ -127,8 +131,8 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	base := "http://localhost:18092"
 
 	// --- GET /api/v1/cache ---
-	req, _ := http.NewRequest("GET", base+"/api/v1/cache", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/cache", base), nil)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", adminToken))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/v1/cache: %v", err)
@@ -155,8 +159,8 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	}
 
 	// --- GET /api/v1/status ---
-	req, _ = http.NewRequest("GET", base+"/api/v1/status", nil)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/status", base), nil)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", adminToken))
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /api/v1/status: %v", err)
@@ -184,8 +188,8 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 
 	// --- POST /api/v1/cache/purge (admin) ---
 	body, _ := json.Marshal(map[string]string{"version": "v0.21.4"})
-	req, _ = http.NewRequest("POST", base+"/api/v1/cache/purge", bytes.NewReader(body))
-	req.Header.Set("Authorization", "Bearer "+adminToken)
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/cache/purge", base), bytes.NewReader(body))
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", adminToken))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {

@@ -24,7 +24,6 @@ Quick links:
 | `dagger/`           | Local Dagger module — CI pipeline.                   |
 | `scripts/`          | Dev scripts (`dagger-kubernetes.sh`, `update-helm-docs.sh`). |
 | `deploy/docker`     | Local dev compose stack.                              |
-| `deploy/k8s`        | Kubernetes manifests.                                 |
 | `deploy/helm`       | Helm chart.                                           |
 | `ci-integrations/`  | GHA action, Jenkins shared lib, Drone extension.     |
 | `ui/`               | Vite SPA pipeline UI.                                 |

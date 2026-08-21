@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -28,7 +29,7 @@ func newProbeServer(t *testing.T, manifests, blobs map[string]bool) *httptest.Se
 		trimmed := strings.TrimPrefix(r.URL.Path, "/v2/")
 		parts := strings.Split(trimmed, "/")
 		if len(parts) >= 2 && parts[len(parts)-2] == "manifests" {
-			key := strings.Join(parts[:len(parts)-2], "/") + ":" + parts[len(parts)-1]
+			key := fmt.Sprintf("%s:%s", strings.Join(parts[:len(parts)-2], "/"), parts[len(parts)-1])
 			if manifests[key] {
 				w.WriteHeader(http.StatusOK)
 				return
@@ -47,13 +48,13 @@ func newProbeServer(t *testing.T, manifests, blobs map[string]bool) *httptest.Se
 }
 
 func digestRepeat(c string) string {
-	return "sha256:" + strings.Repeat(c, 64)
+	return fmt.Sprintf("sha256:%s", strings.Repeat(c, 64))
 }
 
 func TestHealthyBackendsOrdering(t *testing.T) {
 	r := NewRegistryRouter([]domain.RegistryBackend{
 		{ID: "a"}, {ID: "b"}, {ID: "c"},
-	}, nil, observ.NewTestLogger())
+	}, nil, newRegistryClient, observ.NewTestLogger())
 	r.SetCharges(map[string]int64{"a": 100, "b": 10, "c": 50})
 
 	got := r.HealthyBackends()
@@ -79,7 +80,7 @@ func backendIDs(bs []domain.RegistryBackend) []string {
 func TestRouteForPushLeastChargedAndNoBackend(t *testing.T) {
 	r := NewRegistryRouter([]domain.RegistryBackend{
 		{ID: "a"}, {ID: "b"},
-	}, nil, observ.NewTestLogger())
+	}, nil, newRegistryClient, observ.NewTestLogger())
 	r.SetCharges(map[string]int64{"a": 90, "b": 5})
 
 	b, err := r.RouteForPush("")
@@ -241,7 +242,7 @@ func TestRecordManifestAndRefreshCharges(t *testing.T) {
 }
 
 func TestMarkDownMarkUp(t *testing.T) {
-	r := NewRegistryRouter([]domain.RegistryBackend{{ID: "a"}, {ID: "b"}}, nil, observ.NewTestLogger())
+	r := NewRegistryRouter([]domain.RegistryBackend{{ID: "a"}, {ID: "b"}}, nil, newRegistryClient, observ.NewTestLogger())
 
 	if len(r.HealthyBackends()) != 2 {
 		t.Fatalf("healthy = %d, want 2", len(r.HealthyBackends()))

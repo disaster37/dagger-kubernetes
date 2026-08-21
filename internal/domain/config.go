@@ -241,8 +241,6 @@ type FleetConfig struct {
 	MaxReplicasPerVersion  int                     `mapstructure:"max_replicas_per_version"`
 	MaxSessionsPerReplica  int                     `mapstructure:"max_sessions_per_replica"`
 	ReplicaIdleTTL         time.Duration           `mapstructure:"replica_idle_ttl"`
-	VersionRetention       time.Duration           `mapstructure:"version_retention"`
-	MinReplicasPerVersion  int                     `mapstructure:"min_replicas_per_version"`
 	EngineImageRegistry    string                  `mapstructure:"engine_image_registry"`
 	EngineStorageClass     string                  `mapstructure:"engine_storage_class"`
 	EngineStorageSize      string                  `mapstructure:"engine_storage_size"`
@@ -271,11 +269,10 @@ type CAConfig struct {
 }
 
 type TLSConfig struct {
-	Provider         string `mapstructure:"provider"`
-	ServerCertSecret string `mapstructure:"server_cert_secret"`
-	CAPath           string `mapstructure:"ca_path"`
-	CertPath         string `mapstructure:"cert_path"`
-	KeyPath          string `mapstructure:"key_path"`
+	Provider string `mapstructure:"provider"`
+	CAPath   string `mapstructure:"ca_path"`
+	CertPath string `mapstructure:"cert_path"`
+	KeyPath  string `mapstructure:"key_path"`
 }
 
 type VersionConfig struct {

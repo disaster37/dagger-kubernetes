@@ -14,6 +14,8 @@ type connectFixture struct {
 	tokens *TokenService
 	users  *UserService
 	vr     *Resolver
+	cfg    *domain.Config
+	cache  *Cache
 }
 
 func newConnectFixture(t *testing.T, cache *Cache, key []byte) *connectFixture {
@@ -31,7 +33,20 @@ func newConnectFixture(t *testing.T, cache *Cache, key []byte) *connectFixture {
 	ts := NewTokenService(r.tokens, testLogger(), key)
 	us := NewUserService(r.users, r.groups, testLogger())
 	cs := NewConnectService(cfg, cache, vr, ts, testLogger())
-	return &connectFixture{svc: cs, tokens: ts, users: us, vr: vr}
+	return &connectFixture{svc: cs, tokens: ts, users: us, vr: vr, cfg: cfg, cache: cache}
+}
+
+// setReleases re-wires the fixture's resolver (and the ConnectService that
+// holds it) with a fresh resolver populated with releases. Replaces the removed
+// Resolver.SetReleases mutation.
+func (fx *connectFixture) setReleases(t *testing.T, releases map[string][]string) {
+	t.Helper()
+	vr, err := NewResolver("v0.19.0", nil, releases)
+	if err != nil {
+		t.Fatalf("resolver: %v", err)
+	}
+	fx.vr = vr
+	fx.svc = NewConnectService(fx.cfg, fx.cache, vr, fx.tokens, testLogger())
 }
 
 func registryCache() *Cache {
@@ -275,7 +290,7 @@ func TestConnectEnvAllowedVersions(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	fx.vr.SetReleases(map[string][]string{"0.21": {"v0.21.4"}})
+	fx.setReleases(t, map[string][]string{"0.21": {"v0.21.4"}})
 	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
@@ -291,7 +306,7 @@ func TestConnectEnvNoVersionLatestRelease(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	fx.vr.SetReleases(map[string][]string{
+	fx.setReleases(t, map[string][]string{
 		"0.19": {"v0.19.0"},
 		"0.21": {"v0.21.4"},
 	})

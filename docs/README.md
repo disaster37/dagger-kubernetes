@@ -104,14 +104,14 @@ EOF
 
 # 2. Install from the GHCR OCI repository. No certificate generation needed:
 #    the minting CA + data-plane server cert are auto-generated on first boot.
-helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 \
   -f my-values.yaml \
   --namespace dagger-stack --create-namespace
 
 # 3. Create an API token from the UI (Settings page), or pre-seed the
 #    bootstrap admin password:
-helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+helm upgrade dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
   --set auth.bootstrapAdmin.password="change-me"
 ```
@@ -127,14 +127,14 @@ helm upgrade dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
 To list available chart versions:
 
 ```bash
-helm show chart oci://ghcr.io/disaster/charts/dagger-kubernetes | grep version
+helm show chart oci://ghcr.io/disaster37/charts/dagger-kubernetes | grep version
 ```
 
 For local development or customization, you can install directly from the
 chart source by cloning the repository:
 
 ```bash
-git clone https://github.com/disaster/dagger-kubernetes.git
+git clone https://github.com/disaster37/dagger-kubernetes.git
 cd dagger-kubernetes
 helm dependency build deploy/helm/dagger-kubernetes
 helm install dagger-kubernetes deploy/helm/dagger-kubernetes -f my-values.yaml ...
@@ -424,11 +424,9 @@ inline comments. The sections below summarise the most important ones.
 |                 | `stale_sweep.schedule`                    | `1m`                                                     | Stale sweeper ticker interval.                                                                                                                |
 |                 | `stale_sweep.stale_after`                 | `5m`                                                     | Mark running traces with no active lease failed once older than this.                                                                         |
 | `fleet`         | `namespace`                               | `dagger-kubernetes`                                      | K8s namespace for engine pods.                                                                                                                |
-|                 | `min_replicas_per_version`                | `0`                                                      | Autoscaler floor per version.                                                                                                                 |
 |                 | `max_replicas_per_version`                | `3`                                                      | Autoscaler ceiling per version.                                                                                                               |
 |                 | `max_sessions_per_replica`                | `8`                                                      | Sessions pinned per pod.                                                                                                                      |
 |                 | `replica_idle_ttl`                        | `5m`                                                     | Idle pod TTL before scale-down.                                                                                                               |
-|                 | `version_retention`                       | `24h`                                                    | Time a 0-replica StatefulSet lingers.                                                                                                         |
 |                 | `engine_extra_env`                        | `{}`                                                     | Extra env vars on engine pods (proxy vars etc.).                                                                                              |
 |                 | `engine_extra_env_from`                   | `{}`                                                     | Env vars from Secret keys (proxy credentials).                                                                                                |
 |                 | `engine_ca_secret`                        | `""`                                                     | Secret with custom CA PEM bundle; empty = off.                                                                                                |
@@ -436,11 +434,10 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_debug`                            | `false`                                                  | `engine.toml: debug = true`.                                                                                                                  |
 |                 | `engine_log_format`                       | `json`                                                   | `engine.toml: [log] format`; `""` omits.                                                                                                      |
 |                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
-| `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `ca.crt`/`ca.key` to bring an existing CA. |
+| `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `tls.caCrt`/`tls.caKey` (Helm) to bring an existing CA. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
 | `tls`           | `provider`                                | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Minting CA is auto-bootstrapped for all.                  |
 |                 | `cert_path` / `key_path`                  | see loader                                               | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager).                                                        |
-|                 | `server_cert_secret`                      | `supervisor-tls`                                         | K8s Secret with `tls.crt`/`tls.key`.                                                                                                          |
 |                 | `lease_ttl`                               | `2m`                                                     | Lease TTL; clients renew before expiry.                                                                                                       |
 | `version`       | `floor`                                   | `v0.19.0`                                                | Minimum engine version.                                                                                                                       |
 |                 | `allowlist`                               | —                                                        | `major.minor` prefixes to admit.                                                                                                              |
@@ -471,7 +468,7 @@ Or via the published Docker image from GHCR:
 docker run -p 8080:8080 -p 8443:8443 \
   -v "$PWD/config/config.app.yaml:/etc/dagger-kubernetes/config.app.yaml:ro" \
   -v "$PWD/tokens:/etc/dagger-kubernetes/tokens:ro" \
-  ghcr.io/disaster/dagger-kubernetes:latest
+  ghcr.io/disaster37/dagger-kubernetes:latest
 ```
 
 To build from source:
@@ -495,11 +492,8 @@ Health endpoints (control port):
 
 Engines run as a **per-version Kubernetes StatefulSet**, e.g.
 `dagger-engine-v0-21-4`. The autoscaler (configured under `fleet:`) scales
-each StatefulSet between `min_replicas_per_version` and
-`max_replicas_per_version` based on active leases; pods with no active
-sessions for `replica_idle_ttl` are scaled down, and a version that has had
-zero replicas for `version_retention` is garbage-collected (StatefulSet +
-PVs removed).
+each StatefulSet up to `max_replicas_per_version` based on active leases; pods
+with no active sessions for `replica_idle_ttl` are scaled down.
 
 The fleet provider contains both a stub (in-memory, for testing) and a real
 Kubernetes provider (`internal/repository/k8s_provider.go`) that manages StatefulSets,
@@ -658,8 +652,7 @@ cache:
 Age is taken from the manifest's `org.opencontainers.image.created` annotation;
 tags without it are never purged (conservative). GC never purges cache refs for
 versions that still have active engine replicas when
-`protect_active_versions` is set, even if `fleet.version_retention` would
-otherwise allow their StatefulSets to be deleted.
+`protect_active_versions` is set.
 
 ### Purging cache (admin)
 
@@ -909,6 +902,13 @@ dependency has been removed from the project entirely.
   rolling-restart. Scale-down: shrink both, rolling-restart, then delete the
   removed pod. A pod that loses its PVC (`<dir>/node-id`) becomes a new node
   that must re-join.
+- **No HPA on multi-node Raft:** do **not** enable the chart's
+  `supervisor.autoscaling` HPA on a multi-replica Raft cluster — horizontal
+  autoscaling of a quorum-based store can disturb quorum and cause availability
+  loss. The chart **fails-closed**: it refuses to render when
+  `supervisor.autoscaling.enabled=true` and `supervisor.config.raft.replicas > 1`.
+  The HPA remains available only for single-node deployments
+  (`supervisor.config.raft.replicas=1`).
 - **Data directory** `database.dir` holds `raft.db` (bolt log + stable store),
   `snapshots/`, `node-id`, and `tls/` (CA + leaf). Persist it on a per-pod PVC.
 - The bootstrap-admin flow provisions a fresh admin when the user count is 0,
@@ -1029,7 +1029,7 @@ auto-bootstrapped internal CA (`<release>-raft-ca`) — see
 **Zero certificate generation:** with `embedded` (the default) or
 `cert-manager`, you never run `openssl` by hand — the minting CA, the Raft CA,
 and the server cert (embedded) are all generated automatically. To bring an
-existing minting CA (e.g. migrating a prior deployment), set `ca.crt`/`ca.key`
+existing minting CA (e.g. migrating a prior deployment), set `tls.caCrt`/`tls.caKey`
 in the chart values; the supervisor reuses it instead of generating a new one.
 
 ### cert-manager (public server certificate)
@@ -1058,7 +1058,7 @@ spec:
 EOF
 
 # 2. Install with the cert-manager provider
-helm install dagger-kubernetes oci://ghcr.io/disaster/charts/dagger-kubernetes \
+helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
   --set tls.provider=cert-manager \
   --set dataIngress.enabled=true \
@@ -1125,9 +1125,13 @@ supervisor's delete request must include that key.
 
 ### Grafana
 Unified dashboards for Tempo (traces), Loki (logs), and VictoriaMetrics
-(metrics). Datasources are auto-provisioned via a ConfigMap with label
-`grafana_datasource: "1"`. Default credentials: `admin` / `admin` (change in
-production). Includes trace-to-logs correlation configured out of the box.
+(metrics). Grafana is **enabled by default** (toggle with `grafana.enabled`);
+its datasources are auto-provisioned via a ConfigMap with label
+`grafana_datasource: "1"`. Default credentials: the `admin` user with a
+**randomly generated password** stored in the `<release>-grafana` Secret
+(`kubectl get secret <release>-grafana -o jsonpath="{.data.admin-password}" | base64 -d`);
+set `grafana.adminPassword` explicitly to override it (with a rotation
+workflow). Includes trace-to-logs correlation configured out of the box.
 
 Default URLs (auto-wired by Helm):
 
@@ -1324,8 +1328,9 @@ all delegate to (or mirror) this script.
 
 ## Operations
 
-- **Provision a token:** `openssl rand -hex 32` → append to
-  `tokens_file` (or the `supervisor-tokens` Secret).
+- **Provision a token:** create a per-user API token from the UI
+  (Settings → API tokens), or via the admin API (`POST /api/v1/tokens/me`).
+  Use that token as `DAGGER_CLOUD_TOKEN` / `Authorization: Bearer`.
 - **Admit a new Dagger version:** add its `major.minor` to
   `version.allowlist`; bump `version.floor` if needed; restart the
   Supervisor. Engines for that version are created lazily on first lease.
@@ -1334,8 +1339,7 @@ all delegate to (or mirror) this script.
   (`ca.client_cert_ttl`).
 - **Tune the autoscaler:** `fleet.max_replicas_per_version` (cost ceiling),
   `fleet.max_sessions_per_replica` (per-pod density),
-  `fleet.replica_idle_ttl` (scale-down aggressiveness),
-  `fleet.version_retention` (how long a quiet version lingers).
+  `fleet.replica_idle_ttl` (scale-down aggressiveness).
 - **Health:** `GET /healthz` and `GET /readyz` on the control port are
   wired to the K8s probes.
 - **Backups:** the cache registry and telemetry backends use persistent
@@ -1351,12 +1355,11 @@ all delegate to (or mirror) this script.
 
 - [ ] Set `grafana.adminPassword` to a strong value
 - [ ] Use `cert-manager` (`tls.provider: cert-manager`) for a publicly trusted server certificate (optional; `embedded` is fully auto-provisioned but self-signed)
-- [ ] Back up the auto-generated `<release>-minting-ca` and `<release>-raft-ca` Secrets (or set `ca.crt`/`ca.key` explicitly to reuse a known CA)
+- [ ] Back up the auto-generated `<release>-minting-ca` and `<release>-raft-ca` Secrets (or set `tls.caCrt`/`tls.caKey` explicitly to reuse a known CA)
 - [ ] Configure persistent storage for all stateful components
 - [ ] Set appropriate resource requests/limits per component
 - [ ] Configure ingress with TLS for the control plane
 - [ ] Enable Prometheus ServiceMonitor if using Prometheus Operator
-- [ ] Set `fleet.minReplicasPerVersion: 1` for warm engine pools
 - [ ] Configure object storage (S3/GCS) for Loki and Tempo in production
 - [ ] Use external OAuth provider (GitHub) with org restrictions for UI access
 - [ ] Rotate tokens regularly

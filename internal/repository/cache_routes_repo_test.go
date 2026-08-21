@@ -110,7 +110,7 @@ func TestUploadSessionLifecycle(t *testing.T) {
 	}
 }
 
-func TestBackendChargeAndAllCharges(t *testing.T) {
+func TestAllCharges(t *testing.T) {
 	r := newRoutesRepo(t)
 	ctx := context.Background()
 
@@ -124,10 +124,6 @@ func TestBackendChargeAndAllCharges(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	charge, err := r.BackendCharge(ctx, "reg-1")
-	if err != nil || charge != 30 {
-		t.Fatalf("BackendCharge reg-1 = %d err=%v", charge, err)
-	}
 	all, err := r.AllCharges(ctx)
 	if err != nil {
 		t.Fatalf("AllCharges: %v", err)
@@ -149,40 +145,6 @@ func TestDeleteManifestRoute(t *testing.T) {
 	}
 	if _, ok, _ := r.LookupManifest(ctx, "r", "t"); ok {
 		t.Fatal("expected miss after delete")
-	}
-}
-
-func TestDeleteRoutesForBackend(t *testing.T) {
-	r := newRoutesRepo(t)
-	ctx := context.Background()
-
-	if err := r.UpsertManifest(ctx, "r", "t1", "", "reg-1", 1); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	if err := r.UpsertManifest(ctx, "r", "t2", "", "reg-2", 1); err != nil {
-		t.Fatalf("upsert: %v", err)
-	}
-	if err := r.UpsertBlob(ctx, digestRepeat("a"), "reg-1"); err != nil {
-		t.Fatalf("upsert blob: %v", err)
-	}
-	if err := r.UpsertBlob(ctx, digestRepeat("b"), "reg-2"); err != nil {
-		t.Fatalf("upsert blob: %v", err)
-	}
-
-	if err := r.DeleteRoutesForBackend(ctx, "reg-1"); err != nil {
-		t.Fatalf("DeleteRoutesForBackend: %v", err)
-	}
-	if _, ok, _ := r.LookupManifest(ctx, "r", "t1"); ok {
-		t.Fatal("reg-1 manifest route should be gone")
-	}
-	if _, ok, _ := r.LookupManifest(ctx, "r", "t2"); !ok {
-		t.Fatal("reg-2 manifest route should remain")
-	}
-	if _, ok, _ := r.LookupBlob(ctx, digestRepeat("a")); ok {
-		t.Fatal("reg-1 blob route should be gone")
-	}
-	if _, ok, _ := r.LookupBlob(ctx, digestRepeat("b")); !ok {
-		t.Fatal("reg-2 blob route should remain")
 	}
 }
 

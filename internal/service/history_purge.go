@@ -11,7 +11,6 @@ import (
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
-	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 const historyStatsTTL = 15 * time.Second
@@ -32,7 +31,7 @@ const historyStatsTTL = 15 * time.Second
 type HistoryPurgeService struct {
 	traceMeta  domain.TraceMetaRepository
 	logs       domain.LogRepository      // Loki (may be nil)
-	metrics    *repository.MetricsClient // VictoriaMetrics (may be nil)
+	metrics    domain.CacheMetricsClient // VictoriaMetrics (may be nil)
 	gcCfg      domain.HistoryGCConfig
 	logger     *logrus.Logger
 	metricsObs *observ.Metrics // may be nil
@@ -51,7 +50,7 @@ type HistoryPurgeService struct {
 func NewHistoryPurgeService(
 	traceMeta domain.TraceMetaRepository,
 	logs domain.LogRepository,
-	metrics *repository.MetricsClient,
+	metrics domain.CacheMetricsClient,
 	gcCfg domain.HistoryGCConfig,
 	logger *logrus.Logger,
 	obs *observ.Metrics,

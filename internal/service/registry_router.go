@@ -10,7 +10,6 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
-	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 // Sentinel errors for routing.
@@ -31,8 +30,8 @@ const probeTimeout = 10 * time.Second
 // object→backend mapping. It is safe for concurrent use.
 type RegistryRouter struct {
 	backends []domain.RegistryBackend
-	clients  map[string]*repository.RegistryStatsClient // backendID -> client
-	routes   *repository.CacheRoutesRepo
+	clients  map[string]domain.RegistryClient // backendID -> client
+	routes   domain.CacheRoutesStore
 	logger   *logrus.Logger
 
 	mu      sync.RWMutex
@@ -40,24 +39,27 @@ type RegistryRouter struct {
 	down    map[string]bool  // backendID -> unhealthy
 }
 
-// NewRegistryRouter returns a router over the given backends. Credentials are
-// held per-backend and never leave the router except as Basic auth on proxied
-// requests to that backend.
+// NewRegistryRouter returns a router over the given backends. Clients are
+// constructed via newClient so the service layer never imports the repository
+// layer (cmd/api wires the concrete *repository.RegistryStatsClient). Credentials
+// are held per-backend and never leave the router except as Basic auth on
+// proxied requests to that backend.
 func NewRegistryRouter(
 	backends []domain.RegistryBackend,
-	routes *repository.CacheRoutesRepo,
+	routes domain.CacheRoutesStore,
+	newClient func(domain.RegistryBackend) domain.RegistryClient,
 	logger *logrus.Logger,
 ) *RegistryRouter {
 	r := &RegistryRouter{
 		backends: append([]domain.RegistryBackend(nil), backends...),
-		clients:  make(map[string]*repository.RegistryStatsClient, len(backends)),
+		clients:  make(map[string]domain.RegistryClient, len(backends)),
 		routes:   routes,
 		logger:   logger,
 		charges:  make(map[string]int64),
 		down:     make(map[string]bool),
 	}
 	for _, b := range backends {
-		r.clients[b.ID] = repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+		r.clients[b.ID] = newClient(b)
 	}
 	return r
 }
@@ -82,7 +84,7 @@ func (r *RegistryRouter) BackendByID(id string) (domain.RegistryBackend, bool) {
 }
 
 // ClientByID returns the stats client for a backend (for stats/purge/GC).
-func (r *RegistryRouter) ClientByID(id string) (*repository.RegistryStatsClient, bool) {
+func (r *RegistryRouter) ClientByID(id string) (domain.RegistryClient, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	c, ok := r.clients[id]
@@ -147,7 +149,7 @@ func (r *RegistryRouter) RouteForPull(ctx context.Context, repo, ref string) (do
 	if b, ok, err := r.lookupManifest(ctx, repo, ref); ok || err != nil {
 		return b, err
 	}
-	b, err := r.probeBackends(ctx, func(probeCtx context.Context, c *repository.RegistryStatsClient) (bool, error) {
+	b, err := r.probeBackends(ctx, func(probeCtx context.Context, c domain.RegistryClient) (bool, error) {
 		return c.ProbeManifest(probeCtx, repo, ref)
 	})
 	if err == nil {
@@ -169,7 +171,7 @@ func (r *RegistryRouter) RouteForBlobPull(ctx context.Context, repo, digest stri
 			}
 		}
 	}
-	b, err := r.probeBackends(ctx, func(probeCtx context.Context, c *repository.RegistryStatsClient) (bool, error) {
+	b, err := r.probeBackends(ctx, func(probeCtx context.Context, c domain.RegistryClient) (bool, error) {
 		return c.ProbeBlob(probeCtx, repo, digest)
 	})
 	if err == nil {
@@ -198,7 +200,7 @@ func (r *RegistryRouter) lookupManifest(ctx context.Context, repo, ref string) (
 // object (or all are down).
 func (r *RegistryRouter) probeBackends(
 	ctx context.Context,
-	probe func(context.Context, *repository.RegistryStatsClient) (bool, error),
+	probe func(context.Context, domain.RegistryClient) (bool, error),
 ) (domain.RegistryBackend, error) {
 	for _, b := range r.HealthyBackends() {
 		client, ok := r.ClientByID(b.ID)

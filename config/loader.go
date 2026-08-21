@@ -115,8 +115,6 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("fleet.max_replicas_per_version", 3)
 	v.SetDefault("fleet.max_sessions_per_replica", 8)
 	v.SetDefault("fleet.replica_idle_ttl", 5*time.Minute)
-	v.SetDefault("fleet.version_retention", 24*time.Hour)
-	v.SetDefault("fleet.min_replicas_per_version", 0)
 	v.SetDefault("fleet.engine_image_registry", "registry.dagger.io/engine")
 	v.SetDefault("fleet.engine_storage_class", "")
 	v.SetDefault("fleet.engine_storage_size", "50Gi")
@@ -143,7 +141,6 @@ func Load(configFile string) (*domain.Config, error) {
 
 	v.SetDefault("lease_ttl", 2*time.Minute)
 
-	v.SetDefault("tls.server_cert_secret", "supervisor-tls")
 	v.SetDefault("tls.provider", "embedded")
 	v.SetDefault("tls.ca_path", "/var/lib/dagger-kubernetes/ca")
 	v.SetDefault("tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")

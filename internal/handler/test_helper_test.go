@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -165,7 +166,7 @@ func (e *testEnv) loginAsAdmin(t *testing.T) string {
 	if err != nil {
 		t.Fatalf("admin login: %v", err)
 	}
-	return "Bearer " + access
+	return fmt.Sprintf("Bearer %s", access)
 }
 
 // createUserAndToken creates a user named "alice" (RoleUser) + API token and
@@ -180,7 +181,7 @@ func (e *testEnv) createUserAndToken(t *testing.T) (string, *domain.User) {
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
-	return "Bearer " + plaintext, u
+	return fmt.Sprintf("Bearer %s", plaintext), u
 }
 
 // testTokenEncKey returns a fixed 32-byte AES key for handler tests so tokens

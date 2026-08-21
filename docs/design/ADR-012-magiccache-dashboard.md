@@ -94,6 +94,10 @@ AWS SDK v2 and amend AGENTS.md.
 - The GC sweeper protects cache refs for versions that still have engine
   replicas, even if `fleet.version_retention` would otherwise allow STS
   deletion — preventing purging cache an engine pod might still pull.
+
+  > **Superseded (2026-08-20):** `fleet.version_retention` was never
+  > implemented and the config key has been removed; the GC protection above
+  > is unchanged, but the `version_retention` reference is historical only.
 - The registry must enable delete for purge/GC; otherwise the UI surfaces a
   clear 409 message and no state changes.
 - No new third-party dependencies were introduced (stdlib `net/http` for the

@@ -92,7 +92,7 @@ func manifestKey(path string) string {
 	if len(parts) < 4 {
 		return ""
 	}
-	return parts[len(parts)-3] + ":" + parts[len(parts)-1]
+	return fmt.Sprintf("%s:%s", parts[len(parts)-3], parts[len(parts)-1])
 }
 
 func quoteEach(items []string) []string {
@@ -122,19 +122,19 @@ func manifestJSON(digest string, size int64, layers int64, created string) strin
 	if created != "" {
 		annotation = fmt.Sprintf(`,"annotations":{"org.opencontainers.image.created":%q}`, created)
 	}
-	return fmt.Sprintf(`{"config":{"digest":%q,"size":0},"layers":[%s]%s}`, digest+"-cfg", strings.Join(layerParts, ","), annotation)
+	return fmt.Sprintf(`{"config":{"digest":%q,"size":0},"layers":[%s]%s}`, fmt.Sprintf("%s-cfg", digest), strings.Join(layerParts, ","), annotation)
 }
 
 // digestStr returns a valid sha256:<64 hex> digest built by repeating c, so
 // the fake registry serves realistic digest shapes (the registry client now
 // validates digest shape before placing it in a DELETE path).
 func digestStr(c string) string {
-	return "sha256:" + strings.Repeat(c, 64)
+	return fmt.Sprintf("sha256:%s", strings.Repeat(c, 64))
 }
 
 func newTestRouter(t *testing.T, backends ...domain.RegistryBackend) *RegistryRouter {
 	t.Helper()
-	return NewRegistryRouter(backends, repository.NewCacheRoutesRepo(newServiceStore(t)), observ.NewTestLogger())
+	return NewRegistryRouter(backends, repository.NewCacheRoutesRepo(newServiceStore(t)), newRegistryClient, observ.NewTestLogger())
 }
 
 func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet domain.FleetProvider, gc domain.GCConfig) (*CacheStatsService, *httptest.Server) {
@@ -142,7 +142,7 @@ func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet d
 	ts := httptest.NewServer(reg.handler())
 	t.Cleanup(ts.Close)
 
-	var mc *repository.MetricsClient
+	var mc domain.CacheMetricsClient
 	if metricsURL != "" {
 		mc = repository.NewMetricsClient(metricsURL)
 	}
@@ -459,8 +459,8 @@ func TestPurgeAllTruncated(t *testing.T) {
 	for i := 0; i < 1005; i++ {
 		tag := fmt.Sprintf("v0-%d-%d", 21, i)
 		tags = append(tags, tag)
-		reg.manifestBody["dagger-cache:"+tag] = manifestJSON(fmt.Sprintf("sha256:%d", i), 1, 1, "")
-		reg.manifestDigest["dagger-cache:"+tag] = fmt.Sprintf("sha256:%064d", i)
+		reg.manifestBody[fmt.Sprintf("dagger-cache:%s", tag)] = manifestJSON(fmt.Sprintf("sha256:%d", i), 1, 1, "")
+		reg.manifestDigest[fmt.Sprintf("dagger-cache:%s", tag)] = fmt.Sprintf("sha256:%064d", i)
 	}
 	reg.tags["dagger-cache"] = tags
 
@@ -489,8 +489,8 @@ func TestRunGCPurgesOldTags(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		tag := fmt.Sprintf("v0-21-%d", i)
 		tags = append(tags, tag)
-		reg.manifestBody["dagger-cache:"+tag] = manifestJSON(fmt.Sprintf("sha256:%d", i), 10, 1, old)
-		reg.manifestDigest["dagger-cache:"+tag] = fmt.Sprintf("sha256:%064d", i)
+		reg.manifestBody[fmt.Sprintf("dagger-cache:%s", tag)] = manifestJSON(fmt.Sprintf("sha256:%d", i), 10, 1, old)
+		reg.manifestDigest[fmt.Sprintf("dagger-cache:%s", tag)] = fmt.Sprintf("sha256:%064d", i)
 	}
 	reg.tags["dagger-cache"] = tags
 
@@ -521,8 +521,8 @@ func TestRunGCProtectsActiveVersion(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		tag := fmt.Sprintf("v0-21-%d", i)
 		tags = append(tags, tag)
-		reg.manifestBody["dagger-cache:"+tag] = manifestJSON(fmt.Sprintf("sha256:%d", i), 10, 1, old)
-		reg.manifestDigest["dagger-cache:"+tag] = fmt.Sprintf("sha256:%064d", i)
+		reg.manifestBody[fmt.Sprintf("dagger-cache:%s", tag)] = manifestJSON(fmt.Sprintf("sha256:%d", i), 10, 1, old)
+		reg.manifestDigest[fmt.Sprintf("dagger-cache:%s", tag)] = fmt.Sprintf("sha256:%064d", i)
 	}
 	reg.tags["dagger-cache"] = tags
 

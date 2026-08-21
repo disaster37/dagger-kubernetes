@@ -38,7 +38,6 @@ func newTestEngine(s *Server) *route.Engine {
 	e.POST("/v1/engines", s.handleEngines)
 	e.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	e.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
-	e.GET("/api/v1/logs/:traceID", s.handleLogsRoutes)
 	e.GET("/api/v1/fleet", s.handleFleetInfo)
 	e.GET("/api/v1/cache", s.handleCacheInfo)
 	e.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
@@ -47,7 +46,6 @@ func newTestEngine(s *Server) *route.Engine {
 	e.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
 	e.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
 	e.GET("/api/v1/status", s.handlePlatformStatus)
-	e.GET("/api/v1/versions", s.handleAdminVersions)
 	return e
 }
 
@@ -161,16 +159,6 @@ func TestHandleCacheInfo(t *testing.T) {
 	}
 	if !info.Running {
 		t.Fatal("running should be true from stub provider")
-	}
-}
-
-func TestHandleAdminVersions(t *testing.T) {
-	s, bearer := newTestServer(t)
-	e := newTestEngine(s)
-
-	resp := ut.PerformRequest(e, "GET", "/api/v1/versions", nil, ut.Header{Key: "Authorization", Value: bearer})
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
 }
 

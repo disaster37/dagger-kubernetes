@@ -143,7 +143,7 @@ func defaultHistoryGC() domain.HistoryGCConfig {
 func newHistorySvc(t *testing.T, repo *fakeTraceMetaRepo, gc domain.HistoryGCConfig, lokiStatus, vmStatus int) *HistoryPurgeService {
 	t.Helper()
 	var logs domain.LogRepository
-	var metrics *repository.MetricsClient
+	var metrics domain.CacheMetricsClient
 	if lokiStatus != 0 {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(lokiStatus)

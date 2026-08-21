@@ -36,11 +36,11 @@ supervisor:
 ## @param supervisor.resources.limits.memory Supervisor memory limit.
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
+      cpu: 250m
+      memory: 256Mi
     limits:
-      cpu: 500m
-      memory: 512Mi
+      cpu: 1000m
+      memory: 1Gi
 ## @param supervisor.persistence.enabled Enable a per-pod PVC for the Raft data directory (StatefulSet volumeClaimTemplate). disabled = emptyDir (dev only).
 ## @param supervisor.persistence.storageClass StorageClass for the supervisor PVC (empty = cluster default).
 ## @param supervisor.persistence.size PVC size for each supervisor pod's Raft data directory.
@@ -73,7 +73,7 @@ supervisor:
   tolerations: []
 ## @param supervisor.affinity [object] Affinity rules for supervisor pod scheduling.
   affinity: {}
-## @param supervisor.autoscaling.enabled Enable HPA for supervisor.
+## @param supervisor.autoscaling.enabled Enable HPA for supervisor. ONLY safe with a single-node Raft cluster (supervisor.config.raft.replicas=1): scaling a multi-replica Raft cluster with an HPA can break quorum, so the chart fails-closed when this is enabled together with supervisor.config.raft.replicas > 1.
 ## @param supervisor.autoscaling.minReplicas Minimum replicas for HPA.
 ## @param supervisor.autoscaling.maxReplicas Maximum replicas for HPA.
 ## @param supervisor.autoscaling.targetCPUUtilizationPercentage Target CPU utilization for HPA.
@@ -155,11 +155,9 @@ supervisor:
         enabled: false
         maxAge: "720h"
         schedule: "1h"
-## @param supervisor.config.fleet.minReplicasPerVersion Minimum warm engine replicas per Dagger version.
 ## @param supervisor.config.fleet.maxReplicasPerVersion Maximum engine replicas per Dagger version.
 ## @param supervisor.config.fleet.maxSessionsPerReplica Maximum concurrent sessions per engine replica.
 ## @param supervisor.config.fleet.replicaIdleTtl Idle TTL before scaling down an engine replica.
-## @param supervisor.config.fleet.versionRetention Duration to retain engine versions after last use.
 ## @param supervisor.config.fleet.engineImageRegistry Engine container image registry.
 ## @param supervisor.config.fleet.engineStorageClass StorageClass for engine PVCs (empty = cluster default).
 ## @param supervisor.config.fleet.engineStorageSize PVC size for each engine.
@@ -170,6 +168,10 @@ supervisor:
 ## @param supervisor.config.fleet.engineTerminationGraceSeconds Engine pod termination grace period.
 ## @param supervisor.config.fleet.enginePullPolicy Engine image pull policy.
 ## @param supervisor.config.fleet.enginePrivileged Run engine container in privileged mode.
+##   Required by BuildKit/Dagger engine for mount/overlay operations that need
+##   full root capabilities (rootless mode is not supported by the Dagger
+##   engine in this configuration). Do not disable unless you have verified
+##   your engine version runs unprivileged.
 ## @param supervisor.config.fleet.engineNodeSelector [object] Node selector for engine pods.
 ## @param supervisor.config.fleet.engineTolerations [array] Tolerations for engine pods.
 ## @param supervisor.config.fleet.engineExtraArgs [array] Additional CLI args passed to the engine.
@@ -177,16 +179,22 @@ supervisor:
 ## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods: map of env name -> {secret_name, key} (snake_case keys, rendered verbatim into the app config).
 ## @param supervisor.config.fleet.engineCaSecret Secret with custom CA PEM bundle for engines (empty = disabled).
 ## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
-## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json for engine image pulls (private registries). Rendered into the engine-registry-auth Secret (.dockerconfigjson), mounted into engine pods.
+## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json
+##   (auths for private registries) used by engine image pulls. Stored verbatim
+##   in the `engine-registry-auth` Secret `data` key `.dockerconfigjson`
+##   (already base64 — do NOT pre-decode): Kubernetes base64-decodes it exactly
+##   once on mount, so engine pods read raw JSON at
+##   `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (base64 of `{}`). This is
+##   NOT an imagePullSecret: the supervisor never attaches it to the engine
+##   StatefulSet's `imagePullSecrets`; it is provided as a Docker config file
+##   for the engine's own registry authentication.
 ## @param supervisor.config.fleet.engineDebug Enable engine.toml [debug].
 ## @param supervisor.config.fleet.engineLogFormat Engine log format (json, text; empty omits).
 ## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}).
     fleet:
-      minReplicasPerVersion: 0
       maxReplicasPerVersion: 3
       maxSessionsPerReplica: 8
       replicaIdleTtl: "5m"
-      versionRetention: "24h"
       engineImageRegistry: "registry.dagger.io/engine"
       engineStorageClass: ""
       engineStorageSize: "50Gi"
@@ -426,6 +434,9 @@ opentelemetry-collector:
     requests:
       cpu: 100m
       memory: 256Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
   service:
     type: ClusterIP
   config:
@@ -485,6 +496,9 @@ registry:
     requests:
       cpu: 100m
       memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
 
 ## @skip tempo
 ## @param tempo.enabled Install Grafana Tempo subchart (traces).
@@ -495,10 +509,10 @@ tempo:
     size: 20Gi
     storageClassName: ""
   tempo:
-    ## @param tempo.retention Trace retention duration. Spans are NOT deleted by
+    ## @param tempo.tempo.retention Trace retention duration. Spans are NOT deleted by
     ## the supervisor's history purge; set this to match (or exceed)
     ## supervisor.config.history.gc.maxAge so spans age out alongside the purge.
-    retention: 48h
+    retention: 720h
     storage:
       trace:
         backend: local
@@ -506,8 +520,11 @@ tempo:
           path: /var/tempo/traces
     resources:
       requests:
-        cpu: 100m
-        memory: 256Mi
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
 
 ## @skip loki
 ## @param loki.enabled Install Grafana Loki subchart (logs).
@@ -522,8 +539,11 @@ loki:
       storageClass: ""
     resources:
       requests:
-        cpu: 100m
-        memory: 256Mi
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 2000m
+        memory: 2Gi
   backend:
     replicas: 0
   read:
@@ -568,10 +588,22 @@ victoria:
       requests:
         cpu: 100m
         memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
 
 ## @skip grafana
+## @param grafana.enabled Install Grafana subchart (dashboards with auto-provisioned datasources).
 grafana:
+  enabled: true
   adminPassword: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 200m
+      memory: 256Mi
   sidecar:
     datasources:
       enabled: true

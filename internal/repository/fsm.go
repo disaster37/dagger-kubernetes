@@ -33,7 +33,11 @@ const (
 	kindSetMeta
 	kindUpsertManifestRoute
 	kindDeleteManifestRoute
-	kindDeleteRoutesForBackend
+	// Slot 17 was kindDeleteRoutesForBackend (removed). It is reserved via a
+	// blank identifier so the numeric IDs of the kinds below stay stable: they
+	// are persisted in the Raft log (command.Kind) and must not be renumbered,
+	// or a node replaying a pre-upgrade log tail would misapply commands.
+	_
 	kindUpsertBlobRoute
 	kindRecordUpload
 	kindDeleteUpload
@@ -147,10 +151,6 @@ type (
 	cmdDeleteManifestRoute struct {
 		Repo string `json:"repo"`
 		Tag  string `json:"tag"`
-	}
-
-	cmdDeleteRoutesForBackend struct {
-		BackendID string `json:"backend_id"`
 	}
 
 	cmdUpsertBlobRoute struct {
@@ -383,11 +383,6 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 	case kindDeleteManifestRoute:
 		return nil, applyPayload(cmd, "delete manifest route", func(p cmdDeleteManifestRoute) error {
 			delete(s.cacheObjectRoutes, manifestRouteKey(p.Repo, p.Tag))
-			return nil
-		})
-	case kindDeleteRoutesForBackend:
-		return nil, applyPayload(cmd, "delete routes for backend", func(p cmdDeleteRoutesForBackend) error {
-			s.deleteRoutesForBackend(p.BackendID)
 			return nil
 		})
 	case kindUpsertBlobRoute:
@@ -847,20 +842,6 @@ func (s *fsmState) upsertBlobRoute(digest, backendID, createdAt string) {
 	routes[backendID] = createdAt
 }
 
-func (s *fsmState) deleteRoutesForBackend(backendID string) {
-	for key, cr := range s.cacheObjectRoutes {
-		if cr.BackendID == backendID {
-			delete(s.cacheObjectRoutes, key)
-		}
-	}
-	for digest, routes := range s.cacheBlobRoutes {
-		delete(routes, backendID)
-		if len(routes) == 0 {
-			delete(s.cacheBlobRoutes, digest)
-		}
-	}
-}
-
 func (s *fsmState) recordUpload(sess *domain.CacheUploadSession) {
 	cp := *sess
 	s.cacheUploadSessions[sess.UploadUUID] = &cp
@@ -1267,18 +1248,6 @@ func (f *FSM) lookupUpload(uuid string) (domain.CacheUploadSession, bool) {
 		return domain.CacheUploadSession{}, false
 	}
 	return *sess, true
-}
-
-func (f *FSM) backendCharge(backendID string) int64 {
-	f.state.mu.RLock()
-	defer f.state.mu.RUnlock()
-	var sum int64
-	for _, cr := range f.state.cacheObjectRoutes {
-		if cr.BackendID == backendID {
-			sum += cr.StoredBytes
-		}
-	}
-	return sum
 }
 
 func (f *FSM) allCharges() map[string]int64 {

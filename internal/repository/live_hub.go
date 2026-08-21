@@ -81,11 +81,6 @@ func (h *LiveHub) Broadcast(traceID string, event interface{}) {
 	}
 }
 
-// BroadcastSpanUpdate delegates to Broadcast; kept for existing callers/tests.
-func (h *LiveHub) BroadcastSpanUpdate(traceID string, update interface{}) {
-	h.Broadcast(traceID, update)
-}
-
 func (h *LiveHub) writePump(client *LiveClient) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer func() {
@@ -109,12 +104,6 @@ func (h *LiveHub) writePump(client *LiveClient) {
 			}
 		}
 	}
-}
-
-func (h *LiveHub) ClientCount(traceID string) int {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	return len(h.clients[traceID])
 }
 
 // NewLiveClient constructs a LiveClient bound to a fresh SSE writer for the

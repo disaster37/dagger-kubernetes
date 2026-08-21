@@ -9,13 +9,6 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-type ReplicaState string
-
-const (
-	ReplicaStateRunning  ReplicaState = "running"
-	ReplicaStateDraining ReplicaState = "draining"
-)
-
 type StubProvider struct {
 	mu       sync.Mutex
 	versions map[string]*stubSTS

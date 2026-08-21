@@ -97,46 +97,12 @@ func TestNewLiveHub(t *testing.T) {
 	if hub == nil {
 		t.Fatal("nil hub")
 	}
-	if hub.ClientCount("test-trace") != 0 {
-		t.Fatal("expected 0 clients initially")
-	}
-}
-
-func TestLiveHubClientCounts(t *testing.T) {
-	hub := NewLiveHub()
-
-	c1 := &LiveClient{TraceID: "t1", Send: make(chan []byte, 256), done: make(chan struct{})}
-	c2 := &LiveClient{TraceID: "t1", Send: make(chan []byte, 256), done: make(chan struct{})}
-
-	// Directly add to internal map (bypass writePump due to nil writer).
-	hub.mu.Lock()
-	if hub.clients["t1"] == nil {
-		hub.clients["t1"] = make(map[*LiveClient]bool)
-	}
-	hub.clients["t1"][c1] = true
-	hub.clients["t1"][c2] = true
-	hub.mu.Unlock()
-
-	if hub.ClientCount("t1") != 2 {
-		t.Fatalf("expected 2 clients, got %d", hub.ClientCount("t1"))
-	}
-
-	hub.mu.Lock()
-	delete(hub.clients["t1"], c1)
-	if len(hub.clients["t1"]) == 0 {
-		delete(hub.clients, "t1")
-	}
-	hub.mu.Unlock()
-
-	if hub.ClientCount("t1") != 1 {
-		t.Fatalf("expected 1 client after removal, got %d", hub.ClientCount("t1"))
-	}
 }
 
 func TestLiveHubBroadcastNoClients(t *testing.T) {
 	hub := NewLiveHub()
 	// Should not panic.
-	hub.BroadcastSpanUpdate("test-trace", map[string]string{"status": "running"})
+	hub.Broadcast("test-trace", map[string]string{"status": "running"})
 }
 
 func TestLiveHubBroadcastWithClient(t *testing.T) {
@@ -156,7 +122,7 @@ func TestLiveHubBroadcastWithClient(t *testing.T) {
 	hub.clients["test-trace"][client] = true
 	hub.mu.Unlock()
 
-	hub.BroadcastSpanUpdate("test-trace", map[string]string{"status": "done"})
+	hub.Broadcast("test-trace", map[string]string{"status": "done"})
 
 	select {
 	case msg := <-client.Send:

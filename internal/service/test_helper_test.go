@@ -52,6 +52,13 @@ type repos struct {
 
 func testLogger() *logrus.Logger { return observ.NewTestLogger() }
 
+// newRegistryClient constructs the concrete repository registry client for a
+// backend. It is the factory wired into NewRegistryRouter by tests so the
+// service layer never imports the repository layer.
+func newRegistryClient(b domain.RegistryBackend) domain.RegistryClient {
+	return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+}
+
 // seedUserSvc creates a user (always RoleUser) via the UserService and returns it.
 func seedUserSvc(t *testing.T, svc *UserService, username string) *domain.User {
 	t.Helper()

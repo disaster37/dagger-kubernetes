@@ -50,20 +50,40 @@ func (s *Server) handleHealthz(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, map[string]domain.ServiceState{"state": state})
 }
 
-// handleReadyz is the kube readiness probe: 200 when ok/degraded, 503 when the
-// rollup is down (so kube stops routing traffic when the cache is unreachable).
+// handleReadyz is the kube readiness probe: 200 when the control plane is up
+// (ok/degraded/unknown all count), 503 only when the control plane itself is
+// down. Downstream cache/telemetry/fleet backends deliberately do NOT gate
+// readiness: gating on the aggregate rollup caused a first-boot deadlock — the
+// pod never became Ready while the registry or any telemetry subchart was
+// still starting (or when a subchart was disabled but its URL still
+// auto-derived), which blocked Service routing and StatefulSet rollout.
 func (s *Server) handleReadyz(ctx context.Context, c *app.RequestContext) {
 	state := domain.ServiceOK
-	var services []domain.ServiceStatus
 	if st := s.currentStatus(ctx); st != nil {
-		state = st.State
-		services = st.Services
+		state = readinessState(st)
 	}
 	if state == domain.ServiceDown {
-		c.JSON(consts.StatusServiceUnavailable, map[string]any{"state": state, "services": services})
+		c.JSON(consts.StatusServiceUnavailable, map[string]any{"state": state})
 		return
 	}
-	c.JSON(consts.StatusOK, map[string]domain.ServiceState{"state": state})
+	c.JSON(consts.StatusOK, map[string]any{"state": state})
+}
+
+// readinessState derives pod readiness from the control-plane ("supervisor")
+// service only. A down cache/telemetry/fleet backend degrades the platform but
+// must not make the supervisor pod unready.
+func readinessState(st *domain.PlatformStatus) domain.ServiceState {
+	for _, svc := range st.Services {
+		if svc.Name == "supervisor" {
+			if svc.State == domain.ServiceDown {
+				return domain.ServiceDown
+			}
+			return domain.ServiceOK
+		}
+	}
+	// No supervisor row (status provider misconfigured): report ready rather
+	// than deadlock the pod.
+	return domain.ServiceOK
 }
 
 // healthzState maps a rollup to a liveness state: degraded/down both report as

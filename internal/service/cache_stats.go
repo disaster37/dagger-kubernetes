@@ -14,7 +14,6 @@ import (
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
-	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 const (
@@ -38,7 +37,7 @@ var tagRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 type CacheStatsService struct {
 	cache      *Cache
 	router     *RegistryRouter           // may be nil (s3 backend)
-	metrics    *repository.MetricsClient // may be nil
+	metrics    domain.CacheMetricsClient // may be nil
 	fleet      domain.FleetProvider      // may be nil
 	gcCfg      domain.GCConfig
 	logger     *logrus.Logger
@@ -58,7 +57,7 @@ type CacheStatsService struct {
 func NewCacheStatsService(
 	cache *Cache,
 	router *RegistryRouter,
-	metricsClient *repository.MetricsClient,
+	metricsClient domain.CacheMetricsClient,
 	fleet domain.FleetProvider,
 	gcCfg domain.GCConfig,
 	logger *logrus.Logger,
@@ -222,7 +221,7 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 
 		repos, err := client.Catalog(ctx)
 		if err != nil {
-			if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
+			if errors.Is(err, domain.ErrRegistryCatalogDisabled) {
 				catalogDisabled++
 			}
 			continue
@@ -318,7 +317,7 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 
 // collectEntries walks every repo's tags and collects manifest metadata.
 // Returns entries plus a timedOut flag for partial (context-cancelled) walks.
-func (s *CacheStatsService) collectEntries(ctx context.Context, client *repository.RegistryStatsClient, repos []string) ([]cacheEntry, bool) {
+func (s *CacheStatsService) collectEntries(ctx context.Context, client domain.RegistryClient, repos []string) ([]cacheEntry, bool) {
 	var out []cacheEntry
 	for _, repo := range repos {
 		if ctx.Err() != nil {
@@ -338,7 +337,7 @@ func (s *CacheStatsService) collectEntries(ctx context.Context, client *reposito
 			}
 			digest, size, layers, err := client.ManifestSize(ctx, repo, tag)
 			if err != nil {
-				if errors.Is(err, repository.ErrManifestNotFound) {
+				if errors.Is(err, domain.ErrManifestNotFound) {
 					continue
 				}
 				if ctx.Err() != nil {
@@ -437,7 +436,7 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 	}
 
 	// Route-table hit: purge from the recorded backend.
-	var targetClient *repository.RegistryStatsClient
+	var targetClient domain.RegistryClient
 	if s.router.routes != nil {
 		if route, ok, err := s.router.routes.LookupManifest(ctx, repo, tag); err == nil && ok {
 			targetClient, _ = s.router.ClientByID(route.BackendID)
@@ -469,7 +468,7 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 	}
 
 	digest, size, _, err := targetClient.ManifestSize(ctx, repo, tag)
-	if errors.Is(err, repository.ErrManifestNotFound) {
+	if errors.Is(err, domain.ErrManifestNotFound) {
 		return alreadyPurged()
 	}
 	if err != nil {
@@ -477,7 +476,7 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 	}
 
 	if err := targetClient.DeleteManifest(ctx, repo, digest); err != nil {
-		if errors.Is(err, repository.ErrManifestNotFound) {
+		if errors.Is(err, domain.ErrManifestNotFound) {
 			return alreadyPurged()
 		}
 		return nil, fmt.Errorf("delete manifest: %w", err)
@@ -517,7 +516,7 @@ func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, 
 		}
 		repos, err := client.Catalog(ctx)
 		if err != nil {
-			if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
+			if errors.Is(err, domain.ErrRegistryCatalogDisabled) {
 				catalogDisabled = true
 				continue
 			}
@@ -535,7 +534,7 @@ func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, 
 					break
 				}
 				digest, size, _, err := client.ManifestSize(ctx, repo, tag)
-				if errors.Is(err, repository.ErrManifestNotFound) {
+				if errors.Is(err, domain.ErrManifestNotFound) {
 					result.AlreadyPurged++
 					s.deleteManifestRoute(ctx, repo, tag)
 					continue
@@ -544,7 +543,7 @@ func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, 
 					return nil, fmt.Errorf("manifest lookup: %w", err)
 				}
 				if err := client.DeleteManifest(ctx, repo, digest); err != nil {
-					if errors.Is(err, repository.ErrManifestNotFound) {
+					if errors.Is(err, domain.ErrManifestNotFound) {
 						result.AlreadyPurged++
 						s.deleteManifestRoute(ctx, repo, tag)
 						continue
@@ -607,7 +606,7 @@ func (s *CacheStatsService) RunGC(ctx context.Context) (*domain.GCRunSummary, er
 		}
 		repos, err := client.Catalog(probeCtx)
 		if err != nil {
-			if errors.Is(err, repository.ErrRegistryCatalogDisabled) {
+			if errors.Is(err, domain.ErrRegistryCatalogDisabled) {
 				continue
 			}
 			s.logger.WithField("backend", b.ID).WithError(err).Warn("gc catalog failed")

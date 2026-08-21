@@ -475,9 +475,6 @@ func TestFSMMetaAndCacheRouting(t *testing.T) {
 	}
 
 	// Charges.
-	if charge := f.backendCharge("b2"); charge != 20 {
-		t.Fatalf("backendCharge b2 = %d", charge)
-	}
 	charges := f.allCharges()
 	if charges["b2"] != 20 {
 		t.Fatalf("allCharges = %v", charges)
@@ -493,18 +490,10 @@ func TestFSMMetaAndCacheRouting(t *testing.T) {
 		t.Fatal("upload should be gone")
 	}
 
-	// Delete manifest route + delete routes for backend.
+	// Delete manifest route.
 	applyCmd(t, f, kindDeleteManifestRoute, cmdDeleteManifestRoute{Repo: "r", Tag: "t"})
 	if _, ok := f.lookupManifestRoute("r", "t"); ok {
 		t.Fatal("manifest route should be gone")
-	}
-	applyCmd(t, f, kindUpsertManifestRoute, &domain.CacheRoute{Repo: "r", Tag: "x", BackendID: "b1", CreatedAt: "2026-01-01T00:00:00Z", LastSeenAt: "2026-01-01T00:00:00Z"})
-	applyCmd(t, f, kindDeleteRoutesForBackend, cmdDeleteRoutesForBackend{BackendID: "b1"})
-	if _, ok := f.lookupManifestRoute("r", "x"); ok {
-		t.Fatal("backend manifest routes should be gone")
-	}
-	if _, ok := f.lookupBlobRoute("dgst"); !ok {
-		t.Fatal("b2 blob route should remain")
 	}
 }
 

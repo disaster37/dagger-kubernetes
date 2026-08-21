@@ -195,11 +195,9 @@ history:
 # --- Engine fleet (Kubernetes) ----------------------------------------------
 fleet:
   namespace: "dagger-kubernetes"                # namespace engines run in.
-  min_replicas_per_version: 0              # floor for the per-version autoscaler.
   max_replicas_per_version: 3              # ceiling for the per-version autoscaler.
   max_sessions_per_replica: 8              # sessions pinned to one engine pod.
   replica_idle_ttl: "5m"                    # idle pod TTL before scale-down.
-  version_retention: "24h"                 # how long a version's StatefulSet lingers with 0 replicas.
 
   # --- Engine pod template ---------------------------------------------------
   engine_image_registry: "registry.dagger.io/engine"  # base registry for engine images.
@@ -247,7 +245,6 @@ ca:
 # `provider` only decides where the server certificate comes from:
 tls:
   provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external".
-  server_cert_secret: "supervisor-tls"  # K8s Secret with tls.crt/tls.key (legacy; unused by embedded/cert-manager auto-wiring).
   ca_path: "/var/lib/dagger-kubernetes/ca"   # path to persist the embedded minting CA (Docker bind-mount or PVC); also a local cache of the shared Secret.
   cert_path: "/etc/dagger-kubernetes/tls/tls.crt"  # PEM cert path for the cert-manager/external providers (the Helm chart auto-wires cert-manager to /etc/dagger-kubernetes/data-tls/tls.crt).
   key_path: "/etc/dagger-kubernetes/tls/tls.key"   # PEM key path for the cert-manager/external providers.

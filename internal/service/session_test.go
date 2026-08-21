@@ -62,8 +62,8 @@ func TestStoreReapOrphans(t *testing.T) {
 	if len(expired) != 2 {
 		t.Fatalf("expected 2 expired, got %d", len(expired))
 	}
-	if s.Count() != 0 {
-		t.Fatalf("expected 0 leases, got %d", s.Count())
+	if n := len(s.List()); n != 0 {
+		t.Fatalf("expected 0 leases, got %d", n)
 	}
 }
 

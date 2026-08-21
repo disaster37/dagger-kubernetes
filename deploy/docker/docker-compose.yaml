@@ -31,7 +31,8 @@ services:
       # starting the stack, e.g.:
       #   mkdir -p data && head -c 32 /dev/urandom | xxd -p -u > data/tokens
       # The tokens file is gitignored and must never be committed.
-      # DEPRECATED: migrate with `supervisor migrate-tokens` then remove.
+      # This is the legacy flat-file bearer fallback (dev only). Production
+      # uses per-user API tokens created from the UI (see docs/README.md).
       - ./data/tokens:/etc/dagger-kubernetes/tokens:ro
       # Raft data directory (raft.db, snapshots/, node-id). Fresh-start store.
       - ./data:/var/lib/dagger-kubernetes

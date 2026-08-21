@@ -184,7 +184,6 @@ tests/integration/   Black-box integration tests
 docs/design/         Architecture decision records
 ui/                  Vue 3 SPA (Vite + TypeScript); embeds via internal/handler/ui-dist/
 deploy/docker        Docker Compose dev stack
-deploy/k8s           Kubernetes manifests
 deploy/helm/         Helm chart
 ```
 

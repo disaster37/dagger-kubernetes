@@ -171,12 +171,6 @@ func (s *Store) ReapOrphans() []string {
 	return expired
 }
 
-func (s *Store) Count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.leases)
-}
-
 // List returns a snapshot of all leases. The returned leases are copies so
 // callers may read fields (e.g. InFlight) without racing with concurrent
 // Touch/IncInFlight/DecInFlight updates.
@@ -188,19 +182,6 @@ func (s *Store) List() []*domain.Lease {
 	for _, l := range s.leases {
 		cp := *l
 		leases = append(leases, &cp)
-	}
-	return leases
-}
-
-func (s *Store) ListByVersion(version string) []*domain.Lease {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	var leases []*domain.Lease
-	for _, l := range s.leases {
-		if l.Version == version {
-			leases = append(leases, l)
-		}
 	}
 	return leases
 }

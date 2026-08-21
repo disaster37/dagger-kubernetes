@@ -280,7 +280,6 @@ Minimum recommended resources for a production cluster handling ~50 CI pipelines
 supervisor:
   config:
     fleet:
-      minReplicasPerVersion: 1    # keep one warm engine per version
       maxReplicasPerVersion: 5
       maxSessionsPerReplica: 8
       engineStorageSize: "100Gi"
@@ -327,6 +326,12 @@ grafana:
   goca CA shared via the `<release>-raft-ca` Secret). See
   [Raft (distributed store)](#raft-distributed-store) below. Sessions are
   in-memory and shift on pod restart; clients reconnect automatically.
+  The optional `supervisor.autoscaling` HPA targets this **StatefulSet**
+  (`scaleTargetRef.kind: StatefulSet`), not a Deployment — and is **only safe
+  with a single-node Raft cluster** (`supervisor.config.raft.replicas=1`). The
+  chart fails-closed: it refuses to render when autoscaling is enabled together
+  with `supervisor.config.raft.replicas > 1`, because letting an HPA scale a
+  multi-replica Raft cluster disturbs quorum and risks availability loss.
 - **Loki**: use `deploymentMode: SimpleScalable` with S3/GCS object storage for
   multi-replica setups. SingleBinary is sufficient for up to ~20 GB/day.
 - **Tempo**: use object storage (S3/GCS) for persistence beyond pod lifetime.
@@ -362,7 +367,7 @@ grafana:
 ### Pipeline history retention
 
 - Tempo spans are **not** deleted by the supervisor's history purge — set
-  `tempo.retention` to match (or exceed) `supervisor.config.history.gc.maxAge`
+  `tempo.tempo.retention` to match (or exceed) `supervisor.config.history.gc.maxAge`
   so spans age out alongside the purge.
 - Loki log deletion is enabled by default: the chart runs the Loki compactor
   with `limits_config.deletion_mode: filter-and-delete`,
@@ -386,7 +391,7 @@ grafana:
 | `supervisor.replicaCount` | Supervisor replicas (mirrors `supervisor.config.raft.replicas`) | `3` |
 | `supervisor.persistence.enabled` | Enable per-pod PVC for the Raft data directory (StatefulSet volumeClaimTemplate) | `true` |
 | `supervisor.resources` | Supervisor container resources | see `values.yaml` |
-| `supervisor.autoscaling.enabled` | Enable HPA for supervisor | `false` |
+| `supervisor.autoscaling.enabled` | Enable HPA for supervisor (only safe with `supervisor.config.raft.replicas=1`) | `false` |
 | `supervisor.serviceAccount.annotations` | ServiceAccount annotations | `{}` |
 | `supervisor.serviceAccount.clusterScope` | Use ClusterRole instead of namespaced Role | `false` |
 | `supervisor.podSecurityContext` | Pod-level security context | see `values.yaml` |
@@ -518,6 +523,204 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.history.gc.schedule` | `1h` | Sweeper ticker interval. |
 
 ## Parameters
+
+### Chart metadata
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `nameOverride` | string | `""` | Override the chart name used in resource labels. |
+| `fullnameOverride` | string | `""` | Override the full name of the release. |
+| `namespace` | string | `""` | Namespace for the supervisor and subchart dependencies. Defaults to the release namespace when empty. |
+
+### Supervisor
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `supervisor.enabled` | bool | `true` | Enable the supervisor (control plane + data plane) and its resources. |
+| `supervisor.image.repository` | string | `ghcr.io/disaster37/dagger-kubernetes` | Supervisor container image repository. |
+| `supervisor.image.tag` | string | `""` | Image tag (empty defaults to Chart.appVersion). |
+| `supervisor.image.pullPolicy` | string | `IfNotPresent` | Image pull policy. |
+| `supervisor.image.pullSecrets` | array | `[]` | Image pull secrets for private registries. |
+| `supervisor.replicaCount` | int | `3` | Number of supervisor replicas. Multi-node Raft requires an odd number >= 3 for quorum fault tolerance. Keep in sync with `supervisor.config.raft.replicas`. |
+| `supervisor.resources.requests.cpu` | string | `250m` | Supervisor CPU request. |
+| `supervisor.resources.requests.memory` | string | `256Mi` | Supervisor memory request. |
+| `supervisor.resources.limits.cpu` | string | `1000m` | Supervisor CPU limit. |
+| `supervisor.resources.limits.memory` | string | `1Gi` | Supervisor memory limit. |
+| `supervisor.persistence.enabled` | bool | `true` | Enable a per-pod PVC for the Raft data directory (StatefulSet volumeClaimTemplate). disabled = emptyDir (dev only). |
+| `supervisor.persistence.storageClass` | string | `""` | StorageClass for the supervisor PVC (empty = cluster default). |
+| `supervisor.persistence.size` | string | `2Gi` | PVC size for each supervisor pod's Raft data directory. |
+| `supervisor.podAnnotations` | object | `{}` | Annotations added to the supervisor pod. |
+| `supervisor.podSecurityContext.runAsNonRoot` | bool | `true` | Run supervisor container as non-root. |
+| `supervisor.podSecurityContext.runAsUser` | int | `10001` | User ID for the supervisor container. |
+| `supervisor.podSecurityContext.runAsGroup` | int | `10001` | Group ID for the supervisor container. |
+| `supervisor.podSecurityContext.fsGroup` | int | `10001` | Filesystem group for mounted volumes. |
+| `supervisor.securityContext.allowPrivilegeEscalation` | bool | `false` | Allow privilege escalation. |
+| `supervisor.securityContext.readOnlyRootFilesystem` | bool | `true` | Mount root filesystem as read-only. |
+| `supervisor.securityContext.capabilities.drop` | array | `["ALL"]` | Linux capabilities to drop. |
+| `supervisor.nodeSelector` | object | `{}` | Node selector for supervisor pod scheduling. |
+| `supervisor.tolerations` | array | `[]` | Tolerations for supervisor pod scheduling. |
+| `supervisor.affinity` | object | `{}` | Affinity rules for supervisor pod scheduling. |
+| `supervisor.autoscaling.enabled` | bool | `false` | Enable HPA for supervisor (targets the supervisor StatefulSet). Only safe with a single-node Raft cluster (`supervisor.config.raft.replicas=1`); the chart fails-closed when combined with `supervisor.config.raft.replicas > 1`. |
+| `supervisor.autoscaling.minReplicas` | int | `2` | Minimum replicas for HPA. |
+| `supervisor.autoscaling.maxReplicas` | int | `6` | Maximum replicas for HPA. |
+| `supervisor.autoscaling.targetCPUUtilizationPercentage` | int | `80` | Target CPU utilization for HPA. |
+| `supervisor.autoscaling.targetMemoryUtilizationPercentage` | string | `""` | Target memory utilization for HPA. |
+| `supervisor.serviceAccount.annotations` | object | `{}` | Annotations for the supervisor ServiceAccount. |
+| `supervisor.serviceAccount.clusterScope` | bool | `false` | Use ClusterRole instead of namespaced Role/RoleBinding (cluster-wide access - security-sensitive). |
+| `supervisor.extraEnv` | array | `[]` | Extra environment variables for the supervisor container. |
+
+### Supervisor configuration
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `supervisor.config.raft.replicas` | int | `3` | Raft voter count for DNS peer discovery. Keep in sync with `supervisor.replicaCount`. |
+| `supervisor.config.raft.tls.enabled` | bool | `true` | Enable mTLS for the Raft transport. |
+| `supervisor.config.raft.tls.clientAuth` | bool | `true` | Require and verify peer client certs (mTLS). |
+| `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled). |
+| `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired when the tempo subchart is enabled). |
+| `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired when the loki subchart is enabled). |
+| `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired when the victoria subchart is enabled). |
+| `supervisor.config.cache.backend` | string | `"registry"` | Cache backend type: registry (OCI) or s3. |
+| `supervisor.config.cache.publicHost` | string | `""` | Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`). Must differ from the control-plane host. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled. |
+| `supervisor.config.cache.authToken` | string | `""` | Engine→proxy bearer for the cache. Rendered into the engine-registry-auth Secret (key `token`); the supervisor reads it from there. Empty = "placeholder". |
+| `supervisor.config.cache.registries` | array | `[]` | Multi-backend list of {id, internalAddr, username, password, passwordSecret}. Empty = single-backend mode (the bundled registry). |
+| `supervisor.config.cache.registries[].passwordSecret.name` | string | — | K8s Secret name holding the backend password (rendered as a reference, never the secret itself). |
+| `supervisor.config.cache.registries[].passwordSecret.key` | string | `"password"` | Key inside the Secret holding the password (empty = "password"). |
+| `supervisor.config.cache.s3.bucket` | string | `""` | S3 bucket name (when backend=s3). |
+| `supervisor.config.cache.s3.region` | string | `""` | S3 region (when backend=s3). |
+| `supervisor.config.history.gc.enabled` | bool | `false` | Master switch for the history auto-purge sweeper. |
+| `supervisor.config.history.gc.maxAge` | string | `"720h"` | Purge traces older than this (30d default). |
+| `supervisor.config.history.gc.schedule` | string | `"1h"` | History sweeper ticker interval. |
+| `supervisor.config.fleet.maxReplicasPerVersion` | int | `3` | Maximum engine replicas per Dagger version. |
+| `supervisor.config.fleet.maxSessionsPerReplica` | int | `8` | Maximum concurrent sessions per engine replica. |
+| `supervisor.config.fleet.replicaIdleTtl` | string | `"5m"` | Idle TTL before scaling down an engine replica. |
+| `supervisor.config.fleet.engineImageRegistry` | string | `"registry.dagger.io/engine"` | Engine container image registry. |
+| `supervisor.config.fleet.engineStorageClass` | string | `""` | StorageClass for engine PVCs (empty = cluster default). |
+| `supervisor.config.fleet.engineStorageSize` | string | `"50Gi"` | PVC size for each engine. |
+| `supervisor.config.fleet.engineCPURequest` | string | `"500m"` | Engine CPU request. |
+| `supervisor.config.fleet.engineCPULimit` | string | `"2000m"` | Engine CPU limit. |
+| `supervisor.config.fleet.engineMemoryRequest` | string | `"1Gi"` | Engine memory request. |
+| `supervisor.config.fleet.engineMemoryLimit` | string | `"8Gi"` | Engine memory limit. |
+| `supervisor.config.fleet.engineTerminationGraceSeconds` | int | `120` | Engine pod termination grace period. |
+| `supervisor.config.fleet.enginePullPolicy` | string | `"IfNotPresent"` | Engine image pull policy. |
+| `supervisor.config.fleet.enginePrivileged` | bool | `true` | Run engine container in privileged mode (required by BuildKit/Dagger engine). |
+| `supervisor.config.fleet.engineNodeSelector` | object | `{}` | Node selector for engine pods. |
+| `supervisor.config.fleet.engineTolerations` | array | `[]` | Tolerations for engine pods. |
+| `supervisor.config.fleet.engineExtraArgs` | array | `[]` | Additional CLI args passed to the engine. |
+| `supervisor.config.fleet.engineExtraEnv` | object | `{}` | Extra env vars on engine pods. |
+| `supervisor.config.fleet.engineExtraEnvFrom` | object | `{}` | Extra env vars sourced from Secret keys on engine pods: map of env name -> {secret_name, key}. |
+| `supervisor.config.fleet.engineCaSecret` | string | `""` | Secret with custom CA PEM bundle for engines (empty = disabled). |
+| `supervisor.config.fleet.engineCaSecretKey` | string | `"ca.crt"` | Key inside engineCaSecret containing the CA cert. |
+| `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the engine-registry-auth Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
+| `supervisor.config.fleet.engineDebug` | bool | `false` | Enable engine.toml [debug]. |
+| `supervisor.config.fleet.engineLogFormat` | string | `"json"` | Engine log format (json, text; empty omits). |
+| `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). |
+| `supervisor.config.leaseTtl` | string | `"2m"` | Engine session lease TTL. |
+| `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
+| `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21"]` | Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor). |
+| `supervisor.config.logLevel` | string | `"info"` | Supervisor log level. |
+| `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
+| `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |
+
+### Authentication
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `auth.bootstrapAdmin.username` | string | `"admin"` | Bootstrap admin username. |
+| `auth.bootstrapAdmin.password` | string | `""` | Bootstrap admin password. When empty, a random password is generated and logged once at first boot. |
+| `auth.jwt.secret` | string | `""` | JWT signing secret (HS256). Empty = auto-generated and persisted in DB. |
+| `auth.jwt.accessTtl` | string | `"15m"` | JWT access token TTL. |
+| `auth.jwt.refreshTtl` | string | `"168h"` | JWT refresh token TTL. |
+| `auth.oauth.enabled` | bool | `false` | Enable OAuth2 authentication. |
+| `auth.oauth.provider` | string | `"github"` | OAuth2 provider: "github" or "oidc". |
+| `auth.oauth.clientId` | string | `""` | OAuth2 client ID. |
+| `auth.oauth.clientSecret` | string | `""` | OAuth2 client secret (rendered into the `<release>-oauth` Secret). |
+| `auth.oauth.redirectUrl` | string | `""` | OAuth2 redirect URL (empty = computed). |
+| `auth.oauth.allowedOrgs` | array | `["acme"]` | Allowed OAuth organizations (github: org membership; oidc: groups-claim intersection). |
+| `auth.oauth.defaultGroup` | string | `""` | Default group for OAuth users. |
+| `auth.cookie.accessName` | string | `"dagger_kubernetes_access"` | Access-JWT session cookie name (httpOnly). |
+| `auth.cookie.refreshName` | string | `"dagger_kubernetes_refresh"` | Refresh-JWT session cookie name (httpOnly). |
+| `auth.cookie.secure` | bool | `false` | Force the Secure flag on session cookies. |
+| `auth.cors.allowedOrigins` | array | `[]` | Exact-match Origin allowlist for cross-origin API access (empty = same-origin only). |
+
+### TLS and certificates
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `tls.provider` | string | `"embedded"` | TLS provider for the server certificate: "embedded", "cert-manager", or "external". |
+| `tls.certPath` | string | `""` | Server certificate path (only "external"). cert-manager auto-wires the mounted data-tls secret. |
+| `tls.keyPath` | string | `""` | Server key path (only "external"). |
+| `tls.clientCertTtl` | string | `"2h"` | Client certificate TTL (engine session certs minted from the CA). |
+| `tls.caCrt` | string | `""` | PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot. |
+| `tls.caKey` | string | `""` | PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot. |
+| `tls.crt` | string | `""` | PEM-encoded server certificate (only needed for provider "external"). |
+| `tls.key` | string | `""` | PEM-encoded server private key (only needed for provider "external"). |
+
+### Services
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `service.control.type` | string | `ClusterIP` | Control-plane service type. |
+| `service.control.port` | int | `80` | Control-plane service port (maps to the fixed supervisor :8080). |
+| `service.control.nodePort` | string | `""` | Control-plane service node port (when type=NodePort). |
+| `service.control.host` | string | `""` | Routable hostname/IP for the control plane when exposed via LoadBalancer/NodePort. |
+| `service.data.type` | string | `ClusterIP` | Data-plane service type. ClusterIP when using ingress. |
+| `service.data.port` | int | `443` | Data-plane service port (maps to the fixed supervisor :8443). |
+| `service.data.nodePort` | string | `""` | Data-plane node port (when type=NodePort and no ingress). |
+| `service.data.host` | string | `""` | Routable hostname/IP for the data plane when exposed via LoadBalancer/NodePort. |
+
+### Ingress
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `ingress.enabled` | bool | `true` | Enable control-plane Ingress (web UI + API). |
+| `ingress.className` | string | `""` | Ingress class name (empty = default ingress controller). |
+| `ingress.annotations` | object | `{}` | Ingress annotations. |
+| `ingress.hosts` | array | see `values.yaml` | Ingress host rules. |
+| `ingress.hosts[].host` | string | `supv.example.com` | Hostname for the ingress rule. |
+| `ingress.hosts[].paths[].path` | string | `/` | URL path for the ingress rule. |
+| `ingress.hosts[].paths[].pathType` | string | `Prefix` | Path matching type (Prefix, Exact, ImplementationSpecific). |
+| `ingress.tls` | array | `[]` | Ingress TLS configuration. |
+
+### Data-plane Ingress (mTLS passthrough)
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `dataIngress.enabled` | bool | `false` | Expose data plane via TLS passthrough on a dedicated host. |
+| `dataIngress.host` | string | `"data.supv.example.com"` | Hostname for the data plane. |
+| `dataIngress.className` | string | `""` | Ingress class name. |
+| `dataIngress.annotations` | object | `{}` | Additional ingress annotations. |
+| `dataIngress.tls.secretName` | string | `""` | Secret name for the data-plane TLS cert. |
+
+### Data-plane certificate (cert-manager)
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `dataCert.enabled` | bool | `false` | Provision a certificate for the data plane via cert-manager. |
+| `dataCert.issuerName` | string | `"letsencrypt-prod"` | cert-manager ClusterIssuer name. |
+| `dataCert.issuerKind` | string | `"ClusterIssuer"` | cert-manager issuer kind: ClusterIssuer or Issuer. |
+| `dataCert.secretName` | string | `""` | Secret name where cert-manager stores the certificate. |
+
+### Prometheus ServiceMonitor
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `serviceMonitor.enabled` | bool | `false` | Enable Prometheus ServiceMonitor. |
+| `serviceMonitor.labels` | object | `{}` | Labels applied to the ServiceMonitor. |
+| `serviceMonitor.interval` | string | `30s` | Scrape interval. |
+| `serviceMonitor.scrapeTimeout` | string | `10s` | Scrape timeout. |
+
+### Subchart overrides
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `opentelemetry-collector.enabled` | bool | `true` | Install OpenTelemetry Collector subchart. |
+| `registry.enabled` | bool | `true` | Install Docker Registry subchart (cache backend). |
+| `tempo.enabled` | bool | `true` | Install Grafana Tempo subchart (traces). |
+| `tempo.tempo.retention` | string | `720h` | Trace retention duration. Set to match (or exceed) `supervisor.config.history.gc.maxAge`. |
+| `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |
+| `victoria.enabled` | bool | `true` | Install VictoriaMetrics subchart (metrics). |
+| `grafana.enabled` | bool | `true` | Install Grafana subchart (dashboards with auto-provisioned datasources). |
 
 ## Upgrading
 

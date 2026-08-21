@@ -19,7 +19,7 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
-const cacheProxyDigest = "sha256:" + "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+const cacheProxyDigest = "sha256:aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
 
 // fakeRegistryBackend emulates one OCI Distribution v2 registry.
 type fakeRegistryBackend struct {
@@ -111,7 +111,7 @@ func manifestKeyFromPath(path string) string {
 	if len(parts) < 3 {
 		return ""
 	}
-	return strings.Join(parts[:len(parts)-2], "/") + ":" + parts[len(parts)-1]
+	return fmt.Sprintf("%s:%s", strings.Join(parts[:len(parts)-2], "/"), parts[len(parts)-1])
 }
 
 func TestCacheProxyMultiBackendIntegration(t *testing.T) {
@@ -127,7 +127,9 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 		{ID: "reg-2", InternalAddr: strings.TrimPrefix(ts2.URL, "http://"), Username: "u2", Password: "p2"},
 	}
 	routes := repository.NewCacheRoutesRepo(store)
-	router := service.NewRegistryRouter(backends, routes, logger)
+	router := service.NewRegistryRouter(backends, routes, func(b domain.RegistryBackend) domain.RegistryClient {
+		return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+	}, logger)
 
 	// Seed charge so reg-1 is heavier than reg-2; pushes must land on reg-2.
 	if err := router.RecordManifest(context.Background(), "dagger-cache", "seed", cacheProxyDigest, "reg-1", 1000); err != nil {
@@ -188,7 +190,7 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	}
 
 	// 1. Blob upload start → least-charged backend (reg-2).
-	resp, _ := doReq(http.MethodPost, base+"/v2/dagger-cache/blobs/uploads/", nil, nil)
+	resp, _ := doReq(http.MethodPost, fmt.Sprintf("%s/v2/dagger-cache/blobs/uploads/", base), nil, nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("upload start status = %d, want 202", resp.StatusCode)
 	}
@@ -198,26 +200,26 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	}
 	// Map the cache vhost back to the local test listener while keeping the
 	// Host header (the engine would resolve cache.example.com via DNS/ingress).
-	uploadURL := base + strings.TrimPrefix(loc, "https://cache.example.com")
+	uploadURL := fmt.Sprintf("%s%s", base, strings.TrimPrefix(loc, "https://cache.example.com"))
 
 	// 2. Upload PATCH + PUT to the rewritten Location → same backend affinity.
 	resp, _ = doReq(http.MethodPatch, uploadURL, strings.NewReader("data"), nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("upload patch status = %d, want 202", resp.StatusCode)
 	}
-	resp, _ = doReq(http.MethodPut, uploadURL+"?digest="+cacheProxyDigest, strings.NewReader(""), nil)
+	resp, _ = doReq(http.MethodPut, fmt.Sprintf("%s?digest=%s", uploadURL, cacheProxyDigest), strings.NewReader(""), nil)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("upload complete status = %d, want 201", resp.StatusCode)
 	}
 
 	// 3. Manifest push → least-charged backend (reg-2).
-	resp, _ = doReq(http.MethodPut, base+"/v2/dagger-cache/manifests/v0-21-4", strings.NewReader(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`), nil)
+	resp, _ = doReq(http.MethodPut, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), strings.NewReader(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`), nil)
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("manifest push status = %d, want 201", resp.StatusCode)
 	}
 
 	// 4. Manifest pull → routes back to reg-2 (routing-table hit).
-	resp, _ = doReq(http.MethodGet, base+"/v2/dagger-cache/manifests/v0-21-4", nil, nil)
+	resp, _ = doReq(http.MethodGet, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), nil, nil)
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("manifest pull status = %d, want 200", resp.StatusCode)
 	}
@@ -238,7 +240,7 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	}
 	// The engine's supervisor token must never reach the backend; the backend
 	// sees its own Basic credentials instead.
-	if reg2Auth != "Basic "+base64.StdEncoding.EncodeToString([]byte("u2:p2")) {
+	if reg2Auth != fmt.Sprintf("Basic %s", base64.StdEncoding.EncodeToString([]byte("u2:p2"))) {
 		t.Fatalf("backend Authorization = %q, want backend Basic creds", reg2Auth)
 	}
 	if strings.Contains(reg2Auth, "client-token") {

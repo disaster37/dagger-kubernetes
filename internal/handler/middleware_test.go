@@ -60,7 +60,6 @@ func newAuthEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	e.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
 	e.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
-	e.GET("/api/v1/logs/:traceID", s.handleLogsRoutes)
 	e.POST("/v1/engines", s.handleEngines)
 	return e
 }

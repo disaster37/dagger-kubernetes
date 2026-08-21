@@ -23,6 +23,12 @@ Use a **per-version StatefulSet** model:
 - Garbage collection: versions with zero replicas for `version_retention`
   have their StatefulSet deleted.
 
+> **Superseded (2026-08-20):** the `version_retention` garbage-collection
+> behavior above was never implemented; the `fleet.version_retention` config key
+> was removed. The historical record is preserved as-is; see the current
+> `internal/service/fleet.go` for the implemented autoscaling behavior
+> (scale-up/scale-down only).
+
 ## Rationale
 
 - Prevents cross-version resource contention.

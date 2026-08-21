@@ -467,7 +467,6 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.POST("/v1/logs", s.handleOTel("logs"))
 	h.POST("/v1/metrics", s.handleOTel("metrics"))
 
-	h.GET("/v1/versions", s.handleAdminVersions)
 	h.GET("/api/v1/fleet", s.handleFleetInfo)
 	h.GET("/api/v1/cache", s.handleCacheInfo)
 	h.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
@@ -528,8 +527,6 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
 	h.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
 	h.GET("/api/v1/traces/:traceID/live", s.handleTracesLive)
-
-	h.GET("/api/v1/logs/:traceID", s.handleLogsRoutes)
 
 	h.GET("/api/v1/metrics", s.handleMetricsProxy)
 	h.Any("/api/v1/metrics/*s", s.handleMetricsProxy)
@@ -849,19 +846,6 @@ func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
 			}
 		}
 	}
-}
-
-func (s *Server) handleAdminVersions(_ context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
-		return
-	}
-
-	versions := s.versionResolver.AllReleases()
-	out := make([]string, len(versions))
-	for i, v := range versions {
-		out[i] = v.String()
-	}
-	writeJSON(c, out)
 }
 
 // handleTracesURL returns the self-hosted pipeline-view URL for a trace.

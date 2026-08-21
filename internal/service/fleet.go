@@ -19,8 +19,6 @@ type Manager struct {
 	maxReplicasPerVersion int
 	maxSessionsPerReplica int
 	replicaIdleTTL        time.Duration
-	versionRetention      time.Duration
-	minReplicasPerVersion int
 	logger                *logrus.Logger
 }
 
@@ -28,8 +26,6 @@ type ManagerConfig struct {
 	MaxReplicasPerVersion int
 	MaxSessionsPerReplica int
 	ReplicaIdleTTL        time.Duration
-	VersionRetention      time.Duration
-	MinReplicasPerVersion int
 }
 
 func NewManager(provider domain.FleetProvider, sessions domain.SessionStore, cfg ManagerConfig, logger *logrus.Logger, metrics *observ.Metrics) *Manager {
@@ -40,8 +36,6 @@ func NewManager(provider domain.FleetProvider, sessions domain.SessionStore, cfg
 		maxReplicasPerVersion: cfg.MaxReplicasPerVersion,
 		maxSessionsPerReplica: cfg.MaxSessionsPerReplica,
 		replicaIdleTTL:        cfg.ReplicaIdleTTL,
-		versionRetention:      cfg.VersionRetention,
-		minReplicasPerVersion: cfg.MinReplicasPerVersion,
 		logger:                logger,
 	}
 }
@@ -207,26 +201,6 @@ func sortDescendingOrdinal(replicas []domain.Replica) {
 	sort.Slice(replicas, func(i, j int) bool {
 		return replicas[i].Ordinal > replicas[j].Ordinal
 	})
-}
-
-func (m *Manager) ScaleToZero(version string) error {
-	replicas, err := m.provider.GetReplicas(version)
-	if err != nil {
-		return fmt.Errorf("get replicas: %w", err)
-	}
-	m.observeReplicas(version, replicas)
-
-	sortDescendingOrdinal(replicas)
-
-	for _, r := range replicas {
-		if m.replicaHasActiveSessions(r.Name) {
-			continue
-		}
-		if err := m.provider.ScaleDown(version, r.Ordinal); err != nil {
-			return fmt.Errorf("scale down %s: %w", r.Name, err)
-		}
-	}
-	return nil
 }
 
 func (m *Manager) AllFleetInfo() ([]domain.FleetInfo, error) {

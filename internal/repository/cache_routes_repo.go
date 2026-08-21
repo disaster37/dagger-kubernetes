@@ -14,6 +14,8 @@ type CacheRoutesRepo struct {
 	store *RaftStore
 }
 
+var _ domain.CacheRoutesStore = (*CacheRoutesRepo)(nil)
+
 // NewCacheRoutesRepo returns a CacheRoutesRepo backed by store.
 func NewCacheRoutesRepo(store *RaftStore) *CacheRoutesRepo {
 	return &CacheRoutesRepo{store: store}
@@ -79,11 +81,6 @@ func (r *CacheRoutesRepo) DeleteUpload(ctx context.Context, uuid string) error {
 	return r.store.applyCtx(ctx, kindDeleteUpload, cmdDeleteUpload{UUID: uuid})
 }
 
-// BackendCharge returns the sum of stored_bytes for backendID.
-func (r *CacheRoutesRepo) BackendCharge(ctx context.Context, backendID string) (int64, error) {
-	return r.store.fsmRead().backendCharge(backendID), nil
-}
-
 // AllCharges returns stored_bytes summed per backend_id.
 func (r *CacheRoutesRepo) AllCharges(ctx context.Context) (map[string]int64, error) {
 	return r.store.fsmRead().allCharges(), nil
@@ -92,11 +89,6 @@ func (r *CacheRoutesRepo) AllCharges(ctx context.Context) (map[string]int64, err
 // DeleteManifestRoute removes a repo+tag route (used by purge).
 func (r *CacheRoutesRepo) DeleteManifestRoute(ctx context.Context, repo, tag string) error {
 	return r.store.applyCtx(ctx, kindDeleteManifestRoute, cmdDeleteManifestRoute{Repo: repo, Tag: tag})
-}
-
-// DeleteRoutesForBackend removes all manifest+blob routes for a backend.
-func (r *CacheRoutesRepo) DeleteRoutesForBackend(ctx context.Context, backendID string) error {
-	return r.store.applyCtx(ctx, kindDeleteRoutesForBackend, cmdDeleteRoutesForBackend{BackendID: backendID})
 }
 
 // ReapUploadSessions deletes upload sessions older than maxAge (housekeeping).

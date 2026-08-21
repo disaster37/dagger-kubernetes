@@ -233,8 +233,6 @@ func run(c *cli.Context) error {
 		MaxReplicasPerVersion: cfg.Fleet.MaxReplicasPerVersion,
 		MaxSessionsPerReplica: cfg.Fleet.MaxSessionsPerReplica,
 		ReplicaIdleTTL:        cfg.Fleet.ReplicaIdleTTL,
-		VersionRetention:      cfg.Fleet.VersionRetention,
-		MinReplicasPerVersion: cfg.Fleet.MinReplicasPerVersion,
 	}, logger, metrics)
 
 	traces := repository.NewSpanTreeReconstructor(cfg.Telemetry.TempoURL)
@@ -247,7 +245,9 @@ func run(c *cli.Context) error {
 	var routesRepo *repository.CacheRoutesRepo
 	if cfg.Cache.Backend == "registry" {
 		routesRepo = repository.NewCacheRoutesRepo(raftStore)
-		router = service.NewRegistryRouter(cacheBackends, routesRepo, logger)
+		router = service.NewRegistryRouter(cacheBackends, routesRepo, func(b domain.RegistryBackend) domain.RegistryClient {
+			return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+		}, logger)
 		if err := router.RefreshCharges(ctx); err != nil {
 			logger.WithError(err).Warn("refresh cache charges failed")
 		}
@@ -396,25 +396,13 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 
 	isMultiNode := cfg.Raft.Replicas > 1 || len(cfg.Raft.Peers) > 1
 	if isMultiNode && !cfg.Raft.TLS.Enabled {
-		logger.Warn("raft multi-node is configured but raft.tls.enabled is false: " +
-			"Raft replication traffic — including password hashes, token hashes/ciphertexts, " +
-			"the JWT secret, and the token-encryption key — will flow in CLEARTEXT over the " +
-			"network (CWE-319/CWE-311). Enable raft.tls.enabled for multi-node in production.")
+		logger.Warn(`raft multi-node is configured but raft.tls.enabled is false: Raft replication traffic — including password hashes, token hashes/ciphertexts, the JWT secret, and the token-encryption key — will flow in CLEARTEXT over the network (CWE-319/CWE-311). Enable raft.tls.enabled for multi-node in production.`)
 	}
 	if isMultiNode && !cfg.Raft.TLS.ClientAuth {
-		logger.Warn("raft multi-node is configured with raft.tls.client_auth=false: peers will not " +
-			"verify each other's certificates, so an unauthenticated peer could join the cluster " +
-			"(CWE-295). Keep raft.tls.client_auth=true (mTLS) for multi-node in production.")
+		logger.Warn(`raft multi-node is configured with raft.tls.client_auth=false: peers will not verify each other's certificates, so an unauthenticated peer could join the cluster (CWE-295). Keep raft.tls.client_auth=true (mTLS) for multi-node in production.`)
 	}
 	if isMultiNode && cfg.TLS.Provider == "embedded" && (clientset == nil || cfg.CA.MintingCASecret == "") && isMintingCAOnPerPodStorage(cfg) {
-		logger.Warn("multi-node is configured with the embedded TLS provider but the minting CA " +
-			"cannot be shared across pods (no K8s clientset or ca.minting_ca_secret is empty), and " +
-			"tls.ca_path is stored under the per-pod database directory. Each pod will mint a " +
-			"DISTINCT engine-client CA, so engine mTLS client certs issued by one pod will be " +
-			"REJECTED by other pods' data-plane listeners (CWE-295). To fix: run with a K8s " +
-			"clientset and ca.minting_ca_secret set (the embedded provider then shares the CA via " +
-			"that Secret), mount a shared ReadWriteMany volume at tls.ca_path, or switch " +
-			"tls.provider to cert-manager/external with a shared CA.")
+		logger.Warn(`multi-node is configured with the embedded TLS provider but the minting CA cannot be shared across pods (no K8s clientset or ca.minting_ca_secret is empty), and tls.ca_path is stored under the per-pod database directory. Each pod will mint a DISTINCT engine-client CA, so engine mTLS client certs issued by one pod will be REJECTED by other pods' data-plane listeners (CWE-295). To fix: run with a K8s clientset and ca.minting_ca_secret set (the embedded provider then shares the CA via that Secret), mount a shared ReadWriteMany volume at tls.ca_path, or switch tls.provider to cert-manager/external with a shared CA.`)
 	}
 
 	var raftTLS *tls.Config
@@ -694,8 +682,7 @@ func toRaftPeers(peers []domain.RaftPeer) []repository.RaftPeer {
 // leader's API instead.
 func validateMigrateTokensSingleNode(cfg *domain.Config) error {
 	if cfg.Raft.Replicas > 1 || len(cfg.Raft.Peers) > 1 {
-		return fmt.Errorf("migrate-tokens must run against a single-node cluster (raft.replicas=1 and raft.peers empty); " +
-			"for multi-node, run it via the running leader's API or scale the cluster to 1 first")
+		return fmt.Errorf("migrate-tokens must run against a single-node cluster (raft.replicas=1 and raft.peers empty); for multi-node, run it via the running leader's API or scale the cluster to 1 first")
 	}
 	return nil
 }
@@ -964,7 +951,7 @@ func isMintingCAOnPerPodStorage(cfg *domain.Config) bool {
 		return false
 	}
 	// caPath is under dbDir (e.g. /var/lib/dagger-kubernetes/ca under /var/lib/dagger-kubernetes).
-	return rel != "." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	return rel != "." && !filepath.IsAbs(rel) && !strings.HasPrefix(rel, fmt.Sprintf("..%c", filepath.Separator))
 }
 
 func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (domain.FleetProvider, error) {
@@ -972,8 +959,7 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 		return nil, err
 	}
 	if clientset == nil {
-		logger.Warn("k8s clientset unavailable; falling back to in-memory stub provider — " +
-			"engine fleet will be empty and provisioning will not persist")
+		logger.Warn("k8s clientset unavailable; falling back to in-memory stub provider — engine fleet will be empty and provisioning will not persist")
 		return repository.NewStubProvider(), nil
 	}
 

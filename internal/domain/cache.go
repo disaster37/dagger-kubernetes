@@ -15,6 +15,11 @@ var ErrRegistryDeleteDisabled = errors.New("registry delete not enabled")
 // list what exists). Lives in domain so the handler can map it to a 409.
 var ErrRegistryCatalogDisabled = errors.New("registry catalog disabled")
 
+// ErrManifestNotFound indicates the OCI registry does not have the requested
+// repo:tag manifest (a definitive 404). Lives in domain so the service layer
+// can branch on it without importing the repository layer.
+var ErrManifestNotFound = errors.New("manifest not found")
+
 type S3Ref struct {
 	Bucket string
 	Region string

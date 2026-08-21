@@ -182,10 +182,18 @@ back the stable pod names used for discovery: <fullname>-headless. */}}
 provider issues its own server cert from the minting CA (under tls.ca_path), so
 the path is unused. The cert-manager provider reads the cert-manager-issued
 keypair mounted at /etc/dagger-kubernetes/data-tls (tls.crt). The external
-provider uses the operator-supplied path. */}}
+provider reads the <fullname>-tls Secret mounted at /etc/dagger-kubernetes/tls
+when tls.crt/tls.key are set (the chart auto-wires certPath/keyPath to it), or
+the operator-supplied path when tls.certPath/tls.keyPath are set explicitly. */}}
 {{- define "dagger-kubernetes.controlTLSCertPath" -}}
 {{- if eq (.Values.tls.provider | default "embedded") "cert-manager" -}}
 /etc/dagger-kubernetes/data-tls/tls.crt
+{{- else if eq (.Values.tls.provider | default "embedded") "external" -}}
+{{- if and .Values.tls.crt .Values.tls.key -}}
+/etc/dagger-kubernetes/tls/tls.crt
+{{- else -}}
+{{- .Values.tls.certPath | default "" -}}
+{{- end -}}
 {{- else -}}
 {{- .Values.tls.certPath | default "" -}}
 {{- end -}}
@@ -194,6 +202,12 @@ provider uses the operator-supplied path. */}}
 {{- define "dagger-kubernetes.controlTLSKeyPath" -}}
 {{- if eq (.Values.tls.provider | default "embedded") "cert-manager" -}}
 /etc/dagger-kubernetes/data-tls/tls.key
+{{- else if eq (.Values.tls.provider | default "embedded") "external" -}}
+{{- if and .Values.tls.crt .Values.tls.key -}}
+/etc/dagger-kubernetes/tls/tls.key
+{{- else -}}
+{{- .Values.tls.keyPath | default "" -}}
+{{- end -}}
 {{- else -}}
 {{- .Values.tls.keyPath | default "" -}}
 {{- end -}}

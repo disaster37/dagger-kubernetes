@@ -28,7 +28,7 @@ func ParseRole(s string) (Role, error) {
 	return "", fmt.Errorf("invalid role %q: %w", s, errInvalidRole)
 }
 
-// User is a platform user (human or CI identity). Stored in SQLite.
+// User is a platform user (human or CI identity). Stored in the Raft FSM.
 type User struct {
 	ID            string    `json:"id"`
 	Username      string    `json:"username"`

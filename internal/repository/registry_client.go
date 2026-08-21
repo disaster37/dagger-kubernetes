@@ -19,11 +19,13 @@ import (
 
 // Sentinel errors for the OCI Distribution v2 client. Callers use
 // errors.Is to branch on registry behaviour (catalog disabled, delete
-// disabled, etc.).
+// disabled, etc.). ErrRegistryCatalogDisabled and ErrManifestNotFound alias
+// the domain sentinels (the canonical definitions) so errors.Is still
+// matches when the service layer branches on the domain values.
 var (
 	ErrRegistryUnreachable     = errors.New("registry unreachable")
-	ErrRegistryCatalogDisabled = errors.New("registry catalog disabled")
-	ErrManifestNotFound        = errors.New("manifest not found")
+	ErrRegistryCatalogDisabled = domain.ErrRegistryCatalogDisabled
+	ErrManifestNotFound        = domain.ErrManifestNotFound
 )
 
 // maxRegistryBody caps the size of a registry response body the client will
@@ -73,6 +75,8 @@ type RegistryStatsClient struct {
 	password   string
 	httpClient *http.Client
 }
+
+var _ domain.RegistryClient = (*RegistryStatsClient)(nil)
 
 func NewRegistryStatsClient(host string) *RegistryStatsClient {
 	return &RegistryStatsClient{

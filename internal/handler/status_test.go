@@ -75,12 +75,36 @@ func TestHandleHealthzDegraded(t *testing.T) {
 	}
 }
 
-func TestHandleReadyzDown(t *testing.T) {
+func TestHandleReadyzCacheDownStillReady(t *testing.T) {
 	env := newTestEnv(t)
 	env.server.status = &stubStatusProvider{status: &domain.PlatformStatus{
 		State: domain.ServiceDown,
 		Services: []domain.ServiceStatus{
+			{Name: "supervisor", Category: "control", State: domain.ServiceOK, Configured: true},
 			{Name: "cache", Category: "cache", State: domain.ServiceDown, Configured: true},
+		},
+	}}
+	e := newTestEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/readyz", nil)
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("expected 200 (down cache must not gate readiness), got %d", resp.Result().StatusCode())
+	}
+	var body map[string]domain.ServiceState
+	if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body["state"] != domain.ServiceOK {
+		t.Fatalf("state = %q, want ok", body["state"])
+	}
+}
+
+func TestHandleReadyzSupervisorDown(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.status = &stubStatusProvider{status: &domain.PlatformStatus{
+		State: domain.ServiceDown,
+		Services: []domain.ServiceStatus{
+			{Name: "supervisor", Category: "control", State: domain.ServiceDown, Configured: true},
 		},
 	}}
 	e := newTestEngine(env.server)
@@ -96,8 +120,47 @@ func TestHandleReadyzDown(t *testing.T) {
 	if body["state"] != "down" {
 		t.Fatalf("state = %v, want down", body["state"])
 	}
-	if body["services"] == nil {
-		t.Fatal("services should be present when down")
+}
+
+func TestReadinessState(t *testing.T) {
+	tests := []struct {
+		name     string
+		services []domain.ServiceStatus
+		want     domain.ServiceState
+	}{
+		{
+			name: "supervisor ok with down cache",
+			services: []domain.ServiceStatus{
+				{Name: "supervisor", State: domain.ServiceOK, Configured: true},
+				{Name: "cache", State: domain.ServiceDown, Configured: true},
+			},
+			want: domain.ServiceOK,
+		},
+		{
+			name: "supervisor ok with down telemetry",
+			services: []domain.ServiceStatus{
+				{Name: "supervisor", State: domain.ServiceOK, Configured: true},
+				{Name: "victoria", State: domain.ServiceDown, Configured: true},
+			},
+			want: domain.ServiceOK,
+		},
+		{
+			name:     "supervisor down",
+			services: []domain.ServiceStatus{{Name: "supervisor", State: domain.ServiceDown, Configured: true}},
+			want:     domain.ServiceDown,
+		},
+		{
+			name:     "no supervisor row",
+			services: []domain.ServiceStatus{{Name: "cache", State: domain.ServiceDown, Configured: true}},
+			want:     domain.ServiceOK,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := readinessState(&domain.PlatformStatus{Services: tc.services}); got != tc.want {
+				t.Errorf("readinessState() = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 

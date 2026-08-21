@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -9,7 +8,7 @@ import (
 )
 
 // queryAndWriteTraceLogs queries Loki for a trace's logs and writes the JSON
-// result. Shared by handleLogsRoutes and handleTracesLogs.
+// result. Shared by handleTracesLogs.
 func (s *Server) queryAndWriteTraceLogs(traceID string, c *app.RequestContext) {
 	end := time.Now()
 	start := end.Add(-24 * time.Hour)
@@ -24,13 +23,4 @@ func (s *Server) queryAndWriteTraceLogs(traceID string, c *app.RequestContext) {
 		"trace_id": traceID,
 		"entries":  entries,
 	})
-}
-
-// handleLogsRoutes is the /api/v1/logs/:traceID route. Gated by authorizeTrace.
-func (s *Server) handleLogsRoutes(_ context.Context, c *app.RequestContext) {
-	traceID, ok := s.authorizeTraceRequest(c)
-	if !ok {
-		return
-	}
-	s.queryAndWriteTraceLogs(traceID, c)
 }

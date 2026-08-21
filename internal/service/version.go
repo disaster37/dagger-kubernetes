@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"sort"
 	"sync"
-	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -14,8 +13,6 @@ type Resolver struct {
 	allowlist map[string]bool
 	floor     *domain.Version
 	releases  map[string][]string
-	lastFetch time.Time
-	cacheTTL  time.Duration
 }
 
 var _ domain.VersionResolver = (*Resolver)(nil)
@@ -43,7 +40,6 @@ func NewResolver(floor string, allowlist []string, releases map[string][]string)
 		allowlist: al,
 		floor:     floorVer,
 		releases:  releases,
-		cacheTTL:  1 * time.Hour,
 	}, nil
 }
 
@@ -93,19 +89,6 @@ func (r *Resolver) ResolveMinimal(raw string) (*domain.Version, error) {
 	}
 
 	return v, nil
-}
-
-func (r *Resolver) SetReleases(releases map[string][]string) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.releases = releases
-	r.lastFetch = time.Now()
-}
-
-func (r *Resolver) NeedsRefresh() bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return time.Since(r.lastFetch) > r.cacheTTL
 }
 
 func (r *Resolver) Floor() *domain.Version {

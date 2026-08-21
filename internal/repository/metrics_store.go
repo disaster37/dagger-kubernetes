@@ -29,6 +29,8 @@ type MetricsClient struct {
 	httpClient  *http.Client
 }
 
+var _ domain.CacheMetricsClient = (*MetricsClient)(nil)
+
 func NewMetricsClient(victoriaURL string) *MetricsClient {
 	return &MetricsClient{
 		victoriaURL: victoriaURL,
@@ -36,39 +38,6 @@ func NewMetricsClient(victoriaURL string) *MetricsClient {
 			Timeout: 30 * time.Second,
 		},
 	}
-}
-
-func (c *MetricsClient) InstantQuery(query string) ([]domain.MetricResult, error) {
-	if c.victoriaURL == "" {
-		return nil, fmt.Errorf("victoria URL not configured")
-	}
-
-	params := url.Values{}
-	params.Set("query", query)
-
-	queryURL := fmt.Sprintf("%s/api/v1/query?%s", c.victoriaURL, params.Encode())
-
-	return c.doQuery(queryURL)
-}
-
-func (c *MetricsClient) RangeQuery(query string, start, end time.Time, step time.Duration) ([]domain.MetricResult, error) {
-	if c.victoriaURL == "" {
-		return nil, fmt.Errorf("victoria URL not configured")
-	}
-
-	params := url.Values{}
-	params.Set("query", query)
-	params.Set("start", fmt.Sprintf("%d", start.Unix()))
-	params.Set("end", fmt.Sprintf("%d", end.Unix()))
-	params.Set("step", fmt.Sprintf("%ds", int(step.Seconds())))
-
-	queryURL := fmt.Sprintf("%s/api/v1/query_range?%s", c.victoriaURL, params.Encode())
-
-	return c.doQuery(queryURL)
-}
-
-func (c *MetricsClient) doQuery(queryURL string) ([]domain.MetricResult, error) {
-	return c.doQueryCtx(context.Background(), queryURL)
 }
 
 func (c *MetricsClient) doQueryCtx(ctx context.Context, queryURL string) ([]domain.MetricResult, error) {
