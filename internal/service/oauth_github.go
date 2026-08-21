@@ -22,6 +22,7 @@ type GitHubOAuthService struct {
 	clientSecret string
 	redirectURL  string
 	allowedOrgs  []string
+	allowedTeams []string
 	defaultGroup string
 	tokenURL     string
 	apiBaseURL   string
@@ -30,15 +31,17 @@ type GitHubOAuthService struct {
 	groups       domain.GroupRepository
 	jwt          *JWTService
 	logger       *logrus.Logger
+	mapper       *GroupMapper
 }
 
 // NewGitHubOAuthService returns a GitHubOAuthService.
-func NewGitHubOAuthService(cfg *domain.OAuthConfig, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *GitHubOAuthService {
+func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *GitHubOAuthService {
 	return &GitHubOAuthService{ //nolint:gosec // G101: OAuth client secret is config-derived, not hardcoded.
 		clientID:     cfg.ClientID,
 		clientSecret: cfg.ClientSecret,
 		redirectURL:  cfg.RedirectURL,
 		allowedOrgs:  cfg.AllowedOrgs,
+		allowedTeams: cfg.AllowedTeams,
 		defaultGroup: cfg.DefaultGroup,
 		tokenURL:     "https://github.com/login/oauth/access_token",
 		apiBaseURL:   "https://api.github.com",
@@ -47,6 +50,7 @@ func NewGitHubOAuthService(cfg *domain.OAuthConfig, users *UserService, groups d
 		groups:       groups,
 		jwt:          jwtSvc,
 		logger:       logger,
+		mapper:       mapper,
 	}
 }
 
@@ -63,8 +67,9 @@ func (s *GitHubOAuthService) LoginURL(state string) string {
 }
 
 // Complete exchanges the code for a GitHub access token, fetches the user
-// profile and orgs, enforces allowed_orgs, ensures a local user, optionally
-// auto-joins the default group, and issues a JWT pair.
+// profile, orgs and (when needed) teams, enforces allowed_orgs/allowed_teams,
+// ensures a local user, optionally auto-joins the default group, adds mapped
+// supervisor groups, and issues a JWT pair.
 func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access, refresh string, u *domain.User, err error) {
 	accessToken, err := s.exchangeCode(ctx, code)
 	if err != nil {
@@ -81,11 +86,32 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 		return "", "", nil, fmt.Errorf("fetch github orgs: %w", err)
 	}
 
+	var teams []string
+	if len(s.allowedTeams) > 0 || s.mapper.Active() {
+		teams, err = s.fetchTeams(ctx, accessToken)
+		if err != nil {
+			if len(s.allowedTeams) > 0 {
+				return "", "", nil, fmt.Errorf("fetch github teams: %w", err)
+			}
+			s.logger.WithError(err).Warn("oauth: github teams fetch failed; mapping will use orgs only")
+			teams = nil
+		}
+	}
+
 	if len(s.allowedOrgs) > 0 && !orgsIntersect(s.allowedOrgs, orgs) {
 		return "", "", nil, domain.ErrForbidden
 	}
+	if len(s.allowedTeams) > 0 && !orgsIntersect(s.allowedTeams, teams) {
+		return "", "", nil, domain.ErrForbidden
+	}
 
-	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup)
+	providerGroups := make([]string, 0, len(orgs)+len(teams))
+	providerGroups = append(providerGroups, orgs...)
+	providerGroups = append(providerGroups, teams...)
+
+	mappedGroups := s.mapper.mapIfActive(providerGroups)
+
+	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, mappedGroups)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("github oauth: %w", err)
 	}
@@ -156,6 +182,27 @@ func (s *GitHubOAuthService) fetchOrgs(ctx context.Context, accessToken string) 
 		orgs = append(orgs, o.Login)
 	}
 	return orgs, nil
+}
+
+// fetchTeams fetches the user's teams across orgs and returns "org/team" slugs.
+func (s *GitHubOAuthService) fetchTeams(ctx context.Context, accessToken string) ([]string, error) {
+	var out []struct {
+		Slug string `json:"slug"`
+		Org  struct {
+			Login string `json:"login"`
+		} `json:"organization"`
+	}
+	if err := s.getJSON(ctx, "/user/teams", accessToken, &out); err != nil {
+		return nil, err
+	}
+	teams := make([]string, 0, len(out))
+	for _, t := range out {
+		if t.Slug == "" || t.Org.Login == "" {
+			continue
+		}
+		teams = append(teams, fmt.Sprintf("%s/%s", t.Org.Login, t.Slug))
+	}
+	return teams, nil
 }
 
 // getJSON issues an authenticated GET against the GitHub API and decodes the

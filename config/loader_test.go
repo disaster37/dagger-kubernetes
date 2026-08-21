@@ -112,6 +112,15 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.OAuth.GroupsClaim != "groups" {
 		t.Fatalf("auth.oauth.groups_claim default = %q, want groups", cfg.Auth.OAuth.GroupsClaim)
 	}
+	if cfg.Auth.OAuth.AllowedTeams == nil || len(cfg.Auth.OAuth.AllowedTeams) != 0 {
+		t.Fatalf("auth.oauth.allowed_teams default should be non-nil and empty, got %v", cfg.Auth.OAuth.AllowedTeams)
+	}
+	if cfg.Auth.OAuth.AllowedGroups == nil || len(cfg.Auth.OAuth.AllowedGroups) != 0 {
+		t.Fatalf("auth.oauth.allowed_groups default should be non-nil and empty, got %v", cfg.Auth.OAuth.AllowedGroups)
+	}
+	if cfg.Auth.OAuth.GroupMappings == nil || len(cfg.Auth.OAuth.GroupMappings) != 0 {
+		t.Fatalf("auth.oauth.group_mappings default should be non-nil and empty, got %v", cfg.Auth.OAuth.GroupMappings)
+	}
 	if cfg.LogFormat != "json" {
 		t.Fatalf("log_format default = %q, want json", cfg.LogFormat)
 	}
@@ -458,6 +467,77 @@ func TestValidateAuthConfig(t *testing.T) {
 				t.Fatalf("validateAuthConfig = %q, want containing %q", err.Error(), tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateGroupMappings(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *domain.Config
+		wantErr string
+	}{
+		{name: "empty valid", cfg: &domain.Config{}},
+		{name: "valid rules", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			GroupMappings: []domain.GroupMappingRule{
+				{Pattern: `^dex:(.*)$`, Replacement: `$1`},
+				{Pattern: `^github\.com/acme-(.*)$`, Replacement: `acme-${1}`},
+			},
+			AllowedTeams: []string{"acme/eng"},
+		}}}},
+		{name: "bad pattern", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			GroupMappings: []domain.GroupMappingRule{{Pattern: "[", Replacement: "x"}},
+		}}}, wantErr: "auth.oauth.group_mappings[0].pattern"},
+		{name: "empty pattern", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			GroupMappings: []domain.GroupMappingRule{{Pattern: "", Replacement: "x"}},
+		}}}, wantErr: "auth.oauth.group_mappings[0].pattern must not be empty"},
+		{name: "empty replacement", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			GroupMappings: []domain.GroupMappingRule{{Pattern: "^x$", Replacement: ""}},
+		}}}, wantErr: "auth.oauth.group_mappings[0].replacement must not be empty"},
+		{name: "allowed teams no slash", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AllowedTeams: []string{"noslash"},
+		}}}, wantErr: "auth.oauth.allowed_teams[0] must be a non-empty \"org/team\" string"},
+		{name: "allowed teams empty", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AllowedTeams: []string{""},
+		}}}, wantErr: "auth.oauth.allowed_teams[0] must be a non-empty \"org/team\" string"},
+		{name: "allowed teams too many slashes", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AllowedTeams: []string{"a/b/c"},
+		}}}, wantErr: "auth.oauth.allowed_teams[0] must be a non-empty \"org/team\" string"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateGroupMappings(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateGroupMappings = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateGroupMappings = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateGroupMappings = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidGroupMappings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("auth:\n  oauth:\n    group_mappings:\n      - pattern: \"[\"\n        replacement: \"x\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "validate group mappings") ||
+		!strings.Contains(err.Error(), "auth.oauth.group_mappings[0].pattern") {
+		t.Fatalf("Load error = %q, want wrapped group-mappings validation message", err.Error())
 	}
 }
 

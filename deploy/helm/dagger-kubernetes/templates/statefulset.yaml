@@ -59,26 +59,26 @@ spec:
               value: {{ .Values.supervisor.config.raft.tls.enabled | quote }}
             - name: DAGGER_KUBERNETES_RAFT_TLS_CLIENT_AUTH
               value: {{ .Values.supervisor.config.raft.tls.clientAuth | quote }}
-            {{- if .Values.auth.bootstrapAdmin.password }}
+            {{- if or .Values.auth.bootstrapAdmin.password .Values.auth.bootstrapAdmin.secretRef.name }}
             - name: DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "dagger-kubernetes.fullname" . }}-admin-password
-                  key: password
+                  name: {{ .Values.auth.bootstrapAdmin.secretRef.name | default (printf "%s-admin-password" (include "dagger-kubernetes.fullname" .)) }}
+                  key: {{ .Values.auth.bootstrapAdmin.secretRef.key | default "password" }}
             {{- end }}
-            {{- if .Values.auth.jwt.secret }}
+            {{- if or .Values.auth.jwt.secret .Values.auth.jwt.secretRef.name }}
             - name: DAGGER_KUBERNETES_AUTH_JWT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "dagger-kubernetes.fullname" . }}-jwt
-                  key: secret
+                  name: {{ .Values.auth.jwt.secretRef.name | default (printf "%s-jwt" (include "dagger-kubernetes.fullname" .)) }}
+                  key: {{ .Values.auth.jwt.secretRef.key | default "secret" }}
             {{- end }}
-            {{- if .Values.auth.oauth.clientSecret }}
+            {{- if or .Values.auth.oauth.clientSecret .Values.auth.oauth.clientSecretRef.name }}
             - name: DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET
               valueFrom:
                 secretKeyRef:
-                  name: {{ include "dagger-kubernetes.fullname" . }}-oauth
-                  key: client_secret
+                  name: {{ .Values.auth.oauth.clientSecretRef.name | default (printf "%s-oauth" (include "dagger-kubernetes.fullname" .)) }}
+                  key: {{ .Values.auth.oauth.clientSecretRef.key | default "client_secret" }}
             {{- end }}
             {{- with .Values.supervisor.extraEnv }}
             {{- toYaml . | nindent 12 }}

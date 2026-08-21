@@ -142,7 +142,11 @@ func newOIDCService(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *
 	usvc := NewUserService(r.users, r.groups, logger)
 	gsvc := NewGroupService(r.groups, r.users, logger)
 	jwtSvc := NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
-	svc := NewOIDCOAuthService(cfg, usvc, r.groups, jwtSvc, logger)
+	mapper, err := NewGroupMapper(cfg.GroupMappings)
+	if err != nil {
+		t.Fatalf("NewGroupMapper: %v", err)
+	}
+	svc := NewOIDCOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger)
 	return svc, usvc, gsvc
 }
 
@@ -477,4 +481,118 @@ func TestOIDCCompleteUserInfoGroups(t *testing.T) {
 			t.Fatalf("Complete error = %v, want ErrForbidden", err)
 		}
 	})
+}
+
+func TestOIDCCompleteAllowedGroups(t *testing.T) {
+	tests := []struct {
+		name    string
+		allowed []string
+		wantErr bool
+	}{
+		{name: "pass", allowed: []string{"devs"}},
+		{name: "deny", allowed: []string{"platform"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+			svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+				c.AllowedOrgs = nil
+				c.AllowedGroups = tt.allowed
+			}))
+
+			_, _, _, err := svc.Complete(context.Background(), "code")
+			if tt.wantErr {
+				if !errors.Is(err, domain.ErrForbidden) {
+					t.Fatalf("groups not allowed: %v, want ErrForbidden", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Complete with allowed_groups: %v", err)
+			}
+		})
+	}
+}
+
+func TestOIDCCompleteAllowedGroupsUnionOrgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		orgs    []string
+		groups  []string
+		wantErr bool
+	}{
+		{name: "in allowed_orgs", orgs: []string{"devs"}, groups: []string{"platform"}},
+		{name: "in allowed_groups", orgs: []string{"platform"}, groups: []string{"devs"}},
+		{name: "deny when in neither", orgs: []string{"a"}, groups: []string{"b"}, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+			svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+				c.AllowedOrgs = tt.orgs
+				c.AllowedGroups = tt.groups
+			}))
+
+			_, _, _, err := svc.Complete(context.Background(), "code")
+			if tt.wantErr {
+				if !errors.Is(err, domain.ErrForbidden) {
+					t.Fatalf("neither allowlist matches: %v, want ErrForbidden", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("union should accept allowlist membership: %v", err)
+			}
+		})
+	}
+}
+
+func TestOIDCCompleteGroupMapping(t *testing.T) {
+	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer.claims["groups"] = []any{"devs", "platform"}
+	svc, _, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+		c.AllowedOrgs = nil
+		c.GroupMappings = []domain.GroupMappingRule{
+			{Pattern: "^devs$", Replacement: "dev-mapped"},
+			{Pattern: "^platform$", Replacement: "platform-mapped"},
+		}
+	}))
+	ctx := context.Background()
+
+	dev, _ := gsvc.Create(ctx, GroupInput{Name: "dev-mapped", AgentAvailable: true})
+	platform, _ := gsvc.Create(ctx, GroupInput{Name: "platform-mapped", AgentAvailable: true})
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	ids := map[string]bool{}
+	for _, g := range groups {
+		ids[g.ID] = true
+	}
+	if !ids[dev.ID] || !ids[platform.ID] {
+		t.Fatalf("user should be member of mapped groups, got %v", groups)
+	}
+}
+
+func TestOIDCCompleteNoGroupMappingsNoSync(t *testing.T) {
+	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer.claims["groups"] = []any{"devs"}
+	svc, _, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+		c.AllowedOrgs = nil
+	}))
+	ctx := context.Background()
+
+	// A group named exactly like the claim must NOT be joined: no mapping rules.
+	gsvc.Create(ctx, GroupInput{Name: "devs", AgentAvailable: true})
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(groups) != 0 {
+		t.Fatalf("no mappings should mean no auto-membership, got %v", groups)
+	}
 }

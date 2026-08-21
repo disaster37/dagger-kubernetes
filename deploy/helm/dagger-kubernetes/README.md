@@ -395,9 +395,12 @@ grafana:
 | `namespace` | Target namespace (empty = release namespace) | `""` |
 | `supervisor.config.*` | Supervisor runtime config (see `values.yaml`; URLs are computed, see [Exposition & URLs](#exposition--urls)) | see `values.yaml` |
 | `auth.bootstrapAdmin.username` / `.password` | Bootstrap admin credentials (password empty = random, logged once) | `admin` / `""` |
+| `auth.bootstrapAdmin.secretRef.name` / `.key` | Reference an existing Secret instead of plaintext `password` (takes precedence; key empty = `password`) | `""` / `"password"` |
 | `auth.jwt.secret` | JWT signing secret (empty = auto-generated, persisted in DB) | `""` |
+| `auth.jwt.secretRef.name` / `.key` | Reference an existing Secret instead of plaintext `secret` (takes precedence; key empty = `secret`) | `""` / `"secret"` |
 | `auth.jwt.*` | JWT access/refresh TTLs | `15m` / `168h` |
 | `auth.oauth.*` | OAuth2 provider config (github/oidc) | see `values.yaml` |
+| `auth.oauth.clientSecretRef.name` / `.key` | Reference an existing Secret instead of plaintext `clientSecret` (takes precedence; key empty = `client_secret`) | `""` / `"client_secret"` |
 | `auth.cookie.*` | Session cookie names + Secure flag | see `values.yaml` |
 | `auth.cors.allowedOrigins` | Cross-origin Origin allowlist | `[]` |
 | `tls.provider` | Server cert source: `embedded` \| `cert-manager` \| `external` | `embedded` |
@@ -619,16 +622,30 @@ Configure it under `supervisor.config.history`:
 |---|---|---|---|
 | `auth.bootstrapAdmin.username` | string | `"admin"` | Bootstrap admin username. |
 | `auth.bootstrapAdmin.password` | string | `""` | Bootstrap admin password. When empty, a random password is generated and logged once at first boot. |
+| `auth.bootstrapAdmin.secretRef.name` | string | `""` | K8s Secret name holding the bootstrap admin password (takes precedence over `auth.bootstrapAdmin.password`; the chart-managed `<release>-admin-password` Secret is not rendered). |
+| `auth.bootstrapAdmin.secretRef.key` | string | `"password"` | Key inside the Secret holding the password. |
 | `auth.jwt.secret` | string | `""` | JWT signing secret (HS256). Empty = auto-generated and persisted in DB. |
+| `auth.jwt.secretRef.name` | string | `""` | K8s Secret name holding the JWT secret (takes precedence over `auth.jwt.secret`; the chart-managed `<release>-jwt` Secret is not rendered). |
+| `auth.jwt.secretRef.key` | string | `"secret"` | Key inside the Secret holding the JWT secret. |
 | `auth.jwt.accessTtl` | string | `"15m"` | JWT access token TTL. |
 | `auth.jwt.refreshTtl` | string | `"168h"` | JWT refresh token TTL. |
 | `auth.oauth.enabled` | bool | `false` | Enable OAuth2 authentication. |
 | `auth.oauth.provider` | string | `"github"` | OAuth2 provider: "github" or "oidc". |
 | `auth.oauth.clientId` | string | `""` | OAuth2 client ID. |
 | `auth.oauth.clientSecret` | string | `""` | OAuth2 client secret (rendered into the `<release>-oauth` Secret). |
+| `auth.oauth.clientSecretRef.name` | string | `""` | K8s Secret name holding the OAuth2 client secret (takes precedence over `auth.oauth.clientSecret`; the chart-managed `<release>-oauth` Secret is not rendered). |
+| `auth.oauth.clientSecretRef.key` | string | `"client_secret"` | Key inside the Secret holding the client secret. |
 | `auth.oauth.redirectUrl` | string | `""` | OAuth2 redirect URL (empty = computed). |
-| `auth.oauth.allowedOrgs` | array | `["acme"]` | Allowed OAuth organizations (github: org membership; oidc: groups-claim intersection). |
+| `auth.oauth.allowedOrgs` | array | `[]` | Allowed OAuth organizations (github: org membership; oidc: deprecated alias for allowedGroups). |
+| `auth.oauth.allowedTeams` | array | `[]` | (github) Allowed "org/team" slugs; when set with allowedOrgs, both must be satisfied. |
+| `auth.oauth.allowedGroups` | array | `[]` | (oidc) Allowed provider group names (groups-claim allowlist; union with allowedOrgs). |
+| `auth.oauth.groupMappings` | array | `[]` | Regex group mapping: list of {pattern, replacement} mapping provider groups to supervisor group names (first-match-wins; no match drops the group). |
 | `auth.oauth.defaultGroup` | string | `""` | Default group for OAuth users. |
+| `auth.oauth.cookieSecure` | bool | `false` | Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor). |
+| `auth.oauth.issuerUrl` | string | `""` | (oidc) OIDC issuer URL (e.g. https://dex.example.com). |
+| `auth.oauth.scopes` | array | `["openid", "profile", "email"]` | (oidc) OIDC scopes; "openid" is always appended. |
+| `auth.oauth.usernameClaim` | string | `"preferred_username"` | (oidc) OIDC username claim (fallback: email). |
+| `auth.oauth.groupsClaim` | string | `"groups"` | (oidc) OIDC groups claim (array or single string). |
 | `auth.cookie.accessName` | string | `"dagger_kubernetes_access"` | Access-JWT session cookie name (httpOnly). |
 | `auth.cookie.refreshName` | string | `"dagger_kubernetes_refresh"` | Refresh-JWT session cookie name (httpOnly). |
 | `auth.cookie.secure` | bool | `false` | Force the Secure flag on session cookies. |

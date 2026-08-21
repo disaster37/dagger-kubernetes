@@ -38,7 +38,19 @@ data:
         redirect_url: {{ include "dagger-kubernetes.oauthRedirectUrl" . | quote }}
         allowed_orgs:
 {{ toYaml .Values.auth.oauth.allowedOrgs | indent 10 }}
+        allowed_teams:
+{{ toYaml .Values.auth.oauth.allowedTeams | indent 10 }}
+        allowed_groups:
+{{ toYaml .Values.auth.oauth.allowedGroups | indent 10 }}
+        group_mappings:
+{{ toYaml .Values.auth.oauth.groupMappings | indent 10 }}
         default_group: {{ .Values.auth.oauth.defaultGroup | quote }}
+        cookie_secure: {{ .Values.auth.oauth.cookieSecure }}
+        issuer_url: {{ .Values.auth.oauth.issuerUrl | quote }}
+        scopes:
+{{ toYaml .Values.auth.oauth.scopes | indent 10 }}
+        username_claim: {{ .Values.auth.oauth.usernameClaim | quote }}
+        groups_claim: {{ .Values.auth.oauth.groupsClaim | quote }}
       cookie:
         access_name: {{ .Values.auth.cookie.accessName | quote }}
         refresh_name: {{ .Values.auth.cookie.refreshName | quote }}

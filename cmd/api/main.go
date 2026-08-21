@@ -211,17 +211,20 @@ func run(c *cli.Context) error {
 	var oauthSvc service.OAuthProvider
 	var oauthProvider string
 	if cfg.Auth.OAuth.Enabled {
+		mapper, err := service.NewGroupMapper(cfg.Auth.OAuth.GroupMappings)
+		if err != nil {
+			return fmt.Errorf("compile group mappings: %w", err)
+		}
 		switch cfg.Auth.OAuth.Provider {
 		case "github":
-			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
-			oauthProvider = "github"
+			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger)
 		case "oidc":
-			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, usersSvc, groupRepo, jwtSvc, logger)
-			oauthProvider = "oidc"
+			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger)
 		default:
 			// validateAuthConfig already rejected this, but fail closed.
 			return fmt.Errorf("unsupported oauth provider: %s", cfg.Auth.OAuth.Provider)
 		}
+		oauthProvider = cfg.Auth.OAuth.Provider
 	}
 
 	// --- Fleet + telemetry wiring ---

@@ -28,3 +28,4 @@ the decision.
 | 019  | [Client disconnect detection](ADR-019-client-disconnect-detection.md) |
 | 020  | [Log auto-follow UX](ADR-020-log-autofollow-ux.md) |
 | 021  | [Self-hosted pipeline view URL](ADR-021-pipeline-view-url.md) |
+| 022  | [OAuth group allowlists + regex group mapping](ADR-022-oauth-group-allowlists-and-regex-mapping.md) |

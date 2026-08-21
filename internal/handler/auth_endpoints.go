@@ -17,9 +17,9 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// oauthErrorRedirect is where the OAuth callback sends the browser on any
+// oauthErrorRedirectBase is where the OAuth callback sends the browser on any
 // failure (the SPA surfaces the error message).
-const oauthErrorRedirect = "/auth/login?error=oauth"
+const oauthErrorRedirectBase = "/auth/login"
 
 const oauthStateCookie = "oauth_state"
 const oauthStateCookiePath = "/api/v1/auth/oauth"
@@ -266,7 +266,7 @@ func (s *Server) startOAuthLogin(c *app.RequestContext) {
 	}
 	loginURL := s.oauth.LoginURL(state)
 	if loginURL == "" {
-		redirectOAuthError(c)
+		redirectOAuthErrorCode(c, "oauth")
 		return
 	}
 	c.Redirect(consts.StatusFound, []byte(loginURL))
@@ -302,12 +302,12 @@ func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 	stateClaims, err := s.jwt.ParseOAuthState(state)
 	if code == "" || state == "" || err != nil || len(cookieVal) == 0 {
 		s.clearOAuthStateCookie(c)
-		redirectOAuthError(c)
+		redirectOAuthErrorCode(c, "oauth")
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(stateClaims.Nonce), cookieVal) != 1 {
 		s.clearOAuthStateCookie(c)
-		redirectOAuthError(c)
+		redirectOAuthErrorCode(c, "oauth")
 		return
 	}
 	s.clearOAuthStateCookie(c)
@@ -316,7 +316,11 @@ func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 	// browser back on the login screen with an error hint.
 	access, refresh, _, err := s.oauth.Complete(context.Background(), code)
 	if err != nil {
-		redirectOAuthError(c)
+		if errors.Is(err, domain.ErrForbidden) {
+			redirectOAuthErrorCode(c, "forbidden")
+			return
+		}
+		redirectOAuthErrorCode(c, "oauth")
 		return
 	}
 
@@ -369,8 +373,10 @@ func safeRedirectPath(redirect string) string {
 	return redirect
 }
 
-func redirectOAuthError(c *app.RequestContext) {
-	c.Redirect(consts.StatusFound, []byte(oauthErrorRedirect))
+// redirectOAuthErrorCode sends the browser to the SPA login screen with the
+// given error hint.
+func redirectOAuthErrorCode(c *app.RequestContext, code string) {
+	c.Redirect(consts.StatusFound, []byte(fmt.Sprintf("%s?error=%s", oauthErrorRedirectBase, code)))
 }
 
 // newOAuthNonce returns a cryptographically random 16-byte nonce, base64url

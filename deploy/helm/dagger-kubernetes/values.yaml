@@ -244,27 +244,47 @@ supervisor:
 ## @section Authentication
 
 ## @param auth.bootstrapAdmin.username Bootstrap admin username.
-## @param auth.bootstrapAdmin.password Bootstrap admin password. When empty, a random password is generated and logged once at first boot.
-## @param auth.jwt.secret JWT signing secret (HS256). Empty = auto-generated and persisted in DB.
+## @param auth.bootstrapAdmin.password Bootstrap admin password. When empty, a random password is generated and logged once at first boot. Ignored when auth.bootstrapAdmin.secretRef.name is set.
+## @param auth.bootstrapAdmin.secretRef.name [optional] K8s Secret name holding the bootstrap admin password (takes precedence over auth.bootstrapAdmin.password; the chart-managed <release>-admin-password Secret is not rendered).
+## @param auth.bootstrapAdmin.secretRef.key Key inside the Secret holding the password (empty = "password").
+## @param auth.jwt.secret JWT signing secret (HS256). Empty = auto-generated and persisted in DB. Ignored when auth.jwt.secretRef.name is set.
+## @param auth.jwt.secretRef.name [optional] K8s Secret name holding the JWT secret (takes precedence over auth.jwt.secret; the chart-managed <release>-jwt Secret is not rendered).
+## @param auth.jwt.secretRef.key Key inside the Secret holding the JWT secret (empty = "secret").
 ## @param auth.jwt.accessTtl JWT access token TTL.
 ## @param auth.jwt.refreshTtl JWT refresh token TTL.
 ## @param auth.oauth.enabled Enable OAuth2 authentication.
 ## @param auth.oauth.provider OAuth2 provider: "github" or "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
 ## @param auth.oauth.clientId OAuth2 client ID.
-## @param auth.oauth.clientSecret OAuth2 client secret (rendered into the <release>-oauth Secret; injected as DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET).
+## @param auth.oauth.clientSecret OAuth2 client secret (rendered into the <release>-oauth Secret; injected as DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET). Ignored when auth.oauth.clientSecretRef.name is set.
+## @param auth.oauth.clientSecretRef.name [optional] K8s Secret name holding the OAuth2 client secret (takes precedence over auth.oauth.clientSecret; the chart-managed <release>-oauth Secret is not rendered).
+## @param auth.oauth.clientSecretRef.key Key inside the Secret holding the client secret (empty = "client_secret").
 ## @param auth.oauth.redirectUrl OAuth2 redirect URL (empty = computed `<publicUrl>/api/v1/auth/oauth/<provider>/callback`).
-## @param auth.oauth.allowedOrgs [array] Allowed OAuth organizations (github: org membership; oidc: groups-claim intersection).
+## @param auth.oauth.allowedOrgs [array] Allowed OAuth organizations (github: org membership; oidc: deprecated alias for allowedGroups).
+## @param auth.oauth.allowedTeams [array] (github) Allowed "org/team" slugs; when set with allowedOrgs, both must be satisfied.
+## @param auth.oauth.allowedGroups [array] (oidc) Allowed provider group names (groups-claim allowlist; union with allowedOrgs).
+## @param auth.oauth.groupMappings [array] Regex group mapping: list of {pattern, replacement} mapping provider groups to supervisor group names (first-match-wins; no match drops the group).
 ## @param auth.oauth.defaultGroup Default group for OAuth users.
+## @param auth.oauth.cookieSecure Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).
+## @param auth.oauth.issuerUrl (oidc) OIDC issuer URL (e.g. https://dex.example.com).
+## @param auth.oauth.scopes [array] (oidc) OIDC scopes; "openid" is always appended.
+## @param auth.oauth.usernameClaim (oidc) OIDC username claim (fallback: email).
+## @param auth.oauth.groupsClaim (oidc) OIDC groups claim (array or single string).
 ## @param auth.cookie.accessName Access-JWT session cookie name (httpOnly).
 ## @param auth.cookie.refreshName Refresh-JWT session cookie name (httpOnly).
-## @param auth.cookie.secure Force the Secure flag on session cookies (set true when TLS terminates at an ingress in front of the supervisor).
-## @param auth.cors.allowedOrigins [array] Exact-match Origin allowlist for cross-origin API access (empty = same-origin only, no ACAO header).
+## @param auth.cookie.secure Force the Secure flag on session cookies.
+## @param auth.cors.allowedOrigins [array] Exact-match Origin allowlist.
 auth:
   bootstrapAdmin:
     username: "admin"
     password: ""
+    secretRef:
+      name: ""
+      key: "password"
   jwt:
     secret: ""
+    secretRef:
+      name: ""
+      key: "secret"
     accessTtl: "15m"
     refreshTtl: "168h"
   oauth:
@@ -272,15 +292,71 @@ auth:
     provider: "github"
     clientId: ""
     clientSecret: ""
+    clientSecretRef:
+      name: ""
+      key: "client_secret"
     redirectUrl: ""
-    allowedOrgs: ["acme"]
+    allowedOrgs: []
+    # allowedOrgs example (GitHub org membership):
+    # allowedOrgs: ["acme"]
+    allowedTeams: []
+    # allowedTeams example (GitHub team restriction, "org/team"):
+    # allowedTeams: ["acme/eng"]
+    allowedGroups: []
+    # allowedGroups example (OIDC groups-claim allowlist):
+    # allowedGroups: ["devs", "platform"]
+    groupMappings: []
+    # groupMappings example (regex → supervisor group name):
+    # groupMappings:
+    #   - pattern: '^github\.com/acme-(.*)$'
+    #     replacement: 'acme-$1'
+    #   - pattern: '^ldap/(.+)$'
+    #     replacement: '$1'
     defaultGroup: ""
+    cookieSecure: false
+    issuerUrl: ""
+    scopes: ["openid", "profile", "email"]
+    usernameClaim: "preferred_username"
+    groupsClaim: "groups"
   cookie:
     accessName: "dagger_kubernetes_access"
     refreshName: "dagger_kubernetes_refresh"
     secure: false
   cors:
     allowedOrigins: []
+
+# ---- GitHub OAuth example ---------------------------------------------
+# auth:
+#   oauth:
+#     enabled: true
+#     provider: "github"
+#     clientId: "Ov23li...github-app-client-id"
+#     clientSecretRef: { name: "github-oauth", key: "client_secret" }
+#     redirectUrl: "https://supv.example.com/api/v1/auth/oauth/github/callback"
+#     allowedOrgs: ["acme"]          # optional org restriction
+#     allowedTeams: ["acme/eng"]     # optional team restriction (AND-ed with orgs)
+#     groupMappings:
+#       - pattern: '^acme$'
+#         replacement: 'acme-all'
+#
+# ---- Generic OIDC example (Dex) ---------------------------------------
+# auth:
+#   internal:
+#     enabled: false                  # OIDC-only login
+#   oauth:
+#     enabled: true
+#     provider: "oidc"
+#     issuerUrl: "https://dex.example.com"
+#     clientId: "dagger-kubernetes"
+#     clientSecretRef: { name: "dex-oauth", key: "client_secret" }
+#     redirectUrl: "https://supv.example.com/api/v1/auth/oauth/oidc/callback"
+#     scopes: ["openid", "profile", "email", "groups"]
+#     usernameClaim: "preferred_username"
+#     groupsClaim: "groups"
+#     allowedGroups: ["devs"]         # optional allowlist
+#     groupMappings:
+#       - pattern: '^dex:dev-(.*)$'
+#         replacement: 'dev-$1'
 
 ## @section TLS and certificates
 

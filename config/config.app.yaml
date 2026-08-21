@@ -34,7 +34,10 @@ auth:
     client_id: "${OAUTH_CLIENT_ID}"
     client_secret: "${OAUTH_CLIENT_SECRET}"
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"
-    allowed_orgs: ["acme"]                    # github: org membership; oidc: groups-claim intersection; empty = allow all.
+    allowed_orgs: []                          # github: org membership allowlist; oidc: deprecated alias for allowed_groups; empty = allow all.
+    allowed_teams: []                         # github only: "org/team" slug allowlist; empty = allow all. AND-ed with allowed_orgs when both set.
+    allowed_groups: []                        # oidc only: groups-claim allowlist (canonical); union with allowed_orgs; empty = allow all.
+    group_mappings: []                        # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
     default_group: ""                         # new OAuth users auto-join this group (must exist); empty = none.
     cookie_secure: false                      # force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).
     # OIDC-only fields (provider: oidc). Ignored when provider: github.

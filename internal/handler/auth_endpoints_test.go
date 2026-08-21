@@ -265,6 +265,17 @@ func (fakeOAuthProvider) Complete(ctx context.Context, code string) (string, str
 	return "a", "r", &domain.User{ID: "u1", Username: "alice"}, nil
 }
 
+// forbiddenOAuthProvider is an OAuthProvider stub whose Complete fails with
+// ErrForbidden (allowlist denial).
+type forbiddenOAuthProvider struct{}
+
+func (forbiddenOAuthProvider) LoginURL(state string) string {
+	return fmt.Sprintf("https://provider/auth?state=%s", state)
+}
+func (forbiddenOAuthProvider) Complete(ctx context.Context, code string) (string, string, *domain.User, error) {
+	return "", "", nil, domain.ErrForbidden
+}
+
 // TestHandleProvidersOIDC verifies providers reports oauth_oidc for the oidc
 // provider.
 func TestHandleProvidersOIDC(t *testing.T) {
@@ -451,6 +462,26 @@ func TestOAuthCallbackSuccess(t *testing.T) {
 	}
 	if _, ok := cookies["dagger_kubernetes_refresh"]; !ok {
 		t.Fatal("oauth callback must set the refresh cookie")
+	}
+}
+
+func TestOAuthCallbackForbidden(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = forbiddenOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	e := newAuthEngine(env.server)
+
+	state, err := env.server.jwt.IssueOAuthState("/pipelines", "n1")
+	if err != nil {
+		t.Fatalf("IssueOAuthState: %v", err)
+	}
+	resp := ut.PerformRequest(e, "GET", oauthCallbackPath(state), nil,
+		ut.Header{Key: "Cookie", Value: "oauth_state=n1"})
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=forbidden" {
+		t.Fatalf("Location = %q, want forbidden error redirect", loc)
 	}
 }
 

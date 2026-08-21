@@ -51,11 +51,13 @@ type OIDCOAuthService struct {
 	usernameClaim string
 	groupsClaim   string
 	allowedOrgs   []string
+	allowedGroups []string
 	defaultGroup  string
 	users         *UserService
 	groups        domain.GroupRepository
 	jwt           *JWTService
 	logger        *logrus.Logger
+	mapper        *GroupMapper
 
 	// providerFactory is the testability seam. Production: defaultFactory
 	// calling oidc.NewProvider. Tests: inject a fake returning a fake
@@ -82,7 +84,7 @@ func defaultOIDCProviderFactory(ctx context.Context, issuerURL string) (oidcProv
 // NewOIDCOAuthService returns an OIDCOAuthService. The issuer URL is
 // trailing-slash-normalized; "openid" is appended to scopes when missing; and
 // empty claim names fall back to preferred_username/groups.
-func NewOIDCOAuthService(cfg *domain.OAuthConfig, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *OIDCOAuthService {
+func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *OIDCOAuthService {
 	scopes := make([]string, 0, len(cfg.Scopes)+1)
 	scopes = append(scopes, cfg.Scopes...)
 	hasOpenID := false
@@ -114,11 +116,13 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, users *UserService, groups dom
 		usernameClaim:   usernameClaim,
 		groupsClaim:     groupsClaim,
 		allowedOrgs:     cfg.AllowedOrgs,
+		allowedGroups:   cfg.AllowedGroups,
 		defaultGroup:    cfg.DefaultGroup,
 		users:           users,
 		groups:          groups,
 		jwt:             jwtSvc,
 		logger:          logger,
+		mapper:          mapper,
 		providerFactory: defaultOIDCProviderFactory,
 	}
 }
@@ -249,15 +253,34 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 	}
 	groups := s.resolveGroups(claims)
 
-	if len(s.allowedOrgs) > 0 && !orgsIntersect(s.allowedOrgs, groups) {
+	if allowlist := s.effectiveAllowedGroups(); len(allowlist) > 0 && !orgsIntersect(allowlist, groups) {
 		return "", "", nil, domain.ErrForbidden
 	}
 
-	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "oidc", sub, username, s.defaultGroup)
+	mappedGroups := s.mapper.mapIfActive(groups)
+
+	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "oidc", sub, username, s.defaultGroup, mappedGroups)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("oidc oauth: %w", err)
 	}
 	return access, refresh, u, nil
+}
+
+// effectiveAllowedGroups returns allowed_groups ∪ allowed_orgs (allowed_orgs is
+// the deprecated OIDC alias), de-duplicated preserving first occurrence.
+func (s *OIDCOAuthService) effectiveAllowedGroups() []string {
+	out := make([]string, 0, len(s.allowedGroups)+len(s.allowedOrgs))
+	seen := make(map[string]struct{}, len(s.allowedGroups)+len(s.allowedOrgs))
+	for _, list := range [][]string{s.allowedGroups, s.allowedOrgs} {
+		for _, g := range list {
+			if _, dup := seen[g]; dup {
+				continue
+			}
+			seen[g] = struct{}{}
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 // mergeUserInfo fetches the userinfo endpoint and merges any claim keys that

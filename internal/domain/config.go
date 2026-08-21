@@ -60,18 +60,22 @@ type InternalAuthConfig struct {
 
 // OAuthConfig configures OAuth for human/UI login. A single provider is active
 // per deployment, selected by the `provider` discriminator ("github" | "oidc").
-// The OIDC-only fields (IssuerURL, Scopes, UsernameClaim, GroupsClaim) are
-// ignored when provider is "github"; the github-only fields (AllowedOrgs as org
-// membership) are ignored by oidc (which matches AllowedOrgs against the groups
-// claim instead).
+// The OIDC-only fields (IssuerURL, Scopes, UsernameClaim, GroupsClaim,
+// AllowedGroups) are ignored when provider is "github"; the github-only fields
+// (AllowedOrgs as org membership, AllowedTeams) are ignored by oidc (which
+// matches AllowedOrgs against the groups claim instead — a deprecated alias of
+// AllowedGroups).
 type OAuthConfig struct {
-	Enabled      bool     `mapstructure:"enabled"`
-	Provider     string   `mapstructure:"provider"` // "github" | "oidc"
-	ClientID     string   `mapstructure:"client_id"`
-	ClientSecret string   `mapstructure:"client_secret"`
-	RedirectURL  string   `mapstructure:"redirect_url"`
-	AllowedOrgs  []string `mapstructure:"allowed_orgs"`  // github: org membership; oidc: groups claim intersection
-	DefaultGroup string   `mapstructure:"default_group"` // auto-membership for new OAuth users; empty = none
+	Enabled       bool               `mapstructure:"enabled"`
+	Provider      string             `mapstructure:"provider"` // "github" | "oidc"
+	ClientID      string             `mapstructure:"client_id"`
+	ClientSecret  string             `mapstructure:"client_secret"`
+	RedirectURL   string             `mapstructure:"redirect_url"`
+	AllowedOrgs   []string           `mapstructure:"allowed_orgs"`   // github: org membership allowlist; oidc: deprecated alias for allowed_groups
+	AllowedTeams  []string           `mapstructure:"allowed_teams"`  // github only: "org/team" slug allowlist
+	AllowedGroups []string           `mapstructure:"allowed_groups"` // oidc only: groups-claim allowlist (canonical)
+	GroupMappings []GroupMappingRule `mapstructure:"group_mappings"` // provider group -> supervisor group regex mapping
+	DefaultGroup  string             `mapstructure:"default_group"`  // auto-membership for new OAuth users; empty = none
 	// CookieSecure forces the Secure flag on the oauth_state cookie; set true
 	// when TLS terminates at an ingress/proxy in front of the supervisor.
 	CookieSecure bool `mapstructure:"cookie_secure"`
@@ -81,6 +85,15 @@ type OAuthConfig struct {
 	Scopes        []string `mapstructure:"scopes"`         // default ["openid","profile","email"]
 	UsernameClaim string   `mapstructure:"username_claim"` // default "preferred_username"; fallback "email"
 	GroupsClaim   string   `mapstructure:"groups_claim"`   // default "groups"
+}
+
+// GroupMappingRule maps an upstream provider group name to a supervisor group
+// name. Pattern is a Go regexp matched against the incoming group name;
+// Replacement is the target supervisor group name and may reference capture
+// groups via $1 / ${name} (Go regexp.Expand semantics; $$ = literal $).
+type GroupMappingRule struct {
+	Pattern     string `mapstructure:"pattern"`
+	Replacement string `mapstructure:"replacement"`
 }
 
 // DatabaseConfig configures the Raft data directory backing the multi-user

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"strings"
 	"time"
 
@@ -34,6 +35,9 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.client_secret", "")
 	v.SetDefault("auth.oauth.redirect_url", "")
 	v.SetDefault("auth.oauth.allowed_orgs", []string{})
+	v.SetDefault("auth.oauth.allowed_teams", []string{})
+	v.SetDefault("auth.oauth.allowed_groups", []string{})
+	v.SetDefault("auth.oauth.group_mappings", []domain.GroupMappingRule{})
 	v.SetDefault("auth.oauth.default_group", "")
 	v.SetDefault("auth.oauth.cookie_secure", false)
 	v.SetDefault("auth.oauth.issuer_url", "")
@@ -179,6 +183,10 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("validate auth config: %w", err)
 	}
 
+	if err := validateGroupMappings(&cfg); err != nil {
+		return nil, fmt.Errorf("validate group mappings: %w", err)
+	}
+
 	if err := validateServerConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate server config: %w", err)
 	}
@@ -230,6 +238,32 @@ func validateAuthConfig(cfg *domain.Config) error {
 
 	if !cfg.Auth.Internal.Enabled && !o.Enabled {
 		return fmt.Errorf("auth.internal.enabled: false requires auth.oauth.enabled: true with a fully configured provider")
+	}
+
+	return nil
+}
+
+// validateGroupMappings fails fast on invalid group-mapping rules: each rule
+// needs a non-empty pattern that compiles as a Go regexp, and a non-empty
+// replacement. allowed_teams entries must be non-empty "org/team" strings.
+// Errors name the offending config path and regex.
+func validateGroupMappings(cfg *domain.Config) error {
+	for i, rule := range cfg.Auth.OAuth.GroupMappings {
+		if rule.Pattern == "" {
+			return fmt.Errorf("auth.oauth.group_mappings[%d].pattern must not be empty", i)
+		}
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			return fmt.Errorf("auth.oauth.group_mappings[%d].pattern %q: %w", i, rule.Pattern, err)
+		}
+		if rule.Replacement == "" {
+			return fmt.Errorf("auth.oauth.group_mappings[%d].replacement must not be empty", i)
+		}
+	}
+
+	for i, team := range cfg.Auth.OAuth.AllowedTeams {
+		if team == "" || strings.Count(team, "/") != 1 {
+			return fmt.Errorf("auth.oauth.allowed_teams[%d] must be a non-empty \"org/team\" string", i)
+		}
 	}
 
 	return nil

@@ -63,7 +63,12 @@ auth:
     client_id: "${OAUTH_CLIENT_ID}"    # set via env, do not commit secrets.
     client_secret: ""                   # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET) or the Helm <release>-oauth Secret — never this file.
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"  # backend endpoint (302s to SPA with session cookies). Use /oidc/callback for provider: oidc.
-    allowed_orgs: ["acme"]             # github: org membership; oidc: groups-claim intersection; empty = allow all.
+    allowed_orgs: []                   # github: org membership allowlist; oidc: deprecated alias for allowed_groups; empty = allow all.
+    allowed_teams: []                  # github only: "org/team" slug allowlist; empty = allow all. AND-ed with allowed_orgs when both set.
+    allowed_groups: []                 # oidc only: groups-claim allowlist (canonical); union with allowed_orgs; empty = allow all.
+    group_mappings: []                 # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
+      # - pattern: '^github\.com/acme-(.*)$'   # Go regexp vs incoming provider group name (case-sensitive; (?i) for insensitive).
+      #   replacement: 'acme-$1'               # target supervisor group name; $1/${name} capture substitution, $$ = literal $.
     default_group: ""                  # new OAuth users auto-join this group (must exist); empty = none.
     cookie_secure: false               # force the Secure flag on the oauth_state cookie; set true when TLS terminates at an ingress/proxy in front of the supervisor.
     # OIDC-only fields (provider: oidc). Ignored when provider: github.

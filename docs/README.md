@@ -369,7 +369,11 @@ inline comments. The sections below summarise the most important ones.
 |                 | `tokens_file`                             | `/etc/dagger-kubernetes/tokens`                          | One token per line.                                                                                                                           |
 | `auth.oauth`    | `enabled`                                 | `false`                                                  | OAuth for UI login. Single active provider.                                                                                                   |
 |                 | `provider`                                | `github`                                                 | `"github"` \| `"oidc"` (generic OIDC).                                                                                                        |
-|                 | `allowed_orgs`                            | —                                                        | Restrict login to members of these orgs (github) / groups-claim intersection (oidc).                                                          |
+|                 | `allowed_orgs`                            | `[]`                                                     | GitHub: org-membership allowlist; OIDC: deprecated alias for `allowed_groups` (empty = allow all).                                           |
+|                 | `allowed_teams`                           | `[]`                                                     | GitHub only: `"org/team"` slug allowlist (empty = allow all). AND-ed with `allowed_orgs` when both set.                                       |
+|                 | `allowed_groups`                          | `[]`                                                     | OIDC only: groups-claim allowlist (canonical). Union with `allowed_orgs`; empty = allow all.                                                  |
+|                 | `group_mappings`                          | `[]`                                                     | Regex provider-group → supervisor-group mapping: list of `{pattern, replacement}` (first-match-wins; no match drops the group; empty = no mapping). |
+|                 | `default_group`                           | `""`                                                     | Auto-join group for new OAuth users (must exist); empty = none.                                                                               |
 |                 | `issuer_url`                              | `""`                                                     | OIDC issuer; required for `provider: oidc`.                                                                                                   |
 |                 | `scopes`                                  | `["openid","profile","email"]`                           | OIDC scopes; `openid` always included.                                                                                                        |
 |                 | `username_claim`                          | `preferred_username`                                     | OIDC username claim; fallback `email`.                                                                                                        |
@@ -774,12 +778,25 @@ more **groups**; groups carry engine-session quotas and project visibility.
   use). The primary path for human/UI login.
 - **GitHub OAuth** (`auth.oauth.enabled: true` with `provider: github`) → JWT.
   The callback is `/api/v1/auth/oauth/github/callback`. `allowed_orgs` restricts
-  who may log in (empty = allow all); `default_group` auto-joins new OAuth
-  users to a group.
+  org membership and `allowed_teams` restricts `"org/team"` membership (when
+  both are set, both must be satisfied; empty = allow all). `default_group`
+  auto-joins new OAuth users to a group.
 - **Generic OIDC** (`auth.oauth.enabled: true` with `provider: oidc`) → JWT.
   Discovery via `issuer_url` `/.well-known/openid-configuration`; the callback
-  is `/api/v1/auth/oauth/oidc/callback`. `allowed_orgs` is matched against the
-  `groups_claim` (default `groups`). Covers Dex, Keycloak, Google, Auth0, etc.
+  is `/api/v1/auth/oauth/oidc/callback`. `allowed_groups` is the canonical
+  groups-claim allowlist (`allowed_orgs` remains a deprecated alias; the
+  effective allowlist is their union). Covers Dex, Keycloak, Google, Auth0, etc.
+
+Both providers support **regex group mapping** via `group_mappings`: an ordered
+list of `{pattern, replacement}` rules applied to the upstream provider groups
+(GitHub orgs + `"org/team"` teams; OIDC `groups_claim`). The first matching
+rule produces the supervisor group name (`$1`/`${name}` capture substitution,
+`$$` = literal `$`); a provider group matching no rule is dropped. Mapped names
+are looked up by group name and the user is **added** to those that exist
+(missing groups are skipped with a warning, never auto-created). Membership is
+applied on every login and existing memberships are never removed. An empty
+`group_mappings` list means no mapping and no membership sync — only
+`default_group` auto-join applies.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
   at most one token; the plaintext is shown once at creation/regeneration.
   Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext
@@ -813,11 +830,31 @@ auth:
     client_id: "dagger-kubernetes"
     client_secret: "${OAUTH_CLIENT_SECRET}"
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/oidc/callback"
-    allowed_orgs: ["devs"]   # matches the `groups` claim from Dex
+    allowed_groups: ["devs"]   # canonical groups-claim allowlist (empty = allow all)
     default_group: ""
     scopes: ["openid", "profile", "email", "groups"]
     username_claim: "preferred_username"
     groups_claim: "groups"
+    group_mappings:            # optional regex group mapping
+      - pattern: '^dex:dev-(.*)$'
+        replacement: 'dev-$1'
+```
+
+### OAuth provider: GitHub (org + team restriction example)
+
+```yaml
+auth:
+  oauth:
+    enabled: true
+    provider: "github"
+    client_id: "Ov23li...github-app-client-id"
+    client_secret: "${OAUTH_CLIENT_SECRET}"
+    redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"
+    allowed_orgs: ["acme"]          # optional org restriction
+    allowed_teams: ["acme/eng"]     # optional team restriction (AND-ed with orgs)
+    group_mappings:
+      - pattern: '^acme$'
+        replacement: 'acme-all'
 ```
 
 ### Bootstrap admin
@@ -964,9 +1001,13 @@ subcommand remain (they import flat-file tokens, not SQLite data):
   `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`,
   `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`); `cache.auth_token` is
   read from the `engine-registry-auth` Secret, and multi-backend registry
-  passwords use the `cache.registries[].password_secret` reference. For
-  non-Helm deploys, set those keys via environment variables or the config
-  file directly.
+  passwords use the `cache.registries[].password_secret` reference. To manage
+  secrets outside Helm (e.g. SealedSecrets/ExternalSecrets), point
+  `auth.jwt.secretRef`, `auth.oauth.clientSecretRef`, or
+  `auth.bootstrapAdmin.secretRef` at a pre-existing Secret (`{name, key}`);
+  the referenced value takes precedence over the plaintext Helm value and the
+  chart-managed Secret is not rendered. For non-Helm deploys, set those keys
+  via environment variables or the config file directly.
 - The Raft data directory (`raft.db`, `snapshots/`, `node-id`) holds password
   hashes, token hashes/ciphertexts, the JWT secret, and the token-encryption
   key. `raft.db` and `node-id` are created with `0600` permissions; the
