@@ -63,7 +63,7 @@ Revealing the plaintext is an explicit UI action (checkbox → `?reveal=true`).
 The handler logs nothing on the success path, and error logging uses
 sentinel-wrapped errors that never contain the token.
 
-### 4. CI snippets use secret references by default
+### 4. CI snippets use secret references unless the token is revealed
 
 Interactive-shell snippets (bash exports, `.bashrc` heredoc, generic exports)
 include the plaintext token directly — they land in the user's local
@@ -71,9 +71,8 @@ shell/dotfiles, which are not committed. CI snippets (GitHub Actions `env:`,
 GitLab CI `variables:`) use a secret reference
 (`${{ secrets.DAGGER_CLOUD_TOKEN }}` / `$DAGGER_CLOUD_TOKEN`) by default, with
 a "Copy token value" button and a one-line instruction to paste it into the CI
-secret store once. A "Include plaintext in CI snippet" toggle (off by default,
-red warning when on) allows embedding the literal value for users who accept
-the risk.
+secret store once. The single "Show token plaintext" reveal toggle embeds the
+literal value everywhere — including the CI snippets — for users who opt in.
 
 ### 5. Single source of truth for the cache-config value
 

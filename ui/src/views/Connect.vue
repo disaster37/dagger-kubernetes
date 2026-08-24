@@ -109,17 +109,6 @@
           <span v-if="copied" class="badge badge-success">{{ copied }} copied!</span>
         </div>
 
-        <div style="margin-top: 16px;">
-          <label style="display: flex; align-items: center; gap: 8px; font-size: 13px; cursor: pointer;">
-            <input type="checkbox" v-model="includePlaintextCI" :disabled="!canReveal" />
-            Include plaintext token in CI snippets
-          </label>
-          <p v-if="includePlaintextCI" style="color: #f85149; font-size: 12px; margin-top: 8px;">
-            Warning: this embeds the token plaintext into your CI config. Committed CI files are
-            version-controlled — prefer the secret reference unless you accept the risk.
-          </p>
-        </div>
-
         <h4 style="margin-top: 20px;">Bash/zsh exports</h4>
         <pre class="snippet">{{ bashExports || '—' }}</pre>
 
@@ -157,7 +146,6 @@ import type { ConnectEnvSnapshot, ConnectEnvVar } from '@/api/types'
 const snap = ref<ConnectEnvSnapshot | null>(null)
 const version = ref('')
 const reveal = ref(false)
-const includePlaintextCI = ref(false)
 const error = ref('')
 const copied = ref('')
 const authDisabled = ref(false)
@@ -196,7 +184,7 @@ const bashrcSnippet = computed(() => {
 })
 
 function ciTokenLine(secretRef: string): string {
-  if (includePlaintextCI.value && tokenValue.value) {
+  if (canReveal.value) {
     return `  ${TOKEN_ENV}: ${JSON.stringify(tokenValue.value)}`
   }
   return `  ${TOKEN_ENV}: ${secretRef}`
@@ -227,7 +215,6 @@ async function load() {
 }
 
 function onRevealChange() {
-  includePlaintextCI.value = false
   load()
 }
 

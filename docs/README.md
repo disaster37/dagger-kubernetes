@@ -223,9 +223,9 @@ explicitly pin a version.
 3. Click the copy button for your target:
    - **Bash/zsh exports** or **.bashrc snippet** for interactive shells
      (these include the token plaintext directly).
-   - **GitHub Actions env** or **GitLab CI variables** for CI (these use a
-     secret reference by default; enable "Include plaintext token" only if you
-     accept the risk, and paste the token into your CI secret store once).
+   - **GitHub Actions env** or **GitLab CI variables** for CI (these embed the
+     plaintext only when "Show token plaintext" is checked; otherwise they use
+     a secret reference — paste the token into your CI secret store once).
 4. Source the environment and run Dagger:
 
 ```bash
@@ -1265,8 +1265,8 @@ Features:
   when you pin a version) with one-click copy of bash/zsh exports,
   a `.bashrc` snippet, GitHub Actions `env:`, GitLab CI `variables:`, and a
   "Copy token value" button. The token is masked by default; checking "Show
-  token plaintext" reveals it on demand (CI snippets use secret references by
-  default).
+  token plaintext" reveals it on demand (including in the CI snippets, which
+  otherwise use a secret reference).
 - **Header status indicator** — a colored dot in the navbar (green/amber/red/
   grey) polling `/api/v1/status` every 10s; clicking navigates to `/services`
 - **Cache status** — registry health, cache hit rates
