@@ -1,9 +1,15 @@
 package main
 
 import (
+	"archive/tar"
+	"bytes"
+	"compress/gzip"
+	"context"
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,5 +188,222 @@ func TestRunNoTraceID(t *testing.T) {
 
 	if strings.Contains(stderr, "Pipeline View:") {
 		t.Fatalf("stderr = %q, want no Pipeline View line", stderr)
+	}
+}
+
+func buildTestTarGz(t *testing.T, entries map[string]string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	gz := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gz)
+	for name, content := range entries {
+		hdr := &tar.Header{Name: name, Mode: 0o755, Size: int64(len(content)), Typeflag: tar.TypeReg}
+		if err := tw.WriteHeader(hdr); err != nil {
+			t.Fatalf("tar header: %v", err)
+		}
+		if _, err := tw.Write([]byte(content)); err != nil {
+			t.Fatalf("tar write: %v", err)
+		}
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatalf("tar close: %v", err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatalf("gzip close: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func TestProvisionCLILatest(t *testing.T) {
+	tarball := buildTestTarGz(t, map[string]string{"dagger": "#!/bin/sh\necho hi\n"})
+	var srv *httptest.Server
+	srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/cli/versions/latest":
+			if r.URL.Query().Get("os") != "linux" || r.URL.Query().Get("arch") != "amd64" {
+				t.Errorf("unexpected query %q", r.URL.RawQuery)
+			}
+			_, _ = fmt.Fprintf(w, `{"version":"v0.21.8","url":"%s/api/v1/cli/v0.21.8?os=linux&arch=amd64"}`, srv.URL)
+		case "/api/v1/cli/v0.21.8":
+			if got := r.Header.Get("Authorization"); got != "Bearer tok" {
+				t.Errorf("Authorization = %q", got)
+			}
+			_, _ = w.Write(tarball)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	binDir, cleanup, err := provisionCLI(context.Background(), srv.URL, "tok", "", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("provisionCLI: %v", err)
+	}
+	defer cleanup()
+
+	bin := filepath.Join(binDir, "dagger")
+	st, err := os.Stat(bin)
+	if err != nil {
+		t.Fatalf("stat dagger: %v", err)
+	}
+	if st.Mode()&0o111 == 0 {
+		t.Fatal("dagger not executable")
+	}
+	got, err := os.ReadFile(bin)
+	if err != nil {
+		t.Fatalf("read dagger: %v", err)
+	}
+	if !strings.Contains(string(got), "echo hi") {
+		t.Fatalf("content = %q", got)
+	}
+}
+
+func TestProvisionCLIPinnedVersionURL(t *testing.T) {
+	tarball := buildTestTarGz(t, map[string]string{"dagger": "binary"})
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.RequestURI()
+		_, _ = w.Write(tarball)
+	}))
+	defer srv.Close()
+
+	binDir, cleanup, err := provisionCLI(context.Background(), srv.URL, "tok", "v0.21.4", "linux", "arm64")
+	if err != nil {
+		t.Fatalf("provisionCLI: %v", err)
+	}
+	defer cleanup()
+
+	if gotPath != "/api/v1/cli/v0.21.4?os=linux&arch=arm64" {
+		t.Fatalf("path = %q, want /api/v1/cli/v0.21.4?os=linux&arch=arm64", gotPath)
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "dagger")); err != nil {
+		t.Fatalf("dagger missing: %v", err)
+	}
+}
+
+func TestProvisionCLIDownloadNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.NotFound(w, nil)
+	}))
+	defer srv.Close()
+
+	_, _, err := provisionCLI(context.Background(), srv.URL, "tok", "v0.21.8", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "server returned 404") {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+func TestProvisionCLILatestNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, _, err := provisionCLI(context.Background(), srv.URL, "tok", "", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want error")
+	}
+	if !strings.Contains(err.Error(), "resolve latest cli version") {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+func TestProvisionCLILatestInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not json")
+	}))
+	defer srv.Close()
+
+	_, _, err := provisionCLI(context.Background(), srv.URL, "tok", "", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want decode error")
+	}
+}
+
+func TestProvisionCLIInvalidGzip(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "definitely not gzip")
+	}))
+	defer srv.Close()
+
+	_, _, err := provisionCLI(context.Background(), srv.URL, "tok", "v0.21.8", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want gunzip error")
+	}
+}
+
+func TestProvisionCLIMissingDaggerEntry(t *testing.T) {
+	tarball := buildTestTarGz(t, map[string]string{"other": "not dagger"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(tarball)
+	}))
+	defer srv.Close()
+
+	_, _, err := provisionCLI(context.Background(), srv.URL, "tok", "v0.21.8", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want missing-dagger error")
+	}
+	if !strings.Contains(err.Error(), "dagger binary not found") {
+		t.Fatalf("err = %q", err)
+	}
+}
+
+func TestExtractDaggerOversized(t *testing.T) {
+	old := maxDaggerBinaryBytes
+	maxDaggerBinaryBytes = 1024
+	defer func() { maxDaggerBinaryBytes = old }()
+
+	// A `dagger` entry larger than the (lowered) cap must be rejected.
+	tarball := buildTestTarGz(t, map[string]string{"dagger": strings.Repeat("x", 2048)})
+
+	binDir := t.TempDir()
+	err := extractDagger(bytes.NewReader(tarball), binDir)
+	if err == nil {
+		t.Fatal("extractDagger = nil, want oversize error")
+	}
+	if !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("err = %q", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(binDir, "dagger")); !os.IsNotExist(statErr) {
+		t.Fatal("oversized dagger binary left on disk")
+	}
+}
+
+func TestProvisionCLINetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	_, _, err := provisionCLI(context.Background(), url, "tok", "v0.21.8", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want network error")
+	}
+}
+
+func TestProvisionCLIInvalidServerURL(t *testing.T) {
+	_, _, err := provisionCLI(context.Background(), "://bad", "tok", "v0.21.8", "linux", "amd64")
+	if err == nil {
+		t.Fatal("provisionCLI = nil, want build-request error")
+	}
+}
+
+func TestGetJSONBuildRequestError(t *testing.T) {
+	err := getJSON(context.Background(), "://bad", "tok", &struct{}{})
+	if err == nil {
+		t.Fatal("getJSON = nil, want build-request error")
+	}
+}
+
+func TestGetJSONNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {}))
+	url := srv.URL
+	srv.Close()
+
+	err := getJSON(context.Background(), url, "tok", &struct{}{})
+	if err == nil {
+		t.Fatal("getJSON = nil, want network error")
 	}
 }

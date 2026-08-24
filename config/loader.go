@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -160,6 +161,14 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("ci.jenkins.dynamic_stages", true)
 	v.SetDefault("ci.drone.config_extension", true)
 
+	v.SetDefault("cli.enabled", true)
+	v.SetDefault("cli.cache_dir", "")
+	v.SetDefault("cli.release_list_ttl", time.Hour)
+	v.SetDefault("cli.download_timeout", 5*time.Minute)
+	v.SetDefault("cli.upstream.releases_url", "https://api.github.com/repos/dagger/dagger/releases")
+	v.SetDefault("cli.upstream.download_base", "https://github.com/dagger/dagger/releases/download")
+	v.SetDefault("cli.upstream.github_token", "")
+
 	v.SetDefault("log_level", "info")
 	v.SetDefault("log_format", "json")
 
@@ -193,6 +202,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateFleetConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate fleet config: %w", err)
+	}
+
+	if err := validateCLIConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate cli config: %w", err)
 	}
 
 	return &cfg, nil
@@ -291,4 +304,37 @@ func anyEmpty(fields ...string) bool {
 		}
 	}
 	return false
+}
+
+// validateCLIConfig guards the on-the-fly Dagger CLI provisioning addon. When
+// enabled, the upstream release-discovery and download URLs must be absolute
+// http(s) URLs and the two TTL/timeouts must be positive (a 0 TTL would hot-loop
+// the GitHub Releases API).
+func validateCLIConfig(cfg *domain.Config) error {
+	if !cfg.CLI.Enabled {
+		return nil
+	}
+
+	for _, u := range []struct {
+		key string
+		val string
+	}{
+		{key: "cli.upstream.releases_url", val: cfg.CLI.Upstream.ReleasesURL},
+		{key: "cli.upstream.download_base", val: cfg.CLI.Upstream.DownloadBase},
+	} {
+		parsed, err := url.ParseRequestURI(u.val)
+		if err != nil || parsed.Scheme == "" || parsed.Host == "" ||
+			(parsed.Scheme != "http" && parsed.Scheme != "https") {
+			return fmt.Errorf("%s must be an absolute http(s) URL", u.key)
+		}
+	}
+
+	if cfg.CLI.ReleaseListTTL <= 0 {
+		return fmt.Errorf("cli.release_list_ttl must be > 0")
+	}
+	if cfg.CLI.DownloadTimeout <= 0 {
+		return fmt.Errorf("cli.download_timeout must be > 0")
+	}
+
+	return nil
 }

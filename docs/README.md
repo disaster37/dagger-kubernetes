@@ -42,6 +42,7 @@ Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
   - [GitHub Actions](#github-actions)
   - [Jenkins](#jenkins)
   - [Drone](#drone)
+  - [CLI provisioning](#cli-provisioning)
 - [Client wrapper script](#client-wrapper-script)
 - [Operations](#operations)
 - [Production checklist](#production-checklist)
@@ -450,6 +451,13 @@ inline comments. The sections below summarise the most important ones.
 | `ci.github`     | `job_summary` / `check_runs`              | `true` / `true`                                          | CI niceties.                                                                                                                                  |
 | `ci.jenkins`    | `dynamic_stages`                          | `true`                                                   |                                                                                                                                               |
 | `ci.drone`      | `config_extension`                        | `true`                                                   |                                                                                                                                               |
+| `cli`           | `enabled`                                 | `true`                                                   | On-the-fly Dagger CLI provisioning addon.                                                                                                    |
+|                 | `cache_dir`                               | `<database.dir>/cli-cache`                               | Verified CLI tarball cache (persists on the supervisor PVC).                                                                                  |
+|                 | `release_list_ttl`                        | `1h`                                                     | In-memory upstream release-list TTL.                                                                                                          |
+|                 | `download_timeout`                        | `5m`                                                     | Outbound upstream fetch timeout.                                                                                                              |
+|                 | `upstream.releases_url`                   | `https://api.github.com/repos/dagger/dagger/releases`    | Release discovery (mirror-able).                                                                                                              |
+|                 | `upstream.download_base`                  | `https://github.com/dagger/dagger/releases/download`     | Tarball + checksums.txt base (mirror-able).                                                                                                   |
+|                 | `upstream.github_token`                   | `""`                                                     | Optional GitHub API token (set via `DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN`; never in the file).                                          |
 | `log_level`     | —                                         | `info`                                                   | `debug`/`info`/`warn`/`error`.                                                                                                                |
 | `log_format`    | —                                         | `json`                                                   | Supervisor log format: `json` / `text`.                                                                                                       |
 | `otel`          | `otlp_endpoint`                           | `""`                                                     | If set, the Supervisor exports its own OTLP here.                                                                                             |
@@ -1332,12 +1340,17 @@ Shared library at `ci-integrations/jenkins/daggerKubernetes.groovy`:
 daggerKubernetes(serverUrl: 'https://supv.example.com',
             token: env.DAGGER_CLOUD_TOKEN,
             uiUrl: 'https://ui.supv.example.com',
-            version: 'v0.21.4') {
+            version: 'v0.21.4',            // pins the engine version
+            provisionCli: true,             // provision the Dagger CLI on the fly
+            cliVersion: 'v0.21.4') {       // optional; omit for the latest allowed
   sh 'dagger call github.com/org/ci@v1.0.0 build'
 }
 ```
 
 `ci.jenkins.dynamic_stages: true` splits Dagger steps into Jenkins stages.
+`provisionCli: true` (or the standalone `provisionCli(serverUrl:…, token:…)`
+step) downloads the verified CLI tarball from the supervisor, extracts `dagger`,
+and prepends it to `PATH`. See [CLI provisioning](#cli-provisioning).
 
 ### Drone
 
@@ -1356,7 +1369,42 @@ steps:
 ```
 
 `ci.drone.config_extension: true` enables the `.drone.yml` extension that
-appends a summary step with the trace link.
+appends a summary step with the trace link. The plugin also provisions the
+Dagger CLI on the fly (needs `curl` + `tar`; disable with `cli: false` or
+pin with `cli_version: v0.21.4`). See [CLI provisioning](#cli-provisioning).
+
+### CLI provisioning
+
+The supervisor serves verified Dagger CLI tarballs so CI runners can provision
+the CLI "on the fly" without a public Dagger image:
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/cli/versions/latest?os=linux&arch=amd64` | Resolve the latest allowed version and return `{version, os, arch, filename, url, sha256, size}`. |
+| `GET /api/v1/cli/<version>?os=linux&arch=amd64` | Stream the sha256-verified tarball (`Content-Type: application/gzip`, `Content-Disposition: attachment`). |
+
+Both endpoints are auth-gated (`Authorization: Bearer <token>` — the CI
+runner's `DAGGER_CLOUD_TOKEN`), matching `/api/v1/cache` and
+`/api/v1/connect/env`. `os` is `linux` or `darwin`; `arch` is `amd64`, `arm64`,
+or `armv7` (default `linux`/`amd64`).
+
+**`latest` semantics (allowlist-aware):** `latest` is the highest released
+`vX.Y.Z` whose `major.minor` is in `version.allowlist` **and** `>= version.floor`
+(empty allowlist = the highest released `vX.Y.Z >= version.floor`). The release
+list is cached in memory for `cli.release_list_ttl` (default `1h`).
+
+**Integrity:** the supervisor fetches upstream `checksums.txt`, verifies the
+tarball's sha256, and atomically renames it into `cli.cache_dir` before serving.
+A mismatch (or corrupt cached file) is re-fetched or rejected with `502` — a
+corrupt tarball is never served.
+
+**Mirror / offline:** point `cli.upstream.releases_url` and
+`cli.upstream.download_base` at a mirror, or pre-seed `cli.cache_dir` to serve
+without upstream. `cli.enabled: false` disables the endpoints (404).
+
+The `dagger-kubernetes-ci` wrapper (`--cli`, `--cli-version`, `--cli-os`,
+`--cli-arch`) and the Jenkins/Drone glue above use these endpoints and extract
+`dagger` into a fresh directory prepended to `PATH`.
 
 ---
 

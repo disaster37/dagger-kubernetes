@@ -293,6 +293,17 @@ ci:
   drone:
     config_extension: true # enable the .drone.yml config extension.
 
+# --- On-the-fly Dagger CLI provisioning ------------------------------------
+cli:
+  enabled: true                       # serve verified Dagger CLI tarballs + latest-version resolution.
+  cache_dir: ""                       # "" = <database.dir>/cli-cache (persists on the supervisor PVC).
+  release_list_ttl: "1h"              # how long to cache the upstream release list in memory.
+  download_timeout: "5m"              # outbound fetch timeout for the tarball/checksums.
+  upstream:
+    releases_url: "https://api.github.com/repos/dagger/dagger/releases"   # release discovery (mirror-able).
+    download_base: "https://github.com/dagger/dagger/releases/download"   # tarball + checksums.txt base (mirror-able).
+    github_token: ""                  # optional; set via DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN (raises rate limit).
+
 # --- Logging -----------------------------------------------------------------
 log_level: "info"    # debug | info | warn | error
 log_format: "json"   # json | text — the supervisor's own log format.

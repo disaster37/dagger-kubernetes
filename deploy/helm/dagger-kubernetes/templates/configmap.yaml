@@ -169,6 +169,15 @@ data:
       floor: {{ .Values.supervisor.config.version.floor | quote }}
       allowlist:
 {{ toYaml .Values.supervisor.config.version.allowlist | indent 8 }}
+    cli:
+      enabled: {{ .Values.supervisor.config.cli.enabled }}
+      cache_dir: {{ .Values.supervisor.config.cli.cacheDir | quote }}
+      release_list_ttl: {{ .Values.supervisor.config.cli.releaseListTtl | quote }}
+      download_timeout: {{ .Values.supervisor.config.cli.downloadTimeout | quote }}
+      upstream:
+        releases_url: {{ .Values.supervisor.config.cli.upstream.releasesUrl | quote }}
+        download_base: {{ .Values.supervisor.config.cli.upstream.downloadBase | quote }}
+        github_token: ""
     log_level: {{ .Values.supervisor.config.logLevel | quote }}
     log_format: {{ .Values.supervisor.config.logFormat | quote }}
 {{- with .Values.supervisor.config.otel }}

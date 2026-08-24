@@ -38,6 +38,19 @@ func Parse(raw string) (*Version, error) {
 	return &Version{Major: major, Minor: minor, Patch: patch, Raw: fmt.Sprintf("v%d.%d.%d", major, minor, patch)}, nil
 }
 
+// fullVersionRe matches a complete MAJOR.MINOR.PATCH release version (the
+// optional leading "v" and all three numeric components are required).
+var fullVersionRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
+
+// IsFullVersion reports whether raw is a complete release version with all
+// three components (e.g. "v0.21.0"), as opposed to a partial "MAJOR.MINOR"
+// ("0.21") that Parse also accepts with an implicit patch of 0. Callers that
+// require a full release (download endpoints) use this to reject partials
+// without also rejecting legitimate patch-0 releases.
+func IsFullVersion(raw string) bool {
+	return fullVersionRe.MatchString(raw)
+}
+
 func (v *Version) Compare(other *Version) int {
 	if v.Major != other.Major {
 		return v.Major - other.Major

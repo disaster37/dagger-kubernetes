@@ -20,6 +20,8 @@ type Metrics struct {
 	HistoryPurgeTotal             prometheus.Counter
 	HistoryGCRunTotal             *prometheus.CounterVec
 	PipelineDisconnectFailedTotal *prometheus.CounterVec
+	CLICacheTotal                 *prometheus.CounterVec
+	CLIUpstreamFetchTotal         *prometheus.CounterVec
 }
 
 // NewMetrics builds the Metrics collectors and registers them on reg when
@@ -87,6 +89,16 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_kubernetes_pipeline_disconnect_failed_total",
 			Help: "Total number of pipelines marked failed by disconnect detection",
 		}, []string{"source"}),
+
+		CLICacheTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_cli_cache_total",
+			Help: "Total number of Dagger CLI tarball cache resolutions by result",
+		}, []string{"result"}),
+
+		CLIUpstreamFetchTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_cli_upstream_fetch_total",
+			Help: "Total number of Dagger CLI upstream fetches by status",
+		}, []string{"status"}),
 	}
 
 	if reg != nil {
@@ -103,6 +115,8 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.HistoryPurgeTotal,
 			m.HistoryGCRunTotal,
 			m.PipelineDisconnectFailedTotal,
+			m.CLICacheTotal,
+			m.CLIUpstreamFetchTotal,
 		)
 	}
 

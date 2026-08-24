@@ -46,6 +46,8 @@ func newTestEngine(s *Server) *route.Engine {
 	e.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
 	e.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
 	e.GET("/api/v1/status", s.handlePlatformStatus)
+	e.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
+	e.GET("/api/v1/cli/:version", s.handleCLIDownload)
 	return e
 }
 

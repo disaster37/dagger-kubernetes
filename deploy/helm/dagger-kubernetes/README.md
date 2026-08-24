@@ -612,6 +612,13 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.leaseTtl` | string | `"2m"` | Engine session lease TTL. |
 | `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
 | `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21"]` | Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor). |
+| `supervisor.config.cli.enabled` | bool | `true` | Enable on-the-fly Dagger CLI provisioning addon. |
+| `supervisor.config.cli.cacheDir` | string | `""` | Cache dir for verified CLI tarballs (empty = `<database.dir>/cli-cache`). |
+| `supervisor.config.cli.releaseListTtl` | string | `"1h"` | Upstream release-list cache TTL. |
+| `supervisor.config.cli.downloadTimeout` | string | `"5m"` | Outbound upstream fetch timeout. |
+| `supervisor.config.cli.upstream.releasesUrl` | string | `"https://api.github.com/repos/dagger/dagger/releases"` | Release discovery URL (mirror-able). |
+| `supervisor.config.cli.upstream.downloadBase` | string | `"https://github.com/dagger/dagger/releases/download"` | Tarball + checksums.txt base URL (mirror-able). |
+| `supervisor.config.cli.upstream.githubToken` | string | `""` | Optional GitHub token for the releases API (set via `DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN` or `supervisor.extraEnv`). |
 | `supervisor.config.logLevel` | string | `"info"` | Supervisor log level. |
 | `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
 | `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |

@@ -231,6 +231,7 @@ type Deps struct {
 	Router               *service.RegistryRouter
 	LiveHub              service.TraceEventBroadcaster // concrete *repository.LiveHub satisfies it; nil = create one
 	Lifecycle            *service.PipelineLifecycle
+	CLI                  *service.CLIService
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -296,6 +297,7 @@ type Server struct {
 	historyPurger domain.HistoryPurger
 	status        domain.StatusProvider
 	connect       *service.ConnectService
+	cli           *service.CLIService
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -338,6 +340,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		historyPurger: deps.HistoryPurger,
 		status:        deps.StatusProvider,
 		connect:       deps.Connect,
+		cli:           deps.CLI,
 		cacheToken:    cfg.CacheToken,
 	}
 
@@ -476,6 +479,8 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
 	h.GET("/api/v1/status", s.handlePlatformStatus)
 	h.GET("/api/v1/connect/env", s.handleConnectEnv)
+	h.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
+	h.GET("/api/v1/cli/:version", s.handleCLIDownload)
 
 	// Auth (public + self).
 	h.POST("/api/v1/auth/login", s.handleLogin)

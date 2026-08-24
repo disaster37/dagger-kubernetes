@@ -676,3 +676,152 @@ func TestLoadPublicURLWithUserinfo(t *testing.T) {
 		t.Fatalf("Load error = %q, want userinfo rejection message", err.Error())
 	}
 }
+
+func TestLoadCLIDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load with missing file: %v", err)
+	}
+
+	if !cfg.CLI.Enabled {
+		t.Fatal("cli.enabled default should be true")
+	}
+	if cfg.CLI.CacheDir != "" {
+		t.Fatalf("cli.cache_dir default = %q, want empty", cfg.CLI.CacheDir)
+	}
+	if cfg.CLI.ReleaseListTTL != time.Hour {
+		t.Fatalf("cli.release_list_ttl default = %v, want 1h", cfg.CLI.ReleaseListTTL)
+	}
+	if cfg.CLI.DownloadTimeout != 5*time.Minute {
+		t.Fatalf("cli.download_timeout default = %v, want 5m", cfg.CLI.DownloadTimeout)
+	}
+	if cfg.CLI.Upstream.ReleasesURL != "https://api.github.com/repos/dagger/dagger/releases" {
+		t.Fatalf("cli.upstream.releases_url default = %q", cfg.CLI.Upstream.ReleasesURL)
+	}
+	if cfg.CLI.Upstream.DownloadBase != "https://github.com/dagger/dagger/releases/download" {
+		t.Fatalf("cli.upstream.download_base default = %q", cfg.CLI.Upstream.DownloadBase)
+	}
+	if cfg.CLI.Upstream.GitHubToken != "" {
+		t.Fatalf("cli.upstream.github_token default should be empty, got %q", cfg.CLI.Upstream.GitHubToken)
+	}
+}
+
+func TestLoadCLIEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_CLI_RELEASE_LIST_TTL", "30m")
+	t.Setenv("DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN", "ghp_testtoken")
+	t.Setenv("DAGGER_KUBERNETES_CLI_UPSTREAM_RELEASES_URL", "https://mirror.example.com/releases")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.CLI.ReleaseListTTL != 30*time.Minute {
+		t.Fatalf("cli.release_list_ttl = %v, want 30m", cfg.CLI.ReleaseListTTL)
+	}
+	if cfg.CLI.Upstream.GitHubToken != "ghp_testtoken" {
+		t.Fatalf("cli.upstream.github_token = %q, want ghp_testtoken", cfg.CLI.Upstream.GitHubToken)
+	}
+	if cfg.CLI.Upstream.ReleasesURL != "https://mirror.example.com/releases" {
+		t.Fatalf("cli.upstream.releases_url = %q, want mirror", cfg.CLI.Upstream.ReleasesURL)
+	}
+}
+
+func TestValidateCLIConfig(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{
+			CLI: domain.CLIConfig{
+				Enabled:         true,
+				ReleaseListTTL:  time.Hour,
+				DownloadTimeout: 5 * time.Minute,
+				Upstream: domain.CLIUpstreamConfig{
+					ReleasesURL:  "https://api.github.com/repos/dagger/dagger/releases",
+					DownloadBase: "https://github.com/dagger/dagger/releases/download",
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mut     func(c *domain.Config)
+		wantErr string
+	}{
+		{name: "valid", mut: func(c *domain.Config) {}},
+		{name: "disabled skips validation", mut: func(c *domain.Config) {
+			c.CLI.Enabled = false
+			c.CLI.Upstream.ReleasesURL = "not-a-url"
+			c.CLI.ReleaseListTTL = 0
+			c.CLI.DownloadTimeout = 0
+		}},
+		{name: "bad releases_url", mut: func(c *domain.Config) {
+			c.CLI.Upstream.ReleasesURL = "ftp://x"
+		}, wantErr: "cli.upstream.releases_url must be an absolute http(s) URL"},
+		{name: "relative releases_url", mut: func(c *domain.Config) {
+			c.CLI.Upstream.ReleasesURL = "/releases"
+		}, wantErr: "cli.upstream.releases_url must be an absolute http(s) URL"},
+		{name: "bad download_base", mut: func(c *domain.Config) {
+			c.CLI.Upstream.DownloadBase = "not a url"
+		}, wantErr: "cli.upstream.download_base must be an absolute http(s) URL"},
+		{name: "zero release_list_ttl", mut: func(c *domain.Config) {
+			c.CLI.ReleaseListTTL = 0
+		}, wantErr: "cli.release_list_ttl must be > 0"},
+		{name: "negative download_timeout", mut: func(c *domain.Config) {
+			c.CLI.DownloadTimeout = -time.Second
+		}, wantErr: "cli.download_timeout must be > 0"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mut(cfg)
+			err := validateCLIConfig(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateCLIConfig = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateCLIConfig = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateCLIConfig = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidCLIConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "bad releases url", content: "cli:\n  enabled: true\n  upstream:\n    releases_url: \"ftp://x\"\n"},
+		{name: "zero ttl", content: "cli:\n  enabled: true\n  release_list_ttl: \"0s\"\n"},
+		{name: "disabled bad url tolerated", content: "cli:\n  enabled: false\n  upstream:\n    releases_url: \"ftp://x\"\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.app.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if tc.name == "disabled bad url tolerated" {
+				if err != nil {
+					t.Fatalf("Load = %v, want nil (disabled)", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Load = nil, want validation error")
+			}
+			if !strings.Contains(err.Error(), "validate cli config") {
+				t.Fatalf("Load error = %q, want wrapped cli validation message", err.Error())
+			}
+		})
+	}
+}

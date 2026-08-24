@@ -53,3 +53,26 @@ func TestVersionSlug(t *testing.T) {
 		t.Fatalf("expected v0-21-4, got %s", slug)
 	}
 }
+
+func TestIsFullVersion(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want bool
+	}{
+		{"v0.21.8", true},
+		{"0.21.8", true},
+		{"v0.21.0", true},
+		{"v1.0.0", true},
+		{"0.21", false},
+		{"v0.21", false},
+		{"v0.21.8-rc.1", false},
+		{"notaversion", false},
+		{"", false},
+	}
+
+	for _, tt := range tests {
+		if got := IsFullVersion(tt.raw); got != tt.want {
+			t.Errorf("IsFullVersion(%q) = %v, want %v", tt.raw, got, tt.want)
+		}
+	}
+}

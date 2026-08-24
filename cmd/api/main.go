@@ -270,6 +270,26 @@ func run(c *cli.Context) error {
 	statusSvc := service.NewStatusService(cfg, cacheBackend, router, fleetManager, logger)
 	connectSvc := service.NewConnectService(cfg, cacheBackend, versionResolver, tokensSvc, logger)
 
+	// --- On-the-fly Dagger CLI provisioning wiring ---
+	var cliSvc *service.CLIService
+	if cfg.CLI.Enabled {
+		cacheDir := cfg.CLI.CacheDir
+		if cacheDir == "" {
+			cacheDir = filepath.Join(cfg.Database.Dir, "cli-cache")
+		}
+		cliCache, err := repository.NewFileCLICache(cacheDir)
+		if err != nil {
+			return fmt.Errorf("create cli cache: %w", err)
+		}
+		cliUpstream := repository.NewGitHubCLIUpstream(repository.GitHubCLIUpstreamConfig{
+			ReleasesURL:  cfg.CLI.Upstream.ReleasesURL,
+			DownloadBase: cfg.CLI.Upstream.DownloadBase,
+			GitHubToken:  cfg.CLI.Upstream.GitHubToken,
+			Timeout:      cfg.CLI.DownloadTimeout,
+		})
+		cliSvc = service.NewCLIService(versionResolver, cliUpstream, cliCache, cfg.Server.PublicURL, cfg.CLI.ReleaseListTTL, logger, metrics)
+	}
+
 	server := handler.NewServer(&handler.ServerConfig{
 		ControlAddr:  cfg.Server.ControlAddr,
 		DataAddr:     cfg.Server.DataAddr,
@@ -316,6 +336,7 @@ func run(c *cli.Context) error {
 		Router:               router,
 		LiveHub:              liveHub,
 		Lifecycle:            pipelineLifecycle,
+		CLI:                  cliSvc,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {

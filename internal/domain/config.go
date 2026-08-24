@@ -20,6 +20,7 @@ type Config struct {
 	OTel      OTelConfig      `mapstructure:"otel"`
 	Database  DatabaseConfig  `mapstructure:"database"`
 	Raft      RaftConfig      `mapstructure:"raft"`
+	CLI       CLIConfig       `mapstructure:"cli"`
 }
 
 type ServerConfig struct {
@@ -316,4 +317,21 @@ type DroneConfig struct {
 
 type OTelConfig struct {
 	OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+}
+
+// CLIConfig configures the on-the-fly Dagger CLI provisioning addon.
+type CLIConfig struct {
+	Enabled         bool              `mapstructure:"enabled"`
+	CacheDir        string            `mapstructure:"cache_dir"`        // "" = <database.dir>/cli-cache
+	ReleaseListTTL  time.Duration     `mapstructure:"release_list_ttl"` // default "1h"
+	DownloadTimeout time.Duration     `mapstructure:"download_timeout"` // default "5m"
+	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`
+}
+
+// CLIUpstreamConfig points at the Dagger release source (mirror-able for
+// self-hosted/offline deployments).
+type CLIUpstreamConfig struct {
+	ReleasesURL  string `mapstructure:"releases_url"`  // https://api.github.com/repos/dagger/dagger/releases
+	DownloadBase string `mapstructure:"download_base"` // https://github.com/dagger/dagger/releases/download
+	GitHubToken  string `mapstructure:"github_token"`  // optional, raises API rate limit; set via env only
 }

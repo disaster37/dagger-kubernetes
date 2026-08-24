@@ -86,6 +86,8 @@ func TestNewMetricsRegisters(t *testing.T) {
 	m.OTelIngestTotal.WithLabelValues("traces", "success").Inc()
 	m.PipelineDisconnectFailedTotal.WithLabelValues("tunnel_close").Inc()
 	m.PipelineDisconnectFailedTotal.WithLabelValues("stale_sweep").Inc()
+	m.CLICacheTotal.WithLabelValues("hit").Inc()
+	m.CLIUpstreamFetchTotal.WithLabelValues("success").Inc()
 
 	fam, err := reg.Gather()
 	if err != nil {
@@ -106,6 +108,16 @@ func TestNewMetricsRegisters(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("pipeline_disconnect_failed_total metric not registered")
+	}
+
+	found = false
+	for _, f := range fam {
+		if f.GetName() == "dagger_kubernetes_cli_cache_total" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("cli_cache_total metric not registered")
 	}
 }
 
