@@ -41,6 +41,7 @@ Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
 - [CI integrations](#ci-integrations)
   - [GitHub Actions](#github-actions)
   - [Jenkins](#jenkins)
+    - [Jenkins on Kubernetes (official Helm chart)](#jenkins-on-kubernetes-official-helm-chart)
   - [Drone](#drone)
   - [CLI provisioning](#cli-provisioning)
 - [Client wrapper script](#client-wrapper-script)
@@ -1406,6 +1407,109 @@ that spawns child `FlowNode`s via the `FlowNode`/`StepContext` API — a separat
 deliverable. The NDJSON wire protocol is designed to feed such a plugin
 unchanged. The pipeline UI (`/pipelines/<id>`) remains the full-fidelity
 reference view.
+
+#### Jenkins on Kubernetes (official Helm chart)
+
+When Jenkins runs on the same Kubernetes/CaaS cluster as the supervisor —
+deployed with the official [`jenkins/jenkins`](https://charts.jenkins.io)
+Helm chart and the
+[Kubernetes plugin](https://plugins.jenkins.io/kubernetes) — three pieces
+wire it together: the **agent image**, the **shared library**, and the
+**token credential**.
+
+Since agents run as pods on the same cluster, use the supervisor's
+cluster-internal control endpoint as `serverUrl`:
+`http://<release>-control.<namespace>.svc.cluster.local:8080` (the Helm
+chart's `-control` Service). `uiUrl` stays the public `server.public_url`
+host so the printed pipeline-view links resolve from a browser.
+
+**1. Agent image.** All pipeline `sh` steps execute in the pod's `jnlp`
+container, so bake the prerequisites into a custom inbound-agent image:
+
+```dockerfile
+FROM docker.io/jenkins/inbound-agent:latest-jdk21
+USER root
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl tar \
+    && rm -rf /var/lib/apt/lists/*
+COPY dagger-kubernetes-ci /usr/local/bin/dagger-kubernetes-ci
+USER jenkins
+```
+
+Build the wrapper from this repo (`go build -o dagger-kubernetes-ci ./cmd/ci`
+— see [Development](#development)). `curl` + `tar` power `provisionCli`; the
+wrapper binary is only needed for `dynamicStages` (otherwise set
+`env.DAGGER_KUBERNETES_CI_BIN` to its path).
+
+**2. Shared library (JCasC).** Register the global pipeline library, pointing
+`libraryPath` at this repo's `ci-integrations/jenkins` folder:
+
+```yaml
+jenkins:
+  controller:
+    JCasC:
+      configScripts:
+        global-libraries: |
+          unclassified:
+            globalLibraries:
+              libraries:
+                - name: "dagger-kubernetes"
+                  defaultVersion: "main"
+                  retriever:
+                    modernSCM:
+                      scm:
+                        git:
+                          remote: "https://github.com/disaster/dagger-kubernetes.git"
+                          libraryPath: "ci-integrations/jenkins"
+        kubernetes-cloud: |
+          jenkins:
+            clouds:
+              - kubernetes:
+                  name: "kubernetes"
+                  serverUrl: "https://kubernetes.default.svc.cluster.local"
+                  templates:
+                    - name: "dagger"
+                      label: "dagger"
+                      containers:
+                        - name: "jnlp"
+                          image: "docker.io/your-org/jenkins-dagger-agent:latest"
+```
+
+**3. Token credential.** Create a Jenkins **Secret text** credential (e.g.
+`dagger-kubernetes-token`) holding a supervisor API token and bind it as an
+environment variable in the pipeline.
+
+A complete Jenkinsfile (agent pods need no pre-installed Dagger — the CLI is
+provisioned on the fly):
+
+```groovy
+@Library('dagger-kubernetes') _
+
+pipeline {
+  agent { label 'dagger' }
+  environment {
+    DAGGER_KUBERNETES_TOKEN = credentials('dagger-kubernetes-token')
+  }
+  stages {
+    stage('Dagger') {
+      steps {
+        daggerKubernetes(
+            serverUrl: 'http://dagger-kubernetes-control.dagger-kubernetes.svc.cluster.local:8080',
+            token: env.DAGGER_KUBERNETES_TOKEN,
+            uiUrl: 'https://supv.example.com',
+            provisionCli: true,
+            dynamicStages: true,
+            command: 'dagger call github.com/org/ci@v1.0.0 build')
+      }
+    }
+  }
+}
+```
+
+The supervisor schedules the Dagger engine pods itself (per version
+StatefulSets in its own namespace); the agent pods only need egress to the
+`-control` Service over HTTP and to the `-data` Service over mTLS (both
+cluster-internal).
 
 ### Drone
 
