@@ -825,3 +825,95 @@ func TestLoadRejectsInvalidCLIConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateCIConfig(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{
+			CI: domain.CIConfig{
+				Jenkins: domain.JenkinsConfig{
+					DynamicStages:     true,
+					StepsPollInterval: 2 * time.Second,
+					StepsMaxDepth:     8,
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name    string
+		mut     func(c *domain.Config)
+		wantErr string
+	}{
+		{name: "valid", mut: func(c *domain.Config) {}},
+		{name: "disabled skips poll-interval check", mut: func(c *domain.Config) {
+			c.CI.Jenkins.DynamicStages = false
+			c.CI.Jenkins.StepsPollInterval = 0
+		}},
+		{name: "zero poll interval when enabled", mut: func(c *domain.Config) {
+			c.CI.Jenkins.StepsPollInterval = 0
+		}, wantErr: "ci.jenkins.steps_poll_interval must be > 0"},
+		{name: "negative poll interval when enabled", mut: func(c *domain.Config) {
+			c.CI.Jenkins.StepsPollInterval = -time.Second
+		}, wantErr: "ci.jenkins.steps_poll_interval must be > 0"},
+		{name: "negative max depth", mut: func(c *domain.Config) {
+			c.CI.Jenkins.StepsMaxDepth = -1
+		}, wantErr: "ci.jenkins.steps_max_depth must be >= 0"},
+		{name: "zero max depth allowed", mut: func(c *domain.Config) {
+			c.CI.Jenkins.StepsMaxDepth = 0
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mut(cfg)
+			err := validateCIConfig(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateCIConfig = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateCIConfig = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateCIConfig = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidCIConfig(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "zero poll interval", content: "ci:\n  jenkins:\n    dynamic_stages: true\n    steps_poll_interval: \"0s\"\n"},
+		{name: "negative max depth", content: "ci:\n  jenkins:\n    steps_max_depth: -1\n"},
+		{name: "disabled zero poll interval tolerated", content: "ci:\n  jenkins:\n    dynamic_stages: false\n    steps_poll_interval: \"0s\"\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.app.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if tc.name == "disabled zero poll interval tolerated" {
+				if err != nil {
+					t.Fatalf("Load = %v, want nil (disabled)", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatal("Load = nil, want validation error")
+			}
+			if !strings.Contains(err.Error(), "validate ci config") {
+				t.Fatalf("Load error = %q, want wrapped ci validation message", err.Error())
+			}
+		})
+	}
+}

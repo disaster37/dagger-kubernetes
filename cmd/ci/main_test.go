@@ -14,8 +14,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/urfave/cli/v2"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
+	"github.com/disaster/dagger-kubernetes/internal/observ"
+	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
 const testTraceID = "abcdef0123456789abcdef0123456789"
@@ -24,13 +29,14 @@ func newTestCLIContext(t *testing.T, args ...string) *cli.Context {
 	t.Helper()
 	app := cli.NewApp()
 	set := flag.NewFlagSet("test", flag.ContinueOnError)
-	set.String("server", "", "")
-	set.String("token", "", "")
-	set.String("ui-url", "", "")
-	set.String("config", "", "")
-	set.String("cache-registry", "", "")
-	set.String("version", "", "")
-	set.String("ci", "", "")
+	// Apply the real app flags so the context behaves exactly like production:
+	// defaults and env-var sources (e.g. DAGGER_KUBERNETES_TOKEN for --token)
+	// are resolved the same way app.Run resolves them.
+	for _, f := range ciFlags() {
+		if err := f.Apply(set); err != nil {
+			t.Fatalf("apply flag %v: %v", f.Names(), err)
+		}
+	}
 	if err := set.Parse(args); err != nil {
 		t.Fatalf("parse flags: %v", err)
 	}
@@ -188,6 +194,64 @@ func TestRunNoTraceID(t *testing.T) {
 
 	if strings.Contains(stderr, "Pipeline View:") {
 		t.Fatalf("stderr = %q, want no Pipeline View line", stderr)
+	}
+}
+
+// TestRunTokenFromEnv proves the supervisor token can be supplied via the
+// DAGGER_KUBERNETES_TOKEN environment variable instead of argv: the CI
+// integrations rely on it to keep the credential out of the process list
+// (CWE-214/CWE-532).
+func TestRunTokenFromEnv(t *testing.T) {
+	stubDaggerOnPath(t, testTraceID)
+	t.Setenv("DAGGER_KUBERNETES_TOKEN", "env-token")
+	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--ui-url", "https://supv.example.com",
+		"--config", missingConfig,
+		"call", "foo",
+	)
+
+	stderr := captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	want := fmt.Sprintf("Pipeline View: https://supv.example.com/pipelines/%s", testTraceID)
+	if !strings.Contains(stderr, want) {
+		t.Fatalf("stderr = %q, want containing %q", stderr, want)
+	}
+}
+
+// TestRunTokenFlagWinsOverEnv proves an explicit --token still takes
+// precedence over the environment (urfave/cli source precedence).
+func TestRunTokenFlagWinsOverEnv(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_TOKEN", "env-token")
+	ctx := newTestCLIContext(t, "--server", "https://supv.example.com", "--token", "flag-token", "call", "foo")
+	if got := ctx.String("token"); got != "flag-token" {
+		t.Fatalf("token = %q, want flag-token", got)
+	}
+}
+
+func TestClampPollInterval(t *testing.T) {
+	tests := []struct {
+		in   time.Duration
+		want time.Duration
+	}{
+		{in: -time.Second, want: minStepsPollInterval},
+		{in: 0, want: minStepsPollInterval},
+		{in: time.Nanosecond, want: minStepsPollInterval},
+		{in: 50 * time.Millisecond, want: minStepsPollInterval},
+		{in: minStepsPollInterval, want: minStepsPollInterval},
+		{in: 5 * time.Second, want: 5 * time.Second},
+	}
+	for _, tt := range tests {
+		t.Run(tt.in.String(), func(t *testing.T) {
+			if got := clampPollInterval(tt.in); got != tt.want {
+				t.Fatalf("clampPollInterval(%v) = %v, want %v", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -405,5 +469,259 @@ func TestGetJSONNetworkError(t *testing.T) {
 	err := getJSON(context.Background(), url, "tok", &struct{}{})
 	if err == nil {
 		t.Fatal("getJSON = nil, want network error")
+	}
+}
+
+// --- nested-step streaming (ADR-024) tests ---
+
+type stubSnapshotSource struct {
+	trace     *domain.TraceInfo
+	traceErr  error
+	logs      []domain.LogEntry
+	logsErr   error
+	lastStart time.Time
+}
+
+func (s *stubSnapshotSource) GetTrace(string) (*domain.TraceInfo, error) {
+	return s.trace, s.traceErr
+}
+
+func (s *stubSnapshotSource) QueryTraceLogs(_ string, start, _ time.Time, _ int) ([]domain.LogEntry, error) {
+	s.lastStart = start
+	return s.logs, s.logsErr
+}
+
+type collectSink struct {
+	events []domain.CIEvent
+}
+
+func (s *collectSink) Emit(e domain.CIEvent) error {
+	s.events = append(s.events, e)
+	return nil
+}
+
+func (s *collectSink) Flush() error { return nil }
+
+func TestLiveCaptureWriterPassesThroughAndCaptures(t *testing.T) {
+	var dst bytes.Buffer
+	var gotID string
+	w := &liveCaptureWriter{dst: &dst, onID: func(id string) { gotID = id }}
+
+	// Feed the trace id split across writes to prove the buffer accumulates.
+	for _, chunk := range []string{"prefix ", testTraceID[:16], testTraceID[16:], " suffix\n"} {
+		if _, err := w.Write([]byte(chunk)); err != nil {
+			t.Fatalf("Write(%q): %v", chunk, err)
+		}
+	}
+
+	if gotID != testTraceID {
+		t.Fatalf("captured id = %q, want %q", gotID, testTraceID)
+	}
+	if dst.String() != "prefix "+testTraceID+" suffix\n" {
+		t.Fatalf("dst = %q", dst.String())
+	}
+
+	// A later write must not re-trigger onID (found flag latched).
+	calls := 0
+	w.onID = func(string) { calls++ }
+	if _, err := w.Write([]byte("more\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("onID re-fired %d times after first capture", calls)
+	}
+}
+
+func TestLiveCaptureWriterNoID(t *testing.T) {
+	var dst bytes.Buffer
+	fired := false
+	w := &liveCaptureWriter{dst: &dst, onID: func(string) { fired = true }}
+	if _, err := w.Write([]byte("no trace id here\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if fired {
+		t.Fatal("onID fired without a trace id")
+	}
+	if dst.String() != "no trace id here\n" {
+		t.Fatalf("dst = %q", dst.String())
+	}
+}
+
+func TestLiveCaptureWriterBoundedBuffer(t *testing.T) {
+	var dst bytes.Buffer
+	var gotID string
+	w := &liveCaptureWriter{dst: &dst, onID: func(id string) { gotID = id }}
+
+	// A large non-hex stream must not grow the scan buffer unbounded, and a
+	// trace id arriving afterwards must still be captured.
+	noise := strings.Repeat("z", liveCaptureMaxBuf*3)
+	if _, err := w.Write([]byte(noise)); err != nil {
+		t.Fatalf("Write noise: %v", err)
+	}
+	if _, err := w.Write([]byte(testTraceID)); err != nil {
+		t.Fatalf("Write id: %v", err)
+	}
+	if gotID != testTraceID {
+		t.Fatalf("captured id = %q, want %q", gotID, testTraceID)
+	}
+}
+
+func TestResolveStepsFlagDefaultsFromConfig(t *testing.T) {
+	cfg := &domain.Config{CI: domain.CIConfig{Jenkins: domain.JenkinsConfig{
+		DynamicStages:     true,
+		StepsPollInterval: 7 * time.Second,
+		StepsMaxDepth:     3,
+	}}}
+
+	// Explicit flags win over config.
+	ctx := newTestCLIContext(t, "--steps", "--steps-poll-interval", "5s", "--steps-max-depth", "2")
+	steps, interval, depth := resolveSteps(ctx, cfg)
+	if !steps || interval != 5*time.Second || depth != 2 {
+		t.Fatalf("resolveSteps = (%v, %v, %v), want (true, 5s, 2)", steps, interval, depth)
+	}
+
+	// Without flags, poll/depth fall back to config; steps stays false.
+	ctx = newTestCLIContext(t)
+	steps, interval, depth = resolveSteps(ctx, cfg)
+	if steps || interval != 7*time.Second || depth != 3 {
+		t.Fatalf("resolveSteps = (%v, %v, %v), want (false, 7s, 3)", steps, interval, depth)
+	}
+}
+
+func TestPollTraceOnceEmitsEvents(t *testing.T) {
+	root := &domain.SpanNode{SpanID: "r", Name: "build", Status: "success", Children: []*domain.SpanNode{}}
+	src := &stubSnapshotSource{
+		trace: &domain.TraceInfo{TraceID: testTraceID, RootSpan: root, Status: "success"},
+		logs:  []domain.LogEntry{{Timestamp: time.Unix(100, 0), SpanID: "r", Line: "hello"}},
+	}
+	b := service.NewStepEventBuilder(0)
+	sink := &collectSink{}
+
+	if err := pollTraceOnce(src, b, sink, testTraceID, time.Time{}); err != nil {
+		t.Fatalf("pollTraceOnce: %v", err)
+	}
+	if len(sink.events) == 0 {
+		t.Fatal("no events emitted")
+	}
+	// First event is root node_started, last is pipeline_done.
+	if sink.events[0].Type != domain.CIEventNodeStarted {
+		t.Fatalf("events[0].Type = %q, want node_started", sink.events[0].Type)
+	}
+	if sink.events[len(sink.events)-1].Type != domain.CIEventPipelineDone {
+		t.Fatalf("last event = %q, want pipeline_done", sink.events[len(sink.events)-1].Type)
+	}
+	// The query start bound was passed through to the source.
+	if !src.lastStart.IsZero() {
+		t.Fatalf("lastStart = %v, want zero", src.lastStart)
+	}
+}
+
+func TestPollTraceOnceGetTraceError(t *testing.T) {
+	src := &stubSnapshotSource{traceErr: fmt.Errorf("network down")}
+	b := service.NewStepEventBuilder(0)
+	sink := &collectSink{}
+
+	err := pollTraceOnce(src, b, sink, testTraceID, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "get trace") {
+		t.Fatalf("err = %q, want get-trace error", err)
+	}
+}
+
+func TestPollTraceOnceLogsError(t *testing.T) {
+	src := &stubSnapshotSource{
+		trace:   &domain.TraceInfo{TraceID: testTraceID, RootSpan: &domain.SpanNode{SpanID: "r", Status: "running", Children: []*domain.SpanNode{}}},
+		logsErr: fmt.Errorf("loki down"),
+	}
+	b := service.NewStepEventBuilder(0)
+	sink := &collectSink{}
+
+	err := pollTraceOnce(src, b, sink, testTraceID, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "query logs") {
+		t.Fatalf("err = %q, want query-logs error", err)
+	}
+}
+
+func TestStreamStepsPollsUntilCancelled(t *testing.T) {
+	root := &domain.SpanNode{SpanID: "r", Name: "build", Status: "running", Children: []*domain.SpanNode{}}
+	src := &stubSnapshotSource{
+		trace: &domain.TraceInfo{TraceID: testTraceID, RootSpan: root, Status: "running"},
+	}
+	b := service.NewStepEventBuilder(0)
+	sink := &collectSink{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		streamSteps(ctx, src, b, sink, testTraceID, 10*time.Millisecond, observ.NewTestLogger())
+		close(done)
+	}()
+
+	time.Sleep(70 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("streamSteps did not return after cancel")
+	}
+
+	if len(sink.events) == 0 {
+		t.Fatal("streamSteps emitted no events")
+	}
+	if sink.events[0].Type != domain.CIEventNodeStarted {
+		t.Fatalf("events[0].Type = %q, want node_started", sink.events[0].Type)
+	}
+}
+
+type errSink struct{}
+
+func (errSink) Emit(domain.CIEvent) error { return fmt.Errorf("sink boom") }
+func (errSink) Flush() error              { return nil }
+
+func TestPollTraceOnceNilTraceError(t *testing.T) {
+	// GetTrace succeeds with a nil trace -> Advance wraps the nil-trace error.
+	src := &stubSnapshotSource{trace: nil}
+	b := service.NewStepEventBuilder(0)
+
+	err := pollTraceOnce(src, b, &collectSink{}, testTraceID, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "advance step snapshot") {
+		t.Fatalf("err = %q, want advance error", err)
+	}
+}
+
+func TestPollTraceOnceEmitError(t *testing.T) {
+	root := &domain.SpanNode{SpanID: "r", Name: "build", Status: "success", Children: []*domain.SpanNode{}}
+	src := &stubSnapshotSource{trace: &domain.TraceInfo{TraceID: testTraceID, RootSpan: root, Status: "success"}}
+	b := service.NewStepEventBuilder(0)
+
+	err := pollTraceOnce(src, b, errSink{}, testTraceID, time.Time{})
+	if err == nil || !strings.Contains(err.Error(), "emit step event") {
+		t.Fatalf("err = %q, want emit error", err)
+	}
+}
+
+func TestStreamStepsDefaultIntervalAndErrorRetry(t *testing.T) {
+	// interval <= 0 falls back to the default; poll errors are logged, not
+	// fatal, and the loop still returns cleanly on cancel.
+	src := &stubSnapshotSource{traceErr: fmt.Errorf("network down")}
+	b := service.NewStepEventBuilder(0)
+	sink := &collectSink{}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		streamSteps(ctx, src, b, sink, testTraceID, 0, observ.NewTestLogger())
+		close(done)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("streamSteps did not return after cancel")
+	}
+
+	if len(sink.events) != 0 {
+		t.Fatalf("events = %d, want 0 (source always errors)", len(sink.events))
 	}
 }

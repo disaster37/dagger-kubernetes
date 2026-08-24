@@ -289,7 +289,9 @@ ci:
     job_summary: true      # post a $GITHUB_STEP_SUMMARY with the trace link.
     check_runs: true      # create Check Runs annotated with cache stats.
   jenkins:
-    dynamic_stages: true   # split Dagger steps into Jenkins stages.
+    dynamic_stages: true          # split Dagger steps into nested Jenkins stages (Blue Ocean).
+    steps_poll_interval: "2s"     # how often the CI wrapper polls the supervisor for new steps/logs.
+    steps_max_depth: 8            # maximum nested step depth surfaced (0 = unlimited).
   drone:
     config_extension: true # enable the .drone.yml config extension.
 

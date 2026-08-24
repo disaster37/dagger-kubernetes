@@ -159,6 +159,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("ci.github.job_summary", true)
 	v.SetDefault("ci.github.check_runs", true)
 	v.SetDefault("ci.jenkins.dynamic_stages", true)
+	v.SetDefault("ci.jenkins.steps_poll_interval", 2*time.Second)
+	v.SetDefault("ci.jenkins.steps_max_depth", 8)
 	v.SetDefault("ci.drone.config_extension", true)
 
 	v.SetDefault("cli.enabled", true)
@@ -206,6 +208,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateCLIConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate cli config: %w", err)
+	}
+
+	if err := validateCIConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate ci config: %w", err)
 	}
 
 	return &cfg, nil
@@ -336,5 +342,21 @@ func validateCLIConfig(cfg *domain.Config) error {
 		return fmt.Errorf("cli.download_timeout must be > 0")
 	}
 
+	return nil
+}
+
+// validateCIConfig guards the CI step-stream feature flags. When
+// ci.jenkins.dynamic_stages is enabled, the step-stream poll interval must be
+// positive (0 would hot-loop the supervisor API) and the depth clamp must not
+// be negative.
+func validateCIConfig(cfg *domain.Config) error {
+	if cfg.CI.Jenkins.DynamicStages {
+		if cfg.CI.Jenkins.StepsPollInterval <= 0 {
+			return fmt.Errorf("ci.jenkins.steps_poll_interval must be > 0 when ci.jenkins.dynamic_stages is enabled")
+		}
+	}
+	if cfg.CI.Jenkins.StepsMaxDepth < 0 {
+		return fmt.Errorf("ci.jenkins.steps_max_depth must be >= 0")
+	}
 	return nil
 }

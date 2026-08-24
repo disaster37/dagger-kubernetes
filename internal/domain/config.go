@@ -308,7 +308,9 @@ type GHAConfig struct {
 }
 
 type JenkinsConfig struct {
-	DynamicStages bool `mapstructure:"dynamic_stages"`
+	DynamicStages     bool          `mapstructure:"dynamic_stages"`
+	StepsPollInterval time.Duration `mapstructure:"steps_poll_interval"` // poll cadence for the CI step stream
+	StepsMaxDepth     int           `mapstructure:"steps_max_depth"`     // 0 = unlimited
 }
 
 type DroneConfig struct {

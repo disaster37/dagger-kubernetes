@@ -30,3 +30,4 @@ the decision.
 | 021  | [Self-hosted pipeline view URL](ADR-021-pipeline-view-url.md) |
 | 022  | [OAuth group allowlists + regex group mapping](ADR-022-oauth-group-allowlists-and-regex-mapping.md) |
 | 023  | [On-the-fly Dagger CLI provisioning addon](ADR-023-cli-provisioning.md) |
+| 024  | [CI integration — nested Dagger step view](ADR-024-ci-nested-steps.md) |
