@@ -263,6 +263,50 @@ log_format: "text"
 	}
 }
 
+func TestLoadRaftClusterDomain(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		want    string
+	}{
+		{
+			name:    "default",
+			content: "server:\n  control_addr: \":8080\"\n",
+			want:    "cluster.local",
+		},
+		{
+			name: "explicit empty means svc-only",
+			content: `raft:
+  cluster_domain: ""
+`,
+			want: "",
+		},
+		{
+			name: "custom domain",
+			content: `raft:
+  cluster_domain: "cluster.internal"
+`,
+			want: "cluster.internal",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.app.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := Load(path)
+			if err != nil {
+				t.Fatalf("Load: %v", err)
+			}
+			if cfg.Raft.ClusterDomain != tc.want {
+				t.Fatalf("raft.cluster_domain = %q, want %q", cfg.Raft.ClusterDomain, tc.want)
+			}
+		})
+	}
+}
+
 func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("DAGGER_KUBERNETES_SERVER_CONTROL_ADDR", ":7070")
 	t.Setenv("DAGGER_KUBERNETES_LOG_LEVEL", "error")

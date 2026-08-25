@@ -68,10 +68,38 @@ func TestDNSPeerResolverResolve(t *testing.T) {
 				StatefulSetName: "sts",
 				HeadlessService: "headless",
 				Namespace:       "ns",
+				ClusterDomain:   "cluster.local",
 				Replicas:        1,
 				RaftPort:        8081,
 			},
 			want: []RaftPeer{{ID: "sts-0", Address: "sts-0.headless.ns.svc.cluster.local:8081"}},
+		},
+		{
+			name: "svc-only addresses",
+			cfg: RaftDiscoveryConfig{
+				StatefulSetName: "sts",
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "",
+				Replicas:        2,
+				RaftPort:        8081,
+			},
+			want: []RaftPeer{
+				{ID: "sts-0", Address: "sts-0.headless.ns.svc:8081"},
+				{ID: "sts-1", Address: "sts-1.headless.ns.svc:8081"},
+			},
+		},
+		{
+			name: "custom cluster domain",
+			cfg: RaftDiscoveryConfig{
+				StatefulSetName: "sts",
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "cluster.internal",
+				Replicas:        1,
+				RaftPort:        8081,
+			},
+			want: []RaftPeer{{ID: "sts-0", Address: "sts-0.headless.ns.svc.cluster.internal:8081"}},
 		},
 		{
 			name:    "zero replicas",
@@ -278,6 +306,18 @@ func TestDeriveAdvertiseAddr(t *testing.T) {
 			want:     "sts-2.headless.ns.svc.cluster.local:8081",
 		},
 		{
+			name: "pod svc-only derivation",
+			cfg: RaftDiscoveryConfig{
+				StatefulSetName: "sts",
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "",
+				RaftPort:        8081,
+			},
+			hostname: "sts-2",
+			want:     "sts-2.headless.ns.svc:8081",
+		},
+		{
 			name: "hostname not matching falls back to bind",
 			cfg: RaftDiscoveryConfig{
 				StatefulSetName: "sts",
@@ -362,6 +402,24 @@ func TestPodSANs(t *testing.T) {
 	dns2, _ := PodSANs(&RaftDiscoveryConfig{}, "plain-host")
 	if len(dns2) != 2 || dns2[0] != "plain-host" || dns2[1] != "localhost" {
 		t.Fatalf("podSANs (no headless) = %v", dns2)
+	}
+
+	// Empty cluster domain → SANs end at .svc (no FQDN entry).
+	dns3, _ := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: ""}, "sts-0")
+	want3 := []string{
+		"sts-0",
+		"localhost",
+		"sts-0.headless",
+		"sts-0.headless.ns",
+		"sts-0.headless.ns.svc",
+	}
+	if len(dns3) != len(want3) {
+		t.Fatalf("podSANs (svc-only) dns = %v, want %v", dns3, want3)
+	}
+	for i := range want3 {
+		if dns3[i] != want3[i] {
+			t.Fatalf("podSANs (svc-only) dns[%d] = %q, want %q", i, dns3[i], want3[i])
+		}
 	}
 }
 

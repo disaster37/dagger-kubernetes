@@ -51,10 +51,12 @@ advertises its pod FQDN, and followers serve stale reads while returning
   `tls.ca_path` files remain as a cache. Both Secrets hold CA **private keys**
   and must be RBAC-restricted to the supervisor ServiceAccount.
 - **StatefulSet discovery**: peers are derived from the StatefulSet's stable
-  pod DNS names (`<sts>-<i>.<headless>.<ns>.svc.cluster.local:8081` for
-  `i=0..replicas-1`) — pure DNS arithmetic, no K8s API calls and no new RBAC.
+  pod DNS names (`<sts>-<i>.<headless>.<ns>.svc.<cluster_domain>:8081` for
+  `i=0..replicas-1`; `raft.cluster_domain` defaults to `cluster.local`, and
+  `""` makes addresses end at `.svc` for clusters that only resolve the
+  `.svc` form) — pure DNS arithmetic, no K8s API calls and no new RBAC.
   An explicit `raft.peers` override is kept for non-K8s/testing.
-- **Advertise address**: each node advertises its pod FQDN (derived from
+- **Advertise address**: each node advertises its pod DNS name (derived from
   `os.Hostname()` + headless service + namespace + port), not `127.0.0.1`.
 - **Follower startup**: the hard `WaitForLeader` barrier is replaced with
   `WaitForLeader` (wait until *a* leader exists, not necessarily self). The
@@ -67,7 +69,9 @@ advertises its pod FQDN, and followers serve stale reads while returning
   calls `raft.AddVoter` for missing voters and `raft.RemoveServer` for
   removed voters (scale-up/scale-down, idempotent).
 - **Helm chart**: `Deployment` → `StatefulSet` with `volumeClaimTemplates`
-  (per-pod PVC), a headless Service, `podManagementPolicy: Parallel`, and TLS
+  (per-pod PVC), a headless Service (`publishNotReadyAddresses: true` so peer
+  DNS resolves before pods are Ready — otherwise raft bootstrap and readiness
+  deadlock), `podManagementPolicy: Parallel`, and TLS
   env wiring. The existing control/data Services stay (ClusterIP, select all
   Ready pods).
 - **Single source of truth for the cluster size (2026-08-21 revision):** the

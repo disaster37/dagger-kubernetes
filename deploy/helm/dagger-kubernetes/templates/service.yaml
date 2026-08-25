@@ -8,6 +8,7 @@ metadata:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
 spec:
   clusterIP: None
+  publishNotReadyAddresses: true
   selector:
     {{- include "dagger-kubernetes.selectorLabels" . | nindent 4 }}
   ports:

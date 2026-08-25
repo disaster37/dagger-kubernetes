@@ -69,7 +69,7 @@ data:
       statefulset_name: {{ include "dagger-kubernetes.supervisorStatefulSetName" . | quote }}
       headless_service: {{ include "dagger-kubernetes.supervisorHeadlessService" . | quote }}
       namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
-      cluster_domain: "cluster.local"
+      cluster_domain: {{ .Values.supervisor.config.raft.clusterDomain | quote }}
       apply_timeout: "5s"
       leader_wait_timeout: "30s"
       snapshot_threshold: 1000

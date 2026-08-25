@@ -8,10 +8,6 @@ import (
 	"strings"
 )
 
-// defaultClusterDomain is the Kubernetes cluster DNS suffix when
-// raft.cluster_domain is unset.
-const defaultClusterDomain = "cluster.local"
-
 // defaultRaftPort is the fallback Raft port when bind_addr carries no port.
 const defaultRaftPort = 8081
 
@@ -53,13 +49,12 @@ func NewPeerResolver(cfg *RaftDiscoveryConfig) PeerResolver {
 	}
 }
 
-// clusterDomain returns the configured cluster DNS suffix, defaulting to
-// "cluster.local".
+// clusterDomain returns the configured cluster DNS suffix. The config loader
+// defaults raft.cluster_domain to "cluster.local" (standard clusters); an
+// explicitly empty value makes peer addresses end at ".svc" with no cluster
+// suffix.
 func clusterDomain(cfg *RaftDiscoveryConfig) string {
-	if cfg.ClusterDomain != "" {
-		return cfg.ClusterDomain
-	}
-	return defaultClusterDomain
+	return cfg.ClusterDomain
 }
 
 // raftPort returns the configured Raft port, defaulting to 8081.
@@ -75,13 +70,19 @@ func raftPort(cfg *RaftDiscoveryConfig) int {
 	return defaultRaftPort
 }
 
-// podAddress builds a pod's stable DNS FQDN + port for a given hostname:
-// <host>.<headless>.<ns>.svc.<clusterDomain>:<port>.
+// podAddress builds a pod's stable DNS name + port for a given hostname:
+//   - clusterDomain set:   <host>.<headless>.<ns>.svc.<clusterDomain>:<port>
+//   - clusterDomain empty: <host>.<headless>.<ns>.svc:<port>
 func podAddress(cfg *RaftDiscoveryConfig, clusterDomain, host string) string {
-	return fmt.Sprintf("%s.%s.%s.svc.%s:%d", host, cfg.HeadlessService, cfg.Namespace, clusterDomain, raftPort(cfg))
+	name := fmt.Sprintf("%s.%s.%s.svc", host, cfg.HeadlessService, cfg.Namespace)
+	if clusterDomain != "" {
+		name = fmt.Sprintf("%s.%s", name, clusterDomain)
+	}
+	return fmt.Sprintf("%s:%d", name, raftPort(cfg))
 }
 
-// dnsPeerResolver derives peers from <sts>-<i>.<headless>.<ns>.svc.<clusterDomain>.
+// dnsPeerResolver derives peers from <sts>-<i>.<headless>.<ns>.svc, plus the
+// cluster suffix when clusterDomain is non-empty.
 type dnsPeerResolver struct {
 	cfg           RaftDiscoveryConfig
 	clusterDomain string
@@ -247,7 +248,7 @@ func deriveBindHost(bindAddr string, port int) string {
 
 // DeriveAdvertiseAddr computes this pod's advertise address:
 //   - cfg.AdvertiseAddr if set.
-//   - else if hostname matches <sts>-<ordinal>: "<hostname>.<headless>.<ns>.svc.<clusterDomain>:<port>".
+//   - else if hostname matches <sts>-<ordinal>: "<hostname>.<headless>.<ns>.svc[:<clusterDomain>]:<port>".
 //   - else: the bind host (warn if 127.0.0.1/0.0.0.0 with multi-node).
 func DeriveAdvertiseAddr(cfg *RaftDiscoveryConfig, hostname string) (string, error) {
 	return deriveAdvertiseAddr(cfg, hostname)
@@ -266,7 +267,8 @@ func deriveAdvertiseAddr(cfg *RaftDiscoveryConfig, hostname string) (string, err
 // PodSANs returns the DNS + IP SANs for this pod's leaf cert:
 //
 //	DNS: <hostname>, <hostname>.<headless>, <hostname>.<headless>.<ns>,
-//	     <hostname>.<headless>.<ns>.svc, <hostname>.<headless>.<ns>.svc.<clusterDomain>,
+//	     <hostname>.<headless>.<ns>.svc,
+//	     <hostname>.<headless>.<ns>.svc.<clusterDomain> (when clusterDomain != ""),
 //	     "localhost"
 //	IP:   127.0.0.1
 func PodSANs(cfg *RaftDiscoveryConfig, hostname string) (dnsNames []string, ipAddrs []net.IP) {
@@ -276,7 +278,10 @@ func PodSANs(cfg *RaftDiscoveryConfig, hostname string) (dnsNames []string, ipAd
 		names = append(names, base)
 		if cfg.Namespace != "" {
 			baseNS := fmt.Sprintf("%s.%s", base, cfg.Namespace)
-			names = append(names, baseNS, fmt.Sprintf("%s.svc", baseNS), fmt.Sprintf("%s.svc.%s", baseNS, clusterDomain(cfg)))
+			names = append(names, baseNS, fmt.Sprintf("%s.svc", baseNS))
+			if domain := clusterDomain(cfg); domain != "" {
+				names = append(names, fmt.Sprintf("%s.svc.%s", baseNS, domain))
+			}
 		}
 	}
 	// Dedupe while preserving order.

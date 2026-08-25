@@ -405,7 +405,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `statefulset_name`                        | `""`                                                     | StatefulSet name for DNS discovery.                                                                                                           |
 |                 | `headless_service`                        | `""`                                                     | Headless Service name for stable pod DNS.                                                                                                     |
 |                 | `namespace`                               | `""` (fleet ns)                                          | K8s namespace for pod DNS.                                                                                                                    |
-|                 | `cluster_domain`                          | `cluster.local`                                          | K8s cluster DNS suffix.                                                                                                                       |
+|                 | `cluster_domain`                          | `cluster.local`                                          | K8s cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<cluster_domain>`). Set `""` to end peer addresses at `.svc` (no suffix) on clusters whose DNS only resolves the `.svc` form. |
 |                 | `apply_timeout`                           | `5s`                                                     | `raft.Apply` enqueue timeout.                                                                                                                 |
 |                 | `leader_wait_timeout`                     | `30s`                                                    | Startup wait for leadership.                                                                                                                  |
 |                 | `snapshot_threshold`                      | `1000`                                                   | Raft log snapshot threshold.                                                                                                                  |
@@ -946,8 +946,12 @@ dependency has been removed from the project entirely.
   itself as the only voter and is always the leader.
 - **Multi-node:** the Helm chart ships a `StatefulSet` + headless Service.
   Peers are discovered from the StatefulSet's stable pod DNS names
-  (`<sts>-<i>.<headless>.<ns>.svc.cluster.local:8081` for `i=0..replicas-1`) —
-  pure DNS arithmetic, no K8s API calls. Each pod advertises its pod FQDN, not
+  (`<sts>-<i>.<headless>.<ns>.svc:8081` for `i=0..replicas-1`; the Helm chart
+  defaults `raft.cluster_domain` to `""` so addresses end at `.svc` — set it
+  to `cluster.local` or your cluster's real domain to use full FQDNs) — pure
+  DNS arithmetic, no K8s API calls. The headless Service sets
+  `publishNotReadyAddresses: true` so pods resolve (and can elect a leader)
+  before they are Ready. Each pod advertises its pod DNS name, not
   `127.0.0.1`. In the chart the voter count is derived from
   `supervisor.replicaCount` (each supervisor pod is one voter; there is no
   separate `raft.replicas` knob). Set it to an **odd number ≥ 3** for quorum

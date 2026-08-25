@@ -132,7 +132,7 @@ raft:
   statefulset_name: ""     # e.g. "dagger-kubernetes-supervisor" (DNS discovery).
   headless_service: ""     # e.g. "dagger-kubernetes-headless" (DNS discovery).
   namespace: ""            # K8s namespace for pod DNS (default = release ns).
-  cluster_domain: "cluster.local"
+  cluster_domain: "cluster.local"   # K8s cluster DNS suffix; "" = peer addresses end at .svc (no suffix).
   apply_timeout: "5s"
   leader_wait_timeout: "30s"
   snapshot_threshold: 1000
