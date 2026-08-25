@@ -356,6 +356,17 @@ come from env/secrets, never the file.
 > `cache.registries[].password` (a slice element) is likewise not env-bindable:
 > use the `password_secret` K8s-Secret reference for multi-backend registries.
 
+> **Duration values** accept Go `time.ParseDuration` syntax (`ns`, `us`, `µs`,
+> `ms`, `s`, `m`, `h`) plus the extensions `d` (day) and `w` (week), so
+> `"7d"`, `"1w"`, `"1.5d12h"` and `"168h"` are all valid for keys like
+> `auth.jwt.refresh_ttl`, `history.gc.max_age` or `lease_ttl`.
+>
+> **Map keys may contain dots** — registry hostnames in
+> `fleet.engine_registry_mirrors` (`docker.io`, `ghcr.io`,
+> `public.ecr.aws`) and label keys in `fleet.engine_pvc_labels` /
+> `fleet.engine_node_selector` (e.g.
+> `recurring-job-group.longhorn.io/nobackup`) are preserved verbatim.
+
 ### Full reference
 
 See [`config/config.app.yaml.sample`](../config/config.app.yaml.sample) for every key with
@@ -671,7 +682,7 @@ A background sweeper can purge stale cache tags. It is **disabled by default**:
 cache:
   gc:
     enabled: true                 # master switch
-    max_age: "168h"               # purge tags older than 7d
+    max_age: "168h"               # purge tags older than 7d ("7d" also accepted)
     schedule: "1h"                # sweeper interval
     min_refs_to_keep: 3           # keep the newest N tags per minor version
     protect_active_versions: true # never purge tags for versions with running engines
@@ -703,7 +714,7 @@ from the `/history` page. See ADR-018.
 history:
   gc:
     enabled: true                 # master switch (disabled by default)
-    max_age: "720h"               # purge traces whose last update is older than 30d
+    max_age: "720h"               # purge traces whose last update is older than 30d ("30d" also accepted)
     schedule: "1h"                # sweeper interval
 ```
 

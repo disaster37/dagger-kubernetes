@@ -581,7 +581,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.cache.s3.bucket` | string | `""` | S3 bucket name (when backend=s3). |
 | `supervisor.config.cache.s3.region` | string | `""` | S3 region (when backend=s3). |
 | `supervisor.config.history.gc.enabled` | bool | `false` | Master switch for the history auto-purge sweeper. |
-| `supervisor.config.history.gc.maxAge` | string | `"720h"` | Purge traces older than this (30d default). |
+| `supervisor.config.history.gc.maxAge` | string | `"720h"` | Purge traces older than this (30d default). Duration strings accept Go units plus `d` (day) and `w` (week), e.g. `7d`, `1w`. |
 | `supervisor.config.history.gc.schedule` | string | `"1h"` | History sweeper ticker interval. |
 | `supervisor.config.fleet.maxReplicasPerVersion` | int | `3` | Maximum engine replicas per Dagger version. |
 | `supervisor.config.fleet.maxSessionsPerReplica` | int | `8` | Maximum concurrent sessions per engine replica. |
@@ -590,7 +590,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.fleet.engineImageRegistry` | string | `"registry.dagger.io/engine"` | Engine container image registry. |
 | `supervisor.config.fleet.engineStorageClass` | string | `""` | StorageClass for engine PVCs (empty = cluster default). |
 | `supervisor.config.fleet.engineStorageSize` | string | `"50Gi"` | PVC size for each engine. |
-| `supervisor.config.fleet.enginePvcLabels` | object | `{}` | Extra labels added to engine PVCs (merged with managed labels app/version, which take precedence). |
+| `supervisor.config.fleet.enginePvcLabels` | object | `{}` | Extra labels added to engine PVCs (merged with managed labels app/version, which take precedence). Keys may contain dots (e.g. `recurring-job-group.longhorn.io/nobackup`) and are preserved verbatim. |
 | `supervisor.config.fleet.engineCPURequest` | string | `"500m"` | Engine CPU request. |
 | `supervisor.config.fleet.engineCPULimit` | string | `"2000m"` | Engine CPU limit. |
 | `supervisor.config.fleet.engineMemoryRequest` | string | `"1Gi"` | Engine memory request. |
@@ -608,7 +608,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the engine-registry-auth Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
 | `supervisor.config.fleet.engineDebug` | bool | `false` | Enable engine.toml [debug]. |
 | `supervisor.config.fleet.engineLogFormat` | string | `"json"` | Engine log format (json, text; empty omits). |
-| `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). |
+| `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). Dotted keys such as `docker.io`, `ghcr.io`, `public.ecr.aws` are preserved verbatim. |
 | `supervisor.config.leaseTtl` | string | `"2m"` | Engine session lease TTL. |
 | `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
 | `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21"]` | Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor). |
@@ -635,7 +635,7 @@ Configure it under `supervisor.config.history`:
 | `auth.jwt.secretRef.name` | string | `""` | K8s Secret name holding the JWT secret (takes precedence over `auth.jwt.secret`; the chart-managed `<release>-jwt` Secret is not rendered). |
 | `auth.jwt.secretRef.key` | string | `"secret"` | Key inside the Secret holding the JWT secret. |
 | `auth.jwt.accessTtl` | string | `"15m"` | JWT access token TTL. |
-| `auth.jwt.refreshTtl` | string | `"168h"` | JWT refresh token TTL. |
+| `auth.jwt.refreshTtl` | string | `"168h"` | JWT refresh token TTL. Duration strings accept Go units plus `d` (day) and `w` (week), e.g. `7d`. |
 | `auth.oauth.enabled` | bool | `false` | Enable OAuth2 authentication. |
 | `auth.oauth.provider` | string | `"github"` | OAuth2 provider: "github" or "oidc". |
 | `auth.oauth.clientId` | string | `""` | OAuth2 client ID. |

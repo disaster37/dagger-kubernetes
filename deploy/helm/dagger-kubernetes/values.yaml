@@ -134,7 +134,7 @@ supervisor:
         bucket: ""
         region: ""
 ## @param supervisor.config.history.gc.enabled Master switch for the history auto-purge sweeper.
-## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default).
+## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.history.gc.schedule History sweeper ticker interval.
     history:
       gc:
@@ -148,7 +148,7 @@ supervisor:
 ## @param supervisor.config.fleet.engineImageRegistry Engine container image registry.
 ## @param supervisor.config.fleet.engineStorageClass StorageClass for engine PVCs (empty = cluster default).
 ## @param supervisor.config.fleet.engineStorageSize PVC size for each engine.
-## @param supervisor.config.fleet.enginePvcLabels [object] Extra labels added to engine PVCs (merged with managed labels app/version, which take precedence).
+## @param supervisor.config.fleet.enginePvcLabels [object] Extra labels added to engine PVCs (merged with managed labels app/version, which take precedence). Keys may contain dots (e.g. `recurring-job-group.longhorn.io/nobackup`) and are preserved verbatim.
 ## @param supervisor.config.fleet.engineCPURequest Engine CPU request.
 ## @param supervisor.config.fleet.engineCPULimit Engine CPU limit.
 ## @param supervisor.config.fleet.engineMemoryRequest Engine memory request.
@@ -222,7 +222,8 @@ supervisor:
       engineDebug: false
       engineLogFormat: "json"
       # engineRegistryMirrors: engine.toml registry mirrors (quote registry
-      # names containing dots, or YAML nests them):
+      # names containing dots, or YAML nests them; the supervisor preserves
+      # dotted keys such as "docker.io", "ghcr.io", "public.ecr.aws" verbatim):
       # engineRegistryMirrors:
       #   "docker.io": ["mirror.gcr.io", "my-mirror.corp.example"]
       engineRegistryMirrors: {}
@@ -267,7 +268,7 @@ supervisor:
 ## @param auth.jwt.secretRef.name [optional] K8s Secret name holding the JWT secret (takes precedence over auth.jwt.secret; the chart-managed <release>-jwt Secret is not rendered).
 ## @param auth.jwt.secretRef.key Key inside the Secret holding the JWT secret (empty = "secret").
 ## @param auth.jwt.accessTtl JWT access token TTL.
-## @param auth.jwt.refreshTtl JWT refresh token TTL.
+## @param auth.jwt.refreshTtl JWT refresh token TTL. Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d".
 ## @param auth.oauth.enabled Enable OAuth2 authentication.
 ## @param auth.oauth.provider OAuth2 provider: "github" or "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
 ## @param auth.oauth.clientId OAuth2 client ID.

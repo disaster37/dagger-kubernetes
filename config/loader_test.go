@@ -3,9 +3,12 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/viper"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -915,5 +918,415 @@ func TestLoadRejectsInvalidCIConfig(t *testing.T) {
 				t.Fatalf("Load error = %q, want wrapped ci validation message", err.Error())
 			}
 		})
+	}
+}
+
+func TestLoadExtendedDurationUnits(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`
+auth:
+  jwt:
+    refresh_ttl: "7d"
+cache:
+  gc:
+    max_age: "30d"
+    schedule: "1d12h"
+history:
+  gc:
+    max_age: "7d"
+fleet:
+  replica_idle_ttl: "1w"
+  version_retention: "1.5d"
+cli:
+  release_list_ttl: "2d3h"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Auth.JWT.RefreshTTL != 168*time.Hour {
+		t.Fatalf("auth.jwt.refresh_ttl = %v, want 168h (7d)", cfg.Auth.JWT.RefreshTTL)
+	}
+	if cfg.Cache.GC.MaxAge != 30*24*time.Hour {
+		t.Fatalf("cache.gc.max_age = %v, want 720h (30d)", cfg.Cache.GC.MaxAge)
+	}
+	if cfg.Cache.GC.Schedule != 36*time.Hour {
+		t.Fatalf("cache.gc.schedule = %v, want 36h (1d12h)", cfg.Cache.GC.Schedule)
+	}
+	if cfg.History.GC.MaxAge != 168*time.Hour {
+		t.Fatalf("history.gc.max_age = %v, want 168h (7d)", cfg.History.GC.MaxAge)
+	}
+	if cfg.Fleet.ReplicaIdleTTL != 7*24*time.Hour {
+		t.Fatalf("fleet.replica_idle_ttl = %v, want 168h (1w)", cfg.Fleet.ReplicaIdleTTL)
+	}
+	if cfg.Fleet.VersionRetention != 36*time.Hour {
+		t.Fatalf("fleet.version_retention = %v, want 36h (1.5d)", cfg.Fleet.VersionRetention)
+	}
+	if cfg.CLI.ReleaseListTTL != 51*time.Hour {
+		t.Fatalf("cli.release_list_ttl = %v, want 51h (2d3h)", cfg.CLI.ReleaseListTTL)
+	}
+}
+
+func TestLoadEnvExtendedDuration(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_AUTH_JWT_REFRESH_TTL", "7d")
+	t.Setenv("DAGGER_KUBERNETES_HISTORY_GC_MAX_AGE", "14d")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if cfg.Auth.JWT.RefreshTTL != 168*time.Hour {
+		t.Fatalf("env auth.jwt.refresh_ttl = %v, want 168h (7d)", cfg.Auth.JWT.RefreshTTL)
+	}
+	if cfg.History.GC.MaxAge != 14*24*time.Hour {
+		t.Fatalf("env history.gc.max_age = %v, want 336h (14d)", cfg.History.GC.MaxAge)
+	}
+}
+
+func TestLoadDottedMapKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`
+fleet:
+  engine_pvc_labels:
+    recurring-job-group.longhorn.io/nobackup: "enabled"
+    recurring-job-group.longhorn.io/source: "enabled"
+    recurring-job.longhorn.io/snapshots: "enabled"
+  engine_node_selector:
+    node-role.kubernetes.io/control-plane: "true"
+  engine_extra_env_from:
+    http.proxy:
+      secretName: "proxy"
+      key: "HTTP_PROXY"
+  engine_registry_mirrors:
+    docker.io:
+      - "hm-registry.hm.dm.ad/docker-hub"
+      - "mirror.gcr.io"
+    public.ecr.aws:
+      - "hm-registry.hm.dm.ad/docker-aws"
+    ghcr.io:
+      - "hm-registry.hm.dm.ad/docker-github"
+    docker.elastic.co:
+      - "hm-registry.hm.dm.ad/docker-elastic"
+    gcr.io:
+      - "hm-registry.hm.dm.ad/gcr.io"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	wantLabels := map[string]string{
+		"recurring-job-group.longhorn.io/nobackup": "enabled",
+		"recurring-job-group.longhorn.io/source":   "enabled",
+		"recurring-job.longhorn.io/snapshots":      "enabled",
+	}
+	if len(cfg.Fleet.EnginePVCLabels) != len(wantLabels) {
+		t.Fatalf("engine_pvc_labels = %v, want %v", cfg.Fleet.EnginePVCLabels, wantLabels)
+	}
+	for k, want := range wantLabels {
+		if cfg.Fleet.EnginePVCLabels[k] != want {
+			t.Errorf("engine_pvc_labels[%q] = %q, want %q", k, cfg.Fleet.EnginePVCLabels[k], want)
+		}
+	}
+
+	if cfg.Fleet.EngineNodeSelector["node-role.kubernetes.io/control-plane"] != "true" {
+		t.Errorf("engine_node_selector = %v, want dotted key preserved", cfg.Fleet.EngineNodeSelector)
+	}
+
+	src, ok := cfg.Fleet.EngineExtraEnvFrom["http.proxy"]
+	if !ok {
+		t.Fatalf("engine_extra_env_from = %v, want dotted key http.proxy", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	if src.SecretName != "proxy" || src.Key != "HTTP_PROXY" {
+		t.Errorf("engine_extra_env_from[http.proxy] = %+v", src)
+	}
+
+	wantMirrors := map[string][]string{
+		"docker.io":         {"hm-registry.hm.dm.ad/docker-hub", "mirror.gcr.io"},
+		"public.ecr.aws":    {"hm-registry.hm.dm.ad/docker-aws"},
+		"ghcr.io":           {"hm-registry.hm.dm.ad/docker-github"},
+		"docker.elastic.co": {"hm-registry.hm.dm.ad/docker-elastic"},
+		"gcr.io":            {"hm-registry.hm.dm.ad/gcr.io"},
+	}
+	if len(cfg.Fleet.EngineRegistryMirrors) != len(wantMirrors) {
+		t.Fatalf("engine_registry_mirrors = %v, want %v", cfg.Fleet.EngineRegistryMirrors, wantMirrors)
+	}
+	for k, want := range wantMirrors {
+		got := cfg.Fleet.EngineRegistryMirrors[k]
+		if len(got) != len(want) {
+			t.Fatalf("engine_registry_mirrors[%q] = %v, want %v", k, got, want)
+		}
+		for i := range want {
+			if got[i] != want[i] {
+				t.Errorf("engine_registry_mirrors[%q][%d] = %q, want %q", k, i, got[i], want[i])
+			}
+		}
+	}
+}
+
+func TestLoadRejectsInvalidDuration(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{name: "jwt refresh_ttl", content: "auth:\n  jwt:\n    refresh_ttl: \"banana\"\n"},
+		{name: "history gc max_age", content: "history:\n  gc:\n    max_age: \"7x\"\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.app.yaml")
+			if err := os.WriteFile(path, []byte(tc.content), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+
+			_, err := Load(path)
+			if err == nil {
+				t.Fatal("Load = nil, want duration parse error")
+			}
+			if !strings.Contains(err.Error(), "unmarshal config") || !strings.Contains(err.Error(), "time:") {
+				t.Fatalf("Load error = %q, want wrapped duration parse error", err.Error())
+			}
+		})
+	}
+}
+
+func TestParseExtendedDuration(t *testing.T) {
+	tests := []struct {
+		name    string
+		in      string
+		want    time.Duration
+		wantErr string
+	}{
+		{name: "days", in: "7d", want: 168 * time.Hour},
+		{name: "weeks", in: "1w", want: 7 * 24 * time.Hour},
+		{name: "two weeks", in: "2w", want: 14 * 24 * time.Hour},
+		{name: "fractional days", in: "1.5d", want: 36 * time.Hour},
+		{name: "negative days", in: "-7d", want: -168 * time.Hour},
+		{name: "days and hours", in: "1d12h", want: 36 * time.Hour},
+		{name: "mixed with minutes", in: "2d3h4m", want: 51*time.Hour + 4*time.Minute},
+		{name: "std minutes", in: "90m", want: 90 * time.Minute},
+		{name: "std composite", in: "1m30s", want: 90 * time.Second},
+		{name: "std hours", in: "168h", want: 168 * time.Hour},
+		{name: "zero", in: "0", want: 0},
+		{name: "zero unit", in: "0s", want: 0},
+		{name: "fractional hours", in: "1.5h", want: 90 * time.Minute},
+		{name: "microseconds", in: "250us", want: 250 * time.Microsecond},
+		{name: "huge days overflow float", in: strings.Repeat("9", 400) + "d", wantErr: "time:"},
+		{name: "huge hours overflow int", in: strings.Repeat("9", 400) + "h", wantErr: "time:"},
+		{name: "empty", in: "", wantErr: "invalid duration"},
+		{name: "garbage", in: "abc", wantErr: "invalid duration"},
+		{name: "unknown unit", in: "7x", wantErr: "unknown unit"},
+		{name: "double unit", in: "7dd", wantErr: "time:"},
+		{name: "unit first", in: "d7", wantErr: "time:"},
+		{name: "bad decimal", in: "1.2.3d", wantErr: "time:"},
+		{name: "space", in: "7d 1h", wantErr: "time:"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := parseExtendedDuration(tt.in)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("parseExtendedDuration(%q) = %v, want %v", tt.in, err, tt.want)
+				}
+				if got != tt.want {
+					t.Fatalf("parseExtendedDuration(%q) = %v, want %v", tt.in, got, tt.want)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("parseExtendedDuration(%q) = %v, want error containing %q", tt.in, got, tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("parseExtendedDuration(%q) error = %q, want containing %q", tt.in, err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestExactKeyPrefix(t *testing.T) {
+	tests := []struct {
+		name string
+		src  any
+		key  string
+		want string
+	}{
+		{name: "nil source", src: nil, key: "a.b", want: ""},
+		{name: "longest dotted match", src: map[string]any{"a.b": 1, "a": 2, "x": 3}, key: "a.b.c", want: "a.b"},
+		{name: "exact dotted match", src: map[string]any{"docker.io": []any{"x"}}, key: "docker.io", want: "docker.io"},
+		{name: "no match", src: map[string]any{"a": 1}, key: "x.y", want: ""},
+		{name: "typed string map match", src: map[string]string{"a.b": "v"}, key: "a.b.c", want: "a.b"},
+		{name: "typed string map no match", src: map[string]string{"a": "v"}, key: "b.c", want: ""},
+		{name: "unhandled source type", src: []string{"a"}, key: "a.b", want: ""},
+		{name: "empty key", src: map[string]any{"a": 1}, key: "", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := exactKeyPrefix(tt.src, tt.key); got != tt.want {
+				t.Fatalf("exactKeyPrefix(%#v, %q) = %q, want %q", tt.src, tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestInsertSetting(t *testing.T) {
+	t.Run("fallback walk without structure", func(t *testing.T) {
+		v := viper.New()
+		dst := map[string]any{}
+		insertSetting(v, dst, "x.y.z", "v")
+		sub, ok := dst["x"].(map[string]any)
+		if !ok {
+			t.Fatalf("dst = %#v, want nested maps", dst)
+		}
+		sub2, ok := sub["y"].(map[string]any)
+		if !ok || sub2["z"] != "v" {
+			t.Fatalf("dst = %#v, want x.y.z = v", dst)
+		}
+	})
+
+	t.Run("descends into existing subtree", func(t *testing.T) {
+		v := viper.New()
+		v.Set("a.b", 1)
+		v.Set("a.c", 2)
+		dst := map[string]any{}
+		insertSetting(v, dst, "a.b", 1)
+		insertSetting(v, dst, "a.c", 2)
+		sub, ok := dst["a"].(map[string]any)
+		if !ok || sub["b"] != 1 || sub["c"] != 2 {
+			t.Fatalf("dst = %#v, want a.b = 1 and a.c = 2", dst)
+		}
+	})
+
+	t.Run("dotted map key preserved", func(t *testing.T) {
+		v := viper.New()
+		v.Set("fleet.engine_registry_mirrors", map[string]any{"docker.io": []any{"mirror.gcr.io"}})
+		dst := map[string]any{}
+		insertSetting(v, dst, "fleet.engine_registry_mirrors.docker.io", []string{"mirror.gcr.io"})
+		fleet, ok := dst["fleet"].(map[string]any)
+		if !ok {
+			t.Fatalf("dst = %#v, want fleet subtree", dst)
+		}
+		mirrors, ok := fleet["engine_registry_mirrors"].(map[string]any)
+		if !ok {
+			t.Fatalf("dst = %#v, want engine_registry_mirrors map", dst)
+		}
+		if _, ok := mirrors["docker.io"]; !ok {
+			t.Fatalf("mirrors = %#v, want intact docker.io key", mirrors)
+		}
+		if _, mangled := mirrors["docker"]; mangled {
+			t.Fatalf("mirrors = %#v, docker.io key was split on the dot", mirrors)
+		}
+	})
+
+	t.Run("dotted key with nested map value", func(t *testing.T) {
+		v := viper.New()
+		v.Set("fleet.engine_extra_env_from", map[string]any{"http.proxy": map[string]any{"secretName": "proxy", "key": "HTTP_PROXY"}})
+		dst := map[string]any{}
+		insertSetting(v, dst, "fleet.engine_extra_env_from.http.proxy.secretname", "proxy")
+		fleet, ok := dst["fleet"].(map[string]any)
+		if !ok {
+			t.Fatalf("dst = %#v, want fleet subtree", dst)
+		}
+		envFrom, ok := fleet["engine_extra_env_from"].(map[string]any)
+		if !ok {
+			t.Fatalf("dst = %#v, want engine_extra_env_from map", dst)
+		}
+		proxy, ok := envFrom["http.proxy"].(map[string]any)
+		if !ok {
+			t.Fatalf("envFrom = %#v, want intact http.proxy key", envFrom)
+		}
+		if proxy["secretname"] != "proxy" {
+			t.Fatalf("envFrom = %#v, want http.proxy.secretname = proxy", envFrom)
+		}
+	})
+}
+
+func TestCollectSettingsSkipsShadowedKeys(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_SERVER", "whole-tree-value")
+	v := viper.New()
+	v.SetEnvPrefix("DAGGER_KUBERNETES")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv()
+	v.SetDefault("server.control_addr", ":8080")
+	v.SetDefault("log_level", "info")
+
+	settings := collectSettings(v)
+	if _, ok := settings["server"]; ok {
+		t.Fatalf("settings = %#v, want server subtree shadowed by env and skipped", settings)
+	}
+	if settings["log_level"] != "info" {
+		t.Fatalf("settings[log_level] = %v, want info", settings["log_level"])
+	}
+}
+
+func TestStringToDurationHookFunc(t *testing.T) {
+	hook := stringToDurationHookFunc()
+	durType := reflect.TypeOf(time.Duration(0))
+	strType := reflect.TypeOf("")
+
+	out, err := hook(durType, durType, 5*time.Second)
+	if err != nil || out != 5*time.Second {
+		t.Fatalf("non-string passthrough = (%v, %v), want (5s, nil)", out, err)
+	}
+	out, err = hook(strType, strType, "keep")
+	if err != nil || out != "keep" {
+		t.Fatalf("non-duration target passthrough = (%v, %v), want (keep, nil)", out, err)
+	}
+	out, err = hook(strType, durType, "7d")
+	if err != nil || out != 168*time.Hour {
+		t.Fatalf("7d = (%v, %v), want (168h, nil)", out, err)
+	}
+	out, err = hook(strType, durType, "nope")
+	if err == nil || out != nil {
+		t.Fatalf("invalid duration = (%v, %v), want error", out, err)
+	}
+}
+
+func TestStringToWeakSliceHookFunc(t *testing.T) {
+	hook := stringToWeakSliceHookFunc(",")
+	strType := reflect.TypeOf("")
+	sliceType := reflect.TypeOf([]string{})
+	intType := reflect.TypeOf(0)
+
+	out, err := hook(strType, sliceType, "a,b")
+	if err != nil {
+		t.Fatalf("split = %v", err)
+	}
+	if got := out.([]string); len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("split = %v, want [a b]", got)
+	}
+	out, err = hook(strType, sliceType, "")
+	if err != nil {
+		t.Fatalf("empty split = %v", err)
+	}
+	if got := out.([]string); len(got) != 0 {
+		t.Fatalf("empty split = %v, want empty slice", got)
+	}
+	out, err = hook(strType, strType, "x")
+	if err != nil || out != "x" {
+		t.Fatalf("non-slice target passthrough = (%v, %v), want (x, nil)", out, err)
+	}
+	out, err = hook(intType, sliceType, 5)
+	if err != nil || out != 5 {
+		t.Fatalf("non-string passthrough = (%v, %v), want (5, nil)", out, err)
+	}
+}
+
+func TestDecodeSettingsRejectsNonPointer(t *testing.T) {
+	err := decodeSettings(nil, struct{}{})
+	if err == nil || !strings.Contains(err.Error(), "pointer") {
+		t.Fatalf("decodeSettings(nil, struct) = %v, want pointer error", err)
 	}
 }

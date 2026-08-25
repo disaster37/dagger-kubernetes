@@ -11,6 +11,12 @@
 #   fleet.max_replicas_per_version -> DAGGER_KUBERNETES_FLEET_MAX_REPLICAS_PER_VERSION
 # Environment variables take precedence over this file.
 #
+# Duration values accept Go time.ParseDuration syntax (ns, us, µs, ms, s, m, h)
+# plus the extensions "d" (day) and "w" (week), e.g. "7d", "1w", "1.5d12h",
+# "2d3h". Map keys may contain dots — e.g. fleet.engine_registry_mirrors
+# ("docker.io", "ghcr.io") and fleet.engine_pvc_labels
+# ("recurring-job-group.longhorn.io/nobackup") — and are preserved verbatim.
+#
 # When deploying with the Helm chart (recommended for production), the
 # config file is rendered from deploy/helm/dagger-kubernetes/values.yaml and
 # auto-wires telemetry/cache URLs to the in-cluster dependency Services.
@@ -46,7 +52,7 @@ auth:
     secret: ""                                      # HS256 signing key (>= 32 bytes, enforced); empty = auto-generated and persisted in the DB.
                                                     # In production set via env (DAGGER_KUBERNETES_AUTH_JWT_SECRET) or the Helm <release>-jwt Secret — never this file.
     access_ttl: "15m"
-    refresh_ttl: "168h"                             # 7d; refresh rotated on use.
+    refresh_ttl: "7d"                               # 168h; refresh rotated on use. "d"/"w" units accepted.
 
   # API-token plaintext recovery (Connect-env UI). AES-256-GCM key (>= 32 bytes).
   # Empty = auto-generated and persisted in the DB meta table (dev mode).

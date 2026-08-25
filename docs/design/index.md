@@ -31,3 +31,4 @@ the decision.
 | 022  | [OAuth group allowlists + regex group mapping](ADR-022-oauth-group-allowlists-and-regex-mapping.md) |
 | 023  | [On-the-fly Dagger CLI provisioning addon](ADR-023-cli-provisioning.md) |
 | 024  | [CI integration — nested Dagger step view](ADR-024-ci-nested-steps.md) |
+| 025  | [Robust config decoding — extended durations and dot-safe map keys](ADR-025-config-decode-durations-dotted-keys.md) |
