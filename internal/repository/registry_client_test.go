@@ -138,10 +138,10 @@ func TestRegistryManifestSize(t *testing.T) {
 		{
 			name: "no-sizes-fallback-head",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				switch {
-				case r.Method == http.MethodGet:
-					_, _ = w.Write([]byte(fmt.Sprintf(`{"config":{"digest":"sha256:cfg"},"layers":[{"digest":"%s"},{"digest":"%s"}]}`, digestRepeat("1"), digestRepeat("2"))))
-				case r.Method == http.MethodHead:
+				switch r.Method {
+				case http.MethodGet:
+					_, _ = fmt.Fprintf(w, `{"config":{"digest":"sha256:cfg"},"layers":[{"digest":"%s"},{"digest":"%s"}]}`, digestRepeat("1"), digestRepeat("2"))
+				case http.MethodHead:
 					if r.URL.Path == "/v2/dagger-cache/blobs/"+digestRepeat("1") {
 						w.Header().Set("Content-Length", "40")
 					} else if r.URL.Path == "/v2/dagger-cache/blobs/"+digestRepeat("2") {

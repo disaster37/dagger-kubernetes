@@ -30,7 +30,7 @@ func TestNewPeerResolverSelection(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			resolver := NewPeerResolver(tc.cfg)
+			resolver := NewPeerResolver(&tc.cfg)
 			got := typeName(resolver)
 			if got != tc.want {
 				t.Fatalf("resolver type = %s, want %s", got, tc.want)
@@ -96,7 +96,7 @@ func TestDNSPeerResolverResolve(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			r := &dnsPeerResolver{cfg: tc.cfg, clusterDomain: clusterDomain(tc.cfg)}
+			r := &dnsPeerResolver{cfg: tc.cfg, clusterDomain: clusterDomain(&tc.cfg)}
 			got, err := r.Resolve()
 			if tc.wantErr {
 				if err == nil {
@@ -128,7 +128,7 @@ func TestDNSPeerResolverSelf(t *testing.T) {
 		Replicas:        3,
 		RaftPort:        8081,
 	}
-	r := &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(cfg)}
+	r := &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(&cfg)}
 
 	t.Run("matches pod ordinal", func(t *testing.T) {
 		self, err := r.selfFor("sts-1")
@@ -165,7 +165,7 @@ func TestDNSPeerResolverSelf(t *testing.T) {
 	})
 
 	t.Run("Self resolves via injected hostname", func(t *testing.T) {
-		r3 := &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(cfg), hostname: "sts-1"}
+		r3 := &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(&cfg), hostname: "sts-1"}
 		self, err := r3.Self()
 		if err != nil {
 			t.Fatalf("Self: %v", err)
@@ -177,7 +177,7 @@ func TestDNSPeerResolverSelf(t *testing.T) {
 	})
 
 	t.Run("Self falls back to os.Hostname", func(t *testing.T) {
-		r4 := &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(cfg)}
+		r4 := &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(&cfg)}
 		self, err := r4.Self()
 		if err == nil {
 			// The test host name usually does not match "<sts>-<ordinal>",
@@ -297,7 +297,7 @@ func TestDeriveAdvertiseAddr(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := DeriveAdvertiseAddr(tc.cfg, tc.hostname)
+			got, err := DeriveAdvertiseAddr(&tc.cfg, tc.hostname)
 			if err != nil {
 				t.Fatalf("DeriveAdvertiseAddr: %v", err)
 			}
@@ -337,7 +337,7 @@ func TestPodSANs(t *testing.T) {
 		Namespace:       "ns",
 		ClusterDomain:   "cluster.local",
 	}
-	dns, ips := PodSANs(cfg, "sts-0")
+	dns, ips := PodSANs(&cfg, "sts-0")
 	want := []string{
 		"sts-0",
 		"localhost",
@@ -359,7 +359,7 @@ func TestPodSANs(t *testing.T) {
 	}
 
 	// No headless service → only hostname + localhost + IP.
-	dns2, _ := PodSANs(RaftDiscoveryConfig{}, "plain-host")
+	dns2, _ := PodSANs(&RaftDiscoveryConfig{}, "plain-host")
 	if len(dns2) != 2 || dns2[0] != "plain-host" || dns2[1] != "localhost" {
 		t.Fatalf("podSANs (no headless) = %v", dns2)
 	}

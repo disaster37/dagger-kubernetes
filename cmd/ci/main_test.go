@@ -495,8 +495,8 @@ type collectSink struct {
 	events []domain.CIEvent
 }
 
-func (s *collectSink) Emit(e domain.CIEvent) error {
-	s.events = append(s.events, e)
+func (s *collectSink) Emit(e *domain.CIEvent) error {
+	s.events = append(s.events, *e)
 	return nil
 }
 
@@ -674,8 +674,8 @@ func TestStreamStepsPollsUntilCancelled(t *testing.T) {
 
 type errSink struct{}
 
-func (errSink) Emit(domain.CIEvent) error { return fmt.Errorf("sink boom") }
-func (errSink) Flush() error              { return nil }
+func (errSink) Emit(*domain.CIEvent) error { return fmt.Errorf("sink boom") }
+func (errSink) Flush() error               { return nil }
 
 func TestPollTraceOnceNilTraceError(t *testing.T) {
 	// GetTrace succeeds with a nil trace -> Advance wraps the nil-trace error.

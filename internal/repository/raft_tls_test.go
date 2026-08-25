@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"net"
@@ -15,8 +16,8 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func testRaftTLSCfg(dir string) RaftTLSConfig {
-	return RaftTLSConfig{
+func testRaftTLSCfg(dir string) *RaftTLSConfig {
+	return &RaftTLSConfig{
 		Enabled:      true,
 		Dir:          dir,
 		Validity:     8760 * time.Hour,
@@ -73,7 +74,7 @@ func TestLoadOrBuildRaftTLSManualMode(t *testing.T) {
 		t.Fatalf("write key: %v", err)
 	}
 
-	m, cfg, err := LoadOrBuildRaftTLS(RaftTLSConfig{
+	m, cfg, err := LoadOrBuildRaftTLS(&RaftTLSConfig{
 		Enabled:      true,
 		Organization: "org",
 		CACertPath:   caPath,
@@ -93,13 +94,14 @@ func TestLoadOrBuildRaftTLSManualMode(t *testing.T) {
 	if len(cfg.Certificates) != 1 {
 		t.Fatalf("Certificates = %d, want 1", len(cfg.Certificates))
 	}
+	//nolint:staticcheck // caPool is built manually, not from SystemCertPool, so Subjects() is accurate here.
 	if m.caPool == nil || len(m.caPool.Subjects()) == 0 {
 		t.Fatal("CA pool empty")
 	}
 }
 
 func TestLoadOrBuildRaftTLSManualModeMissingFiles(t *testing.T) {
-	if _, _, err := LoadOrBuildRaftTLS(RaftTLSConfig{Enabled: true, CACertPath: "/nonexistent/ca.crt"}, false, nil, "", nil, nil, "n", testLogger()); err == nil {
+	if _, _, err := LoadOrBuildRaftTLS(&RaftTLSConfig{Enabled: true, CACertPath: "/nonexistent/ca.crt"}, false, nil, "", nil, nil, "n", testLogger()); err == nil {
 		t.Fatal("expected error for missing manual files")
 	}
 }
@@ -108,7 +110,7 @@ func TestLoadOrBuildRaftTLSLocalOnly(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testRaftTLSCfg(dir)
 	cn := "node-0"
-	dns, ips := PodSANs(RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: "cluster.local"}, cn)
+	dns, ips := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: "cluster.local"}, cn)
 
 	_, tlsCfg, err := LoadOrBuildRaftTLS(cfg, false, nil, "", dns, ips, cn, testLogger())
 	if err != nil {
@@ -125,7 +127,7 @@ func TestLoadOrBuildRaftTLSLocalOnly(t *testing.T) {
 		t.Fatalf("second: %v", err)
 	}
 	secondCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
-	if string(firstCert) != string(secondCert) {
+	if !bytes.Equal(firstCert, secondCert) {
 		t.Fatal("leaf cert should be reused when present and not expired")
 	}
 
@@ -138,7 +140,7 @@ func TestLoadOrBuildRaftTLSLocalOnly(t *testing.T) {
 		t.Fatalf("reissue: %v", err)
 	}
 	thirdCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
-	if string(firstCert) == string(thirdCert) {
+	if bytes.Equal(firstCert, thirdCert) {
 		t.Fatal("leaf cert should be re-issued after deletion")
 	}
 }
@@ -163,7 +165,7 @@ func TestIssueOrReuseNodeCertExpiryReissue(t *testing.T) {
 	}
 
 	cfg := testRaftTLSCfg(dir)
-	dns, ips := PodSANs(RaftDiscoveryConfig{}, "node-0")
+	dns, ips := PodSANs(&RaftDiscoveryConfig{}, "node-0")
 
 	// Issue a short-TTL cert (expires within the 7-day safety margin).
 	cfg.Validity = time.Minute
@@ -179,7 +181,7 @@ func TestIssueOrReuseNodeCertExpiryReissue(t *testing.T) {
 		t.Fatalf("reissue: %v", err)
 	}
 	secondCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
-	if string(firstCert) == string(secondCert) {
+	if bytes.Equal(firstCert, secondCert) {
 		t.Fatal("within-margin leaf should be re-issued")
 	}
 
@@ -224,7 +226,7 @@ func TestBuildRaftTLSConfig(t *testing.T) {
 func TestTLSStreamLayerMTLS(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testRaftTLSCfg(dir)
-	dns, ips := PodSANs(RaftDiscoveryConfig{}, "node-0")
+	dns, ips := PodSANs(&RaftDiscoveryConfig{}, "node-0")
 	_, tlsCfg, err := LoadOrBuildRaftTLS(cfg, false, nil, "", dns, ips, "node-0", testLogger())
 	if err != nil {
 		t.Fatalf("loadOrBuildRaftTLS: %v", err)
@@ -345,7 +347,7 @@ func TestEnsureRaftCASecretBootstrapAndPoll(t *testing.T) {
 	// Bootstrap node creates the secret.
 	clientset := fake.NewSimpleClientset()
 	cfg := RaftTLSConfig{Enabled: true, Dir: t.TempDir(), Organization: "org", CASecret: "raft-ca", CABootstrap: true, SecretPollTimeout: time.Second}
-	certPEM, keyPEM, err := ensureRaftCA(cfg, clientset, "ns", logger)
+	certPEM, keyPEM, err := ensureRaftCA(&cfg, clientset, "ns", logger)
 	if err != nil {
 		t.Fatalf("bootstrap ensureRaftCA: %v", err)
 	}
@@ -362,11 +364,11 @@ func TestEnsureRaftCASecretBootstrapAndPoll(t *testing.T) {
 
 	// Non-bootstrap node polls and reads the existing secret.
 	cfg2 := RaftTLSConfig{Enabled: true, Dir: t.TempDir(), Organization: "org", CASecret: "raft-ca", SecretPollTimeout: time.Second}
-	certPEM2, keyPEM2, err := ensureRaftCA(cfg2, clientset, "ns", logger)
+	certPEM2, keyPEM2, err := ensureRaftCA(&cfg2, clientset, "ns", logger)
 	if err != nil {
 		t.Fatalf("poll ensureRaftCA: %v", err)
 	}
-	if string(certPEM2) != string(certPEM) || string(keyPEM2) != string(keyPEM) {
+	if !bytes.Equal(certPEM2, certPEM) || !bytes.Equal(keyPEM2, keyPEM) {
 		t.Fatal("polled CA differs from bootstrap CA")
 	}
 }
@@ -377,7 +379,7 @@ func TestEnsureRaftCASecretBootstrapRestart(t *testing.T) {
 	cfg := RaftTLSConfig{Enabled: true, Dir: t.TempDir(), Organization: "org", CASecret: "raft-ca", CABootstrap: true, SecretPollTimeout: time.Second}
 
 	// First boot: the bootstrap node generates and shares the CA.
-	firstCert, firstKey, err := ensureRaftCA(cfg, clientset, "ns", logger)
+	firstCert, firstKey, err := ensureRaftCA(&cfg, clientset, "ns", logger)
 	if err != nil {
 		t.Fatalf("first boot ensureRaftCA: %v", err)
 	}
@@ -385,11 +387,11 @@ func TestEnsureRaftCASecretBootstrapRestart(t *testing.T) {
 	// Restart of the bootstrap node: the Secret already exists, so the node
 	// must reuse the existing CA instead of failing on AlreadyExists (which
 	// would crash-loop pod-0 and take the cluster down).
-	secondCert, secondKey, err := ensureRaftCA(cfg, clientset, "ns", logger)
+	secondCert, secondKey, err := ensureRaftCA(&cfg, clientset, "ns", logger)
 	if err != nil {
 		t.Fatalf("restart ensureRaftCA: %v", err)
 	}
-	if string(secondCert) != string(firstCert) || string(secondKey) != string(firstKey) {
+	if !bytes.Equal(secondCert, firstCert) || !bytes.Equal(secondKey, firstKey) {
 		t.Fatal("restart must reuse the existing CA, not generate a new one")
 	}
 }
@@ -397,7 +399,7 @@ func TestEnsureRaftCASecretBootstrapRestart(t *testing.T) {
 func TestEnsureRaftCASecretPollTimeout(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	cfg := RaftTLSConfig{Enabled: true, Dir: t.TempDir(), Organization: "org", CASecret: "missing-ca", SecretPollTimeout: 200 * time.Millisecond}
-	if _, _, err := ensureRaftCA(cfg, clientset, "ns", testLogger()); err == nil {
+	if _, _, err := ensureRaftCA(&cfg, clientset, "ns", testLogger()); err == nil {
 		t.Fatal("expected timeout when secret never appears")
 	}
 }
@@ -408,7 +410,7 @@ func TestEnsureRaftCASecretMissingKeys(t *testing.T) {
 		Data:       map[string][]byte{"wrong": []byte("x")},
 	})
 	cfg := RaftTLSConfig{Enabled: true, Dir: t.TempDir(), Organization: "org", CASecret: "bad-ca", SecretPollTimeout: time.Second}
-	if _, _, err := ensureRaftCA(cfg, clientset, "ns", testLogger()); err == nil {
+	if _, _, err := ensureRaftCA(&cfg, clientset, "ns", testLogger()); err == nil {
 		t.Fatal("expected error for secret missing ca.crt/ca.key")
 	}
 }
@@ -424,7 +426,7 @@ func TestEnsureRaftCALocalReuse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("second: %v", err)
 	}
-	if string(cert1) != string(cert2) || string(key1) != string(key2) {
+	if !bytes.Equal(cert1, cert2) || !bytes.Equal(key1, key2) {
 		t.Fatal("local CA should be reused across calls")
 	}
 }

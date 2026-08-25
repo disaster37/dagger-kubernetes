@@ -13,12 +13,7 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 )
 
-// probeRegistry emulates an OCI registry for HEAD manifest/blob probes.
-type probeRegistry struct {
-	manifests map[string]bool // "repo:ref" -> exists
-	blobs     map[string]bool // digest -> exists
-}
-
+// newProbeServer emulates an OCI registry for HEAD manifest/blob probes.
 func newProbeServer(t *testing.T, manifests, blobs map[string]bool) *httptest.Server {
 	t.Helper()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

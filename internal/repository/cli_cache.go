@@ -24,10 +24,10 @@ type FileCLICache struct {
 // unbounded response (CWE-400/CWE-409). A var (not const) so tests can lower it.
 var maxCLITarballBytes int64 = 1 << 30
 
-// NewFileCLICache creates the cache directory (0755) and removes any leftover
+// NewFileCLICache creates the cache directory (0750) and removes any leftover
 // tmp-* files from a previous crash.
 func NewFileCLICache(dir string) (*FileCLICache, error) {
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("create cli cache dir: %w", err)
 	}
 	c := &FileCLICache{dir: dir}
@@ -111,10 +111,10 @@ func (c *FileCLICache) Put(version, osName, arch string, r io.Reader, sha256Hex 
 		return "", fmt.Errorf("%w: %s", domain.ErrCLIChecksumMismatch, sha256Hex)
 	}
 
-	if err := os.Chmod(tmpName, 0o644); err != nil {
+	if err := os.Chmod(tmpName, 0o600); err != nil {
 		return "", fmt.Errorf("chmod cache temp: %w", err)
 	}
-	if err := os.WriteFile(c.sidecarPath(version, osName, arch), []byte(fmt.Sprintf("%s\n", sha256Hex)), 0o644); err != nil {
+	if err := os.WriteFile(c.sidecarPath(version, osName, arch), []byte(fmt.Sprintf("%s\n", sha256Hex)), 0o600); err != nil {
 		return "", fmt.Errorf("write sidecar: %w", err)
 	}
 	if err := os.Rename(tmpName, p); err != nil {
@@ -143,6 +143,7 @@ func (c *FileCLICache) cleanupTemps() {
 
 // hashFile returns the hex sha256 digest of the file at path.
 func hashFile(path string) (string, error) {
+	// #nosec G304 -- path is produced by the cache from validated version/os/arch within the cache dir.
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err

@@ -95,6 +95,7 @@ func (p *EmbeddedProvider) loadOrCreateCA() (*MintingCA, error) {
 	// non-root and the directory is owned by another UID (e.g. created by an
 	// earlier root-run deployment), chmod fails with EPERM. That is tolerable —
 	// the CA key is still written 0600 below — so proceed rather than crash.
+	// #nosec G302 -- caPath is a directory; 0700 is more restrictive than the 0750 directory threshold.
 	if err := os.Chmod(p.caPath, 0o700); err != nil && !os.IsPermission(err) {
 		return nil, fmt.Errorf("chmod CA path: %w", err)
 	}

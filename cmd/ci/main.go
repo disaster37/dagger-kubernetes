@@ -53,9 +53,9 @@ const minStepsPollInterval = 100 * time.Millisecond
 
 func main() {
 	app := &cli.App{
-		Name:  "dagger-kubernetes-ci",
-		Usage: "Dagger Kubernetes CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
-		Flags: ciFlags(),
+		Name:   "dagger-kubernetes-ci",
+		Usage:  "Dagger Kubernetes CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
+		Flags:  ciFlags(),
 		Action: run,
 	}
 	if err := app.Run(os.Args); err != nil {
@@ -250,7 +250,7 @@ func run(c *cli.Context) error {
 			errMsg = err.Error()
 		}
 		for _, e := range stepsBuilder.Finalize(status, errMsg) {
-			if eerr := stepsSink.Emit(e); eerr != nil {
+			if eerr := stepsSink.Emit(&e); eerr != nil {
 				logger.WithError(eerr).Debug("final ci step event emit failed")
 			}
 		}
@@ -338,7 +338,6 @@ func clampPollInterval(d time.Duration) time.Duration {
 func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 	builder *service.StepEventBuilder, sink domain.CIEventSink,
 	traceID string, interval time.Duration, logger *logrus.Logger) {
-
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
@@ -370,7 +369,6 @@ func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 // Extracted for unit testing and the final-flush path.
 func pollTraceOnce(src domain.TraceSnapshotSource, builder *service.StepEventBuilder,
 	sink domain.CIEventSink, traceID string, logFrom time.Time) error {
-
 	trace, err := src.GetTrace(traceID)
 	if err != nil {
 		return fmt.Errorf("get trace: %w", err)
@@ -384,7 +382,7 @@ func pollTraceOnce(src domain.TraceSnapshotSource, builder *service.StepEventBui
 		return fmt.Errorf("advance step snapshot: %w", err)
 	}
 	for _, e := range events {
-		if err := sink.Emit(e); err != nil {
+		if err := sink.Emit(&e); err != nil {
 			return fmt.Errorf("emit step event: %w", err)
 		}
 	}
@@ -534,7 +532,7 @@ func provisionCLI(ctx context.Context, serverURL, token, version, osName, arch s
 // doAuthenticatedGet performs an authenticated GET and returns the response
 // body on 200, or an error on any failure (network, non-200 status).
 func doAuthenticatedGet(ctx context.Context, url, token string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -592,6 +590,7 @@ func extractDagger(r io.Reader, binDir string) error {
 		}
 
 		dst := filepath.Join(binDir, "dagger")
+		// #nosec G304 G302 -- dst is a fixed "dagger" basename under the caller-owned binDir; 0755 is required for the executable.
 		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
 		if err != nil {
 			return fmt.Errorf("create dagger binary: %w", err)

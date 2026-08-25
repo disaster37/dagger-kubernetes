@@ -36,12 +36,12 @@ func (p *fixedIPProvider) GetReplicas(version string) ([]domain.Replica, error) 
 // serveDataTunnel dials) and accepts connections until the listener closes.
 // Returns the listener (or nil if the port is unavailable, in which case the
 // test is skipped).
-func startDataTunnelBackend(t *testing.T) net.Listener {
+func startDataTunnelBackend(t *testing.T) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:9999")
 	if err != nil {
 		t.Skipf("engine port 9999 unavailable: %v", err)
-		return nil
+		return
 	}
 	t.Cleanup(func() { _ = ln.Close() })
 	go func() {
@@ -56,7 +56,6 @@ func startDataTunnelBackend(t *testing.T) net.Listener {
 			}(backend)
 		}
 	}()
-	return ln
 }
 
 // setupDataTunnel wires the server fleet to the fixed-IP provider, seeds a
@@ -96,7 +95,7 @@ func TestServeDataTunnelMarksTraceFailedOnClose(t *testing.T) {
 	const certFP = "fp-close"
 	setupDataTunnel(t, env, certFP, testTraceID)
 
-	liveConn := subscribeCaptureClient(t, s.liveHub, testTraceID)
+	liveConn := subscribeCaptureClient(t, s.liveHub)
 
 	client, server := net.Pipe()
 	defer client.Close()
@@ -126,7 +125,7 @@ func TestServeDataTunnelMarksTraceFailedOnClose(t *testing.T) {
 	}
 
 	// The live hub must broadcast a re-fetch event to connected viewers.
-	waitForString(t, liveConn, `"type":"trace_update"`, 2*time.Second)
+	waitForString(t, liveConn, `"type":"trace_update"`)
 }
 
 func TestServeDataTunnelNoFailWhenInFlight(t *testing.T) {
@@ -187,7 +186,7 @@ func TestServeDataTunnelLeaseNotFound(t *testing.T) {
 }
 
 func TestClientFingerprint(t *testing.T) {
-	if got := clientFingerprint(tls.ConnectionState{}); got != "" {
+	if got := clientFingerprint(&tls.ConnectionState{}); got != "" {
 		t.Fatalf("clientFingerprint(no peer) = %q, want empty", got)
 	}
 }

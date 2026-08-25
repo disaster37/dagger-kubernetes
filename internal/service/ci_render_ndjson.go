@@ -29,7 +29,7 @@ func NewNDJSONEventSink(w io.Writer) *NDJSONEventSink {
 	return s
 }
 
-func (s *NDJSONEventSink) Emit(e domain.CIEvent) error {
+func (s *NDJSONEventSink) Emit(e *domain.CIEvent) error {
 	if err := s.enc.Encode(e); err != nil {
 		return fmt.Errorf("encode ci event: %w", err)
 	}

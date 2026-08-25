@@ -56,7 +56,7 @@ type raftTLSMaterial struct {
 //
 // Returns the material + the tls.Config for the raft StreamLayer.
 func LoadOrBuildRaftTLS(
-	cfg RaftTLSConfig,
+	cfg *RaftTLSConfig,
 	isMultiNode bool,
 	clientset kubernetes.Interface,
 	namespace string,
@@ -109,7 +109,7 @@ func LoadOrBuildRaftTLS(
 }
 
 // loadManualRaftTLS loads CA + leaf from the configured manual paths.
-func loadManualRaftTLS(cfg RaftTLSConfig) (*raftTLSMaterial, *tls.Config, error) {
+func loadManualRaftTLS(cfg *RaftTLSConfig) (*raftTLSMaterial, *tls.Config, error) {
 	if cfg.CACertPath == "" || cfg.CertPath == "" || cfg.KeyPath == "" {
 		return nil, nil, fmt.Errorf("raft.tls: ca_cert/cert/key must all be set together")
 	}
@@ -135,7 +135,7 @@ func loadManualRaftTLS(cfg RaftTLSConfig) (*raftTLSMaterial, *tls.Config, error)
 // ensureRaftCA returns the CA cert+key PEM, creating it on the bootstrap node
 // and sharing via a K8s Secret, or loading from disk in manual/local mode.
 func ensureRaftCA(
-	cfg RaftTLSConfig,
+	cfg *RaftTLSConfig,
 	clientset kubernetes.Interface,
 	namespace string,
 	logger *logrus.Logger,
@@ -148,7 +148,7 @@ func ensureRaftCA(
 
 // ensureRaftCAFromSecret shares the CA via a K8s Secret: the bootstrap node
 // generates + writes it, other nodes poll until it appears.
-func ensureRaftCAFromSecret(cfg RaftTLSConfig, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) ([]byte, []byte, error) {
+func ensureRaftCAFromSecret(cfg *RaftTLSConfig, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) (caCertPEM, caKeyPEM []byte, err error) {
 	if cfg.CABootstrap {
 		certPEM, keyPEM, err := createRaftCAWithGoca("dagger-kubernetes-raft-ca", cfg.Organization)
 		if err != nil {
@@ -200,7 +200,7 @@ func ensureRaftCAFromSecret(cfg RaftTLSConfig, clientset kubernetes.Interface, n
 
 // readRaftCASecret fetches the CA cert+key from the shared K8s Secret and
 // validates that both keys are present.
-func readRaftCASecret(clientset kubernetes.Interface, namespace, name string) ([]byte, []byte, error) {
+func readRaftCASecret(clientset kubernetes.Interface, namespace, name string) (caCertPEM, caKeyPEM []byte, err error) {
 	secret, err := clientset.CoreV1().Secrets(namespace).Get(context.Background(), name, metav1.GetOptions{})
 	if err != nil {
 		return nil, nil, err
@@ -219,12 +219,13 @@ func ensureTLSDir(dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
+	// #nosec G302 -- dir is a directory; 0700 is more restrictive than the 0750 directory threshold.
 	return os.Chmod(dir, 0o700)
 }
 
 // ensureLocalRaftCA loads/creates the CA files under <dir>/tls for the
 // local-only (single-node) mode.
-func ensureLocalRaftCA(cfg RaftTLSConfig) ([]byte, []byte, error) {
+func ensureLocalRaftCA(cfg *RaftTLSConfig) (caCertPEM, caKeyPEM []byte, err error) {
 	if err := ensureTLSDir(cfg.Dir); err != nil {
 		return nil, nil, fmt.Errorf("raft TLS: mkdir %s: %w", cfg.Dir, err)
 	}
@@ -294,7 +295,7 @@ func createRaftCAWithGoca(name, organization string) (certPEM, keyPEM []byte, er
 // at <dir>/tls/node.crt + node.key (0600). Reused if present and not within
 // the expiry safety margin.
 func issueOrReuseNodeCert(
-	cfg RaftTLSConfig,
+	cfg *RaftTLSConfig,
 	ca *MintingCA,
 	commonName, organization string,
 	dnsNames []string,

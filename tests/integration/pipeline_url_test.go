@@ -26,7 +26,7 @@ const ciWrapperTraceID = "abcdef0123456789abcdef0123456789"
 // control plane (Raft store, stub fleet, admin + API token) with the
 // pipeline-view base set to https://supv.example.com. It returns the
 // control-plane URL and an admin API token.
-func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (string, string) {
+func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (controlURL, adminToken string) {
 	t.Helper()
 	logger := observ.NewTestLogger()
 	store := newIntegrationStore(t)
@@ -45,7 +45,7 @@ func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (string,
 	if err != nil {
 		t.Fatalf("create admin: %v", err)
 	}
-	adminToken, _, err := tokensSvc.Generate(context.Background(), admin.ID)
+	adminToken, _, err = tokensSvc.Generate(context.Background(), admin.ID)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestPipelineViewURLEndpoint(t *testing.T) {
 		t.Fatalf("POST /v1/engines: status %d, want 201", resp.StatusCode)
 	}
 
-	urlReq, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/traces/trace-url-int/url", serverURL), nil)
+	urlReq, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/traces/trace-url-int/url", serverURL), http.NoBody)
 	urlReq.Header.Set("Authorization", "Bearer "+adminToken)
 	urlResp, err := http.DefaultClient.Do(urlReq)
 	if err != nil {

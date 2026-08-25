@@ -164,7 +164,7 @@ func (ca *MintingCA) EncodePEM() (certPEM, keyPEM []byte, err error) {
 // Pure crypto — the caller persists the returned PEM bytes.
 func (ca *MintingCA) IssueServerCertificate(commonName, organization string, dnsNames []string, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
 	now := time.Now()
-	return ca.issueCertificate(commonName, organization, dnsNames, nil, ttl,
+	return ca.issueCertificate(commonName, organization, dnsNames, nil,
 		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, now, now.Add(ttl), "server")
 }
 
@@ -174,14 +174,14 @@ func (ca *MintingCA) IssueServerCertificate(commonName, organization string, dns
 func (ca *MintingCA) IssuePeerCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
 	now := time.Now()
 	// Backdate 5 minutes for clock-skew tolerance across pods (ADR-016).
-	return ca.issueCertificate(commonName, organization, dnsNames, ipAddrs, ttl,
+	return ca.issueCertificate(commonName, organization, dnsNames, ipAddrs,
 		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		now.Add(-5*time.Minute), now.Add(ttl), "peer")
 }
 
 // issueCertificate generates a key + leaf certificate signed by the CA and
 // returns both as PEM. kind labels the key/cert in error messages.
-func (ca *MintingCA) issueCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, ttl time.Duration, extKeyUsage []x509.ExtKeyUsage, notBefore, notAfter time.Time, kind string) (certPEM, keyPEM []byte, err error) {
+func (ca *MintingCA) issueCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, extKeyUsage []x509.ExtKeyUsage, notBefore, notAfter time.Time, kind string) (certPEM, keyPEM []byte, err error) {
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		return nil, nil, fmt.Errorf("generate %s key: %w", kind, err)

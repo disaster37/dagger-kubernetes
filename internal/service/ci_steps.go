@@ -352,7 +352,7 @@ func (b *StepEventBuilder) emitNodeFinished(fn flatNode, emit func(domain.CIEven
 // never indexed, the root never resolved, or the engine failed before printing
 // a trace id. errMsg is surfaced on the pipeline_done event when the pipeline
 // failed.
-func (b *StepEventBuilder) Finalize(status string, errMsg string) []domain.CIEvent {
+func (b *StepEventBuilder) Finalize(status, errMsg string) []domain.CIEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -443,7 +443,7 @@ type flatNode struct {
 // hard-capped at ciMaxAbsoluteDepth). Nodes deeper than the clamp are not
 // emitted; they are recorded in the returned attribution map so their logs
 // fold into their deepest emitted ancestor.
-func flattenTrace(root *domain.SpanNode, maxDepth int) ([]flatNode, map[string]string) {
+func flattenTrace(root *domain.SpanNode, maxDepth int) (flat []flatNode, attribution map[string]string) {
 	if root == nil || root.SpanID == "" {
 		return nil, nil
 	}
@@ -452,8 +452,7 @@ func flattenTrace(root *domain.SpanNode, maxDepth int) ([]flatNode, map[string]s
 	}
 
 	seen := make(map[string]bool)
-	attribution := make(map[string]string)
-	var flat []flatNode
+	attribution = make(map[string]string)
 
 	var walk func(n *domain.SpanNode, depth int, owner string)
 	walk = func(n *domain.SpanNode, depth int, owner string) {

@@ -91,7 +91,7 @@ func (c *SupervisorTraceClient) QueryTraceLogs(traceID string, start, end time.T
 
 // getJSON performs an authenticated GET and decodes the JSON response into out.
 func (c *SupervisorTraceClient) getJSON(u string, out any) error {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, u, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}

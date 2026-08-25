@@ -200,12 +200,41 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 		return stats
 	}
 
-	var entries []cacheEntry
-	charges := make(map[string]int64)
-	anyReachable := false
-	catalogDisabled := 0
-	timedOut := false
+	entries, charges, anyReachable, catalogDisabled, timedOut := s.probeBackends(ctx)
+	s.router.SetCharges(charges)
 
+	stats.Running = anyReachable
+	stats.Reachable = anyReachable
+	if !anyReachable {
+		stats.Message = registryDownMessage
+		return stats
+	}
+	if len(entries) == 0 && catalogDisabled > 0 {
+		stats.Message = catalogDisabledMsg
+		return stats
+	}
+
+	active, unknown := s.activeVersions()
+	refs, totalSize, objectCount, truncated := s.buildVersionRefs(entries, active, unknown)
+
+	stats.TotalSize = totalSize
+	stats.ObjectCount = objectCount
+	stats.Versions = refs
+
+	s.attachHitRate(ctx, stats)
+
+	if timedOut {
+		stats.Message = "partial: probe timed out"
+	} else if truncated {
+		stats.Message = truncatedMsg
+	}
+	return stats
+}
+
+// probeBackends pings every configured backend and collects manifest entries
+// from the reachable ones, updating their charge counters along the way.
+func (s *CacheStatsService) probeBackends(ctx context.Context) (entries []cacheEntry, charges map[string]int64, anyReachable bool, catalogDisabled int, timedOut bool) {
+	charges = make(map[string]int64)
 	for _, b := range s.router.Backends() {
 		client, ok := s.router.ClientByID(b.ID)
 		if !ok {
@@ -241,24 +270,13 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 		}
 		charges[b.ID] = backendCharge
 	}
-	s.router.SetCharges(charges)
+	return entries, charges, anyReachable, catalogDisabled, timedOut
+}
 
-	stats.Running = anyReachable
-	stats.Reachable = anyReachable
-	if !anyReachable {
-		stats.Message = registryDownMessage
-		return stats
-	}
-	if len(entries) == 0 && catalogDisabled > 0 {
-		stats.Message = catalogDisabledMsg
-		return stats
-	}
-
-	active, unknown := s.activeVersions()
-
-	var totalSize int64
-	var objectCount int64
-	refs := make([]domain.CacheVersionRef, 0, len(entries))
+// buildVersionRefs aggregates manifest entries into version refs, sorts them
+// newest-first, and truncates to maxCacheVersions.
+func (s *CacheStatsService) buildVersionRefs(entries []cacheEntry, active map[string]bool, unknown bool) (refs []domain.CacheVersionRef, totalSize, objectCount int64, truncated bool) {
+	refs = make([]domain.CacheVersionRef, 0, len(entries))
 	seen := make(map[string]bool)
 	for _, e := range entries {
 		if e.size >= 0 {
@@ -295,24 +313,11 @@ func (s *CacheStatsService) probe(ctx context.Context) *domain.CacheStats {
 		return vi.Compare(vj) > 0
 	})
 
-	truncated := false
 	if len(refs) > maxCacheVersions {
 		refs = refs[:maxCacheVersions]
 		truncated = true
 	}
-
-	stats.TotalSize = totalSize
-	stats.ObjectCount = objectCount
-	stats.Versions = refs
-
-	s.attachHitRate(ctx, stats)
-
-	if timedOut {
-		stats.Message = "partial: probe timed out"
-	} else if truncated {
-		stats.Message = truncatedMsg
-	}
-	return stats
+	return refs, totalSize, objectCount, truncated
 }
 
 // collectEntries walks every repo's tags and collects manifest metadata.
@@ -431,8 +436,8 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 	}
 
 	repo := s.repo()
-	alreadyPurged := func() (*domain.PurgeResult, error) {
-		return &domain.PurgeResult{AlreadyPurged: 1, Versions: []string{parsed.String()}}, nil
+	alreadyPurged := func() *domain.PurgeResult {
+		return &domain.PurgeResult{AlreadyPurged: 1, Versions: []string{parsed.String()}}
 	}
 
 	// Route-table hit: purge from the recorded backend.
@@ -464,12 +469,12 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 	}
 
 	if targetClient == nil {
-		return alreadyPurged()
+		return alreadyPurged(), nil
 	}
 
 	digest, size, _, err := targetClient.ManifestSize(ctx, repo, tag)
 	if errors.Is(err, domain.ErrManifestNotFound) {
-		return alreadyPurged()
+		return alreadyPurged(), nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("manifest lookup: %w", err)
@@ -477,7 +482,7 @@ func (s *CacheStatsService) Purge(ctx context.Context, req domain.PurgeRequest) 
 
 	if err := targetClient.DeleteManifest(ctx, repo, digest); err != nil {
 		if errors.Is(err, domain.ErrManifestNotFound) {
-			return alreadyPurged()
+			return alreadyPurged(), nil
 		}
 		return nil, fmt.Errorf("delete manifest: %w", err)
 	}
@@ -523,45 +528,12 @@ func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, 
 			return nil, fmt.Errorf("catalog: %w", err)
 		}
 		catalogOK = true
-		for _, repo := range repos {
-			tags, err := client.Tags(ctx, repo)
-			if err != nil {
-				return nil, fmt.Errorf("tags: %w", err)
-			}
-			for _, tag := range tags {
-				if result.Purged+result.AlreadyPurged >= maxPurgeAllTags {
-					truncated = true
-					break
-				}
-				digest, size, _, err := client.ManifestSize(ctx, repo, tag)
-				if errors.Is(err, domain.ErrManifestNotFound) {
-					result.AlreadyPurged++
-					s.deleteManifestRoute(ctx, repo, tag)
-					continue
-				}
-				if err != nil {
-					return nil, fmt.Errorf("manifest lookup: %w", err)
-				}
-				if err := client.DeleteManifest(ctx, repo, digest); err != nil {
-					if errors.Is(err, domain.ErrManifestNotFound) {
-						result.AlreadyPurged++
-						s.deleteManifestRoute(ctx, repo, tag)
-						continue
-					}
-					return nil, fmt.Errorf("delete manifest: %w", err)
-				}
-				result.Purged++
-				result.FreedBytes += size
-				s.deleteManifestRoute(ctx, repo, tag)
-				if s.metricsObs != nil {
-					s.metricsObs.CachePurgeTotal.Inc()
-				}
-			}
-			if truncated {
-				break
-			}
+		backendTruncated, err := s.purgeAllBackend(ctx, client, repos, result)
+		if err != nil {
+			return nil, err
 		}
-		if truncated {
+		if backendTruncated {
+			truncated = true
 			break
 		}
 	}
@@ -574,6 +546,46 @@ func (s *CacheStatsService) PurgeAll(ctx context.Context) (*domain.PurgeResult, 
 	}
 	s.invalidateCache()
 	return result, nil
+}
+
+// purgeAllBackend purges every tag of every repo on one backend. Returns
+// truncated=true when the global maxPurgeAllTags cap was reached.
+func (s *CacheStatsService) purgeAllBackend(ctx context.Context, client domain.RegistryClient, repos []string, result *domain.PurgeResult) (bool, error) {
+	for _, repo := range repos {
+		tags, err := client.Tags(ctx, repo)
+		if err != nil {
+			return false, fmt.Errorf("tags: %w", err)
+		}
+		for _, tag := range tags {
+			if result.Purged+result.AlreadyPurged >= maxPurgeAllTags {
+				return true, nil
+			}
+			digest, size, _, err := client.ManifestSize(ctx, repo, tag)
+			if errors.Is(err, domain.ErrManifestNotFound) {
+				result.AlreadyPurged++
+				s.deleteManifestRoute(ctx, repo, tag)
+				continue
+			}
+			if err != nil {
+				return false, fmt.Errorf("manifest lookup: %w", err)
+			}
+			if err := client.DeleteManifest(ctx, repo, digest); err != nil {
+				if errors.Is(err, domain.ErrManifestNotFound) {
+					result.AlreadyPurged++
+					s.deleteManifestRoute(ctx, repo, tag)
+					continue
+				}
+				return false, fmt.Errorf("delete manifest: %w", err)
+			}
+			result.Purged++
+			result.FreedBytes += size
+			s.deleteManifestRoute(ctx, repo, tag)
+			if s.metricsObs != nil {
+				s.metricsObs.CachePurgeTotal.Inc()
+			}
+		}
+	}
+	return false, nil
 }
 
 // RunGC is the GC sweeper entry point. It purges tags older than MaxAge that
@@ -598,96 +610,107 @@ func (s *CacheStatsService) RunGC(ctx context.Context) (*domain.GCRunSummary, er
 	probeCtx, cancel := context.WithTimeout(ctx, cacheProbeBudget)
 	defer cancel()
 
+	entries := s.gcCollectEntries(probeCtx)
+	active, unknown := s.activeVersions()
+
+	// Group parseable version tags by minor key, newest first.
+	groups := map[string][]cacheEntry{}
+	for _, e := range entries {
+		if v, ok := parseVersionTag(e.tag); ok {
+			groups[v.MinorKey()] = append(groups[v.MinorKey()], e)
+		}
+	}
+
+	for _, group := range groups {
+		if err := s.gcProcessGroup(probeCtx, ctx, group, active, unknown, summary); err != nil {
+			return finish("registry delete not enabled", err)
+		}
+	}
+
+	s.invalidateCache()
+	return finish("", nil)
+}
+
+// gcCollectEntries catalogs every backend and collects manifest entries.
+func (s *CacheStatsService) gcCollectEntries(ctx context.Context) []cacheEntry {
 	var entries []cacheEntry
 	for _, b := range s.router.Backends() {
 		client, ok := s.router.ClientByID(b.ID)
 		if !ok {
 			continue
 		}
-		repos, err := client.Catalog(probeCtx)
+		repos, err := client.Catalog(ctx)
 		if err != nil {
-			if errors.Is(err, domain.ErrRegistryCatalogDisabled) {
-				continue
+			if !errors.Is(err, domain.ErrRegistryCatalogDisabled) {
+				s.logger.WithField("backend", b.ID).WithError(err).Warn("gc catalog failed")
 			}
-			s.logger.WithField("backend", b.ID).WithError(err).Warn("gc catalog failed")
 			continue
 		}
-		es, _ := s.collectEntries(probeCtx, client, repos)
+		es, _ := s.collectEntries(ctx, client, repos)
 		for _, e := range es {
 			e.backendID = b.ID
 			entries = append(entries, e)
 		}
 	}
+	return entries
+}
 
-	active, unknown := s.activeVersions()
+// gcProcessGroup purges expired, unprotected tags of one minor-version group.
+// Returns ErrRegistryDeleteDisabled when the backend refuses deletes.
+func (s *CacheStatsService) gcProcessGroup(probeCtx, ctx context.Context, group []cacheEntry, active map[string]bool, unknown bool, summary *domain.GCRunSummary) error {
+	sort.SliceStable(group, func(i, j int) bool {
+		vi, oki := parseVersionTag(group[i].tag)
+		vj, okj := parseVersionTag(group[j].tag)
+		if !oki || !okj {
+			return oki
+		}
+		return vi.Compare(vj) > 0
+	})
 
-	// Group parseable version tags by minor key, newest first.
-	groups := map[string][]cacheEntry{}
-	for _, e := range entries {
-		v, ok := parseVersionTag(e.tag)
-		if !ok {
+	keep := s.gcCfg.MinRefsToKeep
+	if keep < 0 {
+		keep = 0
+	}
+	for idx, e := range group {
+		if idx < keep {
+			continue // keep newest min_refs_to_keep
+		}
+		v, _ := parseVersionTag(e.tag)
+		ver := v.String()
+		if s.gcCfg.ProtectActiveVersions && isProtected(ver, active, unknown) {
+			summary.Skipped++
 			continue
 		}
-		groups[v.MinorKey()] = append(groups[v.MinorKey()], e)
-	}
-
-	for _, group := range groups {
-		sort.SliceStable(group, func(i, j int) bool {
-			vi, oki := parseVersionTag(group[i].tag)
-			vj, okj := parseVersionTag(group[j].tag)
-			if !oki || !okj {
-				return oki
-			}
-			return vi.Compare(vj) > 0
-		})
-
-		keep := s.gcCfg.MinRefsToKeep
-		if keep < 0 {
-			keep = 0
+		client, ok := s.router.ClientByID(e.backendID)
+		if !ok {
+			summary.Skipped++
+			continue
 		}
-		for idx, e := range group {
-			if idx < keep {
-				continue // keep newest min_refs_to_keep
+		created, err := client.ManifestCreated(probeCtx, e.repo, e.tag)
+		if err != nil || created.IsZero() {
+			// Unknown age: never purge (conservative).
+			summary.Skipped++
+			continue
+		}
+		if time.Since(created) < s.gcCfg.MaxAge {
+			summary.Skipped++
+			continue
+		}
+		if err := client.DeleteManifest(probeCtx, e.repo, e.digest); err != nil {
+			if errors.Is(err, domain.ErrRegistryDeleteDisabled) {
+				return err
 			}
-			v, _ := parseVersionTag(e.tag)
-			ver := v.String()
-			if s.gcCfg.ProtectActiveVersions && isProtected(ver, active, unknown) {
-				summary.Skipped++
-				continue
-			}
-			client, ok := s.router.ClientByID(e.backendID)
-			if !ok {
-				summary.Skipped++
-				continue
-			}
-			created, err := client.ManifestCreated(probeCtx, e.repo, e.tag)
-			if err != nil || created.IsZero() {
-				// Unknown age: never purge (conservative).
-				summary.Skipped++
-				continue
-			}
-			if time.Since(created) < s.gcCfg.MaxAge {
-				summary.Skipped++
-				continue
-			}
-			if err := client.DeleteManifest(probeCtx, e.repo, e.digest); err != nil {
-				if errors.Is(err, domain.ErrRegistryDeleteDisabled) {
-					return finish("registry delete not enabled", err)
-				}
-				summary.Errors++
-				continue
-			}
-			summary.PurgedTags++
-			summary.FreedBytes += e.size
-			s.deleteManifestRoute(ctx, e.repo, e.tag)
-			if s.metricsObs != nil {
-				s.metricsObs.CachePurgeTotal.Inc()
-			}
+			summary.Errors++
+			continue
+		}
+		summary.PurgedTags++
+		summary.FreedBytes += e.size
+		s.deleteManifestRoute(ctx, e.repo, e.tag)
+		if s.metricsObs != nil {
+			s.metricsObs.CachePurgeTotal.Inc()
 		}
 	}
-
-	s.invalidateCache()
-	return finish("", nil)
+	return nil
 }
 
 // recordGC stores the last run summary and bumps the GC run counter.

@@ -45,14 +45,14 @@ func (f *fakeRegistry) handler() http.HandlerFunc {
 				w.WriteHeader(status)
 				return
 			}
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"repositories":[%s]}`, strings.Join(quoteEach(f.repos), ","))))
+			_, _ = fmt.Fprintf(w, `{"repositories":[%s]}`, strings.Join(quoteEach(f.repos), ","))
 		case strings.HasSuffix(r.URL.Path, "/tags/list"):
 			repo := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v2/"), "/tags/list")
 			if st := f.tagsStatus[repo]; st != 0 {
 				w.WriteHeader(st)
 				return
 			}
-			_, _ = w.Write([]byte(fmt.Sprintf(`{"name":%q,"tags":[%s]}`, repo, strings.Join(quoteEach(f.tags[repo]), ","))))
+			_, _ = fmt.Fprintf(w, `{"name":%q,"tags":[%s]}`, repo, strings.Join(quoteEach(f.tags[repo]), ","))
 		case (r.Method == http.MethodGet || r.Method == http.MethodHead) && strings.Contains(r.URL.Path, "/manifests/"):
 			key := manifestKey(r.URL.Path)
 			body, ok := f.manifestBody[key]
@@ -113,7 +113,7 @@ func newFakeRegistry() *fakeRegistry {
 	}
 }
 
-func manifestJSON(digest string, size int64, layers int64, created string) string {
+func manifestJSON(digest string, size, layers int64, created string) string {
 	var layerParts []string
 	for i := int64(0); i < layers; i++ {
 		layerParts = append(layerParts, fmt.Sprintf(`{"digest":"sha256:layer%d","size":%d}`, i, size/layers))
@@ -336,7 +336,7 @@ func TestCacheStatsHitRate(t *testing.T) {
 		} else if strings.Contains(q, "misses_total") {
 			val = "2"
 		}
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"status":"success","data":{"result":[{"metric":{},"value":[1700000000,%q]}]}}`, val)))
+		_, _ = fmt.Fprintf(w, `{"status":"success","data":{"result":[{"metric":{},"value":[1700000000,%q]}]}}`, val)
 	}))
 	defer ms.Close()
 
@@ -802,10 +802,7 @@ func TestStatsPurgeNoDeadlock(t *testing.T) {
 
 	// Wait until Stats is holding its mutex (blocked either way).
 	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if !svc.mu.TryLock() {
-			break
-		}
+	for svc.mu.TryLock() {
 		svc.mu.Unlock()
 		if time.Now().After(deadline) {
 			t.Fatal("Stats never acquired its mutex")

@@ -140,8 +140,8 @@ func (u *GitHubCLIUpstream) FetchTarball(ctx context.Context, version, osName, a
 // the releases API host (the token exists to raise the API rate limit), never
 // to the (potentially third-party/mirrored) download host, so a compromised or
 // misconfigured download_base cannot capture the credential (CWE-522).
-func (u *GitHubCLIUpstream) doRequest(ctx context.Context, url string, withAuth bool) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func (u *GitHubCLIUpstream) doRequest(ctx context.Context, target string, withAuth bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("%w: build request: %v", domain.ErrCLIUpstreamUnavailable, err)
 	}

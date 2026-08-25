@@ -119,7 +119,7 @@ func (c *LogsClient) DeleteTraceLogs(ctx context.Context, traceID string) error 
 	params.Set("start", "0")
 	params.Set("end", fmt.Sprintf("%d", time.Now().Unix()))
 	deleteURL := fmt.Sprintf("%s/loki/api/v1/delete?%s", c.lokiURL, params.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deleteURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deleteURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("loki delete request: %w", err)
 	}
@@ -152,11 +152,15 @@ func normalizeSpanID(label string) string {
 
 func isHexString(s string) bool {
 	for _, c := range s {
-		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+		if !isHexDigit(c) {
 			return false
 		}
 	}
 	return true
+}
+
+func isHexDigit(c rune) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')
 }
 
 func parseNanos(s string) (time.Time, error) {

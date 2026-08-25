@@ -43,14 +43,14 @@ func closedTCP(t *testing.T) string {
 	return "http://" + addr
 }
 
-func newStatusServiceWithRegistry(t *testing.T, cfg *domain.Config, cache *Cache, fleet *Manager) (*StatusService, *httptest.Server) {
+func newStatusServiceWithRegistry(t *testing.T, cfg *domain.Config, cache *Cache, fleet *Manager) *StatusService {
 	t.Helper()
 	reg := newFakeRegistry()
 	ts := httptest.NewServer(reg.handler())
 	t.Cleanup(ts.Close)
 	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
 	svc := NewStatusService(cfg, cache, router, fleet, observ.NewTestLogger())
-	return svc, ts
+	return svc
 }
 
 func emptyFleet() *Manager {
@@ -66,7 +66,7 @@ func TestStatusAllOK(t *testing.T) {
 			VictoriaURL:  openTCP(t),
 		},
 	}
-	svc, _ := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -91,7 +91,7 @@ func TestStatusTelemetryDown(t *testing.T) {
 			CollectorURL: closedTCP(t),
 		},
 	}
-	svc, _ := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -109,7 +109,7 @@ func TestStatusTelemetryDown(t *testing.T) {
 
 func TestStatusUnconfiguredNoRollupImpact(t *testing.T) {
 	cfg := &domain.Config{} // no telemetry URLs
-	svc, _ := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -142,7 +142,7 @@ func TestStatusFleetDegraded(t *testing.T) {
 		},
 	}, NewStore(2*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
 
-	svc, _ := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, fleet)
+	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, fleet)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -161,7 +161,7 @@ func TestStatusFleetDown(t *testing.T) {
 	cfg := &domain.Config{}
 	fleet := NewManager(&stubFleetProvider{allErr: errors.New("k8s down")}, NewStore(2*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
 
-	svc, _ := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, fleet)
+	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, fleet)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)

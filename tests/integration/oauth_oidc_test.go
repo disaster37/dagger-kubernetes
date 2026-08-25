@@ -216,7 +216,7 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 
 	// 2. Callback for a user outside allowed_groups → forbidden redirect.
 	callbackURL := "http://localhost:18099/api/v1/auth/oauth/oidc/callback?code=code&state=" + url.QueryEscape(state)
-	req, err := http.NewRequest("GET", callbackURL, nil)
+	req, err := http.NewRequest("GET", callbackURL, http.NoBody)
 	if err != nil {
 		t.Fatalf("new callback request: %v", err)
 	}

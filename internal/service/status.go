@@ -73,7 +73,7 @@ func (s *StatusService) probe(ctx context.Context) *domain.PlatformStatus {
 		s.probeTelemetry(ctx, "tempo", s.cfg.Telemetry.TempoURL),
 		s.probeTelemetry(ctx, "loki", s.cfg.Telemetry.LokiURL),
 		s.probeTelemetry(ctx, "victoria", s.cfg.Telemetry.VictoriaURL),
-		s.probeFleet(ctx),
+		s.probeFleet(),
 	}
 
 	return &domain.PlatformStatus{
@@ -162,7 +162,7 @@ func (s *StatusService) probeTelemetry(ctx context.Context, name, rawURL string)
 }
 
 // probeFleet reports fleet health from the engine StatefulSet manager.
-func (s *StatusService) probeFleet(ctx context.Context) domain.ServiceStatus {
+func (s *StatusService) probeFleet() domain.ServiceStatus {
 	st := newServiceStatus("fleet", "fleet", true)
 	if s.fleetManager == nil {
 		st.State = domain.ServiceOK

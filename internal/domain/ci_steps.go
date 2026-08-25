@@ -56,7 +56,7 @@ type CIEvent struct {
 // CIEventSink consumes normalized CI events. Implementations render to a CI
 // system (NDJSON for Jenkins/Drone, a future plugin protocol, a debug file).
 type CIEventSink interface {
-	Emit(e CIEvent) error
+	Emit(e *CIEvent) error
 	Flush() error
 }
 

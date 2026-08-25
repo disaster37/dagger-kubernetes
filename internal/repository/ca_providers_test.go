@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"crypto/x509"
 	"net"
@@ -150,7 +151,7 @@ func TestEmbeddedProviderSecretReuseOnRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodePEM (restart): %v", err)
 	}
-	if string(certPEM1) != string(certPEM2) {
+	if !bytes.Equal(certPEM1, certPEM2) {
 		t.Fatal("restart must reuse the existing Secret CA, not mint a new one")
 	}
 }
@@ -176,7 +177,7 @@ func TestEmbeddedProviderSecretNonBootstrapPoll(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodePEM (poll): %v", err)
 	}
-	if string(followerPEM) != string(bootPEM) {
+	if !bytes.Equal(followerPEM, bootPEM) {
 		t.Fatal("polled CA must match the bootstrap CA")
 	}
 }
@@ -200,7 +201,7 @@ func TestEmbeddedProviderSecretAlreadyExistsFallback(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodePEM: %v", err)
 	}
-	if string(certPEM) != string(knownCert) {
+	if !bytes.Equal(certPEM, knownCert) {
 		t.Fatal("bootstrap must reuse the pre-existing Secret CA, not overwrite it")
 	}
 }
@@ -248,7 +249,7 @@ func TestEmbeddedProviderSecretPreCreatedEmpty(t *testing.T) {
 	}
 	cert1, _, _ := ca.EncodePEM()
 	cert2, _, _ := ca2.EncodePEM()
-	if string(cert1) != string(cert2) {
+	if !bytes.Equal(cert1, cert2) {
 		t.Fatal("restart must reuse the populated Secret CA, not mint a new one")
 	}
 }

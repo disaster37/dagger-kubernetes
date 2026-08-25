@@ -46,8 +46,8 @@ func (r *CacheRoutesRepo) UpsertManifest(ctx context.Context, repo, tag, digest,
 }
 
 // LookupBlob returns a backend that holds digest. ok=false when absent.
-func (r *CacheRoutesRepo) LookupBlob(ctx context.Context, digest string) (string, bool, error) {
-	backendID, ok := r.store.fsmRead().lookupBlobRoute(digest)
+func (r *CacheRoutesRepo) LookupBlob(ctx context.Context, digest string) (backendID string, ok bool, err error) {
+	backendID, ok = r.store.fsmRead().lookupBlobRoute(digest)
 	return backendID, ok, nil
 }
 

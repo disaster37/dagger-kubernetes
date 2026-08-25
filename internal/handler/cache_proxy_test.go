@@ -93,9 +93,9 @@ func newReqCtx(method, path, query string) *app.RequestContext {
 	return c
 }
 
-func newCacheServer(router cacheRouter, token, host string) *Server {
+func newCacheServer(router cacheRouter, token string) *Server {
 	return &Server{
-		cfg:        &ServerConfig{CacheHost: host, CacheToken: token},
+		cfg:        &ServerConfig{CacheHost: "cache.example.com", CacheToken: token},
 		logger:     observ.NewTestLogger(),
 		router:     router,
 		cacheToken: token,
@@ -120,7 +120,7 @@ func TestRequireCacheAuth(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newCacheServer(&stubCacheRouter{}, tc.token, "cache.example.com")
+			s := newCacheServer(&stubCacheRouter{}, tc.token)
 			c := app.NewContext(0)
 			if tc.auth != "" {
 				c.Request.Header.Set("Authorization", tc.auth)
@@ -199,7 +199,7 @@ func TestRouteCacheRequest(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newCacheServer(tc.stub, "", "cache.example.com")
+			s := newCacheServer(tc.stub, "")
 			c := newReqCtx(tc.method, tc.path, tc.query)
 			got, kind, err := s.routeCacheRequest(context.Background(), c)
 			if !errors.Is(err, tc.wantErr) {
@@ -253,7 +253,7 @@ func TestWriteCacheRouteError(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newCacheServer(&stubCacheRouter{}, "", "cache.example.com")
+			s := newCacheServer(&stubCacheRouter{}, "")
 			c := app.NewContext(0)
 			s.writeCacheRouteError(c, tc.err)
 			if c.Response.StatusCode() != tc.status {
@@ -266,7 +266,7 @@ func TestWriteCacheRouteError(t *testing.T) {
 func TestCacheProxyDirector(t *testing.T) {
 	s := newCacheServer(&stubCacheRouter{
 		backend: domain.RegistryBackend{ID: "b1", InternalAddr: "backend:5000"},
-	}, "", "cache.example.com")
+	}, "")
 	director := s.cacheProxyDirector()
 
 	req := protocol.NewRequest("GET", "http://example.com/v2/dagger-cache/manifests/v0-21-4", nil)
@@ -295,7 +295,7 @@ func TestCacheProxyDirectorRejectsUnknownTarget(t *testing.T) {
 	// must not be dialled, even if the internal header is somehow set.
 	s := newCacheServer(&stubCacheRouter{
 		backend: domain.RegistryBackend{ID: "b1", InternalAddr: "backend:5000"},
-	}, "", "cache.example.com")
+	}, "")
 	director := s.cacheProxyDirector()
 
 	req := protocol.NewRequest("GET", "http://example.com/v2/", nil)
@@ -316,7 +316,7 @@ func TestCacheProxyDirectorRejectsUnknownTarget(t *testing.T) {
 func TestCacheProxyDirectorNoCredsStripsAuth(t *testing.T) {
 	s := newCacheServer(&stubCacheRouter{
 		backend: domain.RegistryBackend{ID: "b1", InternalAddr: "backend:5000"},
-	}, "", "cache.example.com")
+	}, "")
 	director := s.cacheProxyDirector()
 
 	req := protocol.NewRequest("GET", "http://example.com/v2/", nil)
@@ -330,7 +330,7 @@ func TestCacheProxyDirectorNoCredsStripsAuth(t *testing.T) {
 }
 
 func TestCacheProxyModifyResponse(t *testing.T) {
-	s := newCacheServer(&stubCacheRouter{}, "", "cache.example.com")
+	s := newCacheServer(&stubCacheRouter{}, "")
 	mr := s.cacheProxyModifyResponse()
 
 	// Upload Location rewrite.
@@ -409,7 +409,7 @@ func TestRewriteUploadLocationScheme(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s := newCacheServer(&stubCacheRouter{}, "", "cache.example.com")
+			s := newCacheServer(&stubCacheRouter{}, "")
 			s.cfg.CacheScheme = tc.scheme
 			if got := s.rewriteUploadLocation(tc.loc); got != tc.want {
 				t.Fatalf("rewriteUploadLocation = %q, want %q", got, tc.want)
@@ -423,7 +423,7 @@ func TestRecordCacheRoute(t *testing.T) {
 
 	t.Run("manifest-put-201", func(t *testing.T) {
 		stub := &stubCacheRouter{backend: backend}
-		s := newCacheServer(stub, "", "cache.example.com")
+		s := newCacheServer(stub, "")
 		c := newReqCtx("PUT", "/v2/dagger-cache/manifests/v0-21-4", "")
 		c.Response.SetStatusCode(consts.StatusCreated)
 		c.Response.Header.Set("Docker-Content-Digest", testDigest)
@@ -436,7 +436,7 @@ func TestRecordCacheRoute(t *testing.T) {
 
 	t.Run("manifest-put-malformed-digest", func(t *testing.T) {
 		stub := &stubCacheRouter{backend: backend}
-		s := newCacheServer(stub, "", "cache.example.com")
+		s := newCacheServer(stub, "")
 		c := newReqCtx("PUT", "/v2/dagger-cache/manifests/v0-21-4", "")
 		c.Response.SetStatusCode(consts.StatusCreated)
 		c.Response.Header.Set("Docker-Content-Digest", "../../v2/_catalog")
@@ -449,7 +449,7 @@ func TestRecordCacheRoute(t *testing.T) {
 
 	t.Run("manifest-put-non-2xx-noop", func(t *testing.T) {
 		stub := &stubCacheRouter{backend: backend}
-		s := newCacheServer(stub, "", "cache.example.com")
+		s := newCacheServer(stub, "")
 		c := newReqCtx("PUT", "/v2/dagger-cache/manifests/v0-21-4", "")
 		c.Response.SetStatusCode(consts.StatusInternalServerError)
 
@@ -461,7 +461,7 @@ func TestRecordCacheRoute(t *testing.T) {
 
 	t.Run("upload-start-202", func(t *testing.T) {
 		stub := &stubCacheRouter{backend: backend}
-		s := newCacheServer(stub, "", "cache.example.com")
+		s := newCacheServer(stub, "")
 		c := newReqCtx("POST", "/v2/dagger-cache/blobs/uploads/", "")
 		c.Response.SetStatusCode(consts.StatusAccepted)
 		c.Response.Header.Set("Location", "https://cache.example.com/v2/dagger-cache/blobs/uploads/uuid1")
@@ -474,7 +474,7 @@ func TestRecordCacheRoute(t *testing.T) {
 
 	t.Run("upload-complete-201", func(t *testing.T) {
 		stub := &stubCacheRouter{backend: backend}
-		s := newCacheServer(stub, "", "cache.example.com")
+		s := newCacheServer(stub, "")
 		c := newReqCtx("PUT", "/v2/dagger-cache/blobs/uploads/uuid1", "digest="+testDigest)
 		c.Response.SetStatusCode(consts.StatusCreated)
 
@@ -486,7 +486,7 @@ func TestRecordCacheRoute(t *testing.T) {
 
 	t.Run("upload-complete-malformed-digest-ignored", func(t *testing.T) {
 		stub := &stubCacheRouter{backend: backend}
-		s := newCacheServer(stub, "", "cache.example.com")
+		s := newCacheServer(stub, "")
 		c := newReqCtx("PUT", "/v2/dagger-cache/blobs/uploads/uuid1", "digest=../../v2/_catalog")
 		c.Response.SetStatusCode(consts.StatusCreated)
 
@@ -539,7 +539,7 @@ func TestCacheProxyEndToEnd(t *testing.T) {
 	stub := &stubCacheRouter{backend: domain.RegistryBackend{
 		ID: "b1", InternalAddr: strings.TrimPrefix(backend.URL, "http://"), Username: "backend", Password: "secret",
 	}}
-	s := newCacheServer(stub, "client-token", "cache.example.com")
+	s := newCacheServer(stub, "client-token")
 	s.buildProxies()
 	if s.cacheProxy == nil {
 		t.Fatal("cache proxy not built")

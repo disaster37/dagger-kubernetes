@@ -41,7 +41,7 @@ func NewMetricsClient(victoriaURL string) *MetricsClient {
 }
 
 func (c *MetricsClient) doQueryCtx(ctx context.Context, queryURL string) ([]domain.MetricResult, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("victoria query failed: %w", err)
 	}
@@ -94,7 +94,7 @@ func (c *MetricsClient) DeleteSeries(ctx context.Context, matchers []string) err
 		params.Add("match[]", m)
 	}
 	deleteURL := fmt.Sprintf("%s/api/v1/admin/tsdb/delete_series?%s", c.victoriaURL, params.Encode())
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deleteURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deleteURL, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("victoria delete request: %w", err)
 	}

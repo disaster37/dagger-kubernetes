@@ -44,7 +44,7 @@ func (s *stepsLogRepo) DeleteTraceLogs(context.Context, string) error { return n
 // startCIStepsServer boots a supervisor wired like startPipelineURLServer, but
 // with stub trace/log repositories returning a fixed nested tree (root -> two
 // children, one failed) + span-correlated logs.
-func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (string, string) {
+func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (controlURL, adminToken string) {
 	t.Helper()
 	logger := observ.NewTestLogger()
 	store := newIntegrationStore(t)
@@ -63,7 +63,7 @@ func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (string, str
 	if err != nil {
 		t.Fatalf("create admin: %v", err)
 	}
-	adminToken, _, err := tokensSvc.Generate(context.Background(), admin.ID)
+	adminToken, _, err = tokensSvc.Generate(context.Background(), admin.ID)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}

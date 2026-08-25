@@ -109,7 +109,7 @@ func TestK8sProviderWithManagerIntegration(t *testing.T) {
 	}
 }
 
-func newK8sGCManager(t *testing.T) (*Manager, *repository.K8sProvider, *fake.Clientset, *Store) {
+func newK8sGCManager(t *testing.T) (*Manager, *repository.K8sProvider, *fake.Clientset) {
 	t.Helper()
 	cs := fake.NewSimpleClientset()
 	p := repository.NewK8sProvider(cs, repository.K8sProviderConfig{
@@ -133,11 +133,11 @@ func newK8sGCManager(t *testing.T) (*Manager, *repository.K8sProvider, *fake.Cli
 		ReplicaIdleTTL:        5 * time.Minute,
 		VersionRetention:      30 * time.Minute,
 	}, logger, nil)
-	return manager, p, cs, sessions
+	return manager, p, cs
 }
 
 func TestK8sManagerSweepGCDeletesIdleVersion(t *testing.T) {
-	manager, p, cs, _ := newK8sGCManager(t)
+	manager, p, cs := newK8sGCManager(t)
 
 	if err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
 		t.Fatalf("EnsureStatefulSet: %v", err)
@@ -164,7 +164,7 @@ func TestK8sManagerSweepGCDeletesIdleVersion(t *testing.T) {
 }
 
 func TestK8sManagerSweepGCMalformedAnnotationResets(t *testing.T) {
-	manager, p, cs, _ := newK8sGCManager(t)
+	manager, p, cs := newK8sGCManager(t)
 
 	if err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
 		t.Fatalf("EnsureStatefulSet: %v", err)

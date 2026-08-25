@@ -131,7 +131,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	base := "http://localhost:18092"
 
 	// --- GET /api/v1/cache ---
-	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/cache", base), nil)
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/cache", base), http.NoBody)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", adminToken))
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -159,7 +159,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	}
 
 	// --- GET /api/v1/status ---
-	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/status", base), nil)
+	req, _ = http.NewRequest("GET", fmt.Sprintf("%s/api/v1/status", base), http.NoBody)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", adminToken))
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {

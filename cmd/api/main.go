@@ -406,15 +406,15 @@ func run(c *cli.Context) error {
 // leadership/membership goroutines, and resolves the JWT secret +
 // token-encryption key (the leader provisions, followers wait for replication —
 // ADR-016 D5/D6). The caller owns closing the returned store.
-func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (*repository.RaftStore, []byte, []byte, error) {
+func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (store *repository.RaftStore, jwtSecret, tokenEncKey []byte, err error) {
 	if err := validateRaftConfig(cfg, clientset); err != nil {
 		return nil, nil, nil, fmt.Errorf("validate raft config: %w", err)
 	}
 
 	hostname, _ := os.Hostname()
 	discovery := raftDiscoveryConfig(cfg)
-	resolver := repository.NewPeerResolver(discovery)
-	advertise, err := repository.DeriveAdvertiseAddr(discovery, hostname)
+	resolver := repository.NewPeerResolver(&discovery)
+	advertise, err := repository.DeriveAdvertiseAddr(&discovery, hostname)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive raft advertise addr: %w", err)
 	}
@@ -432,14 +432,14 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 
 	var raftTLS *tls.Config
 	if cfg.Raft.TLS.Enabled {
-		dnsNames, ipAddrs := repository.PodSANs(discovery, hostname)
+		dnsNames, ipAddrs := repository.PodSANs(&discovery, hostname)
 		raftTLS, err = buildRaftTLSConfig(cfg, isMultiNode, clientset, dnsNames, ipAddrs, raftNodeCommonName(cfg, resolver, hostname), hostname, logger)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("build raft TLS: %w", err)
 		}
 	}
 
-	raftStore, err := repository.NewRaftStore(repository.RaftStoreConfig{
+	raftStore, err := repository.NewRaftStore(&repository.RaftStoreConfig{
 		Dir:               cfg.Database.Dir,
 		NodeID:            cfg.Raft.NodeID,
 		BindAddr:          cfg.Raft.BindAddr,
@@ -469,12 +469,12 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	go joinLoop(ctx, raftStore, resolver, logger)
 
 	metaStore := repository.NewMetaStore(raftStore)
-	jwtSecret, err := resolveJWTSecret(ctx, raftStore, metaStore, cfg.Auth.JWT.Secret, cfg.Raft.LeaderWaitTimeout, logger)
+	jwtSecret, err = resolveJWTSecret(ctx, raftStore, metaStore, cfg.Auth.JWT.Secret, cfg.Raft.LeaderWaitTimeout, logger)
 	if err != nil {
 		_ = raftStore.Close()
 		return nil, nil, nil, fmt.Errorf("load jwt secret: %w", err)
 	}
-	tokenEncKey, err := resolveTokenEncryptionKey(ctx, raftStore, metaStore, cfg.Auth.Token.EncryptionKey, cfg.Raft.LeaderWaitTimeout, logger)
+	tokenEncKey, err = resolveTokenEncryptionKey(ctx, raftStore, metaStore, cfg.Auth.Token.EncryptionKey, cfg.Raft.LeaderWaitTimeout, logger)
 	if err != nil {
 		_ = raftStore.Close()
 		return nil, nil, nil, fmt.Errorf("load token encryption key: %w", err)
@@ -644,7 +644,7 @@ func runMigrateTokens(c *cli.Context) error {
 	}
 
 	ctx := c.Context
-	raftStore, err := repository.NewRaftStore(repository.RaftStoreConfig{
+	raftStore, err := repository.NewRaftStore(&repository.RaftStoreConfig{
 		Dir:               cfg.Database.Dir,
 		NodeID:            cfg.Raft.NodeID,
 		BindAddr:          cfg.Raft.BindAddr,
@@ -869,7 +869,7 @@ func buildRaftTLSConfig(cfg *domain.Config, isMultiNode bool, clientset kubernet
 	// auto-detected from the pod hostname (<sts>-0); raft.tls.ca_bootstrap
 	// forces it explicitly (ADR-016 §1.2).
 	caBootstrap := raftCABootstrap(cfg, hostname)
-	_, tlsCfg, err := repository.LoadOrBuildRaftTLS(repository.RaftTLSConfig{
+	_, tlsCfg, err := repository.LoadOrBuildRaftTLS(&repository.RaftTLSConfig{
 		Enabled:           true,
 		Dir:               dir,
 		Validity:          cfg.Raft.TLS.Validity,
@@ -1095,7 +1095,7 @@ func registryHostFrom(registry string) string {
 
 // cacheAddrRe constrains backend internal_addr to host[:port] with no
 // scheme/path (defense against SSRF via config, CWE-918).
-var cacheAddrRe = regexp.MustCompile(`^[A-Za-z0-9._:-]+(:[0-9]+)?$`)
+var cacheAddrRe = regexp.MustCompile(`^[A-Za-z0-9._:-]+(:\d+)?$`)
 
 // validateCacheConfig resolves the cache vhost and effective backend list, and
 // fails fast on configuration that would break the proxy (vhost collision,

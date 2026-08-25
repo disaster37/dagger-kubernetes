@@ -24,7 +24,7 @@ import (
 
 // newTestServer builds a Server with auth enabled plus an admin bearer for the
 // pre-existing engine/fleet/cache tests that authenticate explicitly.
-func newTestServer(t *testing.T) (*Server, string) {
+func newTestServer(t *testing.T) (s *Server, addr string) {
 	t.Helper()
 	env := newTestEnv(t)
 	return env.server, env.loginAsAdmin(t)

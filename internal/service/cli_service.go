@@ -166,6 +166,7 @@ func (s *CLIService) Open(ctx context.Context, version, osName, arch string) (io
 	if !ok {
 		return nil, 0, fmt.Errorf("%w: cached tarball disappeared", domain.ErrCLINotFound)
 	}
+	// #nosec G304 -- path is produced by the cache from validated version/os/arch within the cache dir.
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, 0, fmt.Errorf("open cached tarball: %w", err)

@@ -23,7 +23,7 @@ import (
 
 func newRaftStoreForTest(t *testing.T) *repository.RaftStore {
 	t.Helper()
-	store, err := repository.NewRaftStore(repository.RaftStoreConfig{
+	store, err := repository.NewRaftStore(&repository.RaftStoreConfig{
 		Dir:      t.TempDir(),
 		BindAddr: freeAddr(t),
 	}, observ.NewTestLogger())
@@ -59,7 +59,7 @@ func newMetaStore(t *testing.T) *repository.MetaStore {
 
 // newTwoNodeRaftStores builds a real two-node raft cluster over loopback TCP
 // (plaintext) and waits for a leader to be elected.
-func newTwoNodeRaftStores(t *testing.T) (*repository.RaftStore, *repository.RaftStore) {
+func newTwoNodeRaftStores(t *testing.T) (s1, s2 *repository.RaftStore) {
 	t.Helper()
 	addr1 := freeAddr(t)
 	addr2 := freeAddr(t)
@@ -69,7 +69,7 @@ func newTwoNodeRaftStores(t *testing.T) (*repository.RaftStore, *repository.Raft
 	}
 	logger := observ.NewTestLogger()
 
-	s1, err := repository.NewRaftStore(repository.RaftStoreConfig{
+	s1, err := repository.NewRaftStore(&repository.RaftStoreConfig{
 		Dir:           filepath.Join(t.TempDir(), "node-1"),
 		NodeID:        "node-1",
 		BindAddr:      addr1,
@@ -79,7 +79,7 @@ func newTwoNodeRaftStores(t *testing.T) (*repository.RaftStore, *repository.Raft
 	if err != nil {
 		t.Fatalf("NewRaftStore node-1: %v", err)
 	}
-	s2, err := repository.NewRaftStore(repository.RaftStoreConfig{
+	s2, err = repository.NewRaftStore(&repository.RaftStoreConfig{
 		Dir:           filepath.Join(t.TempDir(), "node-2"),
 		NodeID:        "node-2",
 		BindAddr:      addr2,
@@ -107,7 +107,7 @@ func newTwoNodeRaftStores(t *testing.T) (*repository.RaftStore, *repository.Raft
 
 func mustResolver(t *testing.T, nodeID, advertise string, peers []repository.RaftPeer) repository.PeerResolver {
 	t.Helper()
-	return repository.NewPeerResolver(repository.RaftDiscoveryConfig{
+	return repository.NewPeerResolver(&repository.RaftDiscoveryConfig{
 		NodeID:        nodeID,
 		AdvertiseAddr: advertise,
 		Peers:         peers,
@@ -683,11 +683,12 @@ func TestResolveJWTSecretFollowerWaitsForMeta(t *testing.T) {
 	logger := observ.NewTestLogger()
 	s1, s2 := newTwoNodeRaftStores(t)
 	var leader, follower *repository.RaftStore
-	if s1.IsLeader() {
+	switch {
+	case s1.IsLeader():
 		leader, follower = s1, s2
-	} else if s2.IsLeader() {
+	case s2.IsLeader():
 		leader, follower = s2, s1
-	} else {
+	default:
 		t.Fatal("no leader elected")
 	}
 

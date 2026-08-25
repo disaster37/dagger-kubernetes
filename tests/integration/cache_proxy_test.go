@@ -169,7 +169,7 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	base := "http://localhost:18094"
 	client := &http.Client{Timeout: 5 * time.Second}
 
-	doReq := func(method, url string, body io.Reader, headers map[string]string) (*http.Response, string) {
+	doReq := func(method, url string, body io.Reader, headers map[string]string) (int, http.Header) {
 		t.Helper()
 		req, err := http.NewRequest(method, url, body)
 		if err != nil {
@@ -184,17 +184,17 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s %s: %v", method, url, err)
 		}
-		b, _ := io.ReadAll(resp.Body)
+		_, _ = io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
-		return resp, string(b)
+		return resp.StatusCode, resp.Header
 	}
 
 	// 1. Blob upload start → least-charged backend (reg-2).
-	resp, _ := doReq(http.MethodPost, fmt.Sprintf("%s/v2/dagger-cache/blobs/uploads/", base), nil, nil)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("upload start status = %d, want 202", resp.StatusCode)
+	status, headers := doReq(http.MethodPost, fmt.Sprintf("%s/v2/dagger-cache/blobs/uploads/", base), nil, nil)
+	if status != http.StatusAccepted {
+		t.Fatalf("upload start status = %d, want 202", status)
 	}
-	loc := resp.Header.Get("Location")
+	loc := headers.Get("Location")
 	if !strings.HasPrefix(loc, "https://cache.example.com/v2/dagger-cache/blobs/uploads/") {
 		t.Fatalf("Location = %q, want rewritten to cache vhost", loc)
 	}
@@ -203,25 +203,25 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	uploadURL := fmt.Sprintf("%s%s", base, strings.TrimPrefix(loc, "https://cache.example.com"))
 
 	// 2. Upload PATCH + PUT to the rewritten Location → same backend affinity.
-	resp, _ = doReq(http.MethodPatch, uploadURL, strings.NewReader("data"), nil)
-	if resp.StatusCode != http.StatusAccepted {
-		t.Fatalf("upload patch status = %d, want 202", resp.StatusCode)
+	status, _ = doReq(http.MethodPatch, uploadURL, strings.NewReader("data"), nil)
+	if status != http.StatusAccepted {
+		t.Fatalf("upload patch status = %d, want 202", status)
 	}
-	resp, _ = doReq(http.MethodPut, fmt.Sprintf("%s?digest=%s", uploadURL, cacheProxyDigest), strings.NewReader(""), nil)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("upload complete status = %d, want 201", resp.StatusCode)
+	status, _ = doReq(http.MethodPut, fmt.Sprintf("%s?digest=%s", uploadURL, cacheProxyDigest), strings.NewReader(""), nil)
+	if status != http.StatusCreated {
+		t.Fatalf("upload complete status = %d, want 201", status)
 	}
 
 	// 3. Manifest push → least-charged backend (reg-2).
-	resp, _ = doReq(http.MethodPut, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), strings.NewReader(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`), nil)
-	if resp.StatusCode != http.StatusCreated {
-		t.Fatalf("manifest push status = %d, want 201", resp.StatusCode)
+	status, _ = doReq(http.MethodPut, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), strings.NewReader(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`), nil)
+	if status != http.StatusCreated {
+		t.Fatalf("manifest push status = %d, want 201", status)
 	}
 
 	// 4. Manifest pull → routes back to reg-2 (routing-table hit).
-	resp, _ = doReq(http.MethodGet, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), nil, nil)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("manifest pull status = %d, want 200", resp.StatusCode)
+	status, _ = doReq(http.MethodGet, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), nil, nil)
+	if status != http.StatusOK {
+		t.Fatalf("manifest pull status = %d, want 200", status)
 	}
 
 	fb2.mu.Lock()

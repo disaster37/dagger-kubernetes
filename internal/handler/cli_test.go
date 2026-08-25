@@ -70,7 +70,7 @@ func newCLIHandlerEnv(t *testing.T, up domain.CLIUpstream, allowlist []string) *
 }
 
 // cliUpstreamWithTarball builds a stub serving v0.21.8 for linux/amd64.
-func cliUpstreamWithTarball(version string) (*cliTestUpstream, []byte) {
+func cliUpstreamWithTarball(version string) (upstream *cliTestUpstream, tarball []byte) {
 	data := []byte("tarball-bytes-" + version)
 	filename := domain.AssetFilename(version, "linux", "amd64")
 	return &cliTestUpstream{

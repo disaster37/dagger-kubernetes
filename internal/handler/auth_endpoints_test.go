@@ -261,7 +261,7 @@ type fakeOAuthProvider struct{}
 func (fakeOAuthProvider) LoginURL(state string) string {
 	return fmt.Sprintf("https://provider/auth?state=%s", state)
 }
-func (fakeOAuthProvider) Complete(ctx context.Context, code string) (string, string, *domain.User, error) {
+func (fakeOAuthProvider) Complete(ctx context.Context, code string) (accessToken, refreshToken string, user *domain.User, err error) {
 	return "a", "r", &domain.User{ID: "u1", Username: "alice"}, nil
 }
 
@@ -272,7 +272,7 @@ type forbiddenOAuthProvider struct{}
 func (forbiddenOAuthProvider) LoginURL(state string) string {
 	return fmt.Sprintf("https://provider/auth?state=%s", state)
 }
-func (forbiddenOAuthProvider) Complete(ctx context.Context, code string) (string, string, *domain.User, error) {
+func (forbiddenOAuthProvider) Complete(ctx context.Context, code string) (accessToken, refreshToken string, user *domain.User, err error) {
 	return "", "", nil, domain.ErrForbidden
 }
 

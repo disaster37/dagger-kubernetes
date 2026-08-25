@@ -42,20 +42,20 @@ type RaftDiscoveryConfig struct {
 //   - if cfg.Peers is non-empty → staticPeerResolver (explicit override).
 //   - else if cfg.StatefulSetName != "" && cfg.HeadlessService != "" → dnsPeerResolver.
 //   - else → singleNodeResolver (self only, from cfg.AdvertiseAddr/BindAddr).
-func NewPeerResolver(cfg RaftDiscoveryConfig) PeerResolver {
+func NewPeerResolver(cfg *RaftDiscoveryConfig) PeerResolver {
 	switch {
 	case len(cfg.Peers) > 0:
-		return &staticPeerResolver{cfg: cfg}
+		return &staticPeerResolver{cfg: *cfg}
 	case cfg.StatefulSetName != "" && cfg.HeadlessService != "":
-		return &dnsPeerResolver{cfg: cfg, clusterDomain: clusterDomain(cfg)}
+		return &dnsPeerResolver{cfg: *cfg, clusterDomain: clusterDomain(cfg)}
 	default:
-		return &singleNodeResolver{cfg: cfg}
+		return &singleNodeResolver{cfg: *cfg}
 	}
 }
 
 // clusterDomain returns the configured cluster DNS suffix, defaulting to
 // "cluster.local".
-func clusterDomain(cfg RaftDiscoveryConfig) string {
+func clusterDomain(cfg *RaftDiscoveryConfig) string {
 	if cfg.ClusterDomain != "" {
 		return cfg.ClusterDomain
 	}
@@ -63,7 +63,7 @@ func clusterDomain(cfg RaftDiscoveryConfig) string {
 }
 
 // raftPort returns the configured Raft port, defaulting to 8081.
-func raftPort(cfg RaftDiscoveryConfig) int {
+func raftPort(cfg *RaftDiscoveryConfig) int {
 	if cfg.RaftPort != 0 {
 		return cfg.RaftPort
 	}
@@ -77,7 +77,7 @@ func raftPort(cfg RaftDiscoveryConfig) int {
 
 // podAddress builds a pod's stable DNS FQDN + port for a given hostname:
 // <host>.<headless>.<ns>.svc.<clusterDomain>:<port>.
-func podAddress(cfg RaftDiscoveryConfig, clusterDomain, host string) string {
+func podAddress(cfg *RaftDiscoveryConfig, clusterDomain, host string) string {
 	return fmt.Sprintf("%s.%s.%s.svc.%s:%d", host, cfg.HeadlessService, cfg.Namespace, clusterDomain, raftPort(cfg))
 }
 
@@ -110,7 +110,7 @@ func (r *dnsPeerResolver) Resolve() ([]RaftPeer, error) {
 		host := fmt.Sprintf("%s-%d", cfg.StatefulSetName, i)
 		peers = append(peers, RaftPeer{
 			ID:      host,
-			Address: podAddress(cfg, r.clusterDomain, host),
+			Address: podAddress(&cfg, r.clusterDomain, host),
 		})
 	}
 	return peers, nil
@@ -128,7 +128,7 @@ func (r *dnsPeerResolver) selfFor(host string) (RaftPeer, error) {
 	if _, ok := podOrdinal(host, r.cfg.StatefulSetName); ok {
 		return RaftPeer{
 			ID:      host,
-			Address: podAddress(r.cfg, r.clusterDomain, host),
+			Address: podAddress(&r.cfg, r.clusterDomain, host),
 		}, nil
 	}
 	if r.cfg.AdvertiseAddr != "" {
@@ -206,7 +206,7 @@ func (r *staticPeerResolver) synthesizeSelf() (RaftPeer, error) {
 	}
 	addr := cfg.AdvertiseAddr
 	if addr == "" {
-		addr = deriveBindHost(cfg.BindAddr, raftPort(cfg))
+		addr = deriveBindHost(cfg.BindAddr, raftPort(&cfg))
 	}
 	return RaftPeer{ID: cfg.NodeID, Address: addr}, nil
 }
@@ -227,7 +227,7 @@ func (r *singleNodeResolver) Resolve() ([]RaftPeer, error) {
 func (r *singleNodeResolver) Self() (RaftPeer, error) {
 	addr := r.cfg.AdvertiseAddr
 	if addr == "" {
-		addr = deriveBindHost(r.cfg.BindAddr, raftPort(r.cfg))
+		addr = deriveBindHost(r.cfg.BindAddr, raftPort(&r.cfg))
 	}
 	return RaftPeer{ID: r.cfg.NodeID, Address: addr}, nil
 }
@@ -249,11 +249,11 @@ func deriveBindHost(bindAddr string, port int) string {
 //   - cfg.AdvertiseAddr if set.
 //   - else if hostname matches <sts>-<ordinal>: "<hostname>.<headless>.<ns>.svc.<clusterDomain>:<port>".
 //   - else: the bind host (warn if 127.0.0.1/0.0.0.0 with multi-node).
-func DeriveAdvertiseAddr(cfg RaftDiscoveryConfig, hostname string) (string, error) {
+func DeriveAdvertiseAddr(cfg *RaftDiscoveryConfig, hostname string) (string, error) {
 	return deriveAdvertiseAddr(cfg, hostname)
 }
 
-func deriveAdvertiseAddr(cfg RaftDiscoveryConfig, hostname string) (string, error) {
+func deriveAdvertiseAddr(cfg *RaftDiscoveryConfig, hostname string) (string, error) {
 	if cfg.AdvertiseAddr != "" {
 		return cfg.AdvertiseAddr, nil
 	}
@@ -269,16 +269,14 @@ func deriveAdvertiseAddr(cfg RaftDiscoveryConfig, hostname string) (string, erro
 //	     <hostname>.<headless>.<ns>.svc, <hostname>.<headless>.<ns>.svc.<clusterDomain>,
 //	     "localhost"
 //	IP:   127.0.0.1
-func PodSANs(cfg RaftDiscoveryConfig, hostname string) (dnsNames []string, ipAddrs []net.IP) {
+func PodSANs(cfg *RaftDiscoveryConfig, hostname string) (dnsNames []string, ipAddrs []net.IP) {
 	names := []string{hostname, "localhost"}
 	if cfg.HeadlessService != "" {
 		base := fmt.Sprintf("%s.%s", hostname, cfg.HeadlessService)
 		names = append(names, base)
 		if cfg.Namespace != "" {
 			baseNS := fmt.Sprintf("%s.%s", base, cfg.Namespace)
-			names = append(names, baseNS)
-			names = append(names, fmt.Sprintf("%s.svc", baseNS))
-			names = append(names, fmt.Sprintf("%s.svc.%s", baseNS, clusterDomain(cfg)))
+			names = append(names, baseNS, fmt.Sprintf("%s.svc", baseNS), fmt.Sprintf("%s.svc.%s", baseNS, clusterDomain(cfg)))
 		}
 	}
 	// Dedupe while preserving order.

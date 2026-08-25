@@ -101,11 +101,11 @@ func decodeHex(t *testing.T, s string) []byte {
 	return b
 }
 
-func otlpTraceBody(t *testing.T, traceIDHex string) []byte {
+func otlpTraceBody(t *testing.T) []byte {
 	t.Helper()
 	rs := &tracepb.ResourceSpans{
 		ScopeSpans: []*tracepb.ScopeSpans{
-			{Spans: []*tracepb.Span{{TraceId: decodeHex(t, traceIDHex), SpanId: decodeHex(t, "1111111111111111")}}},
+			{Spans: []*tracepb.Span{{TraceId: decodeHex(t, testTraceID), SpanId: decodeHex(t, "1111111111111111")}}},
 		},
 	}
 	rsBytes, err := proto.Marshal(rs)
@@ -133,20 +133,20 @@ func otlpLogsBody(t *testing.T, traceIDHex string) []byte {
 
 // subscribeCaptureClient registers a live SSE client backed by a mockConn so
 // tests can assert on the bytes writePump emits.
-func subscribeCaptureClient(t *testing.T, hub *repository.LiveHub, traceID string) *mockConn {
+func subscribeCaptureClient(t *testing.T, hub *repository.LiveHub) *mockConn {
 	t.Helper()
 	conn := &mockConn{}
 	c := app.NewContext(0)
 	c.SetConn(conn)
-	client := repository.NewLiveClient(c, traceID)
-	hub.Subscribe(traceID, client)
-	t.Cleanup(func() { hub.Unsubscribe(traceID, client) })
+	client := repository.NewLiveClient(c, testTraceID)
+	hub.Subscribe(testTraceID, client)
+	t.Cleanup(func() { hub.Unsubscribe(testTraceID, client) })
 	return conn
 }
 
-func waitForString(t *testing.T, conn *mockConn, want string, timeout time.Duration) {
+func waitForString(t *testing.T, conn *mockConn, want string) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		if strings.Contains(conn.String(), want) {
 			return
@@ -158,25 +158,25 @@ func waitForString(t *testing.T, conn *mockConn, want string, timeout time.Durat
 
 func TestBroadcastOTelUpdateTraces(t *testing.T) {
 	s, _ := newTestServer(t)
-	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
+	conn := subscribeCaptureClient(t, s.liveHub)
 
-	s.broadcastOTelUpdate("traces", otlpTraceBody(t, testTraceID))
-	waitForString(t, conn, `"type":"trace_update"`, 2*time.Second)
+	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
+	waitForString(t, conn, `"type":"trace_update"`)
 }
 
 func TestBroadcastOTelUpdateLogs(t *testing.T) {
 	s, _ := newTestServer(t)
-	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
+	conn := subscribeCaptureClient(t, s.liveHub)
 
 	s.broadcastOTelUpdate("logs", otlpLogsBody(t, testTraceID))
-	waitForString(t, conn, `"type":"logs_update"`, 2*time.Second)
+	waitForString(t, conn, `"type":"logs_update"`)
 }
 
 func TestBroadcastOTelUpdateMetricsNoop(t *testing.T) {
 	s, _ := newTestServer(t)
-	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
+	conn := subscribeCaptureClient(t, s.liveHub)
 
-	s.broadcastOTelUpdate("metrics", otlpTraceBody(t, testTraceID))
+	s.broadcastOTelUpdate("metrics", otlpTraceBody(t))
 
 	// Give any (incorrect) write a moment to appear.
 	time.Sleep(50 * time.Millisecond)
@@ -189,7 +189,7 @@ func TestBroadcastOTelUpdateNilHub(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.liveHub = nil
 	// Must not panic.
-	s.broadcastOTelUpdate("traces", otlpTraceBody(t, testTraceID))
+	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
 	s.broadcastOTelUpdate("logs", otlpLogsBody(t, testTraceID))
 }
 
@@ -209,9 +209,9 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	e.POST("/v1/traces", s.handleOTel("traces"))
 	e.POST("/v1/logs", s.handleOTel("logs"))
 
-	traceConn := subscribeCaptureClient(t, s.liveHub, testTraceID)
+	traceConn := subscribeCaptureClient(t, s.liveHub)
 
-	traceBody := otlpTraceBody(t, testTraceID)
+	traceBody := otlpTraceBody(t)
 	resp := ut.PerformRequest(e, "POST", "/v1/traces", &ut.Body{
 		Body: bytes.NewReader(traceBody),
 		Len:  len(traceBody),
@@ -219,9 +219,9 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200 from traces ingest, got %d", resp.Result().StatusCode())
 	}
-	waitForString(t, traceConn, `"type":"trace_update"`, 2*time.Second)
+	waitForString(t, traceConn, `"type":"trace_update"`)
 
-	logsConn := subscribeCaptureClient(t, s.liveHub, testTraceID)
+	logsConn := subscribeCaptureClient(t, s.liveHub)
 
 	logsBody := otlpLogsBody(t, testTraceID)
 	resp = ut.PerformRequest(e, "POST", "/v1/logs", &ut.Body{
@@ -231,5 +231,5 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200 from logs ingest, got %d", resp.Result().StatusCode())
 	}
-	waitForString(t, logsConn, `"type":"logs_update"`, 2*time.Second)
+	waitForString(t, logsConn, `"type":"logs_update"`)
 }

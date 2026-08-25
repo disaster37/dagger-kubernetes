@@ -35,7 +35,7 @@ func TestNDJSONEventSinkEmitsOneJSONObjectPerLine(t *testing.T) {
 			ID: "r", Name: "build", State: domain.StepStateRunning, Depth: 0,
 		},
 	}
-	if err := sink.Emit(e); err != nil {
+	if err := sink.Emit(&e); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -54,7 +54,7 @@ func TestNDJSONEventSinkEmitsOneJSONObjectPerLine(t *testing.T) {
 
 	// Emitting a second event appends a second line.
 	e2 := domain.CIEvent{Seq: 2, Type: domain.CIEventPipelineDone, TraceID: "trace-1", Timestamp: time.Unix(101, 0), Status: "success"}
-	if err := sink.Emit(e2); err != nil {
+	if err := sink.Emit(&e2); err != nil {
 		t.Fatalf("Emit 2: %v", err)
 	}
 	if n := strings.Count(buf.String(), "\n"); n != 2 {
@@ -69,7 +69,7 @@ func TestNDJSONEventSinkFlushForwardsToFlusher(t *testing.T) {
 	if buf.flushed != 0 {
 		t.Fatalf("flushed = %d before emit", buf.flushed)
 	}
-	if err := sink.Emit(domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"}); err != nil {
+	if err := sink.Emit(&domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"}); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	if buf.flushed != 1 {
@@ -88,7 +88,7 @@ func TestNDJSONEventSinkNoFlusher(t *testing.T) {
 	// for the flush step and still write the JSON line.
 	var buf bytes.Buffer
 	sink := NewNDJSONEventSink(&buf)
-	if err := sink.Emit(domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"}); err != nil {
+	if err := sink.Emit(&domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"}); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 	if err := sink.Flush(); err != nil {
@@ -115,7 +115,7 @@ func TestNDJSONEventSinkExactSerialization(t *testing.T) {
 			Lines:     []string{"a", "b"},
 		},
 	}
-	if err := sink.Emit(e); err != nil {
+	if err := sink.Emit(&e); err != nil {
 		t.Fatalf("Emit: %v", err)
 	}
 
@@ -154,7 +154,7 @@ func (f *failFlush) Flush() error { return errors.New("flush boom") }
 
 func TestNDJSONEventSinkEncodeError(t *testing.T) {
 	sink := NewNDJSONEventSink(failWrite{})
-	err := sink.Emit(domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"})
+	err := sink.Emit(&domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"})
 	if err == nil || !strings.Contains(err.Error(), "encode ci event") {
 		t.Fatalf("Emit err = %q, want encode error", err)
 	}
@@ -165,7 +165,7 @@ func TestNDJSONEventSinkFlushError(t *testing.T) {
 	sink := NewNDJSONEventSink(&fw)
 
 	// Emit's flush step fails and wraps the error.
-	err := sink.Emit(domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"})
+	err := sink.Emit(&domain.CIEvent{Type: domain.CIEventPipelineDone, Status: "success"})
 	if err == nil || !strings.Contains(err.Error(), "flush ci event") {
 		t.Fatalf("Emit err = %q, want flush error", err)
 	}

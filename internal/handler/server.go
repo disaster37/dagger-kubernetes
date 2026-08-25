@@ -64,15 +64,15 @@ var errBodyTooLarge = errors.New("request body too large")
 // buffered or still a stream, so handlers can enforce a per-endpoint cap before
 // decoding. The cache vhost is exempt: its bodies are streamed to the backend
 // by the reverse proxy and never pass through this helper.
-func readBoundedBody(c *app.RequestContext, max int) ([]byte, error) {
+func readBoundedBody(c *app.RequestContext, maxBytes int) ([]byte, error) {
 	if c.Request.IsBodyStream() {
-		// LimitReader stops after max+1 bytes; the +1 lets us detect overflow.
-		r := io.LimitReader(c.Request.BodyStream(), int64(max)+1)
+		// LimitReader stops after maxBytes+1 bytes; the +1 lets us detect overflow.
+		r := io.LimitReader(c.Request.BodyStream(), int64(maxBytes)+1)
 		b, err := io.ReadAll(r)
 		if err != nil {
 			return nil, err
 		}
-		if len(b) > max {
+		if len(b) > maxBytes {
 			return nil, errBodyTooLarge
 		}
 		return b, nil
@@ -81,7 +81,7 @@ func readBoundedBody(c *app.RequestContext, max int) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > max {
+	if len(body) > maxBytes {
 		return nil, errBodyTooLarge
 	}
 	return body, nil
@@ -809,8 +809,9 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 			body, _ = c.Body()
 		}
 		if signal == "traces" && len(body) > 0 {
-			for _, sum := range service.ExtractTraceSummaries(body) {
-				s.attribution.Ingest(ctx, sum.TraceID, attributionUserID(id), sum.CIRepo, sum.GitRemote, sum.CIProvider, sum.Version, sum.Status, sum.DurationMS, sum.StartedAt)
+			sums := service.ExtractTraceSummaries(body)
+			for i := range sums {
+				s.attribution.Ingest(ctx, sums[i].TraceID, attributionUserID(id), sums[i].CIRepo, sums[i].GitRemote, sums[i].CIProvider, sums[i].Version, sums[i].Status, sums[i].DurationMS, sums[i].StartedAt)
 			}
 		}
 
@@ -840,13 +841,13 @@ func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
 	switch signal {
 	case "traces":
 		for _, traceID := range service.ExtractTraceIDs(body) {
-			if len(traceID) > 0 {
+			if traceID != "" {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "trace_update"})
 			}
 		}
 	case "logs":
 		for _, traceID := range service.ExtractLogTraceIDs(body) {
-			if len(traceID) > 0 {
+			if traceID != "" {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "logs_update"})
 			}
 		}
@@ -912,7 +913,7 @@ func (s *Server) handleDataConn(conn net.Conn) {
 	}
 
 	state := tlsConn.ConnectionState()
-	fp := clientFingerprint(state)
+	fp := clientFingerprint(&state)
 	if fp == "" {
 		s.logger.Error("no client certificate")
 		return
@@ -925,7 +926,7 @@ func (s *Server) handleDataConn(conn net.Conn) {
 // from a TLS connection state. Returns "" when no client certificate is
 // present. Extracted so tests can drive serveDataTunnel without a real TLS
 // handshake.
-func clientFingerprint(state tls.ConnectionState) string {
+func clientFingerprint(state *tls.ConnectionState) string {
 	if len(state.PeerCertificates) == 0 {
 		return ""
 	}
@@ -1110,75 +1111,103 @@ func extractCacheToken(c *app.RequestContext) string {
 func (s *Server) routeCacheRequest(ctx context.Context, c *app.RequestContext) (domain.RegistryBackend, routeKind, error) {
 	path := string(c.Path())
 	method := string(c.Method())
-	invalid := func() (domain.RegistryBackend, routeKind, error) {
-		return domain.RegistryBackend{}, routeOther, service.ErrInvalidOCIPath
-	}
 
 	// Non-routed endpoints (ping, tags list, catalog): any healthy backend.
 	if method == "GET" && (rePing.MatchString(path) || reTags.MatchString(path) || reCatalog.MatchString(path)) {
-		if reTags.MatchString(path) {
-			if m := reTags.FindStringSubmatch(path); m != nil && !validOCIPathSegment(m[1]) {
-				return invalid()
-			}
-		}
-		b, err := s.routeLeastCharged()
-		return b, routeOther, err
+		return s.routeCacheList(path)
 	}
 
 	if m := reManifest.FindStringSubmatch(path); m != nil {
-		repo, ref := m[1], m[2]
-		if !validOCIPathSegment(repo) || !validOCIPathSegment(ref) {
-			return invalid()
-		}
-		switch method {
-		case "GET", "HEAD":
-			b, err := s.router.RouteForPull(ctx, repo, ref)
-			return b, routeOther, err
-		case "PUT":
-			b, err := s.router.RouteForPush(repo)
-			return b, routeManifest, err
-		}
-		return invalid()
+		return s.routeCacheManifest(ctx, method, m)
 	}
 
 	if method == "POST" {
 		if m := reBlobUpload.FindStringSubmatch(path); m != nil {
-			if !validOCIPathSegment(m[1]) {
-				return invalid()
-			}
-			b, err := s.router.RouteForUploadStart(m[1])
-			return b, routeUploadStart, err
+			return s.routeCacheUploadStart(m)
 		}
 	}
 
 	if m := reBlobUploadUUID.FindStringSubmatch(path); m != nil {
-		repo, uuid := m[1], m[2]
-		if !validOCIPathSegment(repo) || !validOCIPathSegment(uuid) {
-			return invalid()
-		}
-		if method != "PATCH" && method != "PUT" {
-			return invalid()
-		}
-		kind := routeOther
-		if method == "PUT" && string(c.QueryArgs().Peek("digest")) != "" {
-			kind = routeUploadComplete
-		}
-		b, err := s.router.RouteForUploadResume(ctx, uuid)
-		return b, kind, err
+		return s.routeCacheUploadResume(ctx, method, c, m)
 	}
 
 	if m := reBlob.FindStringSubmatch(path); m != nil {
-		if !validOCIPathSegment(m[1]) {
-			return invalid()
-		}
-		if method != "GET" && method != "HEAD" {
-			return invalid()
-		}
-		b, err := s.router.RouteForBlobPull(ctx, m[1], m[2])
-		return b, routeOther, err
+		return s.routeCacheBlobPull(ctx, method, m)
 	}
 
-	return invalid()
+	return invalidCacheRoute()
+}
+
+// invalidCacheRoute is the shared failure value for an unparseable OCI path.
+func invalidCacheRoute() (domain.RegistryBackend, routeKind, error) {
+	return domain.RegistryBackend{}, routeOther, service.ErrInvalidOCIPath
+}
+
+// routeCacheList routes non-routed GET endpoints (ping, tags, catalog) to any
+// healthy backend.
+func (s *Server) routeCacheList(path string) (domain.RegistryBackend, routeKind, error) {
+	if reTags.MatchString(path) {
+		if m := reTags.FindStringSubmatch(path); m != nil && !validOCIPathSegment(m[1]) {
+			return invalidCacheRoute()
+		}
+	}
+	b, err := s.routeLeastCharged()
+	return b, routeOther, err
+}
+
+// routeCacheManifest routes manifest pull (GET/HEAD) and push (PUT) requests.
+func (s *Server) routeCacheManifest(ctx context.Context, method string, m []string) (domain.RegistryBackend, routeKind, error) {
+	repo, ref := m[1], m[2]
+	if !validOCIPathSegment(repo) || !validOCIPathSegment(ref) {
+		return invalidCacheRoute()
+	}
+	switch method {
+	case "GET", "HEAD":
+		b, err := s.router.RouteForPull(ctx, repo, ref)
+		return b, routeOther, err
+	case "PUT":
+		b, err := s.router.RouteForPush(repo)
+		return b, routeManifest, err
+	}
+	return invalidCacheRoute()
+}
+
+// routeCacheUploadStart routes blob upload session starts.
+func (s *Server) routeCacheUploadStart(m []string) (domain.RegistryBackend, routeKind, error) {
+	if !validOCIPathSegment(m[1]) {
+		return invalidCacheRoute()
+	}
+	b, err := s.router.RouteForUploadStart(m[1])
+	return b, routeUploadStart, err
+}
+
+// routeCacheUploadResume routes PATCH/PUT continuations of a blob upload.
+func (s *Server) routeCacheUploadResume(ctx context.Context, method string, c *app.RequestContext, m []string) (domain.RegistryBackend, routeKind, error) {
+	repo, uuid := m[1], m[2]
+	if !validOCIPathSegment(repo) || !validOCIPathSegment(uuid) {
+		return invalidCacheRoute()
+	}
+	if method != "PATCH" && method != "PUT" {
+		return invalidCacheRoute()
+	}
+	kind := routeOther
+	if method == "PUT" && len(c.QueryArgs().Peek("digest")) != 0 {
+		kind = routeUploadComplete
+	}
+	b, err := s.router.RouteForUploadResume(ctx, uuid)
+	return b, kind, err
+}
+
+// routeCacheBlobPull routes blob downloads.
+func (s *Server) routeCacheBlobPull(ctx context.Context, method string, m []string) (domain.RegistryBackend, routeKind, error) {
+	if !validOCIPathSegment(m[1]) {
+		return invalidCacheRoute()
+	}
+	if method != "GET" && method != "HEAD" {
+		return invalidCacheRoute()
+	}
+	b, err := s.router.RouteForBlobPull(ctx, m[1], m[2])
+	return b, routeOther, err
 }
 
 // routeLeastCharged picks any healthy backend (least-charged) for non-routed
@@ -1218,60 +1247,78 @@ func (s *Server) recordCacheRoute(ctx context.Context, c *app.RequestContext, ba
 
 	switch kind {
 	case routeManifest:
-		if method != "PUT" || (status != consts.StatusCreated && status != consts.StatusAccepted) {
-			return
-		}
-		m := reManifest.FindStringSubmatch(path)
-		if m == nil {
-			return
-		}
-		digest := string(c.Response.Header.Peek("Docker-Content-Digest"))
-		if !validDigest(digest) {
-			digest = ""
-		}
-		if err := s.router.RecordManifest(ctx, m[1], m[2], digest, backend.ID, 0); err != nil {
-			s.logger.WithError(err).Warn("record manifest route failed")
-		}
+		s.recordManifestRoute(ctx, method, status, path, c, backend)
 	case routeUploadStart:
-		if method != "POST" || status != consts.StatusAccepted {
-			return
-		}
-		m := reBlobUpload.FindStringSubmatch(path)
-		if m == nil {
-			return
-		}
-		uuid := uploadUUIDFromResponse(c)
-		if uuid == "" {
-			return
-		}
-		if err := s.router.RecordUploadSession(ctx, uuid, m[1], backend.ID); err != nil {
-			s.logger.WithError(err).Warn("record upload session failed")
-		}
+		s.recordUploadStartRoute(ctx, method, status, path, c, backend)
 	case routeUploadComplete:
-		if method != "PUT" || status != consts.StatusCreated {
-			return
-		}
-		m := reBlobUploadUUID.FindStringSubmatch(path)
-		if m == nil {
-			return
-		}
-		digest := string(c.QueryArgs().Peek("digest"))
-		if digest == "" {
-			return
-		}
-		// Validate the digest shape before persisting it in the routing
-		// table (the manifest path already does this). A compliant registry
-		// only accepts sha256:<hex>, but defense-in-depth keeps a malicious
-		// or buggy backend from polluting the table with an arbitrary
-		// string that could later be matched by a different code path
-		// (CWE-20/CWE-918).
-		if !validDigest(digest) {
-			s.logger.WithField("digest", digest).Warn("upload complete: ignoring malformed digest")
-			return
-		}
-		if err := s.router.CompleteUpload(ctx, m[2], digest, backend.ID); err != nil {
-			s.logger.WithError(err).Warn("complete upload failed")
-		}
+		s.recordUploadCompleteRoute(ctx, method, status, path, c, backend)
+	}
+}
+
+// recordManifestRoute records a routing-table row for a successful manifest
+// push.
+func (s *Server) recordManifestRoute(ctx context.Context, method string, status int, path string, c *app.RequestContext, backend domain.RegistryBackend) {
+	if method != "PUT" || (status != consts.StatusCreated && status != consts.StatusAccepted) {
+		return
+	}
+	m := reManifest.FindStringSubmatch(path)
+	if m == nil {
+		return
+	}
+	digest := string(c.Response.Header.Peek("Docker-Content-Digest"))
+	if !validDigest(digest) {
+		digest = ""
+	}
+	if err := s.router.RecordManifest(ctx, m[1], m[2], digest, backend.ID, 0); err != nil {
+		s.logger.WithError(err).Warn("record manifest route failed")
+	}
+}
+
+// recordUploadStartRoute records a routing-table row for a successful blob
+// upload session start.
+func (s *Server) recordUploadStartRoute(ctx context.Context, method string, status int, path string, c *app.RequestContext, backend domain.RegistryBackend) {
+	if method != "POST" || status != consts.StatusAccepted {
+		return
+	}
+	m := reBlobUpload.FindStringSubmatch(path)
+	if m == nil {
+		return
+	}
+	uuid := uploadUUIDFromResponse(c)
+	if uuid == "" {
+		return
+	}
+	if err := s.router.RecordUploadSession(ctx, uuid, m[1], backend.ID); err != nil {
+		s.logger.WithError(err).Warn("record upload session failed")
+	}
+}
+
+// recordUploadCompleteRoute records a routing-table row for a completed blob
+// upload.
+func (s *Server) recordUploadCompleteRoute(ctx context.Context, method string, status int, path string, c *app.RequestContext, backend domain.RegistryBackend) {
+	if method != "PUT" || status != consts.StatusCreated {
+		return
+	}
+	m := reBlobUploadUUID.FindStringSubmatch(path)
+	if m == nil {
+		return
+	}
+	digest := string(c.QueryArgs().Peek("digest"))
+	if digest == "" {
+		return
+	}
+	// Validate the digest shape before persisting it in the routing
+	// table (the manifest path already does this). A compliant registry
+	// only accepts sha256:<hex>, but defense-in-depth keeps a malicious
+	// or buggy backend from polluting the table with an arbitrary
+	// string that could later be matched by a different code path
+	// (CWE-20/CWE-918).
+	if !validDigest(digest) {
+		s.logger.WithField("digest", digest).Warn("upload complete: ignoring malformed digest")
+		return
+	}
+	if err := s.router.CompleteUpload(ctx, m[2], digest, backend.ID); err != nil {
+		s.logger.WithError(err).Warn("complete upload failed")
 	}
 }
 

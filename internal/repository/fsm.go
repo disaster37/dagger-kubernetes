@@ -317,102 +317,123 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if err, handled := s.applyEntityCommand(cmd); handled {
+		return nil, err
+	}
+	if result, err, handled := s.applyTraceCacheCommand(cmd); handled {
+		return result, err
+	}
+	return nil, fmt.Errorf("unknown raft command kind %d", cmd.Kind)
+}
+
+// applyEntityCommand handles user/group/project/token commands.
+func (s *fsmState) applyEntityCommand(cmd *command) (error, bool) {
 	switch cmd.Kind {
 	case kindUpsertUser:
-		return nil, applyPayload(cmd, "user", func(p cmdUser) error {
+		return applyPayload(cmd, "user", func(p cmdUser) error {
 			return s.upsertUser(p.toDomain(), p.Create)
-		})
+		}), true
 	case kindDeleteUser:
-		return nil, applyPayload(cmd, "delete user", s.deleteUser)
+		return applyPayload(cmd, "delete user", s.deleteUser), true
 	case kindUpsertGroup:
-		return nil, applyPayload(cmd, "group", func(p cmdGroup) error {
+		return applyPayload(cmd, "group", func(p cmdGroup) error {
 			return s.upsertGroup(&p.Group, p.Create)
-		})
+		}), true
 	case kindDeleteGroup:
-		return nil, applyPayload(cmd, "delete group", s.deleteGroup)
+		return applyPayload(cmd, "delete group", s.deleteGroup), true
 	case kindSetMembers:
-		return nil, applyPayload(cmd, "set members", func(p cmdSetMembers) error {
+		return applyPayload(cmd, "set members", func(p cmdSetMembers) error {
 			return s.setMembers(p.GroupID, p.UserIDs)
-		})
+		}), true
 	case kindUpsertProject:
-		return nil, applyPayload(cmd, "project", func(p cmdProject) error {
+		return applyPayload(cmd, "project", func(p cmdProject) error {
 			return s.upsertProject(&p.Project, p.Create)
-		})
+		}), true
 	case kindDeleteProject:
-		return nil, applyPayload(cmd, "delete project", s.deleteProject)
+		return applyPayload(cmd, "delete project", s.deleteProject), true
 	case kindUpsertToken:
-		return nil, applyPayload(cmd, "api token", func(p cmdToken) error {
+		return applyPayload(cmd, "api token", func(p cmdToken) error {
 			return s.upsertToken(p.toDomain())
-		})
+		}), true
 	case kindDeleteToken:
-		return nil, applyPayload(cmd, "delete token", func(p cmdDeleteToken) error {
+		return applyPayload(cmd, "delete token", func(p cmdDeleteToken) error {
 			s.deleteToken(p.UserID)
 			return nil
-		})
+		}), true
 	case kindTouchToken:
-		return nil, applyPayload(cmd, "touch token", func(p cmdTouchToken) error {
+		return applyPayload(cmd, "touch token", func(p cmdTouchToken) error {
 			s.touchToken(p.ID, p.At)
 			return nil
-		})
+		}), true
+	default:
+		return nil, false
+	}
+}
+
+// applyTraceCacheCommand handles trace metadata, meta KV, and cache routing
+// commands.
+func (s *fsmState) applyTraceCacheCommand(cmd *command) (interface{}, error, bool) {
+	switch cmd.Kind {
 	case kindUpsertTraceProvision:
 		return nil, applyPayload(cmd, "trace provision", func(p cmdUpsertTraceProvision) error {
 			s.upsertTraceProvision(p)
 			return nil
-		})
+		}), true
 	case kindUpsertTraceIngest:
 		return nil, applyPayload(cmd, "trace ingest", func(m domain.TraceMeta) error {
 			s.upsertTraceIngest(&m)
 			return nil
-		})
+		}), true
 	case kindMarkTraceFailed:
 		p, err := decode[cmdMarkTraceFailed](cmd, "mark trace failed")
 		if err != nil {
-			return nil, err
+			return nil, err, true
 		}
-		return s.markTraceFailed(p), nil
+		return s.markTraceFailed(p), nil, true
 	case kindSetMeta:
 		return nil, applyPayload(cmd, "set meta", func(p cmdSetMeta) error {
 			s.meta[p.Key] = p.Value
 			return nil
-		})
+		}), true
 	case kindUpsertManifestRoute:
 		return nil, applyPayload(cmd, "manifest route", func(cr domain.CacheRoute) error {
 			s.upsertManifestRoute(&cr)
 			return nil
-		})
+		}), true
 	case kindDeleteManifestRoute:
 		return nil, applyPayload(cmd, "delete manifest route", func(p cmdDeleteManifestRoute) error {
 			delete(s.cacheObjectRoutes, manifestRouteKey(p.Repo, p.Tag))
 			return nil
-		})
+		}), true
 	case kindUpsertBlobRoute:
 		return nil, applyPayload(cmd, "upsert blob route", func(p cmdUpsertBlobRoute) error {
 			s.upsertBlobRoute(p.Digest, p.BackendID, p.CreatedAt)
 			return nil
-		})
+		}), true
 	case kindRecordUpload:
 		return nil, applyPayload(cmd, "upload session", func(sess domain.CacheUploadSession) error {
 			s.recordUpload(&sess)
 			return nil
-		})
+		}), true
 	case kindDeleteUpload:
 		return nil, applyPayload(cmd, "delete upload", func(p cmdDeleteUpload) error {
 			delete(s.cacheUploadSessions, p.UUID)
 			return nil
-		})
+		}), true
 	case kindReapUploads:
 		p, err := decode[cmdReapUploads](cmd, "reap uploads")
 		if err != nil {
-			return nil, err
+			return nil, err, true
 		}
-		return s.reapUploads(p.CutoffRFC3339)
+		n, err := s.reapUploads(p.CutoffRFC3339)
+		return n, err, true
 	case kindDeleteTrace:
 		return nil, applyPayload(cmd, "delete trace", func(p cmdDeleteTrace) error {
 			delete(s.traces, p.TraceID)
 			return nil
-		})
+		}), true
 	default:
-		return nil, fmt.Errorf("unknown raft command kind %d", cmd.Kind)
+		return nil, nil, false
 	}
 }
 
@@ -633,30 +654,31 @@ func (s *fsmState) addMembership(groupID, userID string) {
 
 func (s *fsmState) upsertProject(p *domain.Project, create bool) error {
 	lower := strings.ToLower(p.Name)
-	if existing, ok := s.projects[p.ID]; ok {
-		if create {
-			return fmt.Errorf("project %s: %w", p.ID, domain.ErrConflict)
+	existing, ok := s.projects[p.ID]
+	if !ok {
+		if !create {
+			return fmt.Errorf("update project %s: %w", p.ID, domain.ErrNotFound)
 		}
-		if other, ok := s.projectsByName[lower]; ok && other != p.ID {
+		if _, dup := s.projectsByName[lower]; dup {
 			return fmt.Errorf("project %s: %w", p.Name, domain.ErrConflict)
 		}
-		p.CreatedAt = existing.CreatedAt
 		if p.UpdatedAt.IsZero() {
-			p.UpdatedAt = existing.UpdatedAt
+			p.UpdatedAt = p.CreatedAt
 		}
-		delete(s.projectsByName, strings.ToLower(existing.Name))
 		s.storeProject(p)
 		return nil
 	}
-	if !create {
-		return fmt.Errorf("update project %s: %w", p.ID, domain.ErrNotFound)
+	if create {
+		return fmt.Errorf("project %s: %w", p.ID, domain.ErrConflict)
 	}
-	if _, ok := s.projectsByName[lower]; ok {
+	if other, dup := s.projectsByName[lower]; dup && other != p.ID {
 		return fmt.Errorf("project %s: %w", p.Name, domain.ErrConflict)
 	}
+	p.CreatedAt = existing.CreatedAt
 	if p.UpdatedAt.IsZero() {
-		p.UpdatedAt = p.CreatedAt
+		p.UpdatedAt = existing.UpdatedAt
 	}
+	delete(s.projectsByName, strings.ToLower(existing.Name))
 	s.storeProject(p)
 	return nil
 }

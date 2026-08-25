@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -182,7 +183,7 @@ func TestFileCLICachePutOverwrites(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if string(got) != string(second) {
+	if !bytes.Equal(got, second) {
 		t.Fatalf("content = %q, want %q", got, second)
 	}
 }

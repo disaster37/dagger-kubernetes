@@ -47,11 +47,12 @@ func TestRaftStoreApplySuccess(t *testing.T) {
 func TestRaftStoreApplyNotLeader(t *testing.T) {
 	a, b := newTwoNodeRaftCluster(t)
 	var leader, follower *RaftStore
-	if a.IsLeader() {
+	switch {
+	case a.IsLeader():
 		leader, follower = a, b
-	} else if b.IsLeader() {
+	case b.IsLeader():
 		leader, follower = b, a
-	} else {
+	default:
 		t.Fatal("no leader elected in two-node cluster")
 	}
 
@@ -128,7 +129,7 @@ func TestRaftStoreLeaderCh(t *testing.T) {
 }
 
 func TestRaftStoreNewRaftStoreSingleNode(t *testing.T) {
-	store, err := NewRaftStore(RaftStoreConfig{
+	store, err := NewRaftStore(&RaftStoreConfig{
 		Dir:      t.TempDir(),
 		BindAddr: freeTCPAddr(t),
 	}, testLogger())
@@ -166,7 +167,7 @@ func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 	}
 
 	// Node-1 is the first peer → bootstraps.
-	s1, err := NewRaftStore(RaftStoreConfig{
+	s1, err := NewRaftStore(&RaftStoreConfig{
 		Dir:           filepath.Join(t.TempDir(), "node-1"),
 		NodeID:        "node-1",
 		BindAddr:      addr1,
@@ -180,7 +181,7 @@ func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 
 	// Node-2 is NOT the first peer → must NOT bootstrap. Its configuration
 	// must be empty until the leader (node-1) replicates the voter list.
-	s2, err := NewRaftStore(RaftStoreConfig{
+	s2, err := NewRaftStore(&RaftStoreConfig{
 		Dir:           filepath.Join(t.TempDir(), "node-2"),
 		NodeID:        "node-2",
 		BindAddr:      addr2,
@@ -219,7 +220,7 @@ func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 // cleartext JSON) are not world-readable (CWE-922).
 func TestRaftStoreSnapshotDirPermissions(t *testing.T) {
 	dir := t.TempDir()
-	store, err := NewRaftStore(RaftStoreConfig{
+	store, err := NewRaftStore(&RaftStoreConfig{
 		Dir:      dir,
 		BindAddr: freeTCPAddr(t),
 	}, testLogger())
@@ -238,7 +239,7 @@ func TestRaftStoreSnapshotDirPermissions(t *testing.T) {
 }
 
 func TestNewRaftStoreBadBindAddr(t *testing.T) {
-	if _, err := NewRaftStore(RaftStoreConfig{Dir: t.TempDir(), BindAddr: "not-an-addr"}, testLogger()); err == nil {
+	if _, err := NewRaftStore(&RaftStoreConfig{Dir: t.TempDir(), BindAddr: "not-an-addr"}, testLogger()); err == nil {
 		t.Fatal("expected error for bad bind addr")
 	}
 }
@@ -250,7 +251,7 @@ func TestNewRaftStoreTLS(t *testing.T) {
 		t.Fatalf("build raft TLS config: %v", err)
 	}
 
-	store, err := NewRaftStore(RaftStoreConfig{
+	store, err := NewRaftStore(&RaftStoreConfig{
 		Dir:      filepath.Join(dir, "data"),
 		BindAddr: freeTCPAddr(t),
 		TLS:      tlsCfg,
@@ -277,11 +278,12 @@ func TestNewRaftStoreTLS(t *testing.T) {
 func TestWaitForLeaderAnyVsSelf(t *testing.T) {
 	a, b := newTwoNodeRaftCluster(t)
 	var leader, follower *RaftStore
-	if a.IsLeader() {
+	switch {
+	case a.IsLeader():
 		leader, follower = a, b
-	} else if b.IsLeader() {
+	case b.IsLeader():
 		leader, follower = b, a
-	} else {
+	default:
 		t.Fatal("no leader elected in two-node cluster")
 	}
 
@@ -329,11 +331,12 @@ func TestWaitForLeaderBeforeElection(t *testing.T) {
 func TestRaftStoreAddVoterAndConfiguration(t *testing.T) {
 	a, b := newTwoNodeRaftCluster(t)
 	var leader *RaftStore
-	if a.IsLeader() {
+	switch {
+	case a.IsLeader():
 		leader = a
-	} else if b.IsLeader() {
+	case b.IsLeader():
 		leader = b
-	} else {
+	default:
 		t.Fatal("no leader elected")
 	}
 
@@ -354,11 +357,12 @@ func TestRaftStoreAddVoterAndConfiguration(t *testing.T) {
 func TestReconcileMembershipAddVoter(t *testing.T) {
 	a, b := newTwoNodeRaftCluster(t)
 	var leader *RaftStore
-	if a.IsLeader() {
+	switch {
+	case a.IsLeader():
 		leader = a
-	} else if b.IsLeader() {
+	case b.IsLeader():
 		leader = b
-	} else {
+	default:
 		t.Fatal("no leader elected")
 	}
 	cfg, err := leader.GetConfiguration()
@@ -392,11 +396,12 @@ func TestReconcileMembershipAddVoter(t *testing.T) {
 func TestReconcileMembershipRemoveServer(t *testing.T) {
 	a, b := newTwoNodeRaftCluster(t)
 	var leader *RaftStore
-	if a.IsLeader() {
+	switch {
+	case a.IsLeader():
 		leader = a
-	} else if b.IsLeader() {
+	case b.IsLeader():
 		leader = b
-	} else {
+	default:
 		t.Fatal("no leader elected")
 	}
 	cfg, err := leader.GetConfiguration()
@@ -467,7 +472,7 @@ func freeTCPAddr(t *testing.T) string {
 
 // newTwoNodeRaftCluster builds two connected in-memory raft nodes and waits
 // for one to win the election.
-func newTwoNodeRaftCluster(t *testing.T) (*RaftStore, *RaftStore) {
+func newTwoNodeRaftCluster(t *testing.T) (a, b *RaftStore) {
 	t.Helper()
 	return newTwoNodeRaftClusterOpt(t, true)
 }
@@ -475,7 +480,7 @@ func newTwoNodeRaftCluster(t *testing.T) (*RaftStore, *RaftStore) {
 // newTwoNodeRaftClusterOpt builds two connected in-memory raft nodes. When
 // waitForLeader is false it returns immediately after bootstrap (before any
 // leader is elected), exercising the startup wait paths.
-func newTwoNodeRaftClusterOpt(t *testing.T, waitForLeader bool) (*RaftStore, *RaftStore) {
+func newTwoNodeRaftClusterOpt(t *testing.T, waitForLeader bool) (a, b *RaftStore) {
 	t.Helper()
 
 	node := func(id string) (*RaftStore, *raft.Raft, *raft.InmemTransport, raft.ServerAddress) {

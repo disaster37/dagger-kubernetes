@@ -53,14 +53,14 @@ func validDigest(d string) bool {
 // readBounded reads at most max+1 bytes from r and returns an error when the
 // body exceeds max, so a compromised registry cannot exhaust memory with an
 // oversized response (CWE-400/CWE-770).
-func readBounded(r io.Reader, max int64) ([]byte, error) {
-	lr := io.LimitReader(r, max+1)
+func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
+	lr := io.LimitReader(r, maxBytes+1)
 	b, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(b)) > max {
-		return nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrRegistryUnreachable, max)
+	if int64(len(b)) > maxBytes {
+		return nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrRegistryUnreachable, maxBytes)
 	}
 	return b, nil
 }
@@ -108,7 +108,7 @@ func (c *RegistryStatsClient) baseURL() string {
 
 // do performs a request and maps transport errors to ErrRegistryUnreachable.
 func (c *RegistryStatsClient) do(ctx context.Context, method, rawURL, accept string) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, rawURL, nil)
+	req, err := http.NewRequestWithContext(ctx, method, rawURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
@@ -309,7 +309,7 @@ func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string)
 // layerCount). sizeBytes is the sum of layer + config descriptor sizes; when
 // those sizes are absent it falls back to HEAD blob Content-Length and, if
 // that also fails, returns -1. Returns ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size int64, layers int64, err error) {
+func (c *RegistryStatsClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error) {
 	m, digest, err := c.getManifest(ctx, repo, tag)
 	if err != nil {
 		return "", 0, 0, err

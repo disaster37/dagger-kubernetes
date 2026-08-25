@@ -2,6 +2,7 @@ package service
 
 import (
 	"encoding/hex"
+	"math"
 	"time"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -233,11 +234,17 @@ func buildSummary(s *spanWithResource) TraceIngestSummary {
 		sum.Status = "running"
 	}
 
-	// Start time + duration.
-	if startNS := int64(root.GetStartTimeUnixNano()); startNS > 0 {
+	// Start time + duration. Proto timestamps are uint64 Unix nanos; guard the
+	// int64 conversions against overflow (G115).
+	startUnix := root.GetStartTimeUnixNano()
+	if startUnix > 0 && startUnix <= math.MaxInt64 {
+		startNS := int64(startUnix)
 		sum.StartedAt = time.Unix(0, startNS).UTC()
-		if endNS := int64(root.GetEndTimeUnixNano()); endNS > 0 {
-			sum.DurationMS = (endNS - startNS) / int64(time.Millisecond)
+		if endUnix := root.GetEndTimeUnixNano(); endUnix <= math.MaxInt64 {
+			endNS := int64(endUnix)
+			if endNS > 0 {
+				sum.DurationMS = (endNS - startNS) / int64(time.Millisecond)
+			}
 		}
 	}
 

@@ -34,7 +34,7 @@ type fakeOIDCIssuer struct {
 	tokenStatus int
 }
 
-func newFakeOIDCIssuer(t *testing.T, clientID string) *fakeOIDCIssuer {
+func newFakeOIDCIssuer(t *testing.T) *fakeOIDCIssuer {
 	t.Helper()
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
@@ -42,7 +42,7 @@ func newFakeOIDCIssuer(t *testing.T, clientID string) *fakeOIDCIssuer {
 	}
 	f := &fakeOIDCIssuer{
 		t:          t,
-		clientID:   clientID,
+		clientID:   oidcTestClientID,
 		signKey:    key,
 		publishKey: key,
 	}
@@ -135,7 +135,7 @@ func (f *fakeOIDCIssuer) mintIDToken() string {
 	return s
 }
 
-func newOIDCService(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *UserService, *GroupService) {
+func newOIDCService(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *GroupService) {
 	t.Helper()
 	r := newServiceDB(t)
 	logger := testLogger()
@@ -147,7 +147,7 @@ func newOIDCService(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *
 		t.Fatalf("NewGroupMapper: %v", err)
 	}
 	svc := NewOIDCOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger)
-	return svc, usvc, gsvc
+	return svc, gsvc
 }
 
 func oidcCfg(issuerURL string, mutate func(*domain.OAuthConfig)) *domain.OAuthConfig {
@@ -167,8 +167,8 @@ func oidcCfg(issuerURL string, mutate func(*domain.OAuthConfig)) *domain.OAuthCo
 }
 
 func TestOIDCCompleteSuccess(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	issuer := newFakeOIDCIssuer(t)
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	access, refresh, u, err := svc.Complete(context.Background(), "code")
 	if err != nil {
@@ -186,8 +186,8 @@ func TestOIDCCompleteSuccess(t *testing.T) {
 }
 
 func TestOIDCCompleteIdempotent(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	issuer := newFakeOIDCIssuer(t)
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 	ctx := context.Background()
 
 	_, _, u1, err := svc.Complete(ctx, "code")
@@ -204,9 +204,9 @@ func TestOIDCCompleteIdempotent(t *testing.T) {
 }
 
 func TestOIDCCompleteGroupsNotAllowed(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["groups"] = []any{"other"}
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if !errors.Is(err, domain.ErrForbidden) {
@@ -215,9 +215,9 @@ func TestOIDCCompleteGroupsNotAllowed(t *testing.T) {
 }
 
 func TestOIDCCompleteNoAllowedOrgsRestriction(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["groups"] = []any{"anything"}
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 		c.AllowedOrgs = nil
 	}))
 
@@ -227,10 +227,10 @@ func TestOIDCCompleteNoAllowedOrgsRestriction(t *testing.T) {
 }
 
 func TestOIDCCompleteUsernameClaimFallback(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	delete(issuer.claims, "preferred_username")
 	issuer.claims["email"] = "alice@example.com"
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, u, err := svc.Complete(context.Background(), "code")
 	if err != nil {
@@ -242,9 +242,9 @@ func TestOIDCCompleteUsernameClaimFallback(t *testing.T) {
 }
 
 func TestOIDCCompleteUsernameClaimMissing(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	delete(issuer.claims, "preferred_username")
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "no usable username claim") {
@@ -253,9 +253,9 @@ func TestOIDCCompleteUsernameClaimMissing(t *testing.T) {
 }
 
 func TestOIDCCompleteGroupsClaimString(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["groups"] = "devs"
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	if _, _, _, err := svc.Complete(context.Background(), "code"); err != nil {
 		t.Fatalf("Complete with string groups claim: %v", err)
@@ -263,8 +263,8 @@ func TestOIDCCompleteGroupsClaimString(t *testing.T) {
 }
 
 func TestOIDCCompleteDefaultGroupAutoJoin(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-	svc, _, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+	issuer := newFakeOIDCIssuer(t)
+	svc, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 		c.DefaultGroup = "auto-join"
 	}))
 	ctx := context.Background()
@@ -282,8 +282,8 @@ func TestOIDCCompleteDefaultGroupAutoJoin(t *testing.T) {
 }
 
 func TestOIDCCompleteDiscoveryFailure(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	issuer := newFakeOIDCIssuer(t)
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 	svc.providerFactory = func(_ context.Context, _ string) (oidcProvider, error) {
 		return nil, errors.New("discovery boom")
 	}
@@ -295,9 +295,9 @@ func TestOIDCCompleteDiscoveryFailure(t *testing.T) {
 }
 
 func TestOIDCCompleteTokenExchangeFailure(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.tokenStatus = http.StatusInternalServerError
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "exchange code") {
@@ -306,13 +306,13 @@ func TestOIDCCompleteTokenExchangeFailure(t *testing.T) {
 }
 
 func TestOIDCCompleteIDTokenVerificationFailure(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	other, err := rsa.GenerateKey(rand.Reader, 2048)
 	if err != nil {
 		t.Fatalf("generate other key: %v", err)
 	}
 	issuer.signKey = other
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err = svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "verify id token") {
@@ -321,9 +321,9 @@ func TestOIDCCompleteIDTokenVerificationFailure(t *testing.T) {
 }
 
 func TestOIDCCompleteIDTokenExpired(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["exp"] = time.Now().Add(-1 * time.Hour).Unix()
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "verify id token") {
@@ -332,9 +332,9 @@ func TestOIDCCompleteIDTokenExpired(t *testing.T) {
 }
 
 func TestOIDCCompleteIDTokenWrongAudience(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["aud"] = "some-other-client"
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "verify id token") {
@@ -343,9 +343,9 @@ func TestOIDCCompleteIDTokenWrongAudience(t *testing.T) {
 }
 
 func TestOIDCCompleteMissingSub(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	delete(issuer.claims, "sub")
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "missing sub") {
@@ -354,10 +354,10 @@ func TestOIDCCompleteMissingSub(t *testing.T) {
 }
 
 func TestOIDCCompleteMultiAudienceAzpMatch(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["aud"] = []any{oidcTestClientID, "other-client"}
 	issuer.claims["azp"] = oidcTestClientID
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	if _, _, _, err := svc.Complete(context.Background(), "code"); err != nil {
 		t.Fatalf("Complete with matching azp: %v", err)
@@ -365,10 +365,10 @@ func TestOIDCCompleteMultiAudienceAzpMatch(t *testing.T) {
 }
 
 func TestOIDCCompleteMultiAudienceAzpMismatch(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["aud"] = []any{oidcTestClientID, "other-client"}
 	issuer.claims["azp"] = "other-client"
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "azp") {
@@ -377,9 +377,9 @@ func TestOIDCCompleteMultiAudienceAzpMismatch(t *testing.T) {
 }
 
 func TestOIDCCompleteMultiAudienceMissingAzp(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["aud"] = []any{oidcTestClientID, "other-client"}
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "missing azp") {
@@ -388,8 +388,8 @@ func TestOIDCCompleteMultiAudienceMissingAzp(t *testing.T) {
 }
 
 func TestOIDCLoginURL(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	issuer := newFakeOIDCIssuer(t)
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	loginURL := svc.LoginURL("state123")
 	u, err := url.Parse(loginURL)
@@ -415,8 +415,8 @@ func TestOIDCLoginURL(t *testing.T) {
 }
 
 func TestOIDCLoginURLAppendsOpenIDScope(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+	issuer := newFakeOIDCIssuer(t)
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 		c.Scopes = []string{"profile", "email"}
 	}))
 
@@ -431,20 +431,20 @@ func TestOIDCLoginURLAppendsOpenIDScope(t *testing.T) {
 }
 
 func TestOIDCIssuerTrailingSlashTrimmed(t *testing.T) {
-	svc, _, _ := newOIDCService(t, oidcCfg("http://localhost:5556/", nil))
+	svc, _ := newOIDCService(t, oidcCfg("http://localhost:5556/", nil))
 	if svc.issuerURL != "http://localhost:5556" {
 		t.Fatalf("issuerURL = %q, want trailing slash trimmed", svc.issuerURL)
 	}
 }
 
 func TestOIDCCompleteUserInfoUsername(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	delete(issuer.claims, "preferred_username")
 	issuer.userinfo = map[string]any{
 		"preferred_username": "bob",
 		"email":              "bob@example.com",
 	}
-	svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+	svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 	_, _, u, err := svc.Complete(context.Background(), "code")
 	if err != nil {
@@ -460,10 +460,10 @@ func TestOIDCCompleteUserInfoUsername(t *testing.T) {
 
 func TestOIDCCompleteUserInfoGroups(t *testing.T) {
 	t.Run("intersect", func(t *testing.T) {
-		issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+		issuer := newFakeOIDCIssuer(t)
 		delete(issuer.claims, "groups")
 		issuer.userinfo = map[string]any{"groups": []any{"devs"}}
-		svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 		if _, _, _, err := svc.Complete(context.Background(), "code"); err != nil {
 			t.Fatalf("Complete: %v", err)
@@ -471,10 +471,10 @@ func TestOIDCCompleteUserInfoGroups(t *testing.T) {
 	})
 
 	t.Run("no intersection", func(t *testing.T) {
-		issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+		issuer := newFakeOIDCIssuer(t)
 		delete(issuer.claims, "groups")
 		issuer.userinfo = map[string]any{"groups": []any{"other"}}
-		svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, nil))
 
 		_, _, _, err := svc.Complete(context.Background(), "code")
 		if !errors.Is(err, domain.ErrForbidden) {
@@ -494,8 +494,8 @@ func TestOIDCCompleteAllowedGroups(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-			svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			issuer := newFakeOIDCIssuer(t)
+			svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 				c.AllowedOrgs = nil
 				c.AllowedGroups = tt.allowed
 			}))
@@ -527,8 +527,8 @@ func TestOIDCCompleteAllowedGroupsUnionOrgs(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			issuer := newFakeOIDCIssuer(t, oidcTestClientID)
-			svc, _, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			issuer := newFakeOIDCIssuer(t)
+			svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 				c.AllowedOrgs = tt.orgs
 				c.AllowedGroups = tt.groups
 			}))
@@ -548,9 +548,9 @@ func TestOIDCCompleteAllowedGroupsUnionOrgs(t *testing.T) {
 }
 
 func TestOIDCCompleteGroupMapping(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["groups"] = []any{"devs", "platform"}
-	svc, _, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+	svc, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 		c.AllowedOrgs = nil
 		c.GroupMappings = []domain.GroupMappingRule{
 			{Pattern: "^devs$", Replacement: "dev-mapped"},
@@ -577,9 +577,9 @@ func TestOIDCCompleteGroupMapping(t *testing.T) {
 }
 
 func TestOIDCCompleteNoGroupMappingsNoSync(t *testing.T) {
-	issuer := newFakeOIDCIssuer(t, oidcTestClientID)
+	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["groups"] = []any{"devs"}
-	svc, _, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+	svc, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
 		c.AllowedOrgs = nil
 	}))
 	ctx := context.Background()

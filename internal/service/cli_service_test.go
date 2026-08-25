@@ -61,7 +61,7 @@ func (u *stubCLIUpstream) FetchTarball(_ context.Context, _, _, _ string) (io.Re
 	return io.NopCloser(bytes.NewReader(u.tarball)), int64(len(u.tarball)), nil
 }
 
-func (u *stubCLIUpstream) counts() (int, int, int) {
+func (u *stubCLIUpstream) counts() (listCalls, checksumCalls, tarballCalls int) {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	return u.listCalls, u.checksumCalls, u.tarballCalls
@@ -89,7 +89,7 @@ func newCLITestService(t *testing.T, allowlist []string, up *stubCLIUpstream) *C
 
 // stubTarball returns tarball bytes plus a checksums map keyed by its asset
 // filename.
-func stubTarball(version string) ([]byte, map[string]string) {
+func stubTarball(version string) (tarball []byte, checksums map[string]string) {
 	data := []byte("fake-tarball-" + version)
 	return data, map[string]string{domain.AssetFilename(version, "linux", "amd64"): shaHex(data)}
 }
@@ -488,7 +488,7 @@ func TestCLIServiceOpen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if string(got) != string(data) {
+	if !bytes.Equal(got, data) {
 		t.Fatalf("body = %q, want %q", got, data)
 	}
 }

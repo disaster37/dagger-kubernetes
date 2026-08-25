@@ -70,12 +70,12 @@ func (s *Server) handleCLIDownload(ctx context.Context, c *app.RequestContext) {
 
 // parseCLIOSArch validates the os/arch query params against the allowlist,
 // defaulting to linux/amd64.
-func (s *Server) parseCLIOSArch(c *app.RequestContext) (string, string, bool) {
-	osName := c.Query("os")
+func (s *Server) parseCLIOSArch(c *app.RequestContext) (osName, arch string, ok bool) {
+	osName = c.Query("os")
 	if osName == "" {
 		osName = "linux"
 	}
-	arch := c.Query("arch")
+	arch = c.Query("arch")
 	if arch == "" {
 		arch = "amd64"
 	}

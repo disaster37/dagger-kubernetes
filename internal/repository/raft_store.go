@@ -65,8 +65,8 @@ type RaftStoreConfig struct {
 // the transport (plaintext TCP or TLS via tlsStreamLayer), and bootstraps the
 // cluster from the resolver's voter list. The caller must call WaitForLeader
 // before issuing writes.
-func NewRaftStore(cfg RaftStoreConfig, logger *logrus.Logger) (*RaftStore, error) {
-	cfg = withDefaults(cfg)
+func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, error) {
+	withDefaults(cfg)
 
 	dir := cfg.Dir
 	if err := os.MkdirAll(dir, 0o750); err != nil {
@@ -132,6 +132,7 @@ func NewRaftStore(cfg RaftStoreConfig, logger *logrus.Logger) (*RaftStore, error
 	// token-encryption key in cleartext JSON. Tighten the snapshots directory
 	// to 0o700 so only the supervisor user can traverse/list it (CWE-922).
 	// raft.db (0600 via raft-boltdb) and node-id (0600) are already restricted.
+	// #nosec G302 -- "snapshots" is a directory; 0700 is more restrictive than the 0750 directory threshold.
 	if err := os.Chmod(filepath.Join(dir, "snapshots"), 0o700); err != nil && !os.IsNotExist(err) {
 		_ = boltStore.Close()
 		return nil, fmt.Errorf("chmod snapshots dir: %w", err)
@@ -228,7 +229,7 @@ func NewInmemRaftStore(nodeID string, logger *logrus.Logger, applyTimeout time.D
 }
 
 // withDefaults fills unset config fields with production defaults.
-func withDefaults(cfg RaftStoreConfig) RaftStoreConfig {
+func withDefaults(cfg *RaftStoreConfig) {
 	if cfg.Dir == "" {
 		cfg.Dir = "/var/lib/dagger-kubernetes"
 	}
@@ -247,13 +248,12 @@ func withDefaults(cfg RaftStoreConfig) RaftStoreConfig {
 	if cfg.TrailingLogs == 0 {
 		cfg.TrailingLogs = 256
 	}
-	return cfg
 }
 
 // newStreamTransport binds a transport on cfg.BindAddr. When cfg.TLS != nil it
 // wraps the listener in a tlsStreamLayer (mTLS); otherwise it uses plaintext
 // raft.NewTCPTransport. Returns (transport, advertiseAddr, error).
-func newStreamTransport(cfg RaftStoreConfig, logOutput io.Writer) (raft.Transport, string, error) {
+func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transport, string, error) {
 	host, port, err := net.SplitHostPort(cfg.BindAddr)
 	if err != nil {
 		return nil, "", fmt.Errorf("parse raft bind_addr %s: %w", cfg.BindAddr, err)
@@ -588,6 +588,7 @@ func (w *logrusWriter) flushLine(line []byte) {
 // generating and persisting a UUIDv4 on first boot.
 func loadOrGenerateNodeID(dir string) (string, error) {
 	path := filepath.Join(dir, "node-id")
+	// #nosec G304 -- path is a fixed "node-id" basename under the store dir.
 	if b, err := os.ReadFile(path); err == nil {
 		id := strings.TrimSpace(string(b))
 		if id != "" {

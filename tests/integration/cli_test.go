@@ -52,11 +52,11 @@ func sha256Hex(b []byte) string {
 // startCLIServer boots a full supervisor wired with a CLI service whose
 // upstream points at the returned httptest server. Returns the control-plane
 // URL, the admin token, and the upstream tarball digest.
-func startCLIServer(t *testing.T, controlAddr, dataAddr string) (string, string, string, []byte) {
+func startCLIServer(t *testing.T, controlAddr, dataAddr string) (serverURL, adminToken, digest string, tarballBytes []byte) {
 	t.Helper()
 
 	tarball := buildCLITarball(t, "#!/bin/sh\necho dagger\n")
-	digest := sha256Hex(tarball)
+	digest = sha256Hex(tarball)
 
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
@@ -90,7 +90,7 @@ func startCLIServer(t *testing.T, controlAddr, dataAddr string) (string, string,
 	if err != nil {
 		t.Fatalf("create admin: %v", err)
 	}
-	adminToken, _, err := tokensSvc.Generate(context.Background(), admin.ID)
+	adminToken, _, err = tokensSvc.Generate(context.Background(), admin.ID)
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
@@ -148,9 +148,9 @@ func startCLIServer(t *testing.T, controlAddr, dataAddr string) (string, string,
 	return fmt.Sprintf("http://localhost%s", controlAddr), adminToken, digest, tarball
 }
 
-func cliGet(t *testing.T, url, token string) (*http.Response, []byte) {
+func cliGet(t *testing.T, url, token string) (status int, header http.Header, body []byte) {
 	t.Helper()
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequest("GET", url, http.NoBody)
 	if err != nil {
 		t.Fatalf("new request: %v", err)
 	}
@@ -159,17 +159,17 @@ func cliGet(t *testing.T, url, token string) (*http.Response, []byte) {
 	if err != nil {
 		t.Fatalf("GET %s: %v", url, err)
 	}
-	body, _ := io.ReadAll(resp.Body)
+	body, _ = io.ReadAll(resp.Body)
 	_ = resp.Body.Close()
-	return resp, body
+	return resp.StatusCode, resp.Header, body
 }
 
 func TestCLILatestEndpoint(t *testing.T) {
 	serverURL, token, digest, _ := startCLIServer(t, ":18100", ":18460")
 
-	resp, body := cliGet(t, serverURL+"/api/v1/cli/versions/latest?os=linux&arch=amd64", token)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("latest status = %d, body = %s", resp.StatusCode, body)
+	status, _, body := cliGet(t, serverURL+"/api/v1/cli/versions/latest?os=linux&arch=amd64", token)
+	if status != http.StatusOK {
+		t.Fatalf("latest status = %d, body = %s", status, body)
 	}
 
 	var art domain.CLIArtifact
@@ -190,14 +190,14 @@ func TestCLILatestEndpoint(t *testing.T) {
 func TestCLIDownloadEndpoint(t *testing.T) {
 	serverURL, token, digest, tarball := startCLIServer(t, ":18101", ":18461")
 
-	resp, body := cliGet(t, serverURL+"/api/v1/cli/v0.21.8?os=linux&arch=amd64", token)
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("download status = %d, body = %s", resp.StatusCode, body)
+	status, header, body := cliGet(t, serverURL+"/api/v1/cli/v0.21.8?os=linux&arch=amd64", token)
+	if status != http.StatusOK {
+		t.Fatalf("download status = %d, body = %s", status, body)
 	}
-	if ct := resp.Header.Get("Content-Type"); ct != "application/gzip" {
+	if ct := header.Get("Content-Type"); ct != "application/gzip" {
 		t.Fatalf("Content-Type = %q, want application/gzip", ct)
 	}
-	if cd := resp.Header.Get("Content-Disposition"); cd != `attachment; filename="dagger_v0.21.8_linux_amd64.tar.gz"` {
+	if cd := header.Get("Content-Disposition"); cd != `attachment; filename="dagger_v0.21.8_linux_amd64.tar.gz"` {
 		t.Fatalf("Content-Disposition = %q", cd)
 	}
 	if sha256Hex(body) != digest {
@@ -225,9 +225,9 @@ func TestCLIDownloadEndpoint(t *testing.T) {
 func TestCLIDownloadNotAllowedVersion(t *testing.T) {
 	serverURL, token, _, _ := startCLIServer(t, ":18102", ":18462")
 
-	resp, _ := cliGet(t, serverURL+"/api/v1/cli/v0.22.0?os=linux&arch=amd64", token)
-	if resp.StatusCode != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400", resp.StatusCode)
+	status, _, _ := cliGet(t, serverURL+"/api/v1/cli/v0.22.0?os=linux&arch=amd64", token)
+	if status != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", status)
 	}
 }
 
@@ -236,8 +236,8 @@ func TestCLIDownloadUnknownVersion(t *testing.T) {
 
 	// v0.21.99 is allowed (minor 0.21 in the allowlist) but does not exist
 	// upstream, so the upstream 404 must surface as HTTP 404.
-	resp, _ := cliGet(t, serverURL+"/api/v1/cli/v0.21.99?os=linux&arch=amd64", token)
-	if resp.StatusCode != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404", resp.StatusCode)
+	status, _, _ := cliGet(t, serverURL+"/api/v1/cli/v0.21.99?os=linux&arch=amd64", token)
+	if status != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", status)
 	}
 }
