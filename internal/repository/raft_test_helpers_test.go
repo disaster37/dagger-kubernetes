@@ -94,6 +94,9 @@ type raftClusterNode struct {
 }
 
 // raftTestConfig returns a fast election-timing raft config for test clusters.
+// Timings are intentionally relaxed enough to stay deterministic under
+// -race and CI container CPU contention (200ms timeouts flaked on loaded
+// runners: leaders stepped down before heartbeats could commit).
 func raftTestConfig(id string) *raft.Config {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(id)
@@ -102,17 +105,17 @@ func raftTestConfig(id string) *raft.Config {
 	config.SnapshotThreshold = 1000
 	config.LogOutput = io.Discard
 	config.LogLevel = "WARN"
-	config.HeartbeatTimeout = 200 * time.Millisecond
-	config.ElectionTimeout = 200 * time.Millisecond
-	config.LeaderLeaseTimeout = 100 * time.Millisecond
-	config.CommitTimeout = 10 * time.Millisecond
+	config.HeartbeatTimeout = 500 * time.Millisecond
+	config.ElectionTimeout = 500 * time.Millisecond
+	config.LeaderLeaseTimeout = 250 * time.Millisecond
+	config.CommitTimeout = 50 * time.Millisecond
 	return config
 }
 
 // waitForClusterLeader blocks until one of the nodes becomes leader.
 func waitForClusterLeader(t *testing.T, nodes []raftClusterNode) *RaftStore {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		for i := range nodes {
 			if nodes[i].r.State() == raft.Leader {
@@ -293,7 +296,7 @@ func clusterStores(nodes []raftClusterNode) []*RaftStore {
 // findLeader returns the current leader store, failing if none is elected.
 func findLeader(t *testing.T, stores []*RaftStore) *RaftStore {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		for _, s := range stores {
 			if s.IsLeader() {
@@ -309,7 +312,7 @@ func findLeader(t *testing.T, stores []*RaftStore) *RaftStore {
 // waitForMetaValue polls a node's local FSM until the meta key reaches want.
 func waitForMetaValue(t *testing.T, store *RaftStore, key, want string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		if v, err := store.fsmRead().readMeta(key); err == nil && v == want {
 			return
@@ -389,7 +392,7 @@ func TestThreeNodeTLSClusterAddVoterJoin(t *testing.T) {
 	bootstrapSingle(t, nodes)
 
 	// Wait for node-0 to become the single-node leader.
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) && !nodes[0].store.IsLeader() {
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -405,7 +408,7 @@ func TestThreeNodeTLSClusterAddVoterJoin(t *testing.T) {
 	}
 
 	// The cluster reaches a 3-node configuration.
-	deadline = time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		cfg, err := leader.GetConfiguration()
 		if err == nil && len(cfg.Servers) == 3 {

@@ -139,14 +139,29 @@ go tool cover -func=coverage.out | grep total
 golangci-lint run ./...
 ```
 
-## Dagger
+## CI validation (mandatory)
 
-**Always run the full CI pipeline locally before pushing.** Changes that pass `go test ./...` locally can still fail in CI because the Dagger pipeline also runs `golangci-lint`, builds binaries, validates the Helm chart, builds the UI, and runs tests with `-race`. Breakage here wastes reviewer time and delays the PR.
+The GitHub Actions workflow (`.github/workflows/ci.yml`) is the merge gate: it
+runs the **same Dagger CI pipeline you must run locally**. Any change that
+breaks it blocks the PR — do not push first and let CI find it for you.
+
+**Before every push, run the exact command the workflow runs:**
 
 ```bash
-# Run before every push:
 dagger call -m ./dagger --src . ci export --path out
 ```
+
+Requirements to mirror CI locally:
+
+- Use the **same Dagger CLI version** as the workflow (see `env.DAGGER_VERSION`
+  in `.github/workflows/ci.yml`, currently pinned). Install it with
+  `curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION=<version> sh`.
+- The command must **exit 0**. `go test ./...` passing is not enough: the
+  pipeline also runs `golangci-lint`, `go vet`, `go test -race -covermode=atomic`,
+  the UI build, the binary builds, the Dockerfile smoke test, and the Helm
+  lint/template matrix — all inside containers, which is where
+  timing-sensitive and environment-dependent failures (e.g. raft cluster
+  tests under `-race` on loaded runners) show up.
 
 The CI pipeline is a local Dagger module in `dagger/` (module name `dagger-kubernetes`).
 It delegates lint and build to the `golang` module and helm lint to the `helm`
@@ -156,10 +171,10 @@ upstream modules cannot express `-race`, the UI build, the Dockerfile smoke
 test, or `helm template`. See [`DAGGER.md`](./DAGGER.md) for the full reference.
 
 ```bash
-# Full CI pipeline (lint + test + ui + build + docker + helm)
+# Full CI pipeline (lint + test + ui + build + docker + helm) — what the workflow runs
 dagger call -m ./dagger --src . ci export --path out
 
-# Individual functions
+# Individual functions (useful while iterating)
 dagger call -m ./dagger --src . lint
 dagger call -m ./dagger --src . test export --path coverage.out
 dagger call -m ./dagger --src . ui export --path ui-dist
@@ -244,7 +259,7 @@ directory. When editing one, copy it verbatim to the other and verify with
 `cmp scripts/dagger-kubernetes.sh ci-integrations/gha/dagger-kubernetes.sh`.
 
 ## PR checklist
-- [ ] `dagger call -m ./dagger --src . ci export --path out` passes locally
+- [ ] `dagger call -m ./dagger --src . ci export --path out` exits 0 locally (same command as `.github/workflows/ci.yml`, same pinned Dagger CLI version)
 - [ ] Tests cover new code (target 100% coverage)
 - [ ] Integration test proves feature works with real Dagger client
 - [ ] `golangci-lint run ./...` passes
