@@ -287,33 +287,8 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 	return transport, advertise.String(), nil
 }
 
-// withSelf ensures the full voter list contains this node with its effective
-// ID and advertise address (self first, duplicates dropped).
-func withSelf(peers []RaftPeer, id, advertise string) []RaftPeer {
-	out := make([]RaftPeer, 0, len(peers)+1)
-	found := false
-	for _, p := range peers {
-		if p.ID == id {
-			found = true
-			if p.Address == "" {
-				p.Address = advertise
-			}
-			out = append(out, p)
-			continue
-		}
-		if p.ID == "" && p.Address == "" {
-			continue
-		}
-		out = append(out, p)
-	}
-	if !found {
-		out = append([]RaftPeer{{ID: id, Address: advertise}}, out...)
-	}
-	return out
-}
-
-// raftConfigurationFromPeers maps the resolved voter list (including self) to
-// a raft.Configuration, skipping empty entries and deduplicating IDs.
+// raftConfigurationFromPeers maps the resolved voter list to a raft
+// Configuration, skipping empty entries and deduplicating IDs.
 func raftConfigurationFromPeers(peers []RaftPeer) raft.Configuration {
 	servers := make([]raft.Server, 0, len(peers))
 	seen := make(map[raft.ServerID]bool, len(peers))
