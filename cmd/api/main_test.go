@@ -58,7 +58,9 @@ func newMetaStore(t *testing.T) *repository.MetaStore {
 }
 
 // newTwoNodeRaftStores builds a real two-node raft cluster over loopback TCP
-// (plaintext) and waits for a leader to be elected.
+// (plaintext) and waits for a leader to be elected. The bootstrap node seeds
+// the cluster with only itself; the follower joins via AddVoter (simulating the
+// production joinLoop).
 func newTwoNodeRaftStores(t *testing.T) (s1, s2 *repository.RaftStore) {
 	t.Helper()
 	addr1 := freeAddr(t)
@@ -94,12 +96,20 @@ func newTwoNodeRaftStores(t *testing.T) (s1, s2 *repository.RaftStore) {
 		_ = s2.Close()
 	})
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Node-1 bootstraps with only itself (single-node quorum). Wait for it
+	// to become leader, then add node-2 via AddVoter (simulating joinLoop).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s1.WaitForLeader(ctx); err != nil {
 		t.Fatalf("WaitForLeader node-1: %v", err)
 	}
-	if err := s2.WaitForLeader(ctx); err != nil {
+	if err := s1.AddVoter("node-2", addr2, 5*time.Second); err != nil {
+		t.Fatalf("AddVoter node-2: %v", err)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel2()
+	if err := s2.WaitForLeader(ctx2); err != nil {
 		t.Fatalf("WaitForLeader node-2: %v", err)
 	}
 	return s1, s2

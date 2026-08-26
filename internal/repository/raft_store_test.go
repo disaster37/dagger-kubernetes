@@ -170,10 +170,12 @@ func TestRaftStoreNewRaftStoreSingleNode(t *testing.T) {
 }
 
 // TestRaftStoreOnlyBootstrapNodeSeedsConfig verifies that only the bootstrap
-// node (first peer in the resolved voter list) calls raft.BootstrapCluster.
-// Other nodes start with no config and join via the leader. This prevents
-// split-brain on scale-up, where fresh nodes would otherwise bootstrap with a
-// voter list that diverges from the pre-existing leader's configuration
+// node (first peer in the resolved voter list) calls raft.BootstrapCluster,
+// and that it seeds the cluster with ONLY itself as the initial voter. Other
+// nodes start with no config and join via the leader's AddVoter (joinLoop).
+// This prevents the deadlock where the bootstrap node includes all peers in
+// the initial configuration, requiring a majority (2 of 3) to elect a leader
+// while the non-bootstrap peers have no config and may not be ready to vote
 // (CWE-693, ADR-016).
 func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 	addr1 := freeTCPAddr(t)
@@ -183,7 +185,7 @@ func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 		{ID: "node-2", Address: addr2},
 	}
 
-	// Node-1 is the first peer → bootstraps.
+	// Node-1 is the first peer → bootstraps with only itself.
 	s1, err := NewRaftStore(&RaftStoreConfig{
 		Dir:           filepath.Join(t.TempDir(), "node-1"),
 		NodeID:        "node-1",
@@ -197,7 +199,7 @@ func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 	defer func() { _ = s1.Close() }()
 
 	// Node-2 is NOT the first peer → must NOT bootstrap. Its configuration
-	// must be empty until the leader (node-1) replicates the voter list.
+	// must be empty until the leader (node-1) adds it via AddVoter.
 	s2, err := NewRaftStore(&RaftStoreConfig{
 		Dir:           filepath.Join(t.TempDir(), "node-2"),
 		NodeID:        "node-2",
@@ -219,15 +221,43 @@ func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
 		t.Fatalf("non-bootstrap node-2 seeded a local config (split-brain risk): %v", cfg2.Servers)
 	}
 
-	// The cluster still forms: node-1 bootstrapped with both voters and
-	// node-2 joins via Raft replication.
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// Node-1 must have bootstrapped with only itself (single-node quorum).
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := s1.WaitForLeader(ctx); err != nil {
 		t.Fatalf("WaitForLeader node-1: %v", err)
 	}
-	if err := s2.WaitForLeader(ctx); err != nil {
-		t.Fatalf("WaitForLeader node-2: %v", err)
+	cfg1, err := s1.GetConfiguration()
+	if err != nil {
+		t.Fatalf("GetConfiguration node-1: %v", err)
+	}
+	if len(cfg1.Servers) != 1 {
+		t.Fatalf("bootstrap node-1 config has %d servers, want 1 (single-node bootstrap)", len(cfg1.Servers))
+	}
+	if string(cfg1.Servers[0].ID) != "node-1" {
+		t.Fatalf("bootstrap node-1 config server = %s, want node-1", cfg1.Servers[0].ID)
+	}
+
+	// Node-2 joins via AddVoter (simulating the joinLoop). Once added, the
+	// leader replicates the configuration and node-2 discovers the leader
+	// through heartbeats.
+	if err := s1.AddVoter("node-2", addr2, 5*time.Second); err != nil {
+		t.Fatalf("AddVoter node-2: %v", err)
+	}
+
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel2()
+	if err := s2.WaitForLeader(ctx2); err != nil {
+		t.Fatalf("WaitForLeader node-2 after AddVoter: %v", err)
+	}
+
+	// Verify the cluster now has both voters.
+	cfgFinal, err := s1.GetConfiguration()
+	if err != nil {
+		t.Fatalf("GetConfiguration final: %v", err)
+	}
+	if len(cfgFinal.Servers) != 2 {
+		t.Fatalf("final config has %d servers, want 2", len(cfgFinal.Servers))
 	}
 }
 

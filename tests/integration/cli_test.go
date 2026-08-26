@@ -165,7 +165,7 @@ func cliGet(t *testing.T, url, token string) (status int, header http.Header, bo
 }
 
 func TestCLILatestEndpoint(t *testing.T) {
-	serverURL, token, digest, _ := startCLIServer(t, ":18100", ":18460")
+	serverURL, token, digest, _ := startCLIServer(t, freeAddr(t), freeAddr(t))
 
 	status, _, body := cliGet(t, serverURL+"/api/v1/cli/versions/latest?os=linux&arch=amd64", token)
 	if status != http.StatusOK {
@@ -188,7 +188,7 @@ func TestCLILatestEndpoint(t *testing.T) {
 }
 
 func TestCLIDownloadEndpoint(t *testing.T) {
-	serverURL, token, digest, tarball := startCLIServer(t, ":18101", ":18461")
+	serverURL, token, digest, tarball := startCLIServer(t, freeAddr(t), freeAddr(t))
 
 	status, header, body := cliGet(t, serverURL+"/api/v1/cli/v0.21.8?os=linux&arch=amd64", token)
 	if status != http.StatusOK {
@@ -223,7 +223,7 @@ func TestCLIDownloadEndpoint(t *testing.T) {
 }
 
 func TestCLIDownloadNotAllowedVersion(t *testing.T) {
-	serverURL, token, _, _ := startCLIServer(t, ":18102", ":18462")
+	serverURL, token, _, _ := startCLIServer(t, freeAddr(t), freeAddr(t))
 
 	status, _, _ := cliGet(t, serverURL+"/api/v1/cli/v0.22.0?os=linux&arch=amd64", token)
 	if status != http.StatusBadRequest {
@@ -232,7 +232,7 @@ func TestCLIDownloadNotAllowedVersion(t *testing.T) {
 }
 
 func TestCLIDownloadUnknownVersion(t *testing.T) {
-	serverURL, token, _, _ := startCLIServer(t, ":18103", ":18463")
+	serverURL, token, _, _ := startCLIServer(t, freeAddr(t), freeAddr(t))
 
 	// v0.21.99 is allowed (minor 0.21 in the allowlist) but does not exist
 	// upstream, so the upstream 404 must surface as HTTP 404.

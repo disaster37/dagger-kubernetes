@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -64,9 +65,25 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
+	// Allocate a random control-plane port per test instance so stale
+	// servers from slow-shutting-down previous tests never intercept requests.
+	controlLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate control port: %v", err)
+	}
+	controlPort := controlLn.Addr().(*net.TCPAddr).Port
+	_ = controlLn.Close()
+
+	dataLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("allocate data port: %v", err)
+	}
+	dataPort := dataLn.Addr().(*net.TCPAddr).Port
+	_ = dataLn.Close()
+
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: ":18095",
-		DataAddr:    ":18456",
+		ControlAddr: fmt.Sprintf("127.0.0.1:%d", controlPort),
+		DataAddr:    fmt.Sprintf("127.0.0.1:%d", dataPort),
 		DataHost:    "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
@@ -83,11 +100,15 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	if err := srv.Start(ctx, serverTLS); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	t.Cleanup(func() { _ = srv.Shutdown(context.Background()) })
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
 	time.Sleep(500 * time.Millisecond)
 
 	return &rbacEnv{
-		baseURL:    "http://localhost:18095",
+		baseURL:    fmt.Sprintf("http://localhost:%d", controlPort),
 		sessions:   sessions,
 		traceMeta:  traceMetaRepo,
 		users:      usersSvc,
@@ -308,9 +329,10 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
+	controlAddr, dataAddr := freeAddr(t), freeAddr(t)
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: ":18096",
-		DataAddr:    ":18457",
+		ControlAddr: controlAddr,
+		DataAddr:    dataAddr,
 		DataHost:    "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
@@ -326,11 +348,16 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 	if err := srv.Start(ctx, serverTLS); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer srv.Shutdown(context.Background())
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
 	time.Sleep(500 * time.Millisecond)
 
 	// Legacy token authenticates as legacy admin (full access, quota bypass).
-	if code := postEngines(t, "http://localhost:18096", "Bearer legacy-token-123", "trace-legacy"); code != http.StatusCreated {
+	baseURL := fmt.Sprintf("http://localhost%s", controlAddr)
+	if code := postEngines(t, baseURL, "Bearer legacy-token-123", "trace-legacy"); code != http.StatusCreated {
 		t.Fatalf("legacy token: %d, want 201", code)
 	}
 }

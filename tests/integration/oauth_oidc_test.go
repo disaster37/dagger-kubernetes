@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/rsa"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -116,6 +117,7 @@ func (f *oidcIssuer) mintIDToken() string {
 // `/auth/login?error=forbidden`.
 func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	const clientID = "integration-client"
+	controlAddr, dataAddr := freeAddr(t), freeAddr(t)
 	issuer := newOIDCIssuer(t, clientID, []any{"devs"})
 
 	logger := observ.NewTestLogger()
@@ -137,7 +139,7 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 		Provider:      "oidc",
 		ClientID:      clientID,
 		ClientSecret:  "csec",
-		RedirectURL:   "http://localhost:18099/api/v1/auth/oauth/oidc/callback",
+		RedirectURL:   fmt.Sprintf("http://localhost%s/api/v1/auth/oauth/oidc/callback", controlAddr),
 		IssuerURL:     issuer.srv.URL,
 		Scopes:        []string{"openid", "profile", "email"},
 		UsernameClaim: "preferred_username",
@@ -164,8 +166,8 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	logsClient := repository.NewLogsClient("")
 
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: ":18099",
-		DataAddr:    ":18460",
+		ControlAddr: controlAddr,
+		DataAddr:    dataAddr,
 		DataHost:    "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
@@ -182,14 +184,19 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	if err := srv.Start(ctx, serverTLS); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	defer srv.Shutdown(context.Background())
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
 	time.Sleep(500 * time.Millisecond)
 
+	baseURL := fmt.Sprintf("http://localhost%s", controlAddr)
 	// 1. Login: must 302 to the OIDC authorize URL and set the nonce cookie.
 	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}}
-	loginResp, err := noRedirect.Get("http://localhost:18099/api/v1/auth/oauth/oidc/login?redirect=/pipelines")
+	loginResp, err := noRedirect.Get(baseURL + "/api/v1/auth/oauth/oidc/login?redirect=/pipelines")
 	if err != nil {
 		t.Fatalf("GET oidc login: %v", err)
 	}
@@ -215,7 +222,7 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	}
 
 	// 2. Callback for a user outside allowed_groups → forbidden redirect.
-	callbackURL := "http://localhost:18099/api/v1/auth/oauth/oidc/callback?code=code&state=" + url.QueryEscape(state)
+	callbackURL := baseURL + "/api/v1/auth/oauth/oidc/callback?code=code&state=" + url.QueryEscape(state)
 	req, err := http.NewRequest("GET", callbackURL, http.NoBody)
 	if err != nil {
 		t.Fatalf("new callback request: %v", err)

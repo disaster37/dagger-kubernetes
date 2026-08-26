@@ -188,7 +188,7 @@ func parseNDJSON(t *testing.T, out string) []domain.CIEvent {
 // reconstructing the supervisor's nested span tree (states + logs), and with
 // --steps disabled stdout stays empty (backwards compatible).
 func TestCIWrapperStreamsNestedSteps(t *testing.T) {
-	serverURL, adminToken := startCIStepsServer(t, ":18099", ":18460")
+	serverURL, adminToken := startCIStepsServer(t, freeAddr(t), freeAddr(t))
 	bin := buildCIWrapper(t)
 	installFakeDagger(t)
 

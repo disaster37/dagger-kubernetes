@@ -73,29 +73,29 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 		return nil, fmt.Errorf("mkdir data dir %s: %w", dir, err)
 	}
 
-	// Resolve the full voter list (resolver takes precedence over Peers).
-	var peers []RaftPeer
 	// shouldBootstrap reports whether this node seeds the initial cluster
 	// configuration via raft.BootstrapCluster. Only the bootstrap node (the
 	// first peer in the resolved voter list — ordinal 0 for DNS discovery,
 	// the first explicit peer for static discovery, self for single-node)
 	// bootstraps. Other nodes start with no config and join via the leader's
-	// AddVoter (joinLoop) or by being in the bootstrap node's voter list on
-	// first boot. This prevents split-brain on scale-up, where fresh nodes
-	// would otherwise bootstrap with a voter list that diverges from the
-	// pre-existing leader's configuration (CWE-693).
+	// AddVoter (joinLoop).
+	//
+	// The bootstrap node seeds the cluster with ONLY itself as the initial
+	// voter (single-node quorum). Once it becomes leader, the joinLoop adds
+	// the remaining peers via AddVoter. Including all peers in the initial
+	// configuration would require a majority (2 of 3) to elect a leader, but
+	// non-bootstrap peers have no config and may not be ready to vote when the
+	// election fires — this creates a deadlock where no leader is ever elected
+	// (CWE-693).
 	shouldBootstrap := true
 	if cfg.Resolver != nil {
 		resolved, err := cfg.Resolver.Resolve()
 		if err != nil {
 			return nil, fmt.Errorf("resolve raft peers: %w", err)
 		}
-		peers = resolved
 		if self, errSelf := cfg.Resolver.Self(); errSelf == nil && len(resolved) > 0 {
 			shouldBootstrap = self.ID == resolved[0].ID
 		}
-	} else {
-		peers = cfg.Peers
 	}
 
 	// Determine the effective node ID: explicit config, else the resolver's
@@ -154,13 +154,8 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 
 	fsm := NewFSM()
 
-	// Bootstrap must happen BEFORE NewRaft so the node starts with the voter
-	// configuration. ErrCantBootstrap (existing state) is ignored. Only the
-	// bootstrap node (first in the resolved voter list) calls BootstrapCluster;
-	// other nodes start with no config and join via the leader's AddVoter or
-	// by being in the bootstrap node's voter list (ADR-016, CWE-693).
 	if shouldBootstrap {
-		configuration := raftConfigurationFromPeers(withSelf(peers, nodeID, advertise))
+		configuration := raftConfigurationFromPeers([]RaftPeer{{ID: nodeID, Address: advertise}})
 		if err := raft.BootstrapCluster(raftConfig, boltStore, boltStore, snapStore, transport, configuration); err != nil && !errors.Is(err, raft.ErrCantBootstrap) {
 			_ = closeRaftTransport(transport)
 			_ = boltStore.Close()

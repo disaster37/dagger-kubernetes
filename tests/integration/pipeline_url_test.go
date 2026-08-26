@@ -95,7 +95,7 @@ func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (control
 // engine records a trace, and GET /api/v1/traces/:traceID/url returns the
 // self-hosted pipeline-view URL for it.
 func TestPipelineViewURLEndpoint(t *testing.T) {
-	serverURL, adminToken := startPipelineURLServer(t, ":18097", ":18458")
+	serverURL, adminToken := startPipelineURLServer(t, freeAddr(t), freeAddr(t))
 
 	reqBody := map[string]string{"image": "registry.dagger.io/engine:v0.21.4", "trace_id": "trace-url-int"}
 	b, _ := json.Marshal(reqBody)
@@ -139,7 +139,7 @@ func TestPipelineViewURLEndpoint(t *testing.T) {
 // integration server with a fake dagger on PATH, prints the self-hosted
 // pipeline-view link using the /pipelines/<id> path.
 func TestCIWrapperPrintsSelfHostedURL(t *testing.T) {
-	serverURL, adminToken := startPipelineURLServer(t, ":18098", ":18459")
+	serverURL, adminToken := startPipelineURLServer(t, freeAddr(t), freeAddr(t))
 
 	binDir := t.TempDir()
 	bin := filepath.Join(binDir, "dagger-kubernetes-ci")
