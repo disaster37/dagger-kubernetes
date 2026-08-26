@@ -159,6 +159,9 @@ spec:
         - name: ca-bundle
           secret:
             secretName: {{ .Values.supervisor.config.fleet.engineCaSecret }}
+            items:
+              - key: {{ .Values.supervisor.config.fleet.engineCaSecretKey }}
+                path: ca.crt
         {{- end }}
         {{- if not .Values.supervisor.persistence.enabled }}
         - name: db
