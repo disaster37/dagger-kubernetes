@@ -125,6 +125,11 @@ func (s *CLIService) EnsureCached(ctx context.Context, version, osName, arch str
 
 	key := fmt.Sprintf("%s|%s|%s", version, osName, arch)
 	s.mu.Lock()
+	if path, ok := s.cache.Get(version, osName, arch); ok {
+		s.mu.Unlock()
+		s.incCache("hit")
+		return s.artifact(version, osName, arch, path), nil
+	}
 	if inflight, ok := s.inflight[key]; ok {
 		s.mu.Unlock()
 		<-inflight.done
