@@ -13,10 +13,11 @@ metadata:
   namespace: {{ include "dagger-kubernetes.namespace" . }}
   labels:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
   annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
-  {{- end }}
+    {{- end }}
 spec:
   {{- if .Values.ingress.className }}
   ingressClassName: {{ .Values.ingress.className }}
