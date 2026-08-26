@@ -102,7 +102,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{
 		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour, MinRefsToKeep: 3, ProtectActiveVersions: true,
 	}, logger, observ.NewMetrics(nil))
-	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger)
+	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger, nil)
 
 	srv := handler.NewServer(&handler.ServerConfig{
 		ControlAddr: ":18092",

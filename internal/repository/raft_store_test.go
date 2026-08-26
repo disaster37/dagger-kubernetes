@@ -28,6 +28,23 @@ func TestRaftStoreSingleNodeLeader(t *testing.T) {
 	if err := store.WaitForLeader(ctx); err != nil {
 		t.Fatalf("WaitForLeader: %v", err)
 	}
+	if !store.IsCleanState() {
+		t.Fatal("single node leader should be in clean state")
+	}
+}
+
+func TestRaftStoreIsCleanStateAfterApply(t *testing.T) {
+	store := newTestRaftStore(t)
+	cmd, err := newCommand(kindSetMeta, cmdSetMeta{Key: "k", Value: "v"})
+	if err != nil {
+		t.Fatalf("newCommand: %v", err)
+	}
+	if err := store.apply(cmd); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if !store.IsCleanState() {
+		t.Fatal("single node after apply should be in clean state")
+	}
 }
 
 func TestRaftStoreApplySuccess(t *testing.T) {

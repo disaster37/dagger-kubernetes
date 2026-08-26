@@ -512,6 +512,27 @@ func (s *RaftStore) IsLeader() bool {
 	return s.raft.State() == raft.Leader
 }
 
+// IsCleanState reports whether the Raft consensus layer is in a clean state:
+//   - the node is a Leader or Follower (not Candidate or Shutdown)
+//   - all committed log entries have been applied (commit_index == applied_index)
+//   - there are no pending FSM mutations (fsm_pending == 0)
+//
+// When the state is not clean the supervisor pod should not be considered ready.
+func (s *RaftStore) IsCleanState() bool {
+	stats := s.raft.Stats()
+	state := stats["state"]
+	if state != "Leader" && state != "Follower" {
+		return false
+	}
+	if stats["commit_index"] != stats["applied_index"] {
+		return false
+	}
+	if stats["fsm_pending"] != "0" {
+		return false
+	}
+	return true
+}
+
 // LeaderCh returns raft.LeaderCh() for the leader-observation goroutine.
 func (s *RaftStore) LeaderCh() <-chan bool {
 	return s.raft.LeaderCh()

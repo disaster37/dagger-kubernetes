@@ -49,7 +49,7 @@ func newStatusServiceWithRegistry(t *testing.T, cfg *domain.Config, cache *Cache
 	ts := httptest.NewServer(reg.handler())
 	t.Cleanup(ts.Close)
 	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
-	svc := NewStatusService(cfg, cache, router, fleet, observ.NewTestLogger())
+	svc := NewStatusService(cfg, cache, router, fleet, observ.NewTestLogger(), nil)
 	return svc
 }
 
@@ -173,7 +173,7 @@ func TestStatusFleetDown(t *testing.T) {
 
 func TestStatusCacheS3(t *testing.T) {
 	cfg := &domain.Config{}
-	svc := NewStatusService(cfg, &Cache{Type: "s3", S3: domain.S3Ref{Bucket: "my-bucket"}}, nil, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(cfg, &Cache{Type: "s3", S3: domain.S3Ref{Bucket: "my-bucket"}}, nil, emptyFleet(), observ.NewTestLogger(), nil)
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -193,7 +193,7 @@ func TestStatusCacheDown(t *testing.T) {
 	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
 	ts.Close()
 
-	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -220,7 +220,7 @@ func TestStatusCacheDegraded(t *testing.T) {
 		domain.RegistryBackend{ID: "good", InternalAddr: ts.Listener.Addr().String()},
 		domain.RegistryBackend{ID: "bad", InternalAddr: badAddr},
 	)
-	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -241,7 +241,7 @@ func TestStatusCacheDegraded(t *testing.T) {
 }
 
 func TestStatusCacheS3Unconfigured(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "s3"}, nil, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(&domain.Config{}, &Cache{Type: "s3"}, nil, emptyFleet(), observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -254,7 +254,7 @@ func TestStatusCacheS3Unconfigured(t *testing.T) {
 }
 
 func TestStatusCacheUnknownBackend(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "bogus"}, nil, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(&domain.Config{}, &Cache{Type: "bogus"}, nil, emptyFleet(), observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -267,7 +267,7 @@ func TestStatusCacheUnknownBackend(t *testing.T) {
 }
 
 func TestStatusCacheRegistryNil(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, nil, emptyFleet(), observ.NewTestLogger())
+	svc := NewStatusService(&domain.Config{}, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, nil, emptyFleet(), observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -280,7 +280,7 @@ func TestStatusCacheRegistryNil(t *testing.T) {
 }
 
 func TestStatusFleetNilManager(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, nil, nil, observ.NewTestLogger())
+	svc := NewStatusService(&domain.Config{}, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, nil, nil, observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -288,6 +288,76 @@ func TestStatusFleetNilManager(t *testing.T) {
 	for _, svc := range status.Services {
 		if svc.Name == "fleet" && svc.State != domain.ServiceOK {
 			t.Errorf("fleet state = %q, want ok (nil manager)", svc.State)
+		}
+	}
+}
+
+type stubRaftCleanState struct {
+	clean bool
+}
+
+func (s *stubRaftCleanState) IsCleanState() bool { return s.clean }
+
+func newStatusServiceWithRaft(t *testing.T, cfg *domain.Config, raft domain.RaftCleanState) *StatusService {
+	t.Helper()
+	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc.raftCleanState = raft
+	return svc
+}
+
+func TestStatusRaftNotCleanSupervisorDown(t *testing.T) {
+	svc := newStatusServiceWithRaft(t, &domain.Config{}, &stubRaftCleanState{clean: false})
+
+	status, err := svc.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	for _, svc := range status.Services {
+		if svc.Name == "supervisor" {
+			if svc.State != domain.ServiceDown {
+				t.Fatalf("supervisor state = %q, want down", svc.State)
+			}
+			if svc.Message != "raft consensus not clean" {
+				t.Fatalf("supervisor message = %q, want 'raft consensus not clean'", svc.Message)
+			}
+		}
+	}
+}
+
+func TestStatusRaftCleanSupervisorOK(t *testing.T) {
+	svc := newStatusServiceWithRaft(t, &domain.Config{}, &stubRaftCleanState{clean: true})
+
+	status, err := svc.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.State != domain.ServiceOK {
+		t.Fatalf("rollup = %q, want ok", status.State)
+	}
+	for _, svc := range status.Services {
+		if svc.Name == "supervisor" {
+			if svc.State != domain.ServiceOK {
+				t.Fatalf("supervisor state = %q, want ok", svc.State)
+			}
+		}
+	}
+}
+
+func TestStatusRaftNilCleanStateSupervisorOK(t *testing.T) {
+	svc := newStatusServiceWithRaft(t, &domain.Config{}, nil)
+
+	status, err := svc.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status: %v", err)
+	}
+	if status.State != domain.ServiceOK {
+		t.Fatalf("rollup = %q, want ok (nil raft = assume clean)", status.State)
+	}
+	for _, svc := range status.Services {
+		if svc.Name == "supervisor" {
+			if svc.State != domain.ServiceOK {
+				t.Fatalf("supervisor state = %q, want ok", svc.State)
+			}
 		}
 	}
 }

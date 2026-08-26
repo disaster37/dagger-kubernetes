@@ -30,18 +30,21 @@ type StatusService struct {
 	fleetManager *Manager        // may be nil
 	logger       *logrus.Logger
 
+	raftCleanState domain.RaftCleanState // nil when raft is not in use (single-node, tests)
+
 	mu       sync.Mutex
 	cached   *domain.PlatformStatus
 	cachedAt time.Time
 }
 
-func NewStatusService(cfg *domain.Config, cache *Cache, router *RegistryRouter, fleet *Manager, logger *logrus.Logger) *StatusService {
+func NewStatusService(cfg *domain.Config, cache *Cache, router *RegistryRouter, fleet *Manager, logger *logrus.Logger, raftCleanState domain.RaftCleanState) *StatusService {
 	return &StatusService{
-		cfg:          cfg,
-		cache:        cache,
-		router:       router,
-		fleetManager: fleet,
-		logger:       logger,
+		cfg:            cfg,
+		cache:          cache,
+		router:         router,
+		fleetManager:   fleet,
+		logger:         logger,
+		raftCleanState: raftCleanState,
 	}
 }
 
@@ -64,7 +67,17 @@ func (s *StatusService) Status(ctx context.Context) (*domain.PlatformStatus, err
 
 func (s *StatusService) probe(ctx context.Context) *domain.PlatformStatus {
 	supervisor := newServiceStatus("supervisor", "control", true)
-	supervisor.State = domain.ServiceOK
+
+	// Supervisor readiness is gated on Raft consensus health when Raft is in
+	// use. A follower that has not applied all committed entries, a node that
+	// is not yet a cluster member, or a shut-down node must report as down so
+	// the pod is removed from the Service endpoints.
+	if s.raftCleanState != nil && !s.raftCleanState.IsCleanState() {
+		supervisor.State = domain.ServiceDown
+		supervisor.Message = "raft consensus not clean"
+	} else {
+		supervisor.State = domain.ServiceOK
+	}
 
 	services := []domain.ServiceStatus{
 		supervisor,

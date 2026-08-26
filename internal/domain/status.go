@@ -33,3 +33,11 @@ type PlatformStatus struct {
 type StatusProvider interface {
 	Status(ctx context.Context) (*PlatformStatus, error)
 }
+
+// RaftCleanState reports whether the Raft consensus layer is in a clean state
+// (all committed log entries applied, node is a cluster member, not shut down).
+// When the Raft state is not clean the supervisor pod should not be considered
+// ready.
+type RaftCleanState interface {
+	IsCleanState() bool
+}
