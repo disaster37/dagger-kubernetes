@@ -170,6 +170,39 @@ UI, docker, and the helm template matrix are implemented locally because the
 upstream modules cannot express `-race`, the UI build, the Dockerfile smoke
 test, or `helm template`. See [`DAGGER.md`](./DAGGER.md) for the full reference.
 
+### Why did my push break CI? The three most common causes
+
+Lint (`golangci-lint run`) is the first pipeline step and the most frequent
+source of breakage. The three recurring failures are:
+
+1. **Dead code left after a refactor.** The `unused` linter fails the build on
+   any symbol that lost its last call site. When you delete or change a call
+   site, delete the now-orphaned helper too — e.g. removing the all-peers
+   bootstrap in `internal/repository/raft_store.go` left `withSelf` unused and
+   broke CI. After any refactor, grep for the function/type you touched and
+   remove every definition with zero remaining references.
+2. **A hardcoded port in a new integration test.** `tests/integration/` spins
+   up real Hertz servers. A new test that reuses a fixed port (`:18090` …) or
+   duplicates a port already used by another test gets *stale-server* failures:
+   the previous test's shutdown may still be draining, so the new test's
+   requests hit the old server and fail (typically `401`). NEVER hardcode a
+   control/data port in a new integration test — allocate one with
+   `freeAddr(t)` (see `tests/integration/net_helpers_test.go`) and shut the
+   server down with a timed context in `t.Cleanup`:
+   ```go
+   t.Cleanup(func() {
+       shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+       defer cancel()
+       _ = srv.Shutdown(shutdownCtx)
+   })
+   ```
+3. **Assuming the pinned lint version is what runs.** The Dagger `golang`
+   module re-installs `golangci-lint` if its binary is not found on `PATH` in
+   the base image, falling back to the **latest release** (not the pinned
+   `golangciLintVersion` in `dagger/main.go`). Code must therefore pass with
+   the current latest `golangci-lint`, not just the pinned version. Bump the
+   pin deliberately and re-run the full `ci` afterwards.
+
 ```bash
 # Full CI pipeline (lint + test + ui + build + docker + helm) — what the workflow runs
 dagger call -m ./dagger --src . ci export --path out
@@ -260,9 +293,11 @@ directory. When editing one, copy it verbatim to the other and verify with
 
 ## PR checklist
 - [ ] `dagger call -m ./dagger --src . ci export --path out` exits 0 locally (same command as `.github/workflows/ci.yml`, same pinned Dagger CLI version)
+- [ ] No dead code left behind: every removed call site has its helper/function removed (`unused` lint passes — grep your touched symbols for zero remaining references)
+- [ ] New integration tests use `freeAddr(t)` for ports (no hardcoded control/data ports) and shut down servers with a timed context
 - [ ] Tests cover new code (target 100% coverage)
 - [ ] Integration test proves feature works with real Dagger client
-- [ ] `golangci-lint run ./...` passes
+- [ ] `golangci-lint run ./...` passes (CI may run a newer golangci-lint than the pinned version in `dagger/main.go` — the latest release must also pass)
 - [ ] No string concatenation (`+`), use `fmt.Sprintf`
 - [ ] Config fields have defaults in `config.Load()`
 - [ ] Errors are wrapped with `%w`

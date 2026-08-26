@@ -18,6 +18,53 @@ cluster, read `AGENTS.local.md`. It is the machine-specific source of truth for:
 Every new feature or bug fix MUST be redeployed and validated on that cluster
 (see the mandate in `AGENTS.local.md` §6).
 
+## CI gate (mandatory — do not break it)
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) is the merge gate and
+runs the **local Dagger module**:
+
+```bash
+dagger call -m ./dagger --src . ci export --path out
+```
+
+That single command runs, inside containers: `golangci-lint`, `go vet ./...`,
+`go test -race -covermode=atomic ./...`, the UI build, the binary builds, the
+Dockerfile smoke test, and the Helm lint/template matrix. `go test ./...`
+passing locally is NOT enough.
+
+Rules that keep CI green:
+
+- **Before finishing any code-changing task, run the gate.** The full `dagger
+  call -m ./dagger --src . ci export --path out` when a Docker daemon is
+  available. Minimum when it is not: `go build ./... && go vet ./... &&
+  go test ./...` plus `dagger call -m ./dagger --src . lint` for the lint step.
+- **Never leave dead symbols.** `golangci-lint` runs the `unused` linter and
+  CI fails on any function/type/var with zero references. When a refactor
+  removes a call site, delete the helper it orphaned (example: removing the
+  all-peers bootstrap left `withSelf` unused in `internal/repository/raft_store.go`
+  and broke CI). After any refactor, grep the symbols you touched and remove
+  what nothing references anymore. There is usually no test coverage for
+  helpers, so `go test` will not catch this — only lint does.
+- **Integration tests: no hardcoded ports.** Everything in `tests/integration/`
+  starts real Hertz servers. A fixed port that collides with another test's
+  port (or a still-draining previous server) produces flaky `401`/stale-server
+  failures. New tests MUST allocate ports with `freeAddr(t)`
+  (`tests/integration/net_helpers_test.go`) and shut down with a timed context
+  in `t.Cleanup`:
+  ```go
+  t.Cleanup(func() {
+      shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+      defer cancel()
+      _ = srv.Shutdown(shutdownCtx)
+  })
+  ```
+- **The effective lint version is the latest release.** The Dagger `golang`
+  module falls back to installing the newest `golangci-lint` when the pinned
+  binary is not on `PATH`, so code must pass the current latest release, not
+  only the pin in `dagger/main.go`.
+- **Changes to `dagger/`, CI scripts, or `.github/workflows/` must update
+  `DAGGER.md`** (function table, pins, troubleshooting) in the same changeset.
+
 ## Required libraries (do not deviate)
 | Purpose        | Import                                |
 |----------------|---------------------------------------|
