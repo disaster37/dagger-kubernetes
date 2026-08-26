@@ -112,6 +112,7 @@ export interface ServiceInfo {
 export interface Providers {
   internal: boolean
   oauth_github: boolean
+  oauth_oidc: boolean
 }
 
 export interface FleetReplica {

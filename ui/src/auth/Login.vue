@@ -37,6 +37,12 @@
           Login with GitHub
         </a>
       </div>
+      <div v-if="providers.oauth_oidc" style="margin-top: 16px; text-align: center;">
+        <hr style="border-color: #30363d; margin-bottom: 16px;" />
+        <a :href="oidcLoginUrl" class="btn" style="display: inline-block; padding: 8px 16px;">
+          Login with OIDC
+        </a>
+      </div>
     </div>
   </div>
 </template>
@@ -56,10 +62,11 @@ const username = ref('')
 const password = ref('')
 const error = ref('')
 const loading = ref(false)
-const providers = ref<Providers>({ internal: true, oauth_github: false })
+const providers = ref<Providers>({ internal: true, oauth_github: false, oauth_oidc: false })
 
 const errorQuery = computed(() => route.query.error === 'oauth')
 const githubLoginUrl = computed(() => `/api/v1/auth/oauth/github/login?redirect=${encodeURIComponent(redirectTarget.value)}`)
+const oidcLoginUrl = computed(() => `/api/v1/auth/oauth/oidc/login?redirect=${encodeURIComponent(redirectTarget.value)}`)
 // The redirect query param is attacker-influenceable (login links); only
 // internal absolute paths are accepted (CWE-601). The backend re-validates
 // for the OAuth flow.
