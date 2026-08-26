@@ -53,82 +53,9 @@ func registryStub(t *testing.T) *httptest.Server {
 }
 
 func TestCacheStatusAndPurgeIntegration(t *testing.T) {
-	logger := observ.NewTestLogger()
-	store := newIntegrationStore(t)
-
-	userRepo := repository.NewUserRepo(store)
-	groupRepo := repository.NewGroupRepo(store)
-	tokenRepo := repository.NewTokenRepo(store)
-	traceMetaRepo := repository.NewTraceMetaRepo(store)
-
-	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
-	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
-	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
-	jwtSvc := service.NewJWTService([]byte("integration-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
-
-	admin, err := usersSvc.Create(context.Background(), "admin", "password123", domain.RoleAdmin)
-	if err != nil {
-		t.Fatalf("create admin: %v", err)
-	}
-	adminToken, _, err := tokensSvc.Generate(context.Background(), admin.ID)
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
-	}
-
-	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
-	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
-	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
-	sessions := service.NewStore(2 * time.Minute)
-	provider := repository.NewStubProvider()
-	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
-		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
-	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
-	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
-	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
-	traces := repository.NewSpanTreeReconstructor("")
-	logsClient := repository.NewLogsClient("")
-
-	// Stub registry + status/stats services.
-	ts := registryStub(t)
-	router := service.NewRegistryRouter(
-		[]domain.RegistryBackend{{ID: "default", InternalAddr: ts.Listener.Addr().String()}},
-		repository.NewCacheRoutesRepo(store),
-		func(b domain.RegistryBackend) domain.RegistryClient {
-			return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
-		},
-		logger,
-	)
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{
-		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour, MinRefsToKeep: 3, ProtectActiveVersions: true,
-	}, logger, observ.NewMetrics(nil))
-	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger, nil)
-
-	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: ":18092",
-		DataAddr:    ":18455",
-		DataHost:    "localhost",
-	}, &handler.Deps{
-		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
-		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
-		Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
-		TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
-		CacheStatsProvider: cacheStatsSvc,
-		CachePurger:        cacheStatsSvc,
-		StatusProvider:     statusSvc,
-	})
-
-	serverTLS, _ := mintingCA.TLSCertificate()
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := srv.Start(ctx, serverTLS); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	defer srv.Shutdown(context.Background())
-	time.Sleep(500 * time.Millisecond)
-
-	base := "http://localhost:18092"
+	env := newCacheStatusTestEnv(t, nil)
+	base := env.base
+	adminToken := env.adminToken
 
 	// --- GET /api/v1/cache ---
 	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/cache", base), http.NoBody)
@@ -205,5 +132,149 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	}
 	if purge.Purged != 1 {
 		t.Fatalf("purge = %+v, want purged=1", purge)
+	}
+}
+
+// stubRaftCleanState stubs domain.RaftCleanState for status tests.
+type stubRaftCleanState struct {
+	clean bool
+}
+
+func (s *stubRaftCleanState) IsCleanState() bool { return s.clean }
+
+// cacheStatusTestEnv is a running control-plane server with auth wired and an
+// admin API token, backed by a stub registry.
+type cacheStatusTestEnv struct {
+	base       string
+	adminToken string
+}
+
+// newCacheStatusTestEnv builds the shared server fixture. raftCleanState is
+// the domain.RaftCleanState wired into the status service (nil = raft clean,
+// as in single-node/dev setups).
+func newCacheStatusTestEnv(t *testing.T, raftCleanState domain.RaftCleanState) *cacheStatusTestEnv {
+	t.Helper()
+	logger := observ.NewTestLogger()
+	store := newIntegrationStore(t)
+
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
+
+	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
+	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
+	jwtSvc := service.NewJWTService([]byte("integration-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
+
+	admin, err := usersSvc.Create(context.Background(), "admin", "password123", domain.RoleAdmin)
+	if err != nil {
+		t.Fatalf("create admin: %v", err)
+	}
+	adminToken, _, err := tokensSvc.Generate(context.Background(), admin.ID)
+	if err != nil {
+		t.Fatalf("generate token: %v", err)
+	}
+
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
+	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
+	sessions := service.NewStore(2 * time.Minute)
+	provider := repository.NewStubProvider()
+	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
+		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
+	}, logger, observ.NewMetrics(nil))
+	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
+	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
+	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
+	traces := repository.NewSpanTreeReconstructor("")
+	logsClient := repository.NewLogsClient("")
+
+	// Stub registry + status/stats services.
+	ts := registryStub(t)
+	router := service.NewRegistryRouter(
+		[]domain.RegistryBackend{{ID: "default", InternalAddr: ts.Listener.Addr().String()}},
+		repository.NewCacheRoutesRepo(store),
+		func(b domain.RegistryBackend) domain.RegistryClient {
+			return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+		},
+		logger,
+	)
+	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{
+		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour, MinRefsToKeep: 3, ProtectActiveVersions: true,
+	}, logger, observ.NewMetrics(nil))
+	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger, raftCleanState)
+
+	controlAddr := freeAddr(t)
+	srv := handler.NewServer(&handler.ServerConfig{
+		ControlAddr: controlAddr,
+		DataAddr:    freeAddr(t),
+		DataHost:    "localhost",
+	}, &handler.Deps{
+		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
+		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
+		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
+		Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
+		TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
+		CacheStatsProvider: cacheStatsSvc,
+		CachePurger:        cacheStatsSvc,
+		StatusProvider:     statusSvc,
+	})
+
+	serverTLS, _ := mintingCA.TLSCertificate()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Start(ctx, serverTLS); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	return &cacheStatusTestEnv{
+		base:       fmt.Sprintf("http://localhost%s", controlAddr),
+		adminToken: adminToken,
+	}
+}
+
+// TestStatusRaftNotCleanSupervisorDownIntegration proves the HTTP status API
+// contract that the UI's services view renders from: when the Raft consensus
+// layer is not in a clean state, the supervisor row must be "down" (never
+// green/ok) with the "raft consensus not clean" message, and the rollup must
+// be "down" so the header indicator turns red.
+func TestStatusRaftNotCleanSupervisorDownIntegration(t *testing.T) {
+	env := newCacheStatusTestEnv(t, &stubRaftCleanState{clean: false})
+
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/status", env.base), http.NoBody)
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", env.adminToken))
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /api/v1/status: %v", err)
+	}
+	var status domain.PlatformStatus
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		t.Fatalf("decode status: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || status.State != domain.ServiceDown {
+		t.Fatalf("status = %d/%s, want 200/down", resp.StatusCode, status.State)
+	}
+	foundSupervisor := false
+	for _, svc := range status.Services {
+		if svc.Name == "supervisor" {
+			foundSupervisor = true
+			if svc.State != domain.ServiceDown {
+				t.Fatalf("supervisor state = %q, want down (never ok/green when raft is not clean)", svc.State)
+			}
+			if svc.Message != "raft consensus not clean" {
+				t.Fatalf("supervisor message = %q, want 'raft consensus not clean'", svc.Message)
+			}
+		}
+	}
+	if !foundSupervisor {
+		t.Fatal("supervisor service missing from status")
 	}
 }

@@ -1630,7 +1630,12 @@ all delegate to (or mirror) this script.
   `fleet.replica_idle_ttl` (scale-down aggressiveness),
   `fleet.version_retention` (idle-version GC horizon).
 - **Health:** `GET /healthz` and `GET /readyz` on the control port are
-  wired to the K8s probes.
+  wired to the K8s probes. The supervisor only starts serving after the Raft
+  store reaches a clean state (leader/follower with all committed entries
+  applied — bounded by `raft.leader_wait_timeout`); until then the pod is not
+  Ready. While the Raft state is not clean, the status API and the UI
+  Services view report the supervisor as `down` ("raft consensus not clean"),
+  never green.
 - **Backups:** the cache registry and telemetry backends use persistent
   volumes. Back up the following PVCs:
   - Registry PV (cache data)

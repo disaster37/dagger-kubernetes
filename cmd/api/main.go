@@ -486,6 +486,20 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		_ = raftStore.Close()
 		return nil, nil, nil, fmt.Errorf("load token encryption key: %w", err)
 	}
+
+	// Startup barrier: the Hertz control/data plane must not start until the
+	// Raft layer is clean (Leader/Follower, commit_index == applied_index,
+	// fsm_pending == 0). Without it a follower still applying its backlog —
+	// or a node caught in an election — would serve the API with a store that
+	// is not settled. The readyz probe keeps gating pod readiness afterwards.
+	cleanCtx, cleanCancel := context.WithTimeout(ctx, cfg.Raft.LeaderWaitTimeout)
+	err = raftStore.WaitForCleanState(cleanCtx)
+	cleanCancel()
+	if err != nil {
+		_ = raftStore.Close()
+		return nil, nil, nil, fmt.Errorf("wait for raft clean state: %w", err)
+	}
+
 	return raftStore, jwtSecret, tokenEncKey, nil
 }
 

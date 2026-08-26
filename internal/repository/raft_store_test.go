@@ -47,6 +47,27 @@ func TestRaftStoreIsCleanStateAfterApply(t *testing.T) {
 	}
 }
 
+func TestRaftStoreWaitForCleanState(t *testing.T) {
+	store := newTestRaftStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.WaitForCleanState(ctx); err != nil {
+		t.Fatalf("WaitForCleanState: %v", err)
+	}
+}
+
+func TestRaftStoreWaitForCleanStateShutdown(t *testing.T) {
+	store := newTestRaftStore(t)
+	if err := store.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := store.WaitForCleanState(ctx); err == nil {
+		t.Fatal("WaitForCleanState after shutdown should error")
+	}
+}
+
 func TestRaftStoreApplySuccess(t *testing.T) {
 	store := newTestRaftStore(t)
 	cmd, err := newCommand(kindSetMeta, cmdSetMeta{Key: "k", Value: "v"})

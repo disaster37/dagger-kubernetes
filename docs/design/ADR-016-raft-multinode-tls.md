@@ -64,6 +64,15 @@ advertises its pod FQDN, and followers serve stale reads while returning
   followers poll the local FSM for those meta keys (replicated), then serve
   stale reads and return `ErrNotLeader` on writes. `WaitForSelfLeadership`
   is used by `migrate-tokens` (which must write).
+- **Clean-state startup barrier (2026-08-26 revision):** the Hertz
+  control/data plane starts only after `RaftStore.WaitForCleanState`
+  (`IsCleanState`: node is Leader/Follower, `commit_index == applied_index`,
+  `fsm_pending == 0`) succeeds, bounded by `leader_wait_timeout`. Without it,
+  a follower still applying its backlog — or a node caught in an election —
+  would serve the API on a store that is not settled. The `/readyz` probe
+  keeps gating pod readiness on the same signal afterwards, and the status
+  API/UI report the supervisor as `down` ("raft consensus not clean") while
+  the state is not clean, so the services view can never show it green.
 - **Membership reconciliation**: a leader-only `joinLoop` periodically
   compares the resolver's voter list to the running raft configuration and
   calls `raft.AddVoter` for missing voters and `raft.RemoveServer` for
@@ -131,6 +140,7 @@ advertises its pod FQDN, and followers serve stale reads while returning
 | D8 | Single-node remains a degenerate one-voter cluster (identical behavior plus TLS). |
 | D9 | The engine-client minting CA (ADR-005) is shared across pods via the `<release>-minting-ca` Secret when the embedded TLS provider is used in multi-node (CWE-295). |
 | D10 | `supervisor.replicaCount` is the single source of truth for the Raft voter count; the separate `raft.replicas` chart value and the supervisor HPA were removed (quorum-safe dynamic scaling is not possible without a membership operator). |
+| D11 | The Hertz control/data plane starts only after the Raft store reaches a clean state (`WaitForCleanState` in `initRaftStore`, bounded by `leader_wait_timeout`); `/readyz` and the status API/UI keep gating on the same signal (supervisor `down` when not clean). |
 
 ## Consequences
 
@@ -175,9 +185,14 @@ advertises its pod FQDN, and followers serve stale reads while returning
 - `ca_test.go`: `TestMintingCAIssuePeerCertificate` (DNS+IP SANs, server+client
   auth, round-trip).
 - `raft_store_test.go`: `TestNewRaftStoreTLS`, `WaitForLeader` (any leader) vs
-  `WaitForSelfLeadership`, membership reconcile AddVoter/RemoveServer.
+  `WaitForSelfLeadership`, `WaitForCleanState` (clean single node, error after
+  shutdown), membership reconcile AddVoter/RemoveServer.
 - `raft_test_helpers_test.go`: 3-node inmem and 3-node real-goca-mTLS
   clusters — replication, not-leader-on-follower, leader failover, AddVoter
   join.
 - `cmd/api/main_test.go`: follower meta-wait path, `validateRaftConfig`,
   `raftCABootstrap` ordinal-0 detection.
+- `tests/integration/cache_status_test.go`:
+  `TestStatusRaftNotCleanSupervisorDownIntegration` proves the status API
+  reports the supervisor `down` with "raft consensus not clean" (the payload
+  the UI renders red) when `IsCleanState` is false.

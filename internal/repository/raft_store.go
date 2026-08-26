@@ -361,6 +361,14 @@ func (s *RaftStore) WaitForSelfLeadership(ctx context.Context) error {
 	return s.waitForLeaderCondition(ctx, "wait for self leadership", s.IsLeader)
 }
 
+// WaitForCleanState blocks until IsCleanState reports true or ctx expires.
+// The supervisor uses it as a startup barrier: the control/data plane must
+// not serve until the Raft layer is a settled Leader/Follower with no
+// un-applied committed entries and no pending FSM mutations.
+func (s *RaftStore) WaitForCleanState(ctx context.Context) error {
+	return s.waitForLeaderCondition(ctx, "wait for raft clean state", s.IsCleanState)
+}
+
 // waitForLeaderCondition polls ready until it returns true, ctx expires, or the
 // raft node shuts down. Raft's LeaderCh only fires when THIS node gains/loses
 // leadership, so a leader-exists wait must also poll on a ticker (ADR-016 D6).
