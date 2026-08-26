@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"runtime"
 	"testing"
 	"time"
 
@@ -96,7 +97,11 @@ type raftClusterNode struct {
 // raftTestConfig returns a fast election-timing raft config for test clusters.
 // Timings are intentionally relaxed enough to stay deterministic under
 // -race and CI container CPU contention (200ms timeouts flaked on loaded
-// runners: leaders stepped down before heartbeats could commit).
+// runners: leaders stepped down before heartbeats could commit; the later
+// failover flake "no leader elected" was the same problem one level up —
+// a 250ms leader lease and 500ms election timeouts can still flap under
+// contention, and each stalled round waits the full transport timeout on the
+// dead node).
 func raftTestConfig(id string) *raft.Config {
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(id)
@@ -105,10 +110,10 @@ func raftTestConfig(id string) *raft.Config {
 	config.SnapshotThreshold = 1000
 	config.LogOutput = io.Discard
 	config.LogLevel = "WARN"
-	config.HeartbeatTimeout = 500 * time.Millisecond
-	config.ElectionTimeout = 500 * time.Millisecond
-	config.LeaderLeaseTimeout = 250 * time.Millisecond
-	config.CommitTimeout = 50 * time.Millisecond
+	config.HeartbeatTimeout = time.Second
+	config.ElectionTimeout = time.Second
+	config.LeaderLeaseTimeout = 500 * time.Millisecond
+	config.CommitTimeout = 100 * time.Millisecond
 	return config
 }
 
@@ -176,13 +181,49 @@ func newInmemRaftCluster(t *testing.T, n int) []*RaftStore {
 }
 
 // newThreeNodeTLSRaftCluster builds a 3-node cluster over loopback TCP with
-// real goca CA + per-node leaf certs + mTLS. Asserts a leader is elected.
+// real goca CA + per-node leaf certs + mTLS. Asserts a leader is elected and
+// that the initial configuration has replicated to every node (see
+// waitForClusterSettled).
 func newThreeNodeTLSRaftCluster(t *testing.T) []*RaftStore {
 	t.Helper()
 	nodes := buildTLSClusterNodes(t, 3)
 	bootstrapCluster(t, nodes)
 	waitForClusterLeader(t, nodes)
-	return clusterStores(nodes)
+	stores := clusterStores(nodes)
+	waitForClusterSettled(t, stores, 3, 30*time.Second)
+	return stores
+}
+
+// waitForClusterSettled blocks until every node's latest configuration
+// contains the full voter set (len(cfg.Servers) == n). This proves the
+// bootstrap configuration entry has been committed and replicated.
+//
+// It exists because raft followers with an empty configuration refuse to
+// start elections by design (split-brain protection: runFollower aborts with
+// "no known peers, aborting election" when the config index is 0). A test
+// that kills the leader before the configuration replicated leaves a cluster
+// that can never elect a new leader — the exact "no leader elected" CI flake
+// in TestThreeNodeTLSClusterLeaderFailover, where the kill landed in the
+// window between the first election and the commit of the no-op barrier
+// entry (widened by leader-lease step-down flaps under -race contention).
+func waitForClusterSettled(t *testing.T, stores []*RaftStore, n int, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		settled := true
+		for _, s := range stores {
+			cfg, err := s.GetConfiguration()
+			if err != nil || len(cfg.Servers) != n {
+				settled = false
+				break
+			}
+		}
+		if settled {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("cluster configuration never replicated to all nodes")
 }
 
 // buildTLSClusterNodes builds n mTLS raft nodes over loopback TCP sharing a
@@ -296,7 +337,16 @@ func clusterStores(nodes []raftClusterNode) []*RaftStore {
 // findLeader returns the current leader store, failing if none is elected.
 func findLeader(t *testing.T, stores []*RaftStore) *RaftStore {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	return findLeaderTimeout(t, stores, 30*time.Second)
+}
+
+// findLeaderTimeout is findLeader with a caller-chosen deadline. The failover
+// test uses a longer one: after the leader dies, election rounds stall on the
+// dead node for the transport timeout, and under -race/CI contention the
+// default 30s has proven too tight.
+func findLeaderTimeout(t *testing.T, stores []*RaftStore, timeout time.Duration) *RaftStore {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		for _, s := range stores {
 			if s.IsLeader() {
@@ -305,6 +355,12 @@ func findLeader(t *testing.T, stores []*RaftStore) *RaftStore {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	for i, s := range stores {
+		t.Logf("node %d stats: %v", i, s.raft.Stats())
+	}
+	stack := make([]byte, 1<<20)
+	n := runtime.Stack(stack, true)
+	t.Logf("goroutine dump:\n%s", stack[:n])
 	t.Fatal("no leader elected")
 	return nil
 }
@@ -372,12 +428,20 @@ func TestThreeNodeTLSClusterLeaderFailover(t *testing.T) {
 	stores := newThreeNodeTLSRaftCluster(t)
 	leader := findLeader(t, stores)
 
-	// Kill the leader; a new one must be elected and writes must resume.
+	// Kill the leader (raft + transport): a new one must be elected and
+	// writes must resume. newThreeNodeTLSRaftCluster already waited for the
+	// configuration to replicate to every node — without it the survivors
+	// would hold an empty configuration and refuse to start elections
+	// (raft's split-brain protection), which was the actual CI flake.
+	// Closing the transport too makes dials to the dead node fail fast
+	// (connection refused) instead of stalling every election round for the
+	// transport timeout.
 	if err := leader.raft.Shutdown().Error(); err != nil {
 		t.Fatalf("shutdown leader: %v", err)
 	}
+	_ = closeRaftTransport(leader.transport)
 
-	newLeader := findLeader(t, stores)
+	newLeader := findLeaderTimeout(t, stores, 60*time.Second)
 	if newLeader == leader {
 		t.Fatal("expected a different leader after failover")
 	}

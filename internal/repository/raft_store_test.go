@@ -28,8 +28,12 @@ func TestRaftStoreSingleNodeLeader(t *testing.T) {
 	if err := store.WaitForLeader(ctx); err != nil {
 		t.Fatalf("WaitForLeader: %v", err)
 	}
-	if !store.IsCleanState() {
-		t.Fatal("single node leader should be in clean state")
+	// A leader that just won the election transiently has its no-op barrier
+	// entry committed but not yet applied (commit_index != applied_index,
+	// fsm_pending > 0); a single-instant IsCleanState check flaked under
+	// -race. Wait for the state to settle instead.
+	if err := store.WaitForCleanState(ctx); err != nil {
+		t.Fatalf("single node leader should be in clean state: %v", err)
 	}
 }
 
