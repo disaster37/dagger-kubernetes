@@ -946,13 +946,17 @@ dependency has been removed from the project entirely.
   itself as the only voter and is always the leader.
 - **Multi-node:** the Helm chart ships a `StatefulSet` + headless Service.
   Peers are discovered from the StatefulSet's stable pod DNS names
-  (`<sts>-<i>.<headless>.<ns>.svc:8081` for `i=0..replicas-1`; the Helm chart
-  defaults `raft.cluster_domain` to `""` so addresses end at `.svc` — set it
-  to `cluster.local` or your cluster's real domain to use full FQDNs) — pure
-  DNS arithmetic, no K8s API calls. The headless Service sets
-  `publishNotReadyAddresses: true` so pods resolve (and can elect a leader)
-  before they are Ready. Each pod advertises its pod DNS name, not
-  `127.0.0.1`. In the chart the voter count is derived from
+  (`<sts>-<i>.<headless>.<ns>.svc.cluster.local:8081` for
+  `i=0..replicas-1`; `raft.cluster_domain` defaults to `cluster.local` — set
+  `""` to end addresses at `.svc` or your cluster's real domain for a
+  non-standard setup) — pure DNS arithmetic, no K8s API calls. The headless
+  Service sets `publishNotReadyAddresses: true` so pods resolve (and can
+  elect a leader) before they are Ready. Each pod advertises its **stable pod
+  DNS name**, not `127.0.0.1` and not its pod IP (pod IPs change on every pod
+  recreation, which would invalidate certificates and the durable raft
+  addresses). Startup resolution of the advertise address retries in-process
+  for up to 2 minutes instead of exiting, so a brand-new cluster whose DNS is
+  still warming up does not crash-loop the pods. In the chart the voter count is derived from
   `supervisor.replicaCount` (each supervisor pod is one voter; there is no
   separate `raft.replicas` knob). Set it to an **odd number ≥ 3** for quorum
   fault tolerance; a 2-node cluster loses quorum on a single failure.
@@ -962,8 +966,14 @@ dependency has been removed from the project entirely.
   true (the Helm chart default). A self-signed internal CA is generated with
   `goca` and shared across pods via the `<release>-raft-ca` Kubernetes Secret;
   each pod issues itself a per-node leaf certificate (SANs = pod DNS names +
-  `127.0.0.1`). Pod-0 writes the CA Secret; the others poll it before issuing
-  their leaf. TLS 1.2+, `RequireAndVerifyClientCert`. For non-Helm deploys you
+  `127.0.0.1`, no pod IPs — they are not stable). Pod-0 writes the CA Secret;
+  the others poll it before issuing their leaf. TLS 1.2+,
+  `RequireAndVerifyClientCert`. A persisted leaf is reused on restart only if
+  it is still valid, still chains to the **current** CA, and still covers the
+  exact CN/SAN set being advertised — so recreating the CA Secret or changing
+  the advertised URI form (e.g. `.svc` → `.svc.cluster.local`) re-issues the
+  leaf on every pod instead of looping forever on `x509: certificate signed
+  by unknown authority` between pods. For non-Helm deploys you
   can pre-provision CA + leaf PEM files via `raft.tls.ca_cert`/`cert`/`key`
   (manual mode) — `raft.tls.enabled` must be set uniformly across all peers.
   The `<release>-raft-ca` Secret contains the internal CA **private key** (any

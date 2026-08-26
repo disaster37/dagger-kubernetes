@@ -91,6 +91,23 @@ advertises its pod FQDN, and followers serve stale reads while returning
   counts are therefore not possible without a membership-operator that
   performs quorum-safe joins/leaves — out of scope. Scaling is a manual
   `supervisor.replicaCount` change + rolling restart.
+- **Bootstrap hardening (2026-08-26 revision):** field reports showed fresh
+  3-node clusters stuck in `CrashLoopBackOff` and, once DNS came up, looping
+  forever with `x509: certificate signed by unknown authority`. Three defects
+  were fixed: (1) the Helm chart defaulted `clusterDomain` to `""`, producing
+  advertise addresses ending at `.svc` whose resolution depended on the pod's
+  DNS search path — the default is now `cluster.local` so addresses are full
+  FQDNs resolved absolutely; (2) startup resolution of the advertise address
+  exited the pod on failure (fresh cluster: cluster DNS not yet serving) —
+  it now retries in-process for a bounded budget (internal
+  `AdvertiseResolveTimeout`, 2-minute default); (3) a persisted leaf cert was reused whenever it was
+  within the expiry margin, even when the CA Secret had been re-created or
+  the advertised URI/SAN form had changed, splitting the mTLS trust chain
+  across pods — a leaf is now reused only if it still chains to the current
+  CA and covers the exact CN/DNS/IP SAN set being advertised. Pod IPs stay
+  out of scope for addressing and SANs: they change on every pod recreation,
+  which would invalidate certificates and durable raft configuration
+  addresses.
 
 ### TLS PKI modes
 

@@ -141,6 +141,12 @@ func (ca *MintingCA) CertPool() *x509.CertPool {
 	return pool
 }
 
+// CACertificate returns the parsed CA certificate (for verifying that a
+// previously issued leaf still chains to the current CA).
+func (ca *MintingCA) CACertificate() *x509.Certificate {
+	return ca.cert
+}
+
 func (ca *MintingCA) TLSCertificate() (tls.Certificate, error) {
 	return tls.Certificate{
 		Certificate: [][]byte{ca.certDER},

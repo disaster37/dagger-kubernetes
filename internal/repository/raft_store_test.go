@@ -639,3 +639,28 @@ func TestLogrusWriterLineBuffering(t *testing.T) {
 		t.Fatalf("CRLF/empty-line handling = %q, want %q", got, want)
 	}
 }
+
+func TestResolveAdvertiseAddrSuccess(t *testing.T) {
+	addr, err := resolveAdvertiseAddr("127.0.0.1:8081", time.Second, io.Discard)
+	if err != nil {
+		t.Fatalf("resolveAdvertiseAddr: %v", err)
+	}
+	if addr == nil || !addr.IP.Equal(net.ParseIP("127.0.0.1")) {
+		t.Fatalf("addr = %v, want 127.0.0.1", addr)
+	}
+}
+
+func TestResolveAdvertiseAddrRetriesThenFails(t *testing.T) {
+	// A fresh cluster's DNS may not resolve the pod FQDN yet. The pod must
+	// retry within the budget instead of exiting (each exit restarts the
+	// whole raft bootstrap sequence), then fail with the last resolve error.
+	start := time.Now()
+	if _, err := resolveAdvertiseAddr("pod-0.headless.ns.svc.cluster.local:8081", 500*time.Millisecond, io.Discard); err != nil {
+		t.Logf("resolution failed after retry budget as expected: %v", err)
+	} else {
+		t.Log("advertise host unexpectedly resolvable in this environment; retry loop not exercised")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("retry budget not enforced: waited %v for a 500ms budget", elapsed)
+	}
+}

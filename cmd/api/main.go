@@ -370,7 +370,14 @@ func run(c *cli.Context) error {
 				}
 				if routesRepo != nil {
 					if n, err := routesRepo.ReapUploadSessions(ctx, time.Hour); err != nil {
-						logger.WithError(err).Error("reap upload sessions error")
+						// Writes are leader-only (ADR-016 D6): every follower
+						// runs this sweeper, so not-the-leader is the expected
+						// steady state on 2 of 3 pods, not an error.
+						if !errors.Is(err, domain.ErrNotLeader) {
+							logger.WithError(err).Error("reap upload sessions error")
+						} else {
+							logger.WithError(err).Debug("reap upload sessions skipped: not the raft leader")
+						}
 					} else if n > 0 {
 						logger.WithField("reaped", n).Debug("reaped stale upload sessions")
 					}

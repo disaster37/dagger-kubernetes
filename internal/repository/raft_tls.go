@@ -292,8 +292,16 @@ func createRaftCAWithGoca(name, organization string) (certPEM, keyPEM []byte, er
 }
 
 // issueOrReuseNodeCert issues a per-node leaf cert signed by the CA, persisted
-// at <dir>/tls/node.crt + node.key (0600). Reused if present and not within
-// the expiry safety margin.
+// at <dir>/tls/node.crt + node.key (0600). A persisted cert is reused only if
+// it is still valid for the CURRENT relationship it protects:
+//   - not within the expiry safety margin (and not yet valid — clock skew),
+//   - signed by the current CA (the Secret may have been re-created, in
+//     which case a stale cert would be rejected by every peer — CWE-295),
+//   - the CN and SAN sets match what would be issued now (e.g. the
+//     advertised URI form changed from `.svc` to `.svc.<cluster-domain>`).
+//
+// On any mismatch the leaf is re-issued under the current CA so peers always
+// agree on the trust chain after CA recreation or URI changes.
 func issueOrReuseNodeCert(
 	cfg *RaftTLSConfig,
 	ca *MintingCA,
@@ -310,7 +318,8 @@ func issueOrReuseNodeCert(
 	if fileExists(certPath) && fileExists(keyPath) {
 		existingCert, err := readPEM(certPath, "node cert")
 		if err == nil {
-			if cert, parseErr := parsePEMCert(existingCert); parseErr == nil && time.Until(cert.NotAfter) > nodeCertSafetyMargin {
+			if cert, parseErr := parsePEMCert(existingCert); parseErr == nil &&
+				reusableNodeCert(cert, ca, commonName, dnsNames, ipAddrs) {
 				key, keyErr := readPEM(keyPath, "node key")
 				if keyErr == nil {
 					return existingCert, key, nil
@@ -330,6 +339,91 @@ func issueOrReuseNodeCert(
 		return nil, nil, err
 	}
 	return certPEM, keyPEM, nil
+}
+
+// reusableNodeCert reports whether a persisted leaf may be reused as the raft
+// transport certificate: valid window, signed by the current CA, and covering
+// the exact CN/DNS/IP SAN set that would be issued now.
+func reusableNodeCert(cert *x509.Certificate, ca *MintingCA, commonName string, dnsNames []string, ipAddrs []net.IP) bool {
+	now := time.Now()
+	if cert.NotBefore.After(now) || time.Until(cert.NotAfter) <= nodeCertSafetyMargin {
+		return false
+	}
+	caCert := ca.CACertificate()
+	if caCert == nil || cert.CheckSignatureFrom(caCert) != nil {
+		return false
+	}
+	if cert.Subject.CommonName != commonName {
+		return false
+	}
+	return sameSANs(cert, dnsNames, ipAddrs)
+}
+
+// sameSANs compares the cert's DNS + IP SAN sets against the requested sets
+// (order-insensitive, nil/empty treated as equal).
+func sameSANs(cert *x509.Certificate, dnsNames []string, ipAddrs []net.IP) bool {
+	certDNS := make(map[string]struct{}, len(cert.DNSNames))
+	for _, n := range cert.DNSNames {
+		certDNS[n] = struct{}{}
+	}
+	if len(certDNS) != len(uniqueStrings(dnsNames)) {
+		return false
+	}
+	for _, n := range dnsNames {
+		if _, ok := certDNS[n]; !ok {
+			return false
+		}
+	}
+
+	certIPs := append([]net.IP(nil), cert.IPAddresses...)
+	wantIPs := normalizeIPs(ipAddrs)
+	if len(certIPs) != len(wantIPs) {
+		return false
+	}
+	for _, want := range wantIPs {
+		found := false
+		for _, have := range certIPs {
+			if have.Equal(want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// uniqueStrings dedupes a string slice (for SAN set cardinality comparison).
+func uniqueStrings(in []string) []string {
+	seen := make(map[string]struct{}, len(in))
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		if _, ok := seen[s]; !ok {
+			seen[s] = struct{}{}
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// normalizeIPs dedupes and canonicalizes an IP slice (16-byte form).
+func normalizeIPs(in []net.IP) []net.IP {
+	out := make([]net.IP, 0, len(in))
+	for _, ip := range in {
+		dup := false
+		for _, existing := range out {
+			if existing.Equal(ip) {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			out = append(out, ip)
+		}
+	}
+	return out
 }
 
 // buildRaftTLSMaterial assembles the CA pool + leaf tls.Certificate.

@@ -459,21 +459,31 @@ give each pod a stable identity for peer discovery.
 | `supervisor.replicaCount` | `3` | Supervisor pod count = Raft voter count (derived, single source of truth). Use an odd number ≥ 3 for fault tolerance. |
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
-| `supervisor.config.raft.clusterDomain` | `""` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix); set `"cluster.local"` (or your cluster's real domain) to advertise full FQDNs. |
+| `supervisor.config.raft.clusterDomain` | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` advertises full FQDNs that resolve absolutely (no search-path reliance during bootstrap); set `""` to end at `.svc` (no suffix) or your cluster's real domain for non-standard setups. |
 
 Everything else is **fixed or derived by the chart**: the data dir is
 `/var/lib/dagger-kubernetes` (per-pod PVC), the Raft transport binds `:8081`
-and advertises `<pod>.<headless>.<ns>.svc` (add `clusterDomain` to use
-full FQDNs), node IDs are the
+and advertises `<pod>.<headless>.<ns>.svc.cluster.local` (stable pod DNS
+names — pod IPs are deliberately NOT advertised, they change on every pod
+recreation), node IDs are the
 StatefulSet pod names (downward-API), peers are discovered via DNS from the
 headless Service (which sets `publishNotReadyAddresses: true` so pods resolve
 and can elect a leader before they are Ready), and the internal CA lives in
-the `<release>-raft-ca` Secret.
+the `<release>-raft-ca` Secret. During startup the supervisor retries
+advertise-address resolution in-process for up to 2 minutes instead of
+exiting: on a fresh cluster the DNS service may not be serving yet, and an
+immediate exit would put every pod into a `CrashLoopBackOff` that delays the
+whole bootstrap.
 
 **TLS auto-CA:** pod-0 generates the internal CA with `goca`, writes it to the
 `<release>-raft-ca` Secret, and issues itself a leaf; pods 1..N-1 poll the
 Secret (bounded by `leader_wait_timeout`) before issuing their own leaves.
-Leaves are reused across restarts and re-issued within a 7-day expiry margin.
+Leaves are reused across restarts only while they remain valid for the
+current trust setup — not within the 7-day expiry margin, not yet valid,
+signed by the current CA (a re-created Secret re-issues every leaf instead of
+splitting the trust chain), and covering the exact CN + DNS/IP SAN set being
+advertised (a URI-form change such as `.svc` → `.svc.cluster.local` re-issues
+the leaf).
 The engine-client **minting CA** is likewise auto-bootstrapped and shared
 across pods via the `<release>-minting-ca` Secret (ordinal 0 generates it, the
 rest poll) so engine mTLS client certs minted by any pod are trusted by every
@@ -574,7 +584,7 @@ Configure it under `supervisor.config.history`:
 |---|---|---|---|
 | `supervisor.config.raft.tls.enabled` | bool | `true` | Enable mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | bool | `true` | Require and verify peer client certs (mTLS). |
-| `supervisor.config.raft.clusterDomain` | string | `""` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix); set `"cluster.local"` (or your cluster's real domain) to advertise full FQDNs. |
+| `supervisor.config.raft.clusterDomain` | string | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` advertises full FQDNs that resolve absolutely (no search-path reliance during bootstrap); set `""` to end at `.svc` (no suffix) or your cluster's real domain for non-standard setups. |
 | `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled). |
 | `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired when the tempo subchart is enabled). |
 | `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired when the loki subchart is enabled). |

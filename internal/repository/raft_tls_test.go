@@ -198,6 +198,90 @@ func TestIssueOrReuseNodeCertExpiryReissue(t *testing.T) {
 	}
 }
 
+func TestIssueOrReuseNodeCertReissueOnCAChange(t *testing.T) {
+	dir := t.TempDir()
+	dns, ips := PodSANs(&RaftDiscoveryConfig{}, "node-0")
+
+	caAPEM, keyAPEM, err := createRaftCAWithGoca("ca", "org")
+	if err != nil {
+		t.Fatalf("create CA A: %v", err)
+	}
+	caA, err := NewMintingCAFromPEM(caAPEM, keyAPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCAFromPEM A: %v", err)
+	}
+	if _, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), caA, "node-0", "org", dns, ips); err != nil {
+		t.Fatalf("issue under CA A: %v", err)
+	}
+	firstCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
+
+	// A re-created CA (simulated Secret deletion + rebootstrap) must NOT
+	// reuse a leaf signed by the old CA: peers trusting the new CA would
+	// reject it (CWE-295 trust split).
+	caBPEM, keyBPEM, err := createRaftCAWithGoca("ca", "org")
+	if err != nil {
+		t.Fatalf("create CA B: %v", err)
+	}
+	caB, err := NewMintingCAFromPEM(caBPEM, keyBPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCAFromPEM B: %v", err)
+	}
+	if _, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), caB, "node-0", "org", dns, ips); err != nil {
+		t.Fatalf("reissue under CA B: %v", err)
+	}
+	secondCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
+	if bytes.Equal(firstCert, secondCert) {
+		t.Fatal("leaf signed by the old CA must be re-issued when the CA changed")
+	}
+	parsed, err := parsePEMCert(secondCert)
+	if err != nil {
+		t.Fatalf("parsePEMCert: %v", err)
+	}
+	if err := parsed.CheckSignatureFrom(caB.CACertificate()); err != nil {
+		t.Fatalf("re-issued leaf does not chain to the current CA: %v", err)
+	}
+	if err := parsed.CheckSignatureFrom(caA.CACertificate()); err == nil {
+		t.Fatal("re-issued leaf must not chain to the old CA")
+	}
+}
+
+func TestIssueOrReuseNodeCertReissueOnSANChange(t *testing.T) {
+	dir := t.TempDir()
+	caCertPEM, caKeyPEM, err := createRaftCAWithGoca("ca", "org")
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	ca, err := NewMintingCAFromPEM(caCertPEM, caKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCAFromPEM: %v", err)
+	}
+
+	// Advertised URI form without the cluster suffix (.svc).
+	oldDNS, oldIPs := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: ""}, "node-0")
+	if _, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), ca, "node-0", "org", oldDNS, oldIPs); err != nil {
+		t.Fatalf("issue (.svc form): %v", err)
+	}
+	firstCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
+
+	// The URI form changed (.svc → .svc.cluster.local): the persisted cert
+	// no longer covers the names peers will dial, so it must be re-issued.
+	newDNS, newIPs := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: "cluster.local"}, "node-0")
+	if _, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), ca, "node-0", "org", newDNS, newIPs); err != nil {
+		t.Fatalf("reissue (cluster.local form): %v", err)
+	}
+	secondCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
+	if bytes.Equal(firstCert, secondCert) {
+		t.Fatal("leaf covering the old URI form must be re-issued when the URI form changed")
+	}
+	parsed, err := parsePEMCert(secondCert)
+	if err != nil {
+		t.Fatalf("parsePEMCert: %v", err)
+	}
+	if !sameSANs(parsed, newDNS, newIPs) {
+		t.Fatalf("re-issued SANs = %v / %v, want %v / %v", parsed.DNSNames, parsed.IPAddresses, newDNS, newIPs)
+	}
+}
+
 func TestBuildRaftTLSConfig(t *testing.T) {
 	dir := t.TempDir()
 	cfg := testRaftTLSCfg(dir)

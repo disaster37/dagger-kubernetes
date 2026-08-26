@@ -58,6 +58,11 @@ type RaftStoreConfig struct {
 	SnapshotInterval  time.Duration
 	TrailingLogs      uint64
 	TLS               *tls.Config
+	// AdvertiseResolveTimeout bounds how long the advertise address may stay
+	// unresolvable at startup (fresh clusters: cluster DNS not serving yet).
+	// The pod retries in-process instead of exiting into a CrashLoopBackOff.
+	// 0 = defaultAdvertiseResolveTimeout (2 minutes).
+	AdvertiseResolveTimeout time.Duration
 }
 
 // NewRaftStore constructs and starts a Raft node. It loads/generates a stable
@@ -261,7 +266,7 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 	if advertiseAddr == "" {
 		advertiseAddr = net.JoinHostPort(host, port)
 	}
-	advertise, err := net.ResolveTCPAddr("tcp", advertiseAddr)
+	advertise, err := resolveAdvertiseAddr(advertiseAddr, cfg.AdvertiseResolveTimeout, logOutput)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve raft advertise addr %s: %w", advertiseAddr, err)
 	}
@@ -287,6 +292,30 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 	return transport, advertise.String(), nil
 }
 
+// resolveAdvertiseAddr resolves advertiseAddr, retrying every second within
+// the timeout budget so a cluster whose DNS is still warming up delays this
+// pod instead of failing it out of the boot sequence (CrashLoopBackOff).
+// The last resolution error is returned once the budget expires.
+func resolveAdvertiseAddr(advertiseAddr string, timeout time.Duration, logOutput io.Writer) (*net.TCPAddr, error) {
+	if timeout <= 0 {
+		timeout = defaultAdvertiseResolveTimeout
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		advertise, err := net.ResolveTCPAddr("tcp", advertiseAddr)
+		if err == nil {
+			return advertise, nil
+		}
+		if !time.Now().Add(advertiseResolveRetryInterval).Before(deadline) {
+			return nil, err
+		}
+		if logOutput != nil {
+			_, _ = fmt.Fprintf(logOutput, "[WARN] raft: unable to resolve advertise addr %s yet (cluster DNS may still be starting), retrying: %v\n", advertiseAddr, err)
+		}
+		time.Sleep(advertiseResolveRetryInterval)
+	}
+}
+
 // raftConfigurationFromPeers maps the resolved voter list to a raft
 // Configuration, skipping empty entries and deduplicating IDs.
 func raftConfigurationFromPeers(peers []RaftPeer) raft.Configuration {
@@ -302,6 +331,16 @@ func raftConfigurationFromPeers(peers []RaftPeer) raft.Configuration {
 	}
 	return raft.Configuration{Servers: servers}
 }
+
+const (
+	// defaultAdvertiseResolveTimeout bounds startup resolution of the
+	// advertise address. A fresh cluster's DNS may not be serving yet (the
+	// CoreDNS pods of a brand-new cluster take time to become ready);
+	// failing out immediately would push this pod into a CrashLoopBackOff,
+	// which delays the whole raft bootstrap sequence.
+	defaultAdvertiseResolveTimeout = 2 * time.Minute
+	advertiseResolveRetryInterval  = time.Second
+)
 
 // leaderPollInterval is how often WaitForLeader / WaitForSelfLeadership
 // re-check leadership.
