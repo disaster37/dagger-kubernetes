@@ -167,7 +167,7 @@ supervisor:
 ## @param supervisor.config.fleet.engineExtraArgs [array] Additional CLI args passed to the engine.
 ## @param supervisor.config.fleet.engineExtraEnv [object] Extra env vars on engine pods.
 ## @param supervisor.config.fleet.engineExtraEnvFrom [object] Extra env vars sourced from Secret keys on engine pods: map of env name -> {secretName, key} (camelCase keys, rendered verbatim into the app config).
-## @param supervisor.config.fleet.engineCaSecret Secret with custom CA PEM bundle for engines (empty = disabled).
+## @param supervisor.config.fleet.engineCaSecret Secret with custom CA PEM bundle. When set, the CA is mounted into BOTH engine pods (for registry TLS) AND the supervisor pod (for OIDC provider TLS, system trust store). The supervisor reads it at /etc/ssl/certs/custom-ca.pem and sets SSL_CERT_FILE/NODE_EXTRA_CA_CERTS. Empty = disabled.
 ## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
 ## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json
 ##   (auths for private registries) used by engine image pulls. Stored verbatim

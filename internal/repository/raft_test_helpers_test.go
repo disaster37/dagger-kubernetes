@@ -262,10 +262,11 @@ func buildTLSClusterNodes(t *testing.T, n int) []raftClusterNode {
 			ClientAuth:   tls.RequireAndVerifyClientCert,
 			MinVersion:   tls.VersionTLS12,
 		}
-		layer, adv, err := newTLSStreamLayer("127.0.0.1:0", nil, tlsCfg)
+		layer, err := newTLSStreamLayer("127.0.0.1:0", nil, tlsCfg)
 		if err != nil {
 			t.Fatalf("newTLSStreamLayer: %v", err)
 		}
+		adv := layer.Addr()
 		trans := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
 			Stream:  layer,
 			Logger:  hclog.NewNullLogger(),

@@ -453,12 +453,15 @@ func TestReconcileMembershipAddVoter(t *testing.T) {
 		{ID: "node-2", Address: addrByID["node-2"]},
 		{ID: "node-3", Address: "127.0.0.1:19999"},
 	}
-	added, removed, err := leader.ReconcileMembership(desired, 5*time.Second)
+	added, updated, removed, err := leader.ReconcileMembership(desired, 5*time.Second)
 	if err != nil {
 		t.Fatalf("ReconcileMembership: %v", err)
 	}
 	if len(added) != 1 || added[0] != "node-3" {
 		t.Fatalf("added = %v, want [node-3]", added)
+	}
+	if len(updated) != 0 {
+		t.Fatalf("updated = %v, want empty", updated)
 	}
 	if len(removed) != 0 {
 		t.Fatalf("removed = %v, want empty", removed)
@@ -497,9 +500,15 @@ func TestReconcileMembershipRemoveServer(t *testing.T) {
 	// Shrink to a single voter (self); both running nodes satisfy the old
 	// 2-node quorum so the removal commits.
 	desired := []RaftPeer{{ID: selfID, Address: selfAddr}}
-	_, removed, err := leader.ReconcileMembership(desired, 5*time.Second)
+	added, updated, removed, err := leader.ReconcileMembership(desired, 5*time.Second)
 	if err != nil {
 		t.Fatalf("ReconcileMembership: %v", err)
+	}
+	if len(added) != 0 {
+		t.Fatalf("added = %v, want empty", added)
+	}
+	if len(updated) != 0 {
+		t.Fatalf("updated = %v, want empty", updated)
 	}
 	if len(removed) != 1 {
 		t.Fatalf("removed = %v, want 1 voter", removed)

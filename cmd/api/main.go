@@ -215,11 +215,15 @@ func run(c *cli.Context) error {
 		if err != nil {
 			return fmt.Errorf("compile group mappings: %w", err)
 		}
+		oauthHTTPClient, err := service.NewOAuthHTTPClient(cfg.Auth.OAuth.CACertPath)
+		if err != nil {
+			return fmt.Errorf("create OAuth HTTP client: %w", err)
+		}
 		switch cfg.Auth.OAuth.Provider {
 		case "github":
 			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger)
 		case "oidc":
-			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger)
+			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient)
 		default:
 			// validateAuthConfig already rejected this, but fail closed.
 			return fmt.Errorf("unsupported oauth provider: %s", cfg.Auth.OAuth.Provider)
@@ -767,14 +771,15 @@ func joinLoop(ctx context.Context, store *repository.RaftStore, resolver reposit
 				logger.WithError(err).Warn("joinLoop: resolve peers failed")
 				continue
 			}
-			added, removed, err := store.ReconcileMembership(desired, 10*time.Second)
+			added, updated, removed, err := store.ReconcileMembership(desired, 10*time.Second)
 			if err != nil {
 				logger.WithError(err).Warn("joinLoop: reconcile membership failed")
 				continue
 			}
-			if len(added) > 0 || len(removed) > 0 {
+			if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
 				logger.WithFields(logrus.Fields{
 					"added":   added,
+					"updated": updated,
 					"removed": removed,
 				}).Info("joinLoop: raft membership reconciled")
 			}

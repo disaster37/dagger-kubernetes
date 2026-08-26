@@ -51,6 +51,7 @@ data:
 {{ toYaml .Values.auth.oauth.scopes | indent 10 }}
         username_claim: {{ .Values.auth.oauth.usernameClaim | quote }}
         groups_claim: {{ .Values.auth.oauth.groupsClaim | quote }}
+        ca_cert_path: {{ if .Values.supervisor.config.fleet.engineCaSecret }}"/etc/ssl/certs/custom-ca.pem"{{ else }}""{{ end }}
       cookie:
         access_name: {{ .Values.auth.cookie.accessName | quote }}
         refresh_name: {{ .Values.auth.cookie.refreshName | quote }}

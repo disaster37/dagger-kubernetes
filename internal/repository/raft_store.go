@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -250,6 +251,33 @@ func withDefaults(cfg *RaftStoreConfig) {
 	}
 }
 
+// hostAddr implements net.Addr with a DNS hostname instead of a resolved IP.
+// Storing DNS names in the Raft cluster configuration lets peers re-resolve
+// the address on each connection, handling IP changes across pod restarts
+// (Kubernetes StatefulSet DNS is stable while pod IPs change).
+type hostAddr struct {
+	host string
+	port int
+}
+
+func (a hostAddr) Network() string { return "tcp" }
+func (a hostAddr) String() string  { return net.JoinHostPort(a.host, strconv.Itoa(a.port)) }
+
+// newHostAddr parses addr as host:port and returns a hostAddr without
+// resolving the hostname. Unlike net.ResolveTCPAddr the DNS name is kept
+// intact so Raft peers resolve it afresh on each connection.
+func newHostAddr(addr string) (net.Addr, error) {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return nil, fmt.Errorf("invalid port: %w", err)
+	}
+	return hostAddr{host: host, port: port}, nil
+}
+
 // newStreamTransport binds a transport on cfg.BindAddr. When cfg.TLS != nil it
 // wraps the listener in a tlsStreamLayer (mTLS); otherwise it uses plaintext
 // raft.NewTCPTransport. Returns (transport, advertiseAddr, error).
@@ -266,13 +294,23 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 	if advertiseAddr == "" {
 		advertiseAddr = net.JoinHostPort(host, port)
 	}
-	advertise, err := resolveAdvertiseAddr(advertiseAddr, cfg.AdvertiseResolveTimeout, logOutput)
+
+	// Validate DNS is resolvable (cluster DNS warmup for fresh clusters).
+	resolved, err := resolveAdvertiseAddr(advertiseAddr, cfg.AdvertiseResolveTimeout, logOutput)
 	if err != nil {
 		return nil, "", fmt.Errorf("resolve raft advertise addr %s: %w", advertiseAddr, err)
 	}
 
 	if cfg.TLS != nil {
-		layer, layerAdvertise, err := newTLSStreamLayer(cfg.BindAddr, advertise, cfg.TLS)
+		// TLS path: use the unresolved DNS name as the advertise address so
+		// Raft peers resolve it afresh on each connection. This handles IP
+		// changes across pod restarts (StatefulSet DNS is stable while pod
+		// IPs change). The TLS stream layer accepts any net.Addr.
+		advertise, err := newHostAddr(advertiseAddr)
+		if err != nil {
+			return nil, "", fmt.Errorf("parse advertise addr %s: %w", advertiseAddr, err)
+		}
+		layer, err := newTLSStreamLayer(cfg.BindAddr, advertise, cfg.TLS)
 		if err != nil {
 			return nil, "", err
 		}
@@ -282,14 +320,16 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 			MaxPool: 10,
 			Timeout: 10 * time.Second,
 		})
-		return transport, layerAdvertise.String(), nil
+		return transport, advertise.String(), nil
 	}
 
-	transport, err := raft.NewTCPTransport(cfg.BindAddr, advertise, 10, 10*time.Second, logOutput)
+	// Plaintext TCP: raft.NewTCPTransport type-asserts stream.Addr() as
+	// *net.TCPAddr, so we must pass the resolved IP (not a hostname).
+	transport, err := raft.NewTCPTransport(cfg.BindAddr, resolved, 10, 10*time.Second, logOutput)
 	if err != nil {
 		return nil, "", fmt.Errorf("create raft transport: %w", err)
 	}
-	return transport, advertise.String(), nil
+	return transport, resolved.String(), nil
 }
 
 // resolveAdvertiseAddr resolves advertiseAddr, retrying every second within
@@ -418,40 +458,93 @@ func (s *RaftStore) RemoveServer(id string, timeout time.Duration) error {
 }
 
 // ReconcileMembership ensures the cluster configuration matches the desired
-// voter list: missing voters are added and extra voters removed (idempotent).
-// Leader-only. Returns the IDs added and removed.
-func (s *RaftStore) ReconcileMembership(desired []RaftPeer, timeout time.Duration) (added, removed []string, err error) {
+// voter list: missing voters are added, stale addresses are updated, and extra
+// voters removed (idempotent). Leader-only. Returns the IDs added, updated,
+// and removed.
+func (s *RaftStore) ReconcileMembership(desired []RaftPeer, timeout time.Duration) (added, updated, removed []string, err error) {
 	current, err := s.GetConfiguration()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
-	currentIDs := make(map[string]bool, len(current.Servers))
+	currentByID := make(map[string]raft.Server, len(current.Servers))
 	for _, srv := range current.Servers {
-		currentIDs[string(srv.ID)] = true
+		currentByID[string(srv.ID)] = srv
 	}
-	desiredIDs := make(map[string]RaftPeer, len(desired))
+	desiredByID := make(map[string]RaftPeer, len(desired))
 	for _, p := range desired {
 		if p.ID != "" {
-			desiredIDs[p.ID] = p
+			desiredByID[p.ID] = p
 		}
 	}
-	for id, p := range desiredIDs {
-		if !currentIDs[id] {
+
+	// Add missing voters.
+	for id, p := range desiredByID {
+		if _, ok := currentByID[id]; !ok {
 			if err := s.AddVoter(id, p.Address, timeout); err != nil {
-				return added, removed, err
+				return added, updated, removed, err
 			}
 			added = append(added, id)
 		}
 	}
-	for id := range currentIDs {
-		if _, ok := desiredIDs[id]; !ok {
+
+	// Update addresses for existing voters whose address changed (e.g. after a
+	// pod restart assigned a new IP while the Raft config still stores the old
+	// one). The resolver returns DNS names (not IPs) for StatefulSet pods, so
+	// the desired address is a stable FQDN. The current address may be a stale
+	// IP from a previous bootstrap. Resolve the desired DNS name to compare.
+	for id, p := range desiredByID {
+		srv, ok := currentByID[id]
+		if !ok {
+			continue
+		}
+		currentAddr := string(srv.Address)
+		desiredAddr := p.Address
+		if addrChanged(currentAddr, desiredAddr) {
+			// Remove and re-add to update the address: raft.AddVoter is a no-op
+			// for existing voters with unchanged addresses.
 			if err := s.RemoveServer(id, timeout); err != nil {
-				return added, removed, err
+				return added, updated, removed, err
+			}
+			if err := s.AddVoter(id, p.Address, timeout); err != nil {
+				return added, updated, removed, err
+			}
+			updated = append(updated, id)
+		}
+	}
+
+	// Remove extra voters.
+	for id := range currentByID {
+		if _, ok := desiredByID[id]; !ok {
+			if err := s.RemoveServer(id, timeout); err != nil {
+				return added, updated, removed, err
 			}
 			removed = append(removed, id)
 		}
 	}
-	return added, removed, nil
+	return added, updated, removed, nil
+}
+
+// addrChanged reports whether two server addresses differ. When the desired
+// address is a DNS name (contains non-numeric characters in the host part),
+// it is resolved to an IP for comparison with the current address (which may
+// be a stale IP from a previous bootstrap). Direct string comparison is used
+// when both are IPs or both are DNS names.
+func addrChanged(current, desired string) bool {
+	if current == desired {
+		return false
+	}
+	host, _, err := net.SplitHostPort(desired)
+	if err != nil || net.ParseIP(host) != nil {
+		// Desired is an IP (or unparseable) — direct string comparison.
+		return true
+	}
+	// Desired is a DNS name; resolve and compare with the current address.
+	resolved, err := net.ResolveTCPAddr("tcp", desired)
+	if err != nil {
+		// Can't resolve — assume changed (will retry on next reconciliation).
+		return true
+	}
+	return current != resolved.String()
 }
 
 // apply marshals cmd, calls raft.Apply, and maps the result to a Go error.

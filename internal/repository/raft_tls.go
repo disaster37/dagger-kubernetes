@@ -474,15 +474,15 @@ var _ raft.StreamLayer = (*tlsStreamLayer)(nil)
 
 // newTLSStreamLayer binds a TLS listener on bindAddr. advertise is the
 // externally routable address (nil = use the bound address).
-func newTLSStreamLayer(bindAddr string, advertise net.Addr, config *tls.Config) (*tlsStreamLayer, net.Addr, error) {
+func newTLSStreamLayer(bindAddr string, advertise net.Addr, config *tls.Config) (*tlsStreamLayer, error) {
 	ln, err := net.Listen("tcp", bindAddr)
 	if err != nil {
-		return nil, nil, fmt.Errorf("raft TLS: listen %s: %w", bindAddr, err)
+		return nil, fmt.Errorf("raft TLS: listen %s: %w", bindAddr, err)
 	}
 	if advertise == nil {
 		advertise = ln.Addr()
 	}
-	return &tlsStreamLayer{listener: ln, config: config, advertise: advertise}, advertise, nil
+	return &tlsStreamLayer{listener: ln, config: config, advertise: advertise}, nil
 }
 
 func (l *tlsStreamLayer) Accept() (net.Conn, error) {

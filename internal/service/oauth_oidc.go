@@ -2,7 +2,11 @@ package service
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -59,6 +63,12 @@ type OIDCOAuthService struct {
 	logger        *logrus.Logger
 	mapper        *GroupMapper
 
+	// httpClient is the HTTP client used for OIDC provider discovery, token
+	// exchange, and userinfo. When nil, http.DefaultClient is used (via
+	// go-oidc and oauth2 defaults). Set to inject a custom TLS config
+	// (e.g. a private CA cert for a self-hosted OIDC issuer).
+	httpClient *http.Client
+
 	// providerFactory is the testability seam. Production: defaultFactory
 	// calling oidc.NewProvider. Tests: inject a fake returning a fake
 	// oidcProvider backed by an httptest.Server.
@@ -84,7 +94,8 @@ func defaultOIDCProviderFactory(ctx context.Context, issuerURL string) (oidcProv
 // NewOIDCOAuthService returns an OIDCOAuthService. The issuer URL is
 // trailing-slash-normalized; "openid" is appended to scopes when missing; and
 // empty claim names fall back to preferred_username/groups.
-func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *OIDCOAuthService {
+// httpClient is the HTTP client for OIDC provider calls; nil uses the default.
+func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, httpClient *http.Client) *OIDCOAuthService {
 	scopes := make([]string, 0, len(cfg.Scopes)+1)
 	scopes = append(scopes, cfg.Scopes...)
 	hasOpenID := false
@@ -123,6 +134,7 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *Us
 		jwt:             jwtSvc,
 		logger:          logger,
 		mapper:          mapper,
+		httpClient:      httpClient,
 		providerFactory: defaultOIDCProviderFactory,
 	}
 }
@@ -150,7 +162,14 @@ func (s *OIDCOAuthService) discover(ctx context.Context) (oidcProvider, error) {
 	}
 	s.mu.Unlock()
 
-	p, err := s.providerFactory(ctx, s.issuerURL)
+	// Inject the custom HTTP client into the context so go-oidc and oauth2
+	// use it for discovery, token exchange, and userinfo calls.
+	discoverCtx := ctx
+	if s.httpClient != nil {
+		discoverCtx = oidc.ClientContext(ctx, s.httpClient)
+	}
+
+	p, err := s.providerFactory(discoverCtx, s.issuerURL)
 	if err != nil {
 		s.logger.WithError(err).Warn("oidc: provider discovery failed")
 		return nil, fmt.Errorf("oidc: discover provider: %w", err)
@@ -177,6 +196,9 @@ func (s *OIDCOAuthService) discover(ctx context.Context) (oidcProvider, error) {
 func (s *OIDCOAuthService) LoginURL(state string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), oidcDiscoverTimeout)
 	defer cancel()
+	if s.httpClient != nil {
+		ctx = oidc.ClientContext(ctx, s.httpClient)
+	}
 	p, err := s.discover(ctx)
 	if err != nil {
 		return ""
@@ -188,6 +210,9 @@ func (s *OIDCOAuthService) LoginURL(state string) string {
 // sub/username/groups claims, enforces allowed_orgs, ensures a local user,
 // optionally auto-joins the default group, and issues a JWT pair.
 func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, refresh string, u *domain.User, err error) {
+	if s.httpClient != nil {
+		ctx = oidc.ClientContext(ctx, s.httpClient)
+	}
 	p, err := s.discover(ctx)
 	if err != nil {
 		return "", "", nil, err
@@ -360,3 +385,33 @@ func claimMissing(claims map[string]any, key string) bool {
 }
 
 var _ OAuthProvider = (*OIDCOAuthService)(nil)
+
+// NewOAuthHTTPClient creates an HTTP client that trusts the CA certificate at
+// caCertPath in addition to the system pool. Use for self-hosted OIDC issuers
+// (Dex, Keycloak, etc.) with private/internal CAs. Returns nil, nil when
+// caCertPath is empty.
+func NewOAuthHTTPClient(caCertPath string) (*http.Client, error) {
+	if caCertPath == "" {
+		return nil, nil
+	}
+	caCert, err := os.ReadFile(caCertPath) //nolint:gosec // G304: path is admin-configured, not user input.
+	if err != nil {
+		return nil, fmt.Errorf("read OAuth CA cert %s: %w", caCertPath, err)
+	}
+	pool, err := x509.SystemCertPool()
+	if err != nil {
+		pool = x509.NewCertPool()
+	}
+	if !pool.AppendCertsFromPEM(caCert) {
+		return nil, fmt.Errorf("OAuth CA cert %s: no valid PEM certificates found", caCertPath)
+	}
+	return &http.Client{
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{
+				RootCAs:    pool,
+				MinVersion: tls.VersionTLS12,
+			},
+		},
+		Timeout: 30 * time.Second,
+	}, nil
+}

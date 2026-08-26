@@ -146,7 +146,7 @@ func newOIDCService(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *
 	if err != nil {
 		t.Fatalf("NewGroupMapper: %v", err)
 	}
-	svc := NewOIDCOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger)
+	svc := NewOIDCOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger, nil)
 	return svc, gsvc
 }
 

@@ -86,6 +86,7 @@ type OAuthConfig struct {
 	Scopes        []string `mapstructure:"scopes"`         // default ["openid","profile","email"]
 	UsernameClaim string   `mapstructure:"username_claim"` // default "preferred_username"; fallback "email"
 	GroupsClaim   string   `mapstructure:"groups_claim"`   // default "groups"
+	CACertPath    string   `mapstructure:"ca_cert_path"`   // optional PEM CA cert for verifying the OIDC issuer TLS
 }
 
 // GroupMappingRule maps an upstream provider group name to a supervisor group

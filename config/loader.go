@@ -48,6 +48,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.scopes", []string{"openid", "profile", "email"})
 	v.SetDefault("auth.oauth.username_claim", "preferred_username")
 	v.SetDefault("auth.oauth.groups_claim", "groups")
+	v.SetDefault("auth.oauth.ca_cert_path", "")
 
 	v.SetDefault("auth.jwt.secret", "")
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)

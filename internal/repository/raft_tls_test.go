@@ -316,13 +316,13 @@ func TestTLSStreamLayerMTLS(t *testing.T) {
 		t.Fatalf("loadOrBuildRaftTLS: %v", err)
 	}
 
-	layer, addr, err := newTLSStreamLayer("127.0.0.1:0", nil, tlsCfg)
+	layer, err := newTLSStreamLayer("127.0.0.1:0", nil, tlsCfg)
 	if err != nil {
 		t.Fatalf("newTLSStreamLayer: %v", err)
 	}
 	defer func() { _ = layer.Close() }()
 
-	if layer.Addr() == nil || addr == nil {
+	if layer.Addr() == nil {
 		t.Fatal("Addr should be non-nil")
 	}
 
@@ -344,7 +344,7 @@ func TestTLSStreamLayerMTLS(t *testing.T) {
 	}()
 
 	// Dial with matching SAN (127.0.0.1 is in the leaf's IP SANs).
-	conn, err := layer.Dial(raft.ServerAddress(addr.String()), time.Second)
+	conn, err := layer.Dial(raft.ServerAddress(layer.Addr().String()), time.Second)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -366,7 +366,7 @@ func TestTLSStreamLayerUntrustedPeerFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("server tls: %v", err)
 	}
-	layer, addr, err := newTLSStreamLayer("127.0.0.1:0", nil, serverTLS)
+	layer, err := newTLSStreamLayer("127.0.0.1:0", nil, serverTLS)
 	if err != nil {
 		t.Fatalf("newTLSStreamLayer: %v", err)
 	}
@@ -391,7 +391,7 @@ func TestTLSStreamLayerUntrustedPeerFails(t *testing.T) {
 		t.Fatalf("client tls: %v", err)
 	}
 
-	conn, err := tls.Dial("tcp", addr.String(), clientTLS)
+	conn, err := tls.Dial("tcp", layer.Addr().String(), clientTLS)
 	if err == nil {
 		_ = conn.Close()
 		t.Fatal("expected handshake failure with untrusted CA")
