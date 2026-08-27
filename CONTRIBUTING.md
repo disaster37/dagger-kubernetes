@@ -110,6 +110,22 @@ func NewManager(provider Provider, store *Store, cfg ManagerConfig, logger *logr
 ### HTTP responses
 JSON responses via `json.NewEncoder(w).Encode(v)`. Error responses as `{"message": "..."}`.
 
+### In-cluster endpoints must use the `.svc` suffix
+When the supervisor is configured to dial an in-cluster remote component — the
+docker cache (`cache.registries[].internal_addr`, `cache.internal_addr`), the
+Dagger engine registry (`fleet.engine_image_registry`,
+`fleet.engine_registry_mirrors`), Loki (`telemetry.loki_url`), VictoriaMetrics
+(`telemetry.victoria_url`), or any other cluster-local service — the address
+must use the `<service>.<namespace>.svc` form (e.g.
+`http://loki.dagger-kubernetes.svc:3100`). Do not use bare service names
+(`loki:3100`) or full FQDNs (`loki.<ns>.svc.cluster.local`).
+
+This keeps proxy configuration minimal: when `HTTP_PROXY` is needed on the
+supervisor (e.g. to download the Dagger CLI via `cli.upstream`), a single
+`.svc` entry in `NO_PROXY` exempts every in-cluster component from the proxy.
+Bare names would require one `NO_PROXY` entry per component, and FQDNs tie the
+entry to a specific cluster domain.
+
 ## Testing
 
 ### Coverage target: 100%
@@ -295,6 +311,7 @@ directory. When editing one, copy it verbatim to the other and verify with
 - [ ] `dagger call -m ./dagger --src . ci export --path out` exits 0 locally (same command as `.github/workflows/ci.yml`, same pinned Dagger CLI version)
 - [ ] No dead code left behind: every removed call site has its helper/function removed (`unused` lint passes — grep your touched symbols for zero remaining references)
 - [ ] New integration tests use `freeAddr(t)` for ports (no hardcoded control/data ports) and shut down servers with a timed context
+- [ ] In-cluster component URLs (cache registry, loki, victoria, ...) use the `<service>.<namespace>.svc` suffix
 - [ ] Tests cover new code (target 100% coverage)
 - [ ] Integration test proves feature works with real Dagger client
 - [ ] `golangci-lint run ./...` passes (CI may run a newer golangci-lint than the pinned version in `dagger/main.go` — the latest release must also pass)

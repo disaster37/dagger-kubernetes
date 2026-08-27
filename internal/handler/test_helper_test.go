@@ -72,6 +72,7 @@ func newTestEnv(t *testing.T) *testEnv {
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacy, logger)
 
 	sessions := service.NewStore(2 * time.Minute)
+	store.SetSessionSink(sessions)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 
@@ -113,6 +114,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		MintingCA:           mintingCA,
 		FleetManager:        fleetManager,
 		Sessions:            sessions,
+		SessionRegistry:     repository.NewSessionRepo(store),
 		CacheBackend:        cacheBackend,
 		VersionResolver:     versionResolver,
 		Auth:                authSvc,

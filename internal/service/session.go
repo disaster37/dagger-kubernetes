@@ -15,11 +15,33 @@ type Store struct {
 }
 
 var _ domain.SessionStore = (*Store)(nil)
+var _ domain.SessionStateSink = (*Store)(nil)
 
 func NewStore(ttl time.Duration) *Store {
 	return &Store{
 		leases: make(map[string]*domain.Lease),
 		ttl:    ttl,
+	}
+}
+
+// ApplySessionRegistered installs (or replaces) a lease received through the
+// Raft FSM. The payload timestamps come from the leader, so every pod applies
+// identical state during replay.
+func (s *Store) ApplySessionRegistered(lease *domain.Lease) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cp := *lease
+	s.leases[lease.CertFP] = &cp
+}
+
+// ApplySessionTouched refreshes a lease's LastActivity from a replicated
+// touch command. Missing leases are ignored (the session may already have
+// been reaped locally).
+func (s *Store) ApplySessionTouched(certFP string, at time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if l, ok := s.leases[certFP]; ok {
+		l.LastActivity = at
 	}
 }
 

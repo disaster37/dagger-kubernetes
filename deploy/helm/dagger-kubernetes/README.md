@@ -123,15 +123,20 @@ grafana:
 supervisor:
   config:
     telemetry:
-      collectorUrl: "http://my-collector:4318"
-      tempoUrl: "http://my-tempo:3200"
-      lokiUrl: "http://my-loki:3100"
-      victoriaUrl: "http://my-victoria:8428"
+      collectorUrl: "http://my-collector.telemetry.svc:4318"
+      tempoUrl: "http://my-tempo.telemetry.svc:3200"
+      lokiUrl: "http://my-loki.telemetry.svc:3100"
+      victoriaUrl: "http://my-victoria.telemetry.svc:8428"
     cache:
       registries:
         - id: my-registry
-          internalAddr: "my-registry:5000"
+          internalAddr: "my-registry.cache.svc:5000"
 ```
+
+In-cluster endpoints must use the `<service>.<namespace>.svc` form (never bare
+service names or `.svc.<cluster-domain>` FQDNs) so a single `.svc` entry in
+`NO_PROXY` covers every in-cluster component when `HTTP_PROXY` is set (see
+`CONTRIBUTING.md`).
 
 ## Install from source (local development)
 
@@ -324,8 +329,13 @@ grafana:
   `replicaCount: 3`) with a **headless Service** for stable pod DNS; peers are
   discovered by DNS arithmetic and the Raft transport is **mTLS** (internal
   goca CA shared via the `<release>-raft-ca` Secret). See
-  [Raft (distributed store)](#raft-distributed-store) below. Sessions are
-  in-memory and shift on pod restart; clients reconnect automatically.
+  [Raft (distributed store)](#raft-distributed-store) below. **Session leases
+  are Raft-replicated** (ADR-026), and the `-control` and `-data` Services
+  select the current **Raft leader** pod (label
+  `dagger-kubernetes.io/raft-leader`, maintained at runtime by each pod): all
+  ingress traffic — API requests and data-plane tunnels — terminates on the
+  leader, the only pod that can apply Raft writes. During leader elections the
+  Services briefly have no endpoints; clients reconnect automatically.
   There is **no HPA**: the supervisor is a quorum-based Raft store, so the
   voter count must follow `supervisor.replicaCount` exactly and cannot track
   an autoscaler.
@@ -433,15 +443,20 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 
 | Config key | Template helper | Target service |
 |---|---|---|
-| `telemetry.collectorUrl` | `dagger-kubernetes.collectorUrl` | `<release>-opentelemetry-collector:4318` |
-| `telemetry.tempoUrl` | `dagger-kubernetes.tempoUrl` | `<release>-tempo:3100` |
-| `telemetry.lokiUrl` | `dagger-kubernetes.lokiUrl` | `<release>-loki:3100` |
-| `telemetry.victoriaUrl` | `dagger-kubernetes.victoriaUrl` | `<release>-victoria-metrics-single:8428` |
+| `telemetry.collectorUrl` | `dagger-kubernetes.collectorUrl` | `<release>-opentelemetry-collector.<namespace>.svc:4318` |
+| `telemetry.tempoUrl` | `dagger-kubernetes.tempoUrl` | `<release>-tempo.<namespace>.svc:3200` |
+| `telemetry.lokiUrl` | `dagger-kubernetes.lokiUrl` | `<release>-loki.<namespace>.svc:3100` |
+| `telemetry.victoriaUrl` | `dagger-kubernetes.victoriaUrl` | `<release>-victoria-server.<namespace>.svc:8428` |
 | `server.public_url` | `dagger-kubernetes.publicUrl` | computed from ingress / service exposition |
 | `server.data_hostname` | `dagger-kubernetes.dataHostname` | computed from dataIngress / service exposition |
 | `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<control-plane host>` |
-| `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `<release>-registry:5000` (when `registry.enabled`) |
+| `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `<release>-registry.<namespace>.svc:5000` (when `registry.enabled`) |
 | `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (public ref emitted to clients) |
+
+All auto-wired endpoints use the `<service>.<namespace>.svc` form — never bare
+service names or `.svc.<cluster-domain>` FQDNs — so a single `.svc` entry in
+`NO_PROXY` covers every in-cluster component when `HTTP_PROXY` is set on the
+supervisor (e.g. to download the Dagger CLI). See `CONTRIBUTING.md`.
 
 ### Raft (distributed store)
 
@@ -459,11 +474,11 @@ give each pod a stable identity for peer discovery.
 | `supervisor.replicaCount` | `3` | Supervisor pod count = Raft voter count (derived, single source of truth). Use an odd number ≥ 3 for fault tolerance. |
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
-| `supervisor.config.raft.clusterDomain` | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` advertises full FQDNs that resolve absolutely (no search-path reliance during bootstrap); set `""` to end at `.svc` (no suffix) or your cluster's real domain for non-standard setups. |
+| `supervisor.config.raft.clusterDomain` | `""` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the `.svc` form is the project-wide convention (single NO_PROXY `.svc` entry); set your cluster's real domain (e.g. `cluster.local`) only when `.svc` cannot resolve. |
 
 Everything else is **fixed or derived by the chart**: the data dir is
 `/var/lib/dagger-kubernetes` (per-pod PVC), the Raft transport binds `:8081`
-and advertises `<pod>.<headless>.<ns>.svc.cluster.local` (stable pod DNS
+and advertises `<pod>.<headless>.<ns>.svc` (stable pod DNS
 names — pod IPs are deliberately NOT advertised, they change on every pod
 recreation), node IDs are the
 StatefulSet pod names (downward-API), peers are discovered via DNS from the
@@ -482,7 +497,7 @@ Leaves are reused across restarts only while they remain valid for the
 current trust setup — not within the 7-day expiry margin, not yet valid,
 signed by the current CA (a re-created Secret re-issues every leaf instead of
 splitting the trust chain), and covering the exact CN + DNS/IP SAN set being
-advertised (a URI-form change such as `.svc` → `.svc.cluster.local` re-issues
+advertised (a URI-form change such as `.svc` → `.svc.<clusterDomain>` re-issues
 the leaf).
 The engine-client **minting CA** is likewise auto-bootstrapped and shared
 across pods via the `<release>-minting-ca` Secret (ordinal 0 generates it, the
@@ -512,7 +527,7 @@ cache registry(ies). Configure it under `supervisor.config.cache`:
 |---|---|---|
 | `supervisor.config.cache.backend` | `registry` | `registry` (OCI) or `s3`. |
 | `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The emitted public ref is always `<publicHost>/dagger-cache`, tagged per engine version (`:V<maj>-<min>-<patch>`). |
-| `supervisor.config.cache.registries` | `[]` | Multi-backend list of `{id, internalAddr, username, password, passwordSecret}`. The proxy load-balances least-charged first (registry cache size). Empty ⇒ single-backend mode (the bundled registry at `<release>-registry:5000`). |
+| `supervisor.config.cache.registries` | `[]` | Multi-backend list of `{id, internalAddr, username, password, passwordSecret}`. The proxy load-balances least-charged first (registry cache size). Empty ⇒ single-backend mode (the bundled registry at `<release>-registry.<namespace>.svc:5000`). |
 
 When `ingress.enabled`, the chart adds a second Ingress host rule for the cache
 vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts`
@@ -584,11 +599,11 @@ Configure it under `supervisor.config.history`:
 |---|---|---|---|
 | `supervisor.config.raft.tls.enabled` | bool | `true` | Enable mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | bool | `true` | Require and verify peer client certs (mTLS). |
-| `supervisor.config.raft.clusterDomain` | string | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` advertises full FQDNs that resolve absolutely (no search-path reliance during bootstrap); set `""` to end at `.svc` (no suffix) or your cluster's real domain for non-standard setups. |
-| `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled). |
-| `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired when the tempo subchart is enabled). |
-| `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired when the loki subchart is enabled). |
-| `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired when the victoria subchart is enabled). |
+| `supervisor.config.raft.clusterDomain` | string | `""` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the `.svc` form is the project-wide convention (single NO_PROXY `.svc` entry); set your cluster's real domain (e.g. `cluster.local`) only when `.svc` cannot resolve. |
+| `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled). |
+| `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled). |
+| `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled). |
+| `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled). |
 | `supervisor.config.cache.backend` | string | `"registry"` | Cache backend type: registry (OCI) or s3. |
 | `supervisor.config.cache.publicHost` | string | `""` | Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`). Must differ from the control-plane host. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled. |
 | `supervisor.config.cache.authToken` | string | `""` | Engine→proxy bearer for the cache. Rendered into the engine-registry-auth Secret (key `token`); the supervisor reads it from there. Empty = "placeholder". |

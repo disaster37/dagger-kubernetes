@@ -76,6 +76,7 @@ data:
       snapshot_threshold: 1000
       snapshot_interval: "10m"
       trailing_logs: 256
+      no_snapshot_restore_on_start: {{ .Values.supervisor.config.raft.noSnapshotRestoreOnStart }}
       tls:
         enabled: {{ .Values.supervisor.config.raft.tls.enabled }}
         dir: ""

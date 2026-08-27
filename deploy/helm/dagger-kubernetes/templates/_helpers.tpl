@@ -32,12 +32,16 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default .Release.Namespace .Values.namespace -}}
 {{- end -}}
 
-{{/* Resolve the OTLP collector URL: use the dependency Service when enabled. */}}
+{{/* Resolve the OTLP collector URL: use the dependency Service when enabled.
+Always the <service>.<namespace>.svc form (see CONTRIBUTING.md): a single
+`.svc` NO_PROXY entry exempts every in-cluster component from the proxy. */}}
 {{- define "dagger-kubernetes.collectorUrl" -}}
+{{- $ns := include "dagger-kubernetes.namespace" . -}}
+{{- $auto := printf "http://%s-opentelemetry-collector.%s.svc:4318" .Release.Name $ns -}}
 {{- if index .Values "opentelemetry-collector" "enabled" -}}
-{{- printf "http://%s-opentelemetry-collector:4318" .Release.Name -}}
+{{- $auto -}}
 {{- else -}}
-{{- default (printf "http://%s-opentelemetry-collector:4318" .Release.Name) .Values.supervisor.config.telemetry.collectorUrl -}}
+{{- default $auto .Values.supervisor.config.telemetry.collectorUrl -}}
 {{- end -}}
 {{- end -}}
 
@@ -73,37 +77,47 @@ the computed public URL by stripping the scheme and any port/path. */}}
 {{- end -}}
 
 {{/* Resolve the internal cache backend address (host[:port], no scheme):
-the in-cluster registry Service when the registry subchart is enabled. */}}
+the in-cluster registry Service when the registry subchart is enabled, in the
+<service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.cacheInternalAddr" -}}
 {{- if .Values.registry.enabled -}}
-{{- printf "%s-registry:5000" .Release.Name -}}
+{{- printf "%s-registry.%s.svc:5000" .Release.Name (include "dagger-kubernetes.namespace" .) -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the Tempo URL: use the dependency Service when enabled. */}}
+{{/* Resolve the Tempo URL: use the dependency Service when enabled, in the
+<service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.tempoUrl" -}}
+{{- $ns := include "dagger-kubernetes.namespace" . -}}
+{{- $auto := printf "http://%s-tempo.%s.svc:3200" .Release.Name $ns -}}
 {{- if .Values.tempo.enabled -}}
-{{- printf "http://%s-tempo:3200" .Release.Name -}}
+{{- $auto -}}
 {{- else -}}
-{{- default "http://tempo:3200" .Values.supervisor.config.telemetry.tempoUrl -}}
+{{- default $auto .Values.supervisor.config.telemetry.tempoUrl -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the Loki URL: use the dependency Service when enabled. */}}
+{{/* Resolve the Loki URL: use the dependency Service when enabled, in the
+<service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.lokiUrl" -}}
+{{- $ns := include "dagger-kubernetes.namespace" . -}}
+{{- $auto := printf "http://%s-loki.%s.svc:3100" .Release.Name $ns -}}
 {{- if .Values.loki.enabled -}}
-{{- printf "http://%s-loki:3100" .Release.Name -}}
+{{- $auto -}}
 {{- else -}}
-{{- default "http://loki:3100" .Values.supervisor.config.telemetry.lokiUrl -}}
+{{- default $auto .Values.supervisor.config.telemetry.lokiUrl -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled. */}}
+{{/* Resolve the VictoriaMetrics URL: use the dependency Service when enabled,
+in the <service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.victoriaUrl" -}}
+{{- $ns := include "dagger-kubernetes.namespace" . -}}
+{{- $auto := printf "http://%s-victoria-server.%s.svc:8428" .Release.Name $ns -}}
 {{- if .Values.victoria.enabled -}}
-{{- printf "http://%s-victoria-server:8428" .Release.Name -}}
+{{- $auto -}}
 {{- else -}}
-{{- default "http://victoria:8428" .Values.supervisor.config.telemetry.victoriaUrl -}}
+{{- default $auto .Values.supervisor.config.telemetry.victoriaUrl -}}
 {{- end -}}
 {{- end -}}
 

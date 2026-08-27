@@ -43,6 +43,8 @@ const (
 	kindDeleteUpload
 	kindReapUploads
 	kindDeleteTrace
+	kindUpsertSession
+	kindTouchSession
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -170,6 +172,20 @@ type (
 	cmdDeleteTrace struct {
 		TraceID string `json:"trace_id"`
 	}
+
+	// cmdUpsertSession registers (or re-registers) a session lease. The lease
+	// fields and the At timestamp come from the leader so replay on every pod
+	// produces identical local state.
+	cmdUpsertSession struct {
+		Lease domain.Lease `json:"lease"`
+		At    time.Time    `json:"at"`
+	}
+
+	// cmdTouchSession refreshes a lease's LastActivity from the leader clock.
+	cmdTouchSession struct {
+		CertFP string    `json:"cert_fp"`
+		At     time.Time `json:"at"`
+	}
 )
 
 // toDomain converts a command user payload into a domain.User.
@@ -257,6 +273,10 @@ type fsmState struct {
 	cacheObjectRoutes   map[string]*domain.CacheRoute         // "repo\x00tag" -> route
 	cacheBlobRoutes     map[string]map[string]string          // digest -> backendID -> createdAt
 	cacheUploadSessions map[string]*domain.CacheUploadSession // uuid -> session
+
+	// sessionSink receives replicated session-lease state (domain.SessionStateSink,
+	// usually the pod-local *service.Store). Nil until wired by NewRaftStore.
+	sessionSink domain.SessionStateSink
 }
 
 func newState() *fsmState {
@@ -322,6 +342,9 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 	}
 	if result, err, handled := s.applyTraceCacheCommand(cmd); handled {
 		return result, err
+	}
+	if err, handled := s.applySessionCommand(cmd); handled {
+		return nil, err
 	}
 	return nil, fmt.Errorf("unknown raft command kind %d", cmd.Kind)
 }
@@ -434,6 +457,33 @@ func (s *fsmState) applyTraceCacheCommand(cmd *command) (interface{}, error, boo
 		}), true
 	default:
 		return nil, nil, false
+	}
+}
+
+// applySessionCommand handles the session-lease commands. The session state
+// itself is NOT stored in the FSM maps: it is forwarded to the pod-local
+// sessionSink so the local domain.SessionStore (used by the data plane,
+// quota, and the fleet sweeper) mirrors the replicated state on every pod.
+func (s *fsmState) applySessionCommand(cmd *command) (error, bool) {
+	switch cmd.Kind {
+	case kindUpsertSession:
+		return applyPayload(cmd, "session register", func(p cmdUpsertSession) error {
+			lease := p.Lease
+			lease.LastActivity = p.At
+			if s.sessionSink != nil {
+				s.sessionSink.ApplySessionRegistered(&lease)
+			}
+			return nil
+		}), true
+	case kindTouchSession:
+		return applyPayload(cmd, "session touch", func(p cmdTouchSession) error {
+			if s.sessionSink != nil {
+				s.sessionSink.ApplySessionTouched(p.CertFP, p.At)
+			}
+			return nil
+		}), true
+	default:
+		return nil, false
 	}
 }
 

@@ -55,6 +55,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
 	sessions := service.NewStore(2 * time.Minute)
+	store.SetSessionSink(sessions)
 	provider := repository.NewStubProvider()
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
@@ -87,7 +88,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 		DataHost:    "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc,
 		Groups: groupsSvc, Projects: projectsSvc, Tokens: tokensSvc,
 		Quota: quotaSvc, Attribution: attributionSvc, TraceMeta: traceMetaRepo,
@@ -336,7 +337,7 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 		DataHost:    "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
 		Projects: projectsSvc, Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
 		TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,

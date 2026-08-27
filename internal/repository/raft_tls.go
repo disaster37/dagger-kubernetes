@@ -297,11 +297,16 @@ func createRaftCAWithGoca(name, organization string) (certPEM, keyPEM []byte, er
 //   - not within the expiry safety margin (and not yet valid — clock skew),
 //   - signed by the current CA (the Secret may have been re-created, in
 //     which case a stale cert would be rejected by every peer — CWE-295),
-//   - the CN and SAN sets match what would be issued now (e.g. the
-//     advertised URI form changed from `.svc` to `.svc.<cluster-domain>`).
+//   - the CN matches and the cert still COVERS the SAN set that would be
+//     issued now (a superset is fine — extra names on its own cert are
+//     harmless, and tolerating them lets rolling upgrades that shrink the
+//     advertised name set (e.g. `.svc.cluster.local` → `.svc`) keep working
+//     while older peers still dial the legacy names).
 //
 // On any mismatch the leaf is re-issued under the current CA so peers always
-// agree on the trust chain after CA recreation or URI changes.
+// agree on the trust chain after CA recreation or URI changes. The operator
+// never has to delete the pod's PVC: the stale cert on the PVC is
+// overwritten in place.
 func issueOrReuseNodeCert(
 	cfg *RaftTLSConfig,
 	ca *MintingCA,
@@ -342,8 +347,9 @@ func issueOrReuseNodeCert(
 }
 
 // reusableNodeCert reports whether a persisted leaf may be reused as the raft
-// transport certificate: valid window, signed by the current CA, and covering
-// the exact CN/DNS/IP SAN set that would be issued now.
+// transport certificate: valid window, signed by the current CA, matching CN,
+// and covering the required DNS/IP SAN set (extras allowed — see
+// issueOrReuseNodeCert).
 func reusableNodeCert(cert *x509.Certificate, ca *MintingCA, commonName string, dnsNames []string, ipAddrs []net.IP) bool {
 	now := time.Now()
 	if cert.NotBefore.After(now) || time.Until(cert.NotAfter) <= nodeCertSafetyMargin {
@@ -356,18 +362,16 @@ func reusableNodeCert(cert *x509.Certificate, ca *MintingCA, commonName string, 
 	if cert.Subject.CommonName != commonName {
 		return false
 	}
-	return sameSANs(cert, dnsNames, ipAddrs)
+	return coversSANs(cert, dnsNames, ipAddrs)
 }
 
-// sameSANs compares the cert's DNS + IP SAN sets against the requested sets
-// (order-insensitive, nil/empty treated as equal).
-func sameSANs(cert *x509.Certificate, dnsNames []string, ipAddrs []net.IP) bool {
+// coversSANs reports whether the cert's SANs cover every required name/ip
+// (superset allowed: extra DNS names or IPs on the cert are ignored, they
+// only name this same pod).
+func coversSANs(cert *x509.Certificate, dnsNames []string, ipAddrs []net.IP) bool {
 	certDNS := make(map[string]struct{}, len(cert.DNSNames))
 	for _, n := range cert.DNSNames {
 		certDNS[n] = struct{}{}
-	}
-	if len(certDNS) != len(uniqueStrings(dnsNames)) {
-		return false
 	}
 	for _, n := range dnsNames {
 		if _, ok := certDNS[n]; !ok {
@@ -375,14 +379,9 @@ func sameSANs(cert *x509.Certificate, dnsNames []string, ipAddrs []net.IP) bool 
 		}
 	}
 
-	certIPs := append([]net.IP(nil), cert.IPAddresses...)
-	wantIPs := normalizeIPs(ipAddrs)
-	if len(certIPs) != len(wantIPs) {
-		return false
-	}
-	for _, want := range wantIPs {
+	for _, want := range normalizeIPs(ipAddrs) {
 		found := false
-		for _, have := range certIPs {
+		for _, have := range cert.IPAddresses {
 			if have.Equal(want) {
 				found = true
 				break
@@ -393,19 +392,6 @@ func sameSANs(cert *x509.Certificate, dnsNames []string, ipAddrs []net.IP) bool 
 		}
 	}
 	return true
-}
-
-// uniqueStrings dedupes a string slice (for SAN set cardinality comparison).
-func uniqueStrings(in []string) []string {
-	seen := make(map[string]struct{}, len(in))
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if _, ok := seen[s]; !ok {
-			seen[s] = struct{}{}
-			out = append(out, s)
-		}
-	}
-	return out
 }
 
 // normalizeIPs dedupes and canonicalizes an IP slice (16-byte form).

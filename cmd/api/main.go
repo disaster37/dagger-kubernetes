@@ -24,6 +24,7 @@ import (
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -171,7 +172,7 @@ func run(c *cli.Context) error {
 	ctx, cancel := context.WithCancel(c.Context)
 	defer cancel()
 
-	raftStore, jwtSecret, tokenEncKey, err := initRaftStore(ctx, cfg, clientset, logger)
+	raftStore, jwtSecret, tokenEncKey, err := initRaftStore(ctx, cfg, clientset, sessions, logger)
 	if err != nil {
 		return err
 	}
@@ -312,6 +313,7 @@ func run(c *cli.Context) error {
 		MintingCA:            serverMintingCA,
 		FleetManager:         fleetManager,
 		Sessions:             sessions,
+		SessionRegistry:      repository.NewSessionRepo(raftStore),
 		CacheBackend:         cacheBackend,
 		VersionResolver:      versionResolver,
 		Auth:                 authSvc,
@@ -430,7 +432,7 @@ func run(c *cli.Context) error {
 // leadership/membership goroutines, and resolves the JWT secret +
 // token-encryption key (the leader provisions, followers wait for replication —
 // ADR-016 D5/D6). The caller owns closing the returned store.
-func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, logger *logrus.Logger) (store *repository.RaftStore, jwtSecret, tokenEncKey []byte, err error) {
+func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, sessions domain.SessionStateSink, logger *logrus.Logger) (store *repository.RaftStore, jwtSecret, tokenEncKey []byte, err error) {
 	if err := validateRaftConfig(cfg, clientset); err != nil {
 		return nil, nil, nil, fmt.Errorf("validate raft config: %w", err)
 	}
@@ -464,19 +466,20 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	}
 
 	raftStore, err := repository.NewRaftStore(&repository.RaftStoreConfig{
-		Dir:                     cfg.Database.Dir,
-		NodeID:                  cfg.Raft.NodeID,
-		BindAddr:                cfg.Raft.BindAddr,
-		AdvertiseAddr:           advertise,
-		Resolver:                resolver,
-		ApplyTimeout:            cfg.Raft.ApplyTimeout,
-		SnapshotThreshold:       cfg.Raft.SnapshotThreshold,
-		SnapshotInterval:        cfg.Raft.SnapshotInterval,
-		TrailingLogs:            cfg.Raft.TrailingLogs,
-		TLS:                     raftTLS,
-		PerformanceMultiplier:   cfg.Raft.PerformanceMultiplier,
-		RaftLogCacheSize:        cfg.Raft.RaftLogCacheSize,
+		Dir:                      cfg.Database.Dir,
+		NodeID:                   cfg.Raft.NodeID,
+		BindAddr:                 cfg.Raft.BindAddr,
+		AdvertiseAddr:            advertise,
+		Resolver:                 resolver,
+		ApplyTimeout:             cfg.Raft.ApplyTimeout,
+		SnapshotThreshold:        cfg.Raft.SnapshotThreshold,
+		SnapshotInterval:         cfg.Raft.SnapshotInterval,
+		TrailingLogs:             cfg.Raft.TrailingLogs,
+		TLS:                      raftTLS,
+		PerformanceMultiplier:    cfg.Raft.PerformanceMultiplier,
+		RaftLogCacheSize:         cfg.Raft.RaftLogCacheSize,
 		NoSnapshotRestoreOnStart: cfg.Raft.NoSnapshotRestoreOnStart,
+		SessionSink:              sessions,
 	}, logger)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open database: %w", err)
@@ -492,7 +495,7 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		return nil, nil, nil, fmt.Errorf("wait for raft leader: %w", err)
 	}
 
-	go observeLeadership(ctx, raftStore, logger)
+	go observeLeadership(ctx, raftStore, clientset, cfg.Fleet.Namespace, logger)
 	go joinLoop(ctx, raftStore, resolver, logger)
 
 	metaStore := repository.NewMetaStore(raftStore)
@@ -753,8 +756,31 @@ func validateMigrateTokensSingleNode(cfg *domain.Config) error {
 	return nil
 }
 
-// observeLeadership logs Raft leadership changes until ctx is cancelled.
-func observeLeadership(ctx context.Context, store *repository.RaftStore, logger *logrus.Logger) {
+// raftLeaderLabel marks the pod currently holding Raft leadership. The Helm
+// chart's -control and -data Services select on it, so all control-plane
+// requests and data-plane tunnels terminate on the leader (the only pod that
+// can apply Raft writes such as session-lease touches).
+const raftLeaderLabel = "dagger-kubernetes.io/raft-leader"
+
+// observeLeadership logs Raft leadership changes and labels this pod
+// (raftLeaderLabel=true/false) until ctx is cancelled. The Services that
+// route ingress traffic select on that label, which keeps them attached to
+// the current leader.
+func observeLeadership(ctx context.Context, store *repository.RaftStore, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) {
+	hostname, _ := os.Hostname()
+	patchPodLabel := func(isLeader bool) {
+		if clientset == nil || hostname == "" || namespace == "" {
+			return
+		}
+		value := "false"
+		if isLeader {
+			value = "true"
+		}
+		patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, raftLeaderLabel, value)
+		if _, err := clientset.CoreV1().Pods(namespace).Patch(context.Background(), hostname, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+			logger.WithError(err).WithField("is_leader", isLeader).Warn("patch pod raft-leader label failed")
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -764,6 +790,7 @@ func observeLeadership(ctx context.Context, store *repository.RaftStore, logger 
 				return
 			}
 			logger.WithField("is_leader", isLeader).Info("raft leadership changed")
+			patchPodLabel(isLeader)
 		}
 	}
 }

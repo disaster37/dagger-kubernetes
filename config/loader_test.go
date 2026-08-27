@@ -272,7 +272,7 @@ func TestLoadRaftClusterDomain(t *testing.T) {
 		{
 			name:    "default",
 			content: "server:\n  control_addr: \":8080\"\n",
-			want:    "cluster.local",
+			want:    "",
 		},
 		{
 			name: "explicit empty means svc-only",

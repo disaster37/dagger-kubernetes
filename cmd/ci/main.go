@@ -204,6 +204,29 @@ func run(c *cli.Context) error {
 		stepsBuilder = service.NewStepEventBuilder(maxDepth)
 		stepsSink = service.NewNDJSONEventSink(os.Stdout)
 
+		// A panic anywhere below must not strand the consumer without a
+		// terminal event: the Jenkins shared library polls the NDJSON stream
+		// until pipeline_done, so finalize on the way out (idempotent — the
+		// normal flush at the end of run() may already have emitted it) and
+		// re-panic.
+		defer func() {
+			if r := recover(); r != nil {
+				// Stop the poller first so the final flush cannot race a
+				// concurrent Advance/Emit from the stream goroutine.
+				if stepsCancel != nil {
+					stepsCancel()
+				}
+				stepsWG.Wait()
+				status := "failed"
+				msg := fmt.Sprintf("wrapper panic: %v", r)
+				for _, e := range stepsBuilder.Finalize(status, msg) {
+					_ = stepsSink.Emit(&e)
+				}
+				_ = stepsSink.Flush()
+				panic(r)
+			}
+		}()
+
 		stepsWG.Add(1)
 		go func() {
 			defer stepsWG.Done()

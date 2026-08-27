@@ -107,7 +107,7 @@ func (a *Autopilot) Start(ctx context.Context) {
 			if !isLeader {
 				continue
 			}
-			a.heartbeatTracker(ctx)
+			a.heartbeatTracker()
 		case <-cleanupTicker.C:
 			if !isLeader || !a.cfg.CleanupDeadServers {
 				continue
@@ -224,7 +224,7 @@ func (a *Autopilot) stabilize() {
 // Servers present in the current Raft configuration get fresh timestamps.
 // Servers that disappear from the configuration keep their old timestamps
 // and will be detected as dead after DeadServerLastContactThreshold.
-func (a *Autopilot) heartbeatTracker(ctx context.Context) {
+func (a *Autopilot) heartbeatTracker() {
 	// Get current configuration to find known servers.
 	cfgFuture := a.r.GetConfiguration()
 	if err := cfgFuture.Error(); err != nil {

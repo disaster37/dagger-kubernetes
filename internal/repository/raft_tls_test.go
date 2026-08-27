@@ -277,8 +277,69 @@ func TestIssueOrReuseNodeCertReissueOnSANChange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parsePEMCert: %v", err)
 	}
-	if !sameSANs(parsed, newDNS, newIPs) {
+	if !coversSANs(parsed, newDNS, newIPs) {
 		t.Fatalf("re-issued SANs = %v / %v, want %v / %v", parsed.DNSNames, parsed.IPAddresses, newDNS, newIPs)
+	}
+}
+
+func TestIssueOrReuseNodeCertReuseOnExtraSANs(t *testing.T) {
+	dir := t.TempDir()
+	caCertPEM, caKeyPEM, err := createRaftCAWithGoca("ca", "org")
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	ca, err := NewMintingCAFromPEM(caCertPEM, caKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCAFromPEM: %v", err)
+	}
+
+	// Old code issued the cert with the full FQDN SAN set (.svc.cluster.local).
+	oldDNS, oldIPs := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: "cluster.local"}, "node-0")
+	if _, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), ca, "node-0", "org", oldDNS, oldIPs); err != nil {
+		t.Fatalf("issue (.svc.cluster.local form): %v", err)
+	}
+	firstCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
+
+	// The advertised URI form shrank (.svc.cluster.local → .svc): the
+	// persisted cert still covers every required name, so it must be REUSED —
+	// re-issuing without the FQDN SAN would break a rolling upgrade where
+	// older peers still dial the FQDN and verify the cert against it.
+	newDNS, newIPs := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: ""}, "node-0")
+	secondCert, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), ca, "node-0", "org", newDNS, newIPs)
+	if err != nil {
+		t.Fatalf("reuse (.svc form): %v", err)
+	}
+	if !bytes.Equal(firstCert, secondCert) {
+		t.Fatal("cert covering a superset of the required SANs must be reused")
+	}
+}
+
+func TestIssueOrReuseNodeCertReissueOnMissingSAN(t *testing.T) {
+	dir := t.TempDir()
+	caCertPEM, caKeyPEM, err := createRaftCAWithGoca("ca", "org")
+	if err != nil {
+		t.Fatalf("create CA: %v", err)
+	}
+	ca, err := NewMintingCAFromPEM(caCertPEM, caKeyPEM, time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCAFromPEM: %v", err)
+	}
+
+	// A cert minted for a bare hostname only.
+	if _, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), ca, "node-0", "org", []string{"node-0", "localhost"}, []net.IP{net.ParseIP("127.0.0.1")}); err != nil {
+		t.Fatalf("issue (bare form): %v", err)
+	}
+	firstCert, _ := os.ReadFile(filepath.Join(dir, "node.crt"))
+
+	// The required set grew (headless/namespace names): the persisted cert no
+	// longer covers what peers will dial → must be re-issued.
+	reqDNS, reqIPs := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns"}, "node-0")
+	secondCert, _, err := issueOrReuseNodeCert(testRaftTLSCfg(dir), ca, "node-0", "org", reqDNS, reqIPs)
+	if err != nil {
+		t.Fatalf("reissue (headless form): %v", err)
+	}
+	if bytes.Equal(firstCert, secondCert) {
+		t.Fatal("cert missing required SANs must be re-issued")
 	}
 }
 

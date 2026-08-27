@@ -285,10 +285,15 @@ regenerate them on the **Settings** page to enable full-snippet copy.
 2. Supervisor resolves the version against `version.floor` /
    `version.allowlist`, mints a client cert (signed by the minting CA),
    creates/updates a per-version StatefulSet, and returns a lease + the
-   pod's data-plane address.
+   pod's data-plane address. The lease is persisted through Raft
+   (`kindUpsertSession`) so **every** supervisor pod can resolve the cert
+   fingerprint (ADR-026).
 3. CLI opens a TLS connection to `data_hostname` using the minted cert.
    The Supervisor's L4 proxy inspects SNI/cert, looks up the lease, and
-   pipes bytes to the live engine pod.
+   pipes bytes to the live engine pod. On the Helm chart the `-control` and
+   `-data` Services select the current **Raft leader** pod (label
+   `dagger-kubernetes.io/raft-leader`), so the tunnel and its lease-touch
+   heartbeats always run where Raft writes can be applied.
 4. Engines push/pull BuildKit cache blobs through the Supervisor's cache
    proxy (Host = `cache.public_host`); the Supervisor validates the engine
    token, injects backend credentials, and routes to the right registry.
@@ -405,7 +410,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `statefulset_name`                        | `""`                                                     | StatefulSet name for DNS discovery.                                                                                                           |
 |                 | `headless_service`                        | `""`                                                     | Headless Service name for stable pod DNS.                                                                                                     |
 |                 | `namespace`                               | `""` (fleet ns)                                          | K8s namespace for pod DNS.                                                                                                                    |
-|                 | `cluster_domain`                          | `cluster.local`                                          | K8s cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<cluster_domain>`). Set `""` to end peer addresses at `.svc` (no suffix) on clusters whose DNS only resolves the `.svc` form. |
+|                 | `cluster_domain`                          | `""`                                                     | K8s cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<cluster_domain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the project-wide convention (single NO_PROXY `.svc` entry); set the real domain only when `.svc` cannot resolve. |
 |                 | `apply_timeout`                           | `5s`                                                     | `raft.Apply` enqueue timeout.                                                                                                                 |
 |                 | `leader_wait_timeout`                     | `30s`                                                    | Startup wait for leadership.                                                                                                                  |
 |                 | `snapshot_threshold`                      | `1000`                                                   | Raft log snapshot threshold.                                                                                                                  |
@@ -419,8 +424,8 @@ inline comments. The sections below summarise the most important ones.
 |                 | `tls.ca_secret`                           | `""`                                                     | Auto/K8s mode: Secret name for sharing the internal CA.                                                                                       |
 |                 | `tls.ca_bootstrap`                        | `false`                                                  | Auto/K8s mode: force this node to generate + write the CA (auto-detects ordinal 0).                                                           |
 |                 | `tls.client_auth`                         | `true`                                                   | mTLS: require + verify peer client certs.                                                                                                     |
-| `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP.                                                                                                                                    |
-|                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm).                                                                                                      |
+| `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP. Helm auto-wires `<release>-opentelemetry-collector.<ns>.svc:4318`.                                                                 |
+|                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm to `<release>-<svc>.<ns>.svc:<port>`).                                                                  |
 | `cache`         | `backend`                                 | `registry`                                               | `registry` (OCI) or `s3`.                                                                                                                     |
 |                 | `registry`                                | `cache.reg/dagger-cache`                                 | OCI repository emitted to clients (single-backend mode); always tagged per engine version `:V<maj>-<min>-<patch>`.                            |
 |                 | `internal_addr`                           | `""`                                                     | Single backend address (used when `registries` empty).                                                                                        |
@@ -628,11 +633,11 @@ cache:
   auth_token: ""                       # or set DAGGER_KUBERNETES_CACHE_AUTH_TOKEN
   registries:
     - id: "reg-1"
-      internal_addr: "registry-1:5000"
+      internal_addr: "registry-1.dagger-kubernetes.svc:5000"   # in-cluster backends must use the <service>.<namespace>.svc form (see CONTRIBUTING.md)
       username: ""
       password: ""
     - id: "reg-2"
-      internal_addr: "registry-2:5000"
+      internal_addr: "registry-2.dagger-kubernetes.svc:5000"
       username: ""
       password: ""
 ```
@@ -946,10 +951,11 @@ dependency has been removed from the project entirely.
   itself as the only voter and is always the leader.
 - **Multi-node:** the Helm chart ships a `StatefulSet` + headless Service.
   Peers are discovered from the StatefulSet's stable pod DNS names
-  (`<sts>-<i>.<headless>.<ns>.svc.cluster.local:8081` for
-  `i=0..replicas-1`; `raft.cluster_domain` defaults to `cluster.local` — set
-  `""` to end addresses at `.svc` or your cluster's real domain for a
-  non-standard setup) — pure DNS arithmetic, no K8s API calls. The headless
+  (`<sts>-<i>.<headless>.<ns>.svc:8081` for
+  `i=0..replicas-1`; `raft.cluster_domain` defaults to `""` so peer addresses
+  end at `.svc` — the project-wide convention that keeps a single `.svc`
+  NO_PROXY entry; set your cluster's real domain when `.svc` cannot resolve) —
+  pure DNS arithmetic, no K8s API calls. The headless
   Service sets `publishNotReadyAddresses: true` so pods resolve (and can
   elect a leader) before they are Ready. Each pod advertises its **stable pod
   DNS name**, not `127.0.0.1` and not its pod IP (pod IPs change on every pod
@@ -969,11 +975,15 @@ dependency has been removed from the project entirely.
   `127.0.0.1`, no pod IPs — they are not stable). Pod-0 writes the CA Secret;
   the others poll it before issuing their leaf. TLS 1.2+,
   `RequireAndVerifyClientCert`. A persisted leaf is reused on restart only if
-  it is still valid, still chains to the **current** CA, and still covers the
-  exact CN/SAN set being advertised — so recreating the CA Secret or changing
-  the advertised URI form (e.g. `.svc` → `.svc.cluster.local`) re-issues the
-  leaf on every pod instead of looping forever on `x509: certificate signed
-  by unknown authority` between pods. For non-Helm deploys you
+  it is still valid, still chains to the **current** CA, and still **covers**
+  the CN/SAN set being advertised (a superset is fine — extra names on its own
+  cert are harmless) — so recreating the CA Secret, growing the required SAN
+  set, or an expired cert re-issues the leaf on every pod instead of looping
+  forever on `x509: certificate signed by unknown authority` between pods,
+  while shrinking the advertised URI form (e.g. `.svc.cluster.local` → `.svc`)
+  keeps the old cert so rolling upgrades survive mixed-dial clusters. No
+  operator PVC surgery is needed: the stale leaf on the PVC is overwritten
+  in place. For non-Helm deploys you
   can pre-provision CA + leaf PEM files via `raft.tls.ca_cert`/`cert`/`key`
   (manual mode) — `raft.tls.enabled` must be set uniformly across all peers.
   The `<release>-raft-ca` Secret contains the internal CA **private key** (any
@@ -1225,14 +1235,17 @@ its datasources are auto-provisioned via a ConfigMap with label
 set `grafana.adminPassword` explicitly to override it (with a rotation
 workflow). Includes trace-to-logs correlation configured out of the box.
 
-Default URLs (auto-wired by Helm):
+Default URLs (auto-wired by Helm, always in the `<service>.<namespace>.svc` form —
+never bare service names or `.svc.<cluster-domain>` FQDNs, so a single `.svc`
+entry in `NO_PROXY` covers every in-cluster component when `HTTP_PROXY` is set
+on the supervisor; see `CONTRIBUTING.md`):
 
 | Component | Config key | Default URL |
 |---|---|---|
-| OTel Collector | `telemetry.collector_url` | `<release>-opentelemetry-collector:4318` |
-| Tempo | `telemetry.tempo_url` | `<release>-tempo:3100` |
-| Loki | `telemetry.loki_url` | `<release>-loki:3100` |
-| VictoriaMetrics | `telemetry.victoria_url` | `<release>-victoria-metrics-single:8428` |
+| OTel Collector | `telemetry.collector_url` | `<release>-opentelemetry-collector.<namespace>.svc:4318` |
+| Tempo | `telemetry.tempo_url` | `<release>-tempo.<namespace>.svc:3200` |
+| Loki | `telemetry.loki_url` | `<release>-loki.<namespace>.svc:3100` |
+| VictoriaMetrics | `telemetry.victoria_url` | `<release>-victoria-server.<namespace>.svc:8428` |
 
 To export the Supervisor's *own* OTLP (e.g. to the same collector), set
 `otel.otlp_endpoint`. Leave it empty to disable.
@@ -1475,6 +1488,15 @@ is wrapped in a configurable `timeout(...)` (default 30 minutes). The `dagger`
 exit code is authoritative for the build result; a failing span surfaces as a
 failed stage and a final `pipeline_done(status=failed)`.
 
+**Terminal-event guarantee / liveness:** the wrapper always emits exactly one
+`pipeline_done` when the Dagger command exits — even when no trace id was ever
+captured — and recovers from panics to emit it. As a second line of defense the
+shared library does not poll blindly: once the wrapper process has exited
+(exit file present) without a terminal event, it stops polling immediately and
+fails the build with the wrapper's stderr (e.g. the underlying "engine was
+never provisioned" error) instead of looping `Sleeping for 1 sec` until
+`timeoutMinutes`.
+
 Config keys:
 
 | Key | Default | Meaning |
@@ -1506,8 +1528,10 @@ wire it together: the **agent image**, the **shared library**, and the
 
 Since agents run as pods on the same cluster, use the supervisor's
 cluster-internal control endpoint as `serverUrl`:
-`http://<release>-control.<namespace>.svc.cluster.local:8080` (the Helm
-chart's `-control` Service). `uiUrl` stays the public `server.public_url`
+`http://<release>-control.<namespace>.svc:8080` (the Helm
+chart's `-control` Service; the `.svc` form — never bare names or
+`.svc.<cluster-domain>` FQDNs — keeps a single `.svc` `NO_PROXY` entry
+sufficient, see `CONTRIBUTING.md`). `uiUrl` stays the public `server.public_url`
 host so the printed pipeline-view links resolve from a browser.
 
 **1. Agent image.** All pipeline `sh` steps execute in the pod's `jnlp`
@@ -1581,7 +1605,7 @@ pipeline {
     stage('Dagger') {
       steps {
         daggerKubernetes(
-            serverUrl: 'http://dagger-kubernetes-control.dagger-kubernetes.svc.cluster.local:8080',
+            serverUrl: 'http://dagger-kubernetes-control.dagger-kubernetes.svc:8080',
             token: env.DAGGER_KUBERNETES_TOKEN,
             uiUrl: 'https://supv.example.com',
             provisionCli: true,

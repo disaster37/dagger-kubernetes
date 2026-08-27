@@ -237,3 +237,59 @@ func TestStoreSetGroupIDNoRace(t *testing.T) {
 
 // Compile-time assertion that Store satisfies domain.SessionStore.
 var _ domain.SessionStore = (*Store)(nil)
+
+func TestStoreApplySessionRegistered(t *testing.T) {
+	s := NewStore(5 * time.Minute)
+	at := time.Now().UTC()
+	s.ApplySessionRegistered(&domain.Lease{
+		CertFP:       "fp1",
+		Version:      "v0.21.9",
+		ReplicaPod:   "pod-0",
+		InstanceID:   "inst-1",
+		LastActivity: at,
+		TraceID:      "trace-1",
+		UserID:       "user-1",
+		GroupID:      "group-1",
+	})
+
+	lease, err := s.Get("fp1")
+	if err != nil {
+		t.Fatalf("Get after apply: %v", err)
+	}
+	if lease.ReplicaPod != "pod-0" || lease.UserID != "user-1" || lease.GroupID != "group-1" || !lease.LastActivity.Equal(at) {
+		t.Fatalf("lease = %+v", lease)
+	}
+
+	// Re-apply replaces the lease (fresh session under the same cert).
+	at2 := at.Add(time.Minute)
+	s.ApplySessionRegistered(&domain.Lease{CertFP: "fp1", Version: "v0.21.9", LastActivity: at2})
+	lease2, _ := s.Get("fp1")
+	if !lease2.LastActivity.Equal(at2) {
+		t.Fatalf("LastActivity = %v, want %v", lease2.LastActivity, at2)
+	}
+	if lease2.UserID != "" {
+		t.Fatalf("re-applied lease must not inherit old fields: %+v", lease2)
+	}
+}
+
+func TestStoreApplySessionTouched(t *testing.T) {
+	s := NewStore(5 * time.Minute)
+	at := time.Now().UTC()
+	s.ApplySessionRegistered(&domain.Lease{CertFP: "fp1", LastActivity: at})
+
+	at2 := at.Add(time.Minute)
+	s.ApplySessionTouched("fp1", at2)
+	lease, err := s.Get("fp1")
+	if err != nil {
+		t.Fatalf("Get after touch: %v", err)
+	}
+	if !lease.LastActivity.Equal(at2) {
+		t.Fatalf("LastActivity = %v, want %v", lease.LastActivity, at2)
+	}
+
+	// Touching a missing lease is a no-op.
+	s.ApplySessionTouched("unknown", at2)
+	if _, err := s.Get("unknown"); err == nil {
+		t.Fatal("unknown lease must not be created by a touch")
+	}
+}

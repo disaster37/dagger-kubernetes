@@ -76,7 +76,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("raft.namespace", "")
 	// "" = peer addresses end at .svc (no cluster suffix), e.g.
 	// <pod>.<headless>.<ns>.svc:8081.
-	v.SetDefault("raft.cluster_domain", "cluster.local")
+	v.SetDefault("raft.cluster_domain", "")
 	v.SetDefault("raft.apply_timeout", 5*time.Second)
 	v.SetDefault("raft.leader_wait_timeout", 30*time.Second)
 	v.SetDefault("raft.snapshot_threshold", uint64(1000))
@@ -112,6 +112,12 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("raft.tls.rotation_period", "24h")
 	v.SetDefault("raft.tls.ca_validity", "262800h") // 30 years
 
+	// Bare-name defaults are non-K8s (dev / docker-compose) fallbacks. On
+	// Kubernetes, in-cluster endpoints MUST use <service>.<namespace>.svc
+	// (never a bare name or a .svc.<cluster-domain> FQDN) so a single `.svc`
+	// NO_PROXY entry covers every in-cluster component when HTTP_PROXY is set
+	// on the supervisor (see CONTRIBUTING.md). The Helm chart auto-wires the
+	// .svc form.
 	v.SetDefault("telemetry.collector_url", "http://otel-collector:4318")
 	v.SetDefault("telemetry.tempo_url", "http://tempo:3200")
 	v.SetDefault("telemetry.loki_url", "http://loki:3100")

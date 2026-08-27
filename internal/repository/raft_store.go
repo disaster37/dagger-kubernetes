@@ -217,7 +217,8 @@ type RaftStoreConfig struct {
 	// unresolvable at startup (fresh clusters: cluster DNS not serving yet).
 	// The pod retries in-process instead of exiting into a CrashLoopBackOff.
 	// 0 = defaultAdvertiseResolveTimeout (2 minutes).
-	// DEPRECATED: use the DNSResolver (retryDNSResolver) instead.
+	//
+	// Deprecated: use the DNSResolver (retryDNSResolver) instead.
 	AdvertiseResolveTimeout time.Duration
 
 	// Backoff overrides the default DNS retry backoff. Zero value = defaults.
@@ -236,6 +237,11 @@ type RaftStoreConfig struct {
 
 	// BoltOptions overrides the default BoltDB options. Nil = use defaults.
 	BoltOptions *raftboltdb.Options
+
+	// SessionSink receives replicated session-lease state (domain.SessionStateSink,
+	// usually the pod-local session store). Set before NewRaftStore so log
+	// replay restores sessions into the local store on every pod.
+	SessionSink domain.SessionStateSink
 }
 
 // NewRaftStore constructs and starts a Raft node. It loads/generates a stable
@@ -251,45 +257,9 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 		return nil, fmt.Errorf("mkdir data dir %s: %w", dir, err)
 	}
 
-	// shouldBootstrap reports whether this node seeds the initial cluster
-	// configuration via raft.BootstrapCluster. Only the bootstrap node (the
-	// first peer in the resolved voter list — ordinal 0 for DNS discovery,
-	// the first explicit peer for static discovery, self for single-node)
-	// bootstraps. Other nodes start with no config and join via the leader's
-	// AddVoter (joinLoop).
-	//
-	// The bootstrap node seeds the cluster with ONLY itself as the initial
-	// voter (single-node quorum). Once it becomes leader, the joinLoop adds
-	// the remaining peers via AddVoter. Including all peers in the initial
-	// configuration would require a majority (2 of 3) to elect a leader, but
-	// non-bootstrap peers have no config and may not be ready to vote when the
-	// election fires — this creates a deadlock where no leader is ever elected
-	// (CWE-693).
-	shouldBootstrap := true
-	if cfg.Resolver != nil {
-		resolved, err := cfg.Resolver.Resolve()
-		if err != nil {
-			return nil, fmt.Errorf("resolve raft peers: %w", err)
-		}
-		if self, errSelf := cfg.Resolver.Self(); errSelf == nil && len(resolved) > 0 {
-			shouldBootstrap = self.ID == resolved[0].ID
-		}
-	}
-
-	// Determine the effective node ID: explicit config, else the resolver's
-	// self ID (e.g. the StatefulSet pod name), else the persisted UUID.
-	nodeID := cfg.NodeID
-	if nodeID == "" && cfg.Resolver != nil {
-		if self, err := cfg.Resolver.Self(); err == nil {
-			nodeID = self.ID
-		}
-	}
-	if nodeID == "" {
-		var err error
-		nodeID, err = loadOrGenerateNodeID(dir)
-		if err != nil {
-			return nil, err
-		}
+	nodeID, shouldBootstrap, err := resolveBootstrapState(cfg, dir)
+	if err != nil {
+		return nil, err
 	}
 
 	logOutput := logrusOutput(logger)
@@ -350,6 +320,7 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 	ApplyPerformanceMultiplier(raftConfig, multiplier)
 
 	fsm := NewFSM()
+	fsm.state.sessionSink = cfg.SessionSink
 
 	if shouldBootstrap {
 		configuration := raftConfigurationFromPeers([]RaftPeer{{ID: nodeID, Address: advertise}})
@@ -377,6 +348,50 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 		dataDir:   dir,
 		logger:    logger,
 	}, nil
+}
+
+// resolveBootstrapState computes this node's stable ID and whether it seeds
+// the initial cluster configuration.
+//
+// shouldBootstrap is true only for the bootstrap node (the first peer in the
+// resolved voter list — ordinal 0 for DNS discovery, the first explicit peer
+// for static discovery, self for single-node). Other nodes start with no
+// config and join via the leader's AddVoter (joinLoop).
+//
+// The bootstrap node seeds the cluster with ONLY itself as the initial voter
+// (single-node quorum). Once it becomes leader, the joinLoop adds the
+// remaining peers via AddVoter. Including all peers in the initial
+// configuration would require a majority (2 of 3) to elect a leader, but
+// non-bootstrap peers have no config and may not be ready to vote when the
+// election fires — this creates a deadlock where no leader is ever elected
+// (CWE-693).
+func resolveBootstrapState(cfg *RaftStoreConfig, dir string) (nodeID string, shouldBootstrap bool, err error) {
+	shouldBootstrap = true
+	if cfg.Resolver != nil {
+		resolved, err := cfg.Resolver.Resolve()
+		if err != nil {
+			return "", false, fmt.Errorf("resolve raft peers: %w", err)
+		}
+		if self, errSelf := cfg.Resolver.Self(); errSelf == nil && len(resolved) > 0 {
+			shouldBootstrap = self.ID == resolved[0].ID
+		}
+	}
+
+	// Determine the effective node ID: explicit config, else the resolver's
+	// self ID (e.g. the StatefulSet pod name), else the persisted UUID.
+	nodeID = cfg.NodeID
+	if nodeID == "" && cfg.Resolver != nil {
+		if self, err := cfg.Resolver.Self(); err == nil {
+			nodeID = self.ID
+		}
+	}
+	if nodeID == "" {
+		nodeID, err = loadOrGenerateNodeID(dir)
+		if err != nil {
+			return "", false, err
+		}
+	}
+	return nodeID, shouldBootstrap, nil
 }
 
 // NewInmemRaftStore constructs a single-node Raft store backed entirely by
@@ -806,6 +821,15 @@ func mapApplyError(err error) error {
 	}
 }
 
+// SetSessionSink wires the pod-local session-state sink into the FSM. Must be
+// called once at startup (before the store starts applying), so replayed and
+// newly-applied session commands update the local domain.SessionStore.
+func (s *RaftStore) SetSessionSink(sink domain.SessionStateSink) {
+	s.fsm.state.mu.Lock()
+	defer s.fsm.state.mu.Unlock()
+	s.fsm.state.sessionSink = sink
+}
+
 // fsmRead returns the FSM for direct reads.
 func (s *RaftStore) fsmRead() *FSM {
 	return s.fsm
@@ -983,7 +1007,7 @@ func (s *RaftStore) RetryJoin(ctx context.Context, cfg JoinConfig) error {
 
 	backoff := cfg.RetryInterval
 	for {
-		if err := s.joinAttempt(ctx, cfg.LeaderAddr); err != nil {
+		if err := s.joinAttempt(); err != nil {
 			s.logger.WithError(err).Warn("join attempt failed, retrying")
 		} else {
 			return nil
@@ -1001,7 +1025,7 @@ func (s *RaftStore) RetryJoin(ctx context.Context, cfg JoinConfig) error {
 }
 
 // joinAttempt performs a single join attempt against a leader.
-func (s *RaftStore) joinAttempt(ctx context.Context, leaderAddr string) error {
+func (s *RaftStore) joinAttempt() error {
 	// For now, the join is handled by the AddVoter on the leader side via joinLoop.
 	// This function is a stub that checks if we've been added.
 	if s.IsVoter() {
@@ -1109,6 +1133,7 @@ func (s *RaftStore) WritePeersJSON() error {
 // configuration when creating a new Raft store.
 func (s *RaftStore) RecoverFromPeersJSON() (raft.Configuration, error) {
 	path := peersJSONPath(s.dataDir)
+	//nolint:gosec // path is derived from the operator-configured data dir (peersJSONPath), not user input.
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return raft.Configuration{}, fmt.Errorf("read peers.json: %w", err)

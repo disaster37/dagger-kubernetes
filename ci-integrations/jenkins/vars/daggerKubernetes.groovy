@@ -194,9 +194,24 @@ void renderStepTree(Map params = [:]) {
     // (plain maps/lists so they stay CPS-serializable across poll iterations).
     def nodes = [:]
     def rootId = null
+    boolean wrapperExited = false
 
     while (!done) {
-        String raw = readFile(file: ndjsonFile)
+        // Liveness: the exit file is only written after the wrapper process
+        // has terminated, so once it exists the NDJSON stream is final. If
+        // pipeline_done is still missing at that point, the wrapper died
+        // before emitting its guaranteed terminal event (crash, OOM kill,
+        // hang-then-kill) and polling further would only spin "Sleeping for
+        // 1 sec" until the enclosing timeout — fail fast instead.
+        boolean exited = fileExists(exitFile)
+
+        String raw = ''
+        try {
+            raw = readFile(file: ndjsonFile)
+        } catch (Exception ignored) {
+            // The wrapper may not have created the file yet on the first
+            // iterations; an empty stream is just "no events yet".
+        }
         if (raw.length() > offset) {
             String newText = raw.substring(offset)
             int lastNL = newText.lastIndexOf('\n')
@@ -258,8 +273,17 @@ void renderStepTree(Map params = [:]) {
             }
         }
         if (!done) {
+            if (exited) {
+                wrapperExited = true
+                finalStatus = 'failed'
+                break
+            }
             sleep(time: 1, unit: 'SECONDS')
         }
+    }
+
+    if (wrapperExited) {
+        echo "[dagger-kubernetes] wrapper exited without a terminal pipeline_done event; treating the run as failed"
     }
 
     // Link children to parents (child-before-parent finish is fine: both are

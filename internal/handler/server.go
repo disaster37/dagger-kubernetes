@@ -203,6 +203,7 @@ type Deps struct {
 	MintingCA            domain.MintingCA
 	FleetManager         *service.Manager
 	Sessions             domain.SessionStore
+	SessionRegistry      domain.SessionRegistry
 	CacheBackend         domain.CacheBackend
 	VersionResolver      domain.VersionResolver
 	Auth                 *service.AuthService
@@ -258,6 +259,7 @@ type Server struct {
 	mintingCA       domain.MintingCA
 	fleetManager    *service.Manager
 	sessions        domain.SessionStore
+	sessionRegistry domain.SessionRegistry
 	cacheBackend    domain.CacheBackend
 	versionResolver domain.VersionResolver
 	liveHub         *repository.LiveHub
@@ -292,14 +294,14 @@ type Server struct {
 	router        cacheRouter
 	cacheToken    string
 
-	cacheStats    domain.CacheStatsProvider
-	cachePurger   domain.CachePurger
-	historyStats  domain.HistoryStatsProvider
-	historyPurger domain.HistoryPurger
-	status        domain.StatusProvider
+	cacheStats      domain.CacheStatsProvider
+	cachePurger     domain.CachePurger
+	historyStats    domain.HistoryStatsProvider
+	historyPurger   domain.HistoryPurger
+	status          domain.StatusProvider
 	startupProvider domain.StartupProvider
-	connect       *service.ConnectService
-	cli           *service.CLIService
+	connect         *service.ConnectService
+	cli             *service.CLIService
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -311,6 +313,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		mintingCA:       deps.MintingCA,
 		fleetManager:    deps.FleetManager,
 		sessions:        deps.Sessions,
+		sessionRegistry: deps.SessionRegistry,
 		cacheBackend:    deps.CacheBackend,
 		versionResolver: deps.VersionResolver,
 		liveHub:         resolveLiveHub(deps.LiveHub),
@@ -336,15 +339,15 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		oauthProvider:       deps.OAuthProvider,
 		limiter:             newAttemptLimiter(),
 
-		cacheStats:    deps.CacheStatsProvider,
-		cachePurger:   deps.CachePurger,
-		historyStats:  deps.HistoryStatsProvider,
-		historyPurger: deps.HistoryPurger,
-		status:        deps.StatusProvider,
+		cacheStats:      deps.CacheStatsProvider,
+		cachePurger:     deps.CachePurger,
+		historyStats:    deps.HistoryStatsProvider,
+		historyPurger:   deps.HistoryPurger,
+		status:          deps.StatusProvider,
 		startupProvider: deps.StartupProvider,
-		connect:       deps.Connect,
-		cli:           deps.CLI,
-		cacheToken:    cfg.CacheToken,
+		connect:         deps.Connect,
+		cli:             deps.CLI,
+		cacheToken:      cfg.CacheToken,
 	}
 
 	// Only store a non-nil router: assigning a nil *service.RegistryRouter to
@@ -734,12 +737,25 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 
 	instanceID := fmt.Sprintf("%s-%d", result.PodName, time.Now().Unix())
 	certFP := clientCert.Fingerprint()
-	s.sessions.Register(certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID)
+
+	// Register the lease through the replicated store so EVERY pod can resolve
+	// this certificate to the lease: the data-plane tunnel may land on any pod
+	// (the -data Service load-balances), not just the one that served this
+	// provision request.
 	// Display aid (D11): record the group only when the user has exactly one.
-	// SetGroupID is used because the lease is shared with the store and read
-	// concurrently (e.g. by List during quota checks).
+	groupID := ""
 	if len(id.GroupIDs) == 1 {
-		s.sessions.SetGroupID(certFP, id.GroupIDs[0])
+		groupID = id.GroupIDs[0]
+	}
+	if err := s.sessionRegistry.Register(ctx, certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID, groupID); err != nil {
+		// Leader failover window (or a follower that still received this
+		// request before leader-routed Services converge): keep the lease in
+		// the local store so the tunnel is not lost outright.
+		s.logger.WithError(err).Warn("session registration via raft failed; registering locally")
+		s.sessions.Register(certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID)
+		if groupID != "" {
+			s.sessions.SetGroupID(certFP, groupID)
+		}
 	}
 	s.metrics.ActiveLeases.Inc()
 	s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "success").Inc()
@@ -985,7 +1001,7 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 	}
 	defer func() { _ = backend.Close() }()
 
-	_ = s.sessions.Touch(fp)
+	s.touchSession(fp)
 
 	// A long-running pipeline holds a single tunnel open for its whole
 	// lifetime. If the lease's LastActivity were only set here, the reaper
@@ -1016,7 +1032,7 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 	for {
 		select {
 		case <-heartbeat.C:
-			_ = s.sessions.Touch(fp)
+			s.touchSession(fp)
 			_ = conn.SetDeadline(time.Now().Add(tunnelIdleTimeout))
 			_ = backend.SetDeadline(time.Now().Add(tunnelIdleTimeout))
 		case <-errc:
@@ -1025,6 +1041,19 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 			return
 		}
 	}
+}
+
+// touchSession refreshes the lease liveness through the replicated store so
+// every pod's reaper and the fleet sweeper keep seeing the session as live.
+// Falls back to the local store when the raft apply is unavailable (leader
+// failover window) so the local reaper never kills a live tunnel.
+func (s *Server) touchSession(fp string) {
+	if s.sessionRegistry != nil {
+		if err := s.sessionRegistry.Touch(context.Background(), fp); err == nil {
+			return
+		}
+	}
+	_ = s.sessions.Touch(fp)
 }
 
 // handleNoRoute serves the embedded SPA for unmatched routes. Cache-host

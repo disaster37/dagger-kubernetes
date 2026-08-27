@@ -27,6 +27,11 @@ spec:
   type: {{ .Values.service.control.type }}
   selector:
     {{- include "dagger-kubernetes.selectorLabels" . | nindent 4 }}
+    # Control-plane traffic is routed to the current Raft leader only: all
+    # writes (session registration, touches) are leader-applied, and routing
+    # everything there avoids follower 503s and lease splits. Each pod labels
+    # itself at runtime (observeLeadership) once a leader is elected.
+    dagger-kubernetes.io/raft-leader: "true"
   ports:
     - name: http
       port: {{ .Values.service.control.port }}
@@ -46,6 +51,9 @@ spec:
   type: {{ .Values.service.data.type }}
   selector:
     {{- include "dagger-kubernetes.selectorLabels" . | nindent 4 }}
+    # Data-plane tunnels terminate on the current Raft leader so the tunnel
+    # heartbeat can apply lease touches through Raft (followers cannot apply).
+    dagger-kubernetes.io/raft-leader: "true"
   ports:
     - name: tls
       port: {{ .Values.service.data.port }}

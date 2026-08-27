@@ -132,7 +132,7 @@ raft:
   statefulset_name: ""     # e.g. "dagger-kubernetes-supervisor" (DNS discovery).
   headless_service: ""     # e.g. "dagger-kubernetes-headless" (DNS discovery).
   namespace: ""            # K8s namespace for pod DNS (default = release ns).
-  cluster_domain: "cluster.local"   # K8s cluster DNS suffix; "" = peer addresses end at .svc (no suffix).
+  cluster_domain: ""                # K8s cluster DNS suffix appended to peer addresses. "" = peer addresses end at .svc (no suffix) — the project-wide convention (single NO_PROXY ".svc" entry); set the real domain only when .svc cannot resolve.
   apply_timeout: "5s"
   leader_wait_timeout: "30s"
   snapshot_threshold: 1000
@@ -153,6 +153,14 @@ raft:
 # --- Telemetry backend endpoints --------------------------------------------
 # Used by the Supervisor to query traces/logs/metrics for the UI and to
 # forward Dagger CLI OTLP when DAGGER_KUBERNETES_OTEL_OTLP_ENDPOINT is empty.
+#
+# On Kubernetes, in-cluster endpoints MUST use the <service>.<namespace>.svc
+# form (e.g. http://loki.dagger-kubernetes.svc:3100) — never a bare service
+# name (http://loki:3100) or a .svc.<cluster-domain> FQDN. That way a single
+# `.svc` entry in NO_PROXY covers every in-cluster component when HTTP_PROXY
+# is set on the supervisor (e.g. to download the Dagger CLI). See
+# CONTRIBUTING.md. The bare-name values below are only the non-K8s (dev /
+# docker-compose) fallbacks; the Helm chart auto-wires the .svc form.
 telemetry:
   collector_url: "http://otel-collector:4318"   # OTLP/HTTP collector.
   tempo_url: "http://tempo:3200"                # Tempo traces API.
@@ -170,14 +178,14 @@ cache:
                                     # Empty = read from the engine-registry-auth K8s secret (key "token"). Never set here in production. Never logged.
   registries: []                    # multi-backend list for load balancing (least-charged first, by registry cache size). Empty = single-backend mode.
     # - id: "reg-1"
-    #   internal_addr: "registry-1:5000"
+    #   internal_addr: "registry-1.dagger-kubernetes.svc:5000"   # in-cluster backends must use the <service>.<namespace>.svc form (see CONTRIBUTING.md).
     #   username: ""
     #   password: ""                 # set directly ONLY for non-K8s deploys. In production use password_secret:
     #   password_secret:
     #     name: "cache-registry-1-auth"   # K8s Secret in the fleet namespace
     #     key: "password"                 # key holding the password (empty = "password")
     # - id: "reg-2"
-    #   internal_addr: "registry-2:5000"
+    #   internal_addr: "registry-2.dagger-kubernetes.svc:5000"
     #   username: ""
     #   password: ""
     #   password_secret:

@@ -13,7 +13,7 @@ data:
     datasources:
       - name: Tempo
         type: tempo
-        url: "http://{{ .Release.Name }}-tempo:3200"
+        url: "http://{{ .Release.Name }}-tempo.{{ include "dagger-kubernetes.namespace" . }}.svc:3200"
         access: proxy
         jsonData:
           tracesToLogsV2:
@@ -25,11 +25,11 @@ data:
             tags: [{ key: "service.name", value: "job" }]
       - name: Loki
         type: loki
-        url: "http://{{ .Release.Name }}-loki:3100"
+        url: "http://{{ .Release.Name }}-loki.{{ include "dagger-kubernetes.namespace" . }}.svc:3100"
         access: proxy
       - name: VictoriaMetrics
         type: prometheus
-        url: "http://{{ .Release.Name }}-victoria-server:8428"
+        url: "http://{{ .Release.Name }}-victoria-server.{{ include "dagger-kubernetes.namespace" . }}.svc:8428"
         access: proxy
         isDefault: true
         jsonData:

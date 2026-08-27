@@ -114,7 +114,7 @@ supervisor:
 ##   the internal CA is auto-bootstrapped in the <release>-raft-ca Secret.
   config:
     raft:
-## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""`. Set `""` to end peer addresses at `.svc` (no suffix) or your cluster's real domain for non-standard setups.
+## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the `.svc` form is the convention everywhere in this project (single NO_PROXY `.svc` entry); set your cluster's real domain (e.g. `cluster.local`) only when `.svc` cannot resolve.
       clusterDomain: ""
       tls:
         enabled: true
@@ -151,10 +151,11 @@ supervisor:
       join:
         retryInterval: "2s"
         maxConcurrent: 20
-## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled).
-## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries (auto-wired when the tempo subchart is enabled).
-## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries (auto-wired when the loki subchart is enabled).
-## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries (auto-wired when the victoria subchart is enabled).
+## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled).
+## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled).
+## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled).
+## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled).
+## In-cluster endpoints must use the `<service>.<namespace>.svc` form — never bare service names or `.svc.<cluster-domain>` FQDNs — so a single `.svc` NO_PROXY entry covers every in-cluster component when HTTP_PROXY is set (see CONTRIBUTING.md).
     telemetry:
       collectorUrl: ""
       tempoUrl: ""
@@ -593,15 +594,15 @@ opentelemetry-collector:
               - set(attributes["loki.attribute.labels"], "trace_id,span_id")
     exporters:
       otlphttp/tempo:
-        endpoint: http://{{ .Release.Name }}-tempo:4318
+        endpoint: http://{{ .Release.Name }}-tempo.{{ .Release.Namespace }}.svc:4318
         tls:
           insecure: true
       loki:
-        endpoint: http://{{ .Release.Name }}-loki:3100/loki/api/v1/push
+        endpoint: http://{{ .Release.Name }}-loki.{{ .Release.Namespace }}.svc:3100/loki/api/v1/push
         tls:
           insecure: true
       prometheusremotewrite:
-        endpoint: http://{{ .Release.Name }}-victoria-server:8428/prometheus/api/v1/write
+        endpoint: http://{{ .Release.Name }}-victoria-server.{{ .Release.Namespace }}.svc:8428/prometheus/api/v1/write
         tls:
           insecure: true
     service:
