@@ -117,6 +117,14 @@ data:
         bucket: {{ .Values.supervisor.config.cache.s3.bucket | quote }}
         region: {{ .Values.supervisor.config.cache.s3.region | quote }}
 {{- end }}
+{{- with .Values.supervisor.config.cache.gc }}
+      gc:
+        enabled: {{ .enabled }}
+        max_age: {{ .maxAge | quote }}
+        schedule: {{ .schedule | quote }}
+        min_refs_to_keep: {{ .minRefsToKeep }}
+        protect_active_versions: {{ .protectActiveVersions }}
+{{- end }}
 {{- with .Values.supervisor.config.history }}
     history:
       gc:

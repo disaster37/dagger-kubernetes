@@ -18,6 +18,8 @@ def call(Map params = [:], Closure body) {
     String stepsPollInterval = params.stepsPollInterval ?: env.DAGGER_KUBERNETES_STEPS_POLL_INTERVAL ?: '2s'
     int stepsMaxDepth = (params.stepsMaxDepth ?: env.DAGGER_KUBERNETES_STEPS_MAX_DEPTH ?: 8) as int
     int timeoutMinutes = (params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES ?: 30) as int
+    boolean magicCache = envTruthy(params.magicCache, env.DAGGER_KUBERNETES_MAGIC_CACHE, false)
+    String cacheRegistry = params.cacheRegistry ?: env.DAGGER_KUBERNETES_CACHE_REGISTRY ?: 'cache.reg/dagger-cache'
 
     if (!serverUrl || !token) {
         error "daggerKubernetes: serverUrl and token are required"
@@ -29,11 +31,18 @@ def call(Map params = [:], Closure body) {
                      os: params.cliOs, arch: params.cliArch)
     }
 
+    String cacheConfig = ''
+    if (magicCache && version) {
+        assertShellSafe(cacheRegistry, 'cacheRegistry')
+        String vslug = version.replaceAll(/^v/, '').replaceAll(/\./, '-')
+        cacheConfig = "type=registry,ref=${cacheRegistry}:V${vslug},mode=max"
+    }
+
     if (dynamicStages) {
         dynamicStagesRun(serverUrl: serverUrl, token: token, uiUrl: uiUrl,
                          version: version, stepsPollInterval: stepsPollInterval,
                          stepsMaxDepth: stepsMaxDepth, timeoutMinutes: timeoutMinutes,
-                         command: params.command)
+                         command: params.command, cacheConfig: cacheConfig)
         return
     }
 
@@ -44,6 +53,9 @@ def call(Map params = [:], Closure body) {
     ]) {
         if (version) {
             env._EXPERIMENTAL_DAGGER_TAG = version
+        }
+        if (cacheConfig) {
+            env._EXPERIMENTAL_DAGGER_CACHE_CONFIG = cacheConfig
         }
 
         def tempLog = File.createTempFile("dagger", ".log")
@@ -106,6 +118,7 @@ void dynamicStagesRun(Map params = [:]) {
     int stepsMaxDepth = params.stepsMaxDepth
     int timeoutMinutes = params.timeoutMinutes
     String daggerCommand = params.command ?: env.DAGGER_COMMAND
+    String cacheConfig = params.cacheConfig ?: ''
 
     if (!daggerCommand) {
         error "daggerKubernetes(dynamicStages: true): pass `command: 'dagger call ...'` (or set env.DAGGER_COMMAND)"
@@ -139,7 +152,7 @@ void dynamicStagesRun(Map params = [:]) {
     // wrapper reads it from the environment instead of a --token argument, the
     // value never appears in the wrapper's process argv either (argv is
     // readable by every local user via ps / /proc/<pid>/cmdline, CWE-214).
-    withEnv(["DAGGER_KUBERNETES_TOKEN=${token}"]) {
+    withEnv(["DAGGER_KUBERNETES_TOKEN=${token}"] + (cacheConfig ? ["_EXPERIMENTAL_DAGGER_CACHE_CONFIG=${cacheConfig}"] : [])) {
         sh "mkdir -p '${stepsDir}'"
         String versionArgs = version ? "--version '${version}'" : ''
 

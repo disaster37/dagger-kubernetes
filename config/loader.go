@@ -93,6 +93,25 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("raft.tls.ca_bootstrap", false)
 	v.SetDefault("raft.tls.client_auth", true)
 
+	v.SetDefault("raft.performance_multiplier", 5.0)
+	v.SetDefault("raft.raft_log_cache_size", 512)
+	v.SetDefault("raft.no_snapshot_restore_on_start", true)
+	v.SetDefault("raft.termination_grace_period", "60s")
+	v.SetDefault("raft.recovery_mode", false)
+
+	v.SetDefault("raft.autopilot.enabled", true)
+	v.SetDefault("raft.autopilot.cleanup_dead_servers", true)
+	v.SetDefault("raft.autopilot.dead_server_last_contact_threshold", "24h")
+	v.SetDefault("raft.autopilot.min_quorum", 2)
+	v.SetDefault("raft.autopilot.stabilization_time", "10s")
+	v.SetDefault("raft.autopilot.heartbeat_interval", "1s")
+
+	v.SetDefault("raft.join.retry_interval", "2s")
+	v.SetDefault("raft.join.max_concurrent", 20)
+
+	v.SetDefault("raft.tls.rotation_period", "24h")
+	v.SetDefault("raft.tls.ca_validity", "262800h") // 30 years
+
 	v.SetDefault("telemetry.collector_url", "http://otel-collector:4318")
 	v.SetDefault("telemetry.tempo_url", "http://tempo:3200")
 	v.SetDefault("telemetry.loki_url", "http://loki:3100")

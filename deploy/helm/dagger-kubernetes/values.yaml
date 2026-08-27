@@ -103,13 +103,45 @@ supervisor:
 ##   Everything else is derived automatically: node IDs come from the
 ##   StatefulSet pod names, peer discovery from the headless Service DNS, and
 ##   the internal CA is auto-bootstrapped in the <release>-raft-ca Secret.
-  config:
+    config:
     raft:
-## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` advertises full FQDNs that resolve absolutely (no reliance on the pod's DNS search path — critical during bootstrap, when the pod's own A record is resolved before it is Ready). Set `""` to end peer addresses at `.svc` (no suffix) or your cluster's real domain for non-standard setups.
-      clusterDomain: "cluster.local"
+## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""`. Set `""` to end peer addresses at `.svc` (no suffix) or your cluster's real domain for non-standard setups.
+      clusterDomain: ""
       tls:
         enabled: true
         clientAuth: true
+## @param supervisor.config.raft.tls.rotationPeriod How often to rotate TLS certificates. Default: 24h.
+        rotationPeriod: "24h"
+## @param supervisor.config.raft.tls.caValidity CA certificate validity period. Default: 262800h (30 years).
+        caValidity: "262800h"
+## @param supervisor.config.raft.performanceMultiplier Scales election/heartbeat/lease timeouts. Higher values reduce false-positive leader elections at the cost of slower failure detection. Default: 5.0.
+      performanceMultiplier: 5.0
+## @param supervisor.config.raft.raftLogCacheSize In-memory Raft log cache size. Default: 512.
+      raftLogCacheSize: 512
+## @param supervisor.config.raft.noSnapshotRestoreOnStart Disable automatic snapshot restore on start. Default: true.
+      noSnapshotRestoreOnStart: true
+## @param supervisor.config.raft.terminationGracePeriodSeconds Pod termination grace period. Default: 60.
+      terminationGracePeriodSeconds: 60
+## @param supervisor.config.raft.recoveryMode Enable peers.json auto-recovery on startup. Default: false.
+      recoveryMode: false
+## @param supervisor.config.raft.autopilot.enabled Enable autopilot subsystem.
+## @param supervisor.config.raft.autopilot.cleanupDeadServers Auto-remove dead servers.
+## @param supervisor.config.raft.autopilot.deadServerLastContactThreshold Time before server considered dead.
+## @param supervisor.config.raft.autopilot.minQuorum Minimum voters before stopping removal. Default: 2 (for 3-node clusters, one failure tolerated).
+## @param supervisor.config.raft.autopilot.stabilizationTime Wait time between membership changes. Default: 10s.
+## @param supervisor.config.raft.autopilot.heartbeatInterval Leader heartbeat check interval. Default: 1s.
+      autopilot:
+        enabled: true
+        cleanupDeadServers: true
+        deadServerLastContactThreshold: "24h"
+        minQuorum: 2
+        stabilizationTime: "10s"
+        heartbeatInterval: "1s"
+## @param supervisor.config.raft.join.retryInterval Interval between join attempts. Default: 2s.
+## @param supervisor.config.raft.join.maxConcurrent Max concurrent join workers. Default: 20.
+      join:
+        retryInterval: "2s"
+        maxConcurrent: 20
 ## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired when the opentelemetry-collector subchart is enabled).
 ## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries (auto-wired when the tempo subchart is enabled).
 ## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries (auto-wired when the loki subchart is enabled).
@@ -135,6 +167,17 @@ supervisor:
       s3:
         bucket: ""
         region: ""
+## @param supervisor.config.cache.gc.enabled Enable the cache auto-purge sweeper. When enabled, orphaned cache refs older than maxAge are purged on each tick. Disabled by default.
+## @param supervisor.config.cache.gc.maxAge Purge cache refs older than this (7d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
+## @param supervisor.config.cache.gc.schedule Cache sweeper ticker interval.
+## @param supervisor.config.cache.gc.minRefsToKeep Minimum version-tagged refs to retain per version during a GC sweep. Default: 3.
+## @param supervisor.config.cache.gc.protectActiveVersions Skip purge for version refs currently pinned by a running engine fleet. Default: true.
+      gc:
+        enabled: false
+        maxAge: "168h"
+        schedule: "1h"
+        minRefsToKeep: 3
+        protectActiveVersions: true
 ## @param supervisor.config.history.gc.enabled Master switch for the history auto-purge sweeper.
 ## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.history.gc.schedule History sweeper ticker interval.
@@ -693,3 +736,11 @@ grafana:
     datasources:
       enabled: true
       label: grafana_datasource
+
+## @section PodDisruptionBudget
+
+## @param podDisruptionBudget.enabled Enable PodDisruptionBudget for the supervisor StatefulSet.
+## @param podDisruptionBudget.maxUnavailable Maximum number of unavailable pods during voluntary disruption.
+podDisruptionBudget:
+  enabled: true
+  maxUnavailable: 1

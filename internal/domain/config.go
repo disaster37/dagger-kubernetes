@@ -124,6 +124,22 @@ type RaftConfig struct {
 	SnapshotInterval  time.Duration `mapstructure:"snapshot_interval"`
 	TrailingLogs      uint64        `mapstructure:"trailing_logs"`
 	TLS               RaftTLSConfig `mapstructure:"tls"`
+
+	// PerformanceMultiplier scales election/heartbeat/lease timeouts. Default: 5.0.
+	PerformanceMultiplier float64 `mapstructure:"performance_multiplier"`
+	// RaftLogCacheSize is the in-memory log cache size. Default: 512.
+	RaftLogCacheSize int `mapstructure:"raft_log_cache_size"`
+	// NoSnapshotRestoreOnStart disables auto snapshot restore on start. Default: true.
+	NoSnapshotRestoreOnStart bool `mapstructure:"no_snapshot_restore_on_start"`
+	// TerminationGracePeriod for the pod. Default: 60s.
+	TerminationGracePeriod time.Duration `mapstructure:"termination_grace_period"`
+	// RecoveryMode enables peers.json auto-recovery. Default: false.
+	RecoveryMode bool `mapstructure:"recovery_mode"`
+
+	// Autopilot configuration.
+	Autopilot AutopilotConfig `mapstructure:"autopilot"`
+	// Join configuration.
+	Join JoinDomainConfig `mapstructure:"join"`
 }
 
 // RaftPeer is one voter in the Raft cluster.
@@ -146,6 +162,27 @@ type RaftTLSConfig struct {
 	CASecret     string        `mapstructure:"ca_secret"`
 	CABootstrap  bool          `mapstructure:"ca_bootstrap"`
 	ClientAuth   bool          `mapstructure:"client_auth"`
+
+	// RotationPeriod is how often to rotate TLS certificates. Default: 24h.
+	RotationPeriod time.Duration `mapstructure:"rotation_period"`
+	// CAValidity is the CA certificate validity period. Default: 262800h (30 years).
+	CAValidity time.Duration `mapstructure:"ca_validity"`
+}
+
+// AutopilotConfig is the domain-level autopilot configuration.
+type AutopilotConfig struct {
+	Enabled                        bool          `mapstructure:"enabled"`
+	CleanupDeadServers             bool          `mapstructure:"cleanup_dead_servers"`
+	DeadServerLastContactThreshold time.Duration `mapstructure:"dead_server_last_contact_threshold"`
+	MinQuorum                      int           `mapstructure:"min_quorum"`
+	StabilizationTime              time.Duration `mapstructure:"stabilization_time"`
+	HeartbeatInterval              time.Duration `mapstructure:"heartbeat_interval"`
+}
+
+// JoinDomainConfig holds join-related configuration.
+type JoinDomainConfig struct {
+	RetryInterval time.Duration `mapstructure:"retry_interval"`
+	MaxConcurrent int           `mapstructure:"max_concurrent"`
 }
 
 // JWTConfig configures HS256 JWT issuance (access + refresh).

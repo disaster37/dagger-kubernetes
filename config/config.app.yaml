@@ -77,6 +77,29 @@ raft:
     ca_secret: ""              # auto/K8s mode: Secret name for CA sharing.
     ca_bootstrap: false        # auto/K8s mode: this node generates the CA (auto-detects ordinal 0).
     client_auth: true          # mTLS (RequireAndVerifyClientCert).
+    rotation_period: "24h"     # how often to rotate TLS certificates
+    ca_validity: "262800h"     # CA certificate validity (30 years)
+
+  # Performance tuning
+  performance_multiplier: 5.0    # scales election/heartbeat/lease timeouts (default 5.0)
+  raft_log_cache_size: 512       # in-memory log cache size
+  no_snapshot_restore_on_start: true  # disable auto snapshot restore on start
+  termination_grace_period: "60s"     # pod termination grace period
+  recovery_mode: false            # enable peers.json auto-recovery on startup
+
+  # Autopilot — dead server detection and removal
+  autopilot:
+    enabled: true
+    cleanup_dead_servers: true
+    dead_server_last_contact_threshold: "24h"
+    min_quorum: 2                 # minimum voters before stopping removal (2 for 3-node clusters)
+    stabilization_time: "10s"     # wait between membership changes
+    heartbeat_interval: "1s"      # leader heartbeat check interval
+
+  # Join — retry-join behavior
+  join:
+    retry_interval: "2s"          # interval between join attempts
+    max_concurrent: 20            # max concurrent join workers
 
 # --- Remote shared cache -----------------------------------------------------
 cache:

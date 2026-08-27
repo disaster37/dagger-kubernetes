@@ -41,3 +41,9 @@ type StatusProvider interface {
 type RaftCleanState interface {
 	IsCleanState() bool
 }
+
+// StartupProvider reports whether the startup phase is complete.
+// Used by the Kubernetes startupProbe (/startup endpoint).
+type StartupProvider interface {
+	IsStarted() bool
+}

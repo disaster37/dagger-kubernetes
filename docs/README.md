@@ -1361,7 +1361,8 @@ step summary with the trace link and Check Runs annotated with cache stats.
 
 ### Jenkins
 
-Shared library at `ci-integrations/jenkins/daggerKubernetes.groovy`:
+Shared library at `ci-integrations/jenkins/vars/daggerKubernetes.groovy`.
+Configure the library with `libraryPath: "ci-integrations/jenkins"`:
 
 ```groovy
 @Library('dagger-kubernetes') _
@@ -1466,8 +1467,8 @@ Build the wrapper from this repo (`go build -o dagger-kubernetes-ci ./cmd/ci`
 wrapper binary is only needed for `dynamicStages` (otherwise set
 `env.DAGGER_KUBERNETES_CI_BIN` to its path).
 
-**2. Shared library (JCasC).** Register the global pipeline library, pointing
-`libraryPath` at this repo's `ci-integrations/jenkins` folder:
+**2. Shared library (JCasC).** Register the global pipeline library with
+`libraryPath` pointing at `ci-integrations/jenkins`:
 
 ```yaml
 jenkins:
@@ -1482,10 +1483,10 @@ jenkins:
                   defaultVersion: "main"
                   retriever:
                     modernSCM:
+                      libraryPath: "ci-integrations/jenkins"
                       scm:
                         git:
                           remote: "https://github.com/disaster/dagger-kubernetes.git"
-                          libraryPath: "ci-integrations/jenkins"
         kubernetes-cloud: |
           jenkins:
             clouds:

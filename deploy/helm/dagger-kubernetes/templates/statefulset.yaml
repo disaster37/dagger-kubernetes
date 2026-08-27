@@ -31,6 +31,7 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "dagger-kubernetes.fullname" . }}
+      terminationGracePeriodSeconds: {{ .Values.supervisor.config.raft.terminationGracePeriodSeconds | default 60 }}
       {{- with .Values.supervisor.image.pullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -96,6 +97,15 @@ spec:
               containerPort: 8443
             - name: raft
               containerPort: 8081
+          lifecycle:
+            preStop:
+              exec:
+                command:
+                  - /bin/sh
+                  - -c
+                  - |
+                    kill -TERM 1
+                    sleep 2
           volumeMounts:
             - name: config
               mountPath: /etc/dagger-kubernetes/config.app.yaml
@@ -121,6 +131,15 @@ spec:
               subPath: ca.crt
               readOnly: true
             {{- end }}
+          startupProbe:
+            httpGet:
+              path: /startup
+              port: control
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 60
+            timeoutSeconds: 5
           readinessProbe:
             httpGet:
               path: /readyz
@@ -128,13 +147,17 @@ spec:
               scheme: HTTPS
             initialDelaySeconds: 5
             periodSeconds: 5
+            failureThreshold: 3
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /healthz
               port: control
               scheme: HTTPS
-            initialDelaySeconds: 10
+            initialDelaySeconds: 30
             periodSeconds: 10
+            failureThreshold: 3
+            timeoutSeconds: 5
           resources:
             {{- toYaml .Values.supervisor.resources | nindent 12 }}
           securityContext:

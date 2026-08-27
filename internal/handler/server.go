@@ -232,6 +232,7 @@ type Deps struct {
 	LiveHub              service.TraceEventBroadcaster // concrete *repository.LiveHub satisfies it; nil = create one
 	Lifecycle            *service.PipelineLifecycle
 	CLI                  *service.CLIService
+	StartupProvider      domain.StartupProvider
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -296,6 +297,7 @@ type Server struct {
 	historyStats  domain.HistoryStatsProvider
 	historyPurger domain.HistoryPurger
 	status        domain.StatusProvider
+	startupProvider domain.StartupProvider
 	connect       *service.ConnectService
 	cli           *service.CLIService
 }
@@ -339,6 +341,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		historyStats:  deps.HistoryStatsProvider,
 		historyPurger: deps.HistoryPurger,
 		status:        deps.StatusProvider,
+		startupProvider: deps.StartupProvider,
 		connect:       deps.Connect,
 		cli:           deps.CLI,
 		cacheToken:    cfg.CacheToken,
@@ -538,6 +541,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 
 	h.GET("/healthz", s.handleHealthz)
 	h.GET("/readyz", s.handleReadyz)
+	h.GET("/startup", s.handleStartup)
 	h.GET("/metrics", adaptor.HertzHandler(promhttp.Handler()))
 
 	h.NoRoute(s.handleNoRoute)

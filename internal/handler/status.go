@@ -69,6 +69,20 @@ func (s *Server) handleReadyz(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, map[string]any{"state": state})
 }
 
+// handleStartup is the kube startup probe: 200 when the Raft node has joined
+// the cluster and DNS is resolved. Used by Kubernetes startupProbe.
+func (s *Server) handleStartup(ctx context.Context, c *app.RequestContext) {
+	if s.startupProvider == nil {
+		c.JSON(consts.StatusOK, map[string]string{"status": "no_provider"})
+		return
+	}
+	if s.startupProvider.IsStarted() {
+		c.JSON(consts.StatusOK, map[string]string{"status": "started"})
+		return
+	}
+	c.JSON(consts.StatusServiceUnavailable, map[string]string{"status": "starting"})
+}
+
 // readinessState derives pod readiness from the control-plane ("supervisor")
 // service only. A down cache/telemetry/fleet backend degrades the platform but
 // must not make the supervisor pod unready.

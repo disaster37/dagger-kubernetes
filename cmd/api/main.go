@@ -336,6 +336,7 @@ func run(c *cli.Context) error {
 		HistoryStatsProvider: historyPurgeSvc,
 		HistoryPurger:        historyPurgeSvc,
 		StatusProvider:       statusSvc,
+		StartupProvider:      raftStore,
 		Connect:              connectSvc,
 		Router:               router,
 		LiveHub:              liveHub,
@@ -395,6 +396,18 @@ func run(c *cli.Context) error {
 
 	sig := <-sigCh
 	logger.WithField("signal", sig.String()).Info("received signal, shutting down")
+
+	// Graceful Raft leave: transfer leadership, remove self, wait commit.
+	shutdownTimeout := cfg.Raft.TerminationGracePeriod
+	if shutdownTimeout == 0 {
+		shutdownTimeout = 60 * time.Second
+	}
+	leaveCtx, leaveCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	if err := raftStore.LeaveCluster(leaveCtx, shutdownTimeout); err != nil {
+		logger.WithError(err).Warn("failed to leave Raft cluster gracefully")
+	}
+	leaveCancel()
+
 	cancel()
 
 	// Cancel pending disconnect-grace timers before the Raft store closes so
@@ -451,16 +464,19 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	}
 
 	raftStore, err := repository.NewRaftStore(&repository.RaftStoreConfig{
-		Dir:               cfg.Database.Dir,
-		NodeID:            cfg.Raft.NodeID,
-		BindAddr:          cfg.Raft.BindAddr,
-		AdvertiseAddr:     advertise,
-		Resolver:          resolver,
-		ApplyTimeout:      cfg.Raft.ApplyTimeout,
-		SnapshotThreshold: cfg.Raft.SnapshotThreshold,
-		SnapshotInterval:  cfg.Raft.SnapshotInterval,
-		TrailingLogs:      cfg.Raft.TrailingLogs,
-		TLS:               raftTLS,
+		Dir:                     cfg.Database.Dir,
+		NodeID:                  cfg.Raft.NodeID,
+		BindAddr:                cfg.Raft.BindAddr,
+		AdvertiseAddr:           advertise,
+		Resolver:                resolver,
+		ApplyTimeout:            cfg.Raft.ApplyTimeout,
+		SnapshotThreshold:       cfg.Raft.SnapshotThreshold,
+		SnapshotInterval:        cfg.Raft.SnapshotInterval,
+		TrailingLogs:            cfg.Raft.TrailingLogs,
+		TLS:                     raftTLS,
+		PerformanceMultiplier:   cfg.Raft.PerformanceMultiplier,
+		RaftLogCacheSize:        cfg.Raft.RaftLogCacheSize,
+		NoSnapshotRestoreOnStart: cfg.Raft.NoSnapshotRestoreOnStart,
 	}, logger)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open database: %w", err)
