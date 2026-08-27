@@ -1359,6 +1359,35 @@ derive a pipeline-view URL). See
 Feature flags `ci.github.job_summary` and `ci.github.check_runs` add a
 step summary with the trace link and Check Runs annotated with cache stats.
 
+#### Magic cache (GitHub Actions)
+
+When `version` is set, the GHA integration automatically derives a version-pinned
+cache ref from `CACHE_REGISTRY` (default `cache.reg/dagger-cache`) and sets
+`_EXPERIMENTAL_DAGGER_CACHE_CONFIG` — no extra flags needed:
+
+```yaml
+- uses: ./ci-integrations/gha
+  with:
+    server-url: https://supv.example.com
+    token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
+    version: v0.21.4              # magic cache enabled automatically
+    module: github.com/org/ci@v1.0.0
+    args: build
+```
+
+Override the cache registry via env:
+
+```yaml
+- uses: ./ci-integrations/gha
+  with:
+    version: v0.21.4
+  env:
+    CACHE_REGISTRY: my-registry.example.com/dagger-cache
+```
+
+Without `version`, the integration skips cache configuration (the Dagger engine
+uses its default cache backend).
+
 ### Jenkins
 
 Shared library at `ci-integrations/jenkins/vars/daggerKubernetes.groovy`.
@@ -1380,6 +1409,38 @@ daggerKubernetes(serverUrl: 'https://supv.example.com',
 `provisionCli: true` (or the standalone `provisionCli(serverUrl:…, token:…)`
 step) downloads the verified CLI tarball from the supervisor, extracts `dagger`,
 and prepends it to `PATH`. See [CLI provisioning](#cli-provisioning).
+
+#### Magic cache (Jenkins)
+
+Enable with `magicCache: true` and a pinned `version`:
+
+```groovy
+daggerKubernetes(serverUrl: 'https://supv.example.com',
+            token: env.DAGGER_CLOUD_TOKEN,
+            version: 'v0.21.4',
+            magicCache: true) {
+  sh 'dagger call github.com/org/ci@v1.0.0 build'
+}
+```
+
+The library derives `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` from `cacheRegistry`
+(default `cache.reg/dagger-cache`) and the version slug (e.g. `v0.21.4` →
+`V0-21-4`), producing a ref like `cache.reg/dagger-cache:V0-21-4`. Override
+the registry:
+
+```groovy
+daggerKubernetes(serverUrl: 'https://supv.example.com',
+            token: env.DAGGER_CLOUD_TOKEN,
+            version: 'v0.21.4',
+            magicCache: true,
+            cacheRegistry: 'my-registry.example.com/dagger-cache') {
+  sh 'dagger call github.com/org/ci@v1.0.0 build'
+}
+```
+
+`magicCache` requires `version` — without it the flag is a no-op. When
+`dynamicStages: true`, the cache config is passed to the background wrapper
+via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`.
 
 #### Nested step view (Blue Ocean)
 
@@ -1557,6 +1618,34 @@ steps:
 appends a summary step with the trace link. The plugin also provisions the
 Dagger CLI on the fly (needs `curl` + `tar`; disable with `cli: false` or
 pin with `cli_version: v0.21.4`). See [CLI provisioning](#cli-provisioning).
+
+#### Magic cache (Drone)
+
+The plugin passes `DAGGER_TAG` through to the engine but does not set
+`_EXPERIMENTAL_DAGGER_CACHE_CONFIG` automatically. Enable it by adding an env
+line to the step that runs `dagger`:
+
+```yaml
+steps:
+  - name: dagger-kubernetes
+    image: dagger-kubernetes/drone-config-extension
+    settings:
+      server_url: https://supv.example.com
+      token:
+        from_secret: dagger_kubernetes_token
+      version: v0.21.4
+  - name: dagger
+    image: alpine:3
+    environment:
+      DAGGER_CLOUD_TOKEN:
+        from_secret: dagger_kubernetes_token
+      _EXPERIMENTAL_DAGGER_CACHE_CONFIG: type=registry,ref=cache.reg/dagger-cache:V0-21-4,mode=max
+    commands:
+      - dagger call github.com/org/ci@v1.0.0 build
+```
+
+The cache ref tag must match the version slug: dots replaced with dashes,
+leading `v` stripped (e.g. `v0.21.4` → `V0-21-4`).
 
 ### CLI provisioning
 
