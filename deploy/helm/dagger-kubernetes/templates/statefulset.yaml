@@ -90,6 +90,10 @@ spec:
             {{- with .Values.supervisor.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          {{- with .Values.supervisor.extraEnvFrom }}
+          envFrom:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           ports:
             - name: control
               containerPort: 8080

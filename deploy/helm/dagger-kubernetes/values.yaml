@@ -78,6 +78,15 @@ supervisor:
     clusterScope: false
 ## @param supervisor.extraEnv [array] Extra environment variables for the supervisor container.
   extraEnv: []
+  # extraEnvFrom: env vars sourced from K8s Secret/ConfigMap keys injected
+  # into the supervisor container. Use to set proxy env vars (HTTP_PROXY,
+  # HTTPS_PROXY, NO_PROXY) that the supervisor needs when downloading the
+  # Dagger CLI from upstream. Example:
+  # extraEnvFrom:
+  #   - secretRef:
+  #       name: "proxy-settings"
+## @param supervisor.extraEnvFrom [array] Extra envFrom sources for the supervisor container (e.g. proxy env vars from a Secret).
+  extraEnvFrom: []
 
 ## @section Supervisor configuration
 
@@ -103,7 +112,7 @@ supervisor:
 ##   Everything else is derived automatically: node IDs come from the
 ##   StatefulSet pod names, peer discovery from the headless Service DNS, and
 ##   the internal CA is auto-bootstrapped in the <release>-raft-ca Secret.
-    config:
+  config:
     raft:
 ## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""`. Set `""` to end peer addresses at `.svc` (no suffix) or your cluster's real domain for non-standard setups.
       clusterDomain: ""
