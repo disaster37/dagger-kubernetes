@@ -160,13 +160,13 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 		ClientID:     "cid",
 		ClientSecret: "csec",
 		AllowedOrgs:  nil,
-		DefaultGroup: "auto-join",
+		DefaultGroup: "unused-param", // ignored: fallback is now hardcoded "default"
 	}
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
-	// Pre-create the default group.
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "auto-join", AgentAvailable: true})
+	// Pre-create the hardcoded "default" group (the only group that matters now).
+	g, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -174,7 +174,7 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 	}
 	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
 	if len(groups) != 1 || groups[0].ID != g.ID {
-		t.Fatalf("user should auto-join default group, got %v", groups)
+		t.Fatalf("user should auto-join hardcoded default group, got %v", groups)
 	}
 }
 
@@ -419,5 +419,88 @@ func TestOAuthCompleteTeamsFetchFailureFatal(t *testing.T) {
 	_, _, _, err := svc.Complete(context.Background(), "code")
 	if err == nil || !strings.Contains(err.Error(), "fetch github teams") {
 		t.Fatalf("teams fetch failure with allowed_teams should be fatal, got %v", err)
+	}
+}
+
+func TestCompleteOAuthUserFallbackToDefault(t *testing.T) {
+	gh := newGitHubServer(t, []string{}, nil)
+	cfg := domain.OAuthConfig{
+		Enabled:      true,
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		AllowedOrgs:  nil,
+		DefaultGroup: "unused-param", // ignored by the new logic
+	}
+	svc, _, gsvc := newOAuthService(t, &cfg, gh)
+	ctx := context.Background()
+
+	// Create the "default" group.
+	dg, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(groups) != 1 || groups[0].ID != dg.ID {
+		t.Fatalf("user should fall back to default group, got %v", groups)
+	}
+}
+
+func TestCompleteOAuthUserWithMappedGroups(t *testing.T) {
+	gh := newGitHubServer(t, []string{"acme"}, nil)
+	cfg := domain.OAuthConfig{
+		Enabled:      true,
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		AllowedOrgs:  nil,
+		GroupMappings: []domain.GroupMappingRule{
+			{Pattern: "^acme$", Replacement: "acme-mapped"},
+		},
+	}
+	svc, _, gsvc := newOAuthService(t, &cfg, gh)
+	ctx := context.Background()
+
+	// Create both the mapped group and the "default" group.
+	mapped, _ := gsvc.Create(ctx, GroupInput{Name: "acme-mapped", AgentAvailable: true})
+	dg, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	ids := map[string]bool{}
+	for _, g := range groups {
+		ids[g.ID] = true
+	}
+	if !ids[mapped.ID] {
+		t.Fatalf("user should be member of mapped group, got %v", groups)
+	}
+	if ids[dg.ID] {
+		t.Fatal("user should NOT be member of default group when mapping rules matched")
+	}
+}
+
+func TestCompleteOAuthUserNoDefaultGroupExists(t *testing.T) {
+	gh := newGitHubServer(t, []string{}, nil)
+	cfg := domain.OAuthConfig{
+		Enabled:      true,
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		AllowedOrgs:  nil,
+	}
+	svc, _, gsvc := newOAuthService(t, &cfg, gh)
+	ctx := context.Background()
+
+	// Do NOT create a "default" group.
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(groups) != 0 {
+		t.Fatalf("user should have 0 memberships, got %v", groups)
 	}
 }

@@ -892,6 +892,22 @@ from `auth.bootstrap_admin.username` (default `admin`). When
 generated and logged once at WARN (the only place a credential is ever
 logged). Set the password explicitly in production.
 
+### Default group
+
+On first boot with an empty groups table, the supervisor auto-creates a system
+group named `default` with `AgentAvailable=true` and unlimited runner sessions.
+Every user that would otherwise have zero group memberships is automatically
+added to this group:
+
+- **Internal users** (created via the admin API): assigned on creation.
+- **OAuth users**: assigned on every login if no group-mapping rules matched.
+- **Existing users at upgrade time**: swept into the default group on first
+  boot when the groups table was previously empty.
+
+Admins can rename, reconfigure, or delete the `default` group through the
+admin UI/API after bootstrap. If deleted, users with no other groups will not
+be able to provision engines until manually assigned to a group.
+
 ### Groups, projects, and quota
 
 - **Groups** carry `max_runner_sessions` (0 = unlimited),

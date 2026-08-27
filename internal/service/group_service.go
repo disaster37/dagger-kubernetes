@@ -161,6 +161,27 @@ func (s *GroupService) SetUserGroups(ctx context.Context, userID string, groupID
 	return nil
 }
 
+// EnsureMember adds userID to the group identified by groupID if they are not
+// already a member. Idempotent — safe to call when the user is already present.
+func (s *GroupService) EnsureMember(ctx context.Context, groupID, userID string) error {
+	if _, err := s.groups.Get(ctx, groupID); err != nil {
+		return fmt.Errorf("group %s: %w", groupID, err)
+	}
+	if _, err := s.users.Get(ctx, userID); err != nil {
+		return fmt.Errorf("user %s: %w", userID, err)
+	}
+	members, err := s.groups.Members(ctx, groupID)
+	if err != nil {
+		return fmt.Errorf("list members of %s: %w", groupID, err)
+	}
+	for _, m := range members {
+		if m.ID == userID {
+			return nil // already a member
+		}
+	}
+	return addGroupMember(ctx, s.groups, groupID, userID)
+}
+
 // Members returns the users in a group.
 func (s *GroupService) Members(ctx context.Context, groupID string) ([]*domain.User, error) {
 	return s.groups.Members(ctx, groupID)

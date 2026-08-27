@@ -116,3 +116,39 @@ func TestGroupServiceSetMembers(t *testing.T) {
 		t.Fatalf("SetMembers missing group: %v", err)
 	}
 }
+
+func TestGroupServiceEnsureMember(t *testing.T) {
+	gsvc, usvc := newGroupService(t)
+	ctx := context.Background()
+
+	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
+	u := seedUserSvc(t, usvc, "u1")
+
+	// Add member.
+	if err := gsvc.EnsureMember(ctx, g.ID, u.ID); err != nil {
+		t.Fatalf("EnsureMember: %v", err)
+	}
+	members, _ := gsvc.Members(ctx, g.ID)
+	if len(members) != 1 || members[0].ID != u.ID {
+		t.Fatalf("members = %v", members)
+	}
+
+	// Idempotent — duplicate add must not error.
+	if err := gsvc.EnsureMember(ctx, g.ID, u.ID); err != nil {
+		t.Fatalf("EnsureMember duplicate: %v", err)
+	}
+	members, _ = gsvc.Members(ctx, g.ID)
+	if len(members) != 1 {
+		t.Fatalf("duplicate should not grow members, got %d", len(members))
+	}
+
+	// Non-existent group.
+	if err := gsvc.EnsureMember(ctx, "nope", u.ID); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("EnsureMember missing group: %v", err)
+	}
+
+	// Non-existent user.
+	if err := gsvc.EnsureMember(ctx, g.ID, "nope"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("EnsureMember missing user: %v", err)
+	}
+}

@@ -265,11 +265,11 @@ func TestOIDCCompleteGroupsClaimString(t *testing.T) {
 func TestOIDCCompleteDefaultGroupAutoJoin(t *testing.T) {
 	issuer := newFakeOIDCIssuer(t)
 	svc, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
-		c.DefaultGroup = "auto-join"
+		c.DefaultGroup = "unused-param" // ignored: fallback is now hardcoded "default"
 	}))
 	ctx := context.Background()
 
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "auto-join", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -277,7 +277,7 @@ func TestOIDCCompleteDefaultGroupAutoJoin(t *testing.T) {
 	}
 	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
 	if len(groups) != 1 || groups[0].ID != g.ID {
-		t.Fatalf("user should auto-join default group, got %v", groups)
+		t.Fatalf("user should auto-join hardcoded default group, got %v", groups)
 	}
 }
 

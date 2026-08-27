@@ -29,13 +29,6 @@ func orgsIntersect(allowed, have []string) bool {
 	return false
 }
 
-// joinDefaultGroup best-effort adds userID to the configured default group.
-// Missing groups and membership errors are logged (never fatal) — the user is
-// still logged in, just not auto-joined.
-func joinDefaultGroup(ctx context.Context, groups domain.GroupRepository, defaultGroup, userID string, logger *logrus.Logger) {
-	joinGroupByName(ctx, groups, defaultGroup, userID, logger)
-}
-
 // joinGroupByName best-effort adds userID to the named group. Missing groups
 // and membership errors are logged (never fatal). It serves both the mapped
 // (group_mappings) and default_group auto-join paths, so the log message is
@@ -60,18 +53,23 @@ func joinMappedGroups(ctx context.Context, groups domain.GroupRepository, mapped
 }
 
 // completeOAuthUser is the shared post-verification tail for both OAuth
-// providers: ensure the local user exists, auto-join the default group on first
-// login, add mapped supervisor groups, and issue a JWT pair.
+// providers: ensure the local user exists, add mapped supervisor groups, fall
+// back to the hardcoded "default" group when the user still has zero
+// memberships, and issue a JWT pair.
 func completeOAuthUser(ctx context.Context, users *UserService, groups domain.GroupRepository, jwt *JWTService, logger *logrus.Logger, provider, oauthID, username, defaultGroup string, mappedGroups []string) (access, refresh string, u *domain.User, err error) {
-	u, created, err := users.EnsureOAuthUser(ctx, provider, oauthID, username)
+	u, _, err = users.EnsureOAuthUser(ctx, provider, oauthID, username)
 	if err != nil {
 		return "", "", nil, err
 	}
-	if created && defaultGroup != "" {
-		joinDefaultGroup(ctx, groups, defaultGroup, u.ID, logger)
-	}
 	joinMappedGroups(ctx, groups, mappedGroups, u.ID, logger)
 	gids, _ := groups.GroupsForUser(ctx, u.ID)
+	// If the user still has zero group memberships after mapping rules ran,
+	// add them to the hardcoded "default" group (on every login, not just first
+	// creation). This ensures every OAuth user can always provision engines.
+	if len(gids) == 0 {
+		joinGroupByName(ctx, groups, "default", u.ID, logger)
+		gids, _ = groups.GroupsForUser(ctx, u.ID)
+	}
 	access, refresh, err = jwt.IssuePair(u, groupIDs(gids))
 	return access, refresh, u, err
 }

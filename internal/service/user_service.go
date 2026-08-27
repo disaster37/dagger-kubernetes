@@ -73,6 +73,17 @@ func (s *UserService) Create(ctx context.Context, username, password string, rol
 		"user_id":  u.ID,
 		"username": u.Username,
 	}).Info("user created")
+
+	// Auto-assign to the default group (best-effort, never blocks user creation).
+	if g, err := s.groups.GetByName(ctx, "default"); err == nil {
+		if err := addGroupMember(ctx, s.groups, g.ID, u.ID); err != nil {
+			s.logger.WithError(err).WithFields(logrus.Fields{
+				"user_id":  u.ID,
+				"username": u.Username,
+			}).Warn("auto-assign to default group failed")
+		}
+	}
+
 	return u, nil
 }
 

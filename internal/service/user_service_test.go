@@ -198,6 +198,59 @@ func TestUserServiceEnsureOAuthUserCollision(t *testing.T) {
 	}
 }
 
+func TestUserServiceCreateAutoAssignDefault(t *testing.T) {
+	r := newServiceDB(t)
+	usvc := NewUserService(r.users, r.groups, testLogger())
+	gsvc := NewGroupService(r.groups, r.users, testLogger())
+	ctx := context.Background()
+
+	// Create the "default" group first.
+	g, err := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	if err != nil {
+		t.Fatalf("create default group: %v", err)
+	}
+
+	u, err := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	members, _ := gsvc.Members(ctx, g.ID)
+	found := false
+	for _, m := range members {
+		if m.ID == u.ID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("user should be auto-assigned to default group")
+	}
+
+	userGroups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(userGroups) != 1 {
+		t.Fatalf("user should have exactly 1 membership, got %d", len(userGroups))
+	}
+}
+
+func TestUserServiceCreateNoDefaultGroup(t *testing.T) {
+	r := newServiceDB(t)
+	usvc := NewUserService(r.users, r.groups, testLogger())
+	gsvc := NewGroupService(r.groups, r.users, testLogger())
+	ctx := context.Background()
+
+	// Do NOT create a "default" group.
+	u, err := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	userGroups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(userGroups) != 0 {
+		t.Fatalf("user should have 0 memberships, got %d", len(userGroups))
+	}
+}
+
 func TestValidateUsername(t *testing.T) {
 	cases := []struct {
 		name string

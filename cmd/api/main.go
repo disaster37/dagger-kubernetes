@@ -203,6 +203,11 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
 
+	// Bootstrap default group (idempotent: only when groups table is empty).
+	if err := bootstrapDefaultGroup(ctx, groupsSvc, usersSvc, logger); err != nil {
+		return fmt.Errorf("bootstrap default group: %w", err)
+	}
+
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 
@@ -664,6 +669,58 @@ func bootstrapAdmin(ctx context.Context, cfg *domain.Config, users *service.User
 		fields["password"] = password
 	}
 	logger.WithFields(fields).Warn("bootstrap admin created")
+	return nil
+}
+
+// bootstrapDefaultGroup creates the "default" system group when no groups exist
+// yet (first boot). Existing users with zero memberships are swept into it.
+// Idempotent: when groups already exist this is a no-op.
+func bootstrapDefaultGroup(ctx context.Context, groups *service.GroupService, users *service.UserService, logger *logrus.Logger) error {
+	existing, err := groups.List(ctx)
+	if err != nil {
+		return err
+	}
+	if len(existing) > 0 {
+		return nil // idempotent: groups already exist
+	}
+
+	g, err := groups.Create(ctx, service.GroupInput{
+		Name:              "default",
+		AgentAvailable:    true,
+		MaxRunnerSessions: 0,
+	})
+	if err != nil {
+		return fmt.Errorf("create default group: %w", err)
+	}
+	logger.WithField("group_id", g.ID).Info("bootstrap default group created")
+
+	// Sweep existing users with zero memberships into the default group.
+	allUsers, err := users.List(ctx)
+	if err != nil {
+		return fmt.Errorf("list users for default group sweep: %w", err)
+	}
+	swept := 0
+	for _, u := range allUsers {
+		userGroups, err := groups.GroupsForUser(ctx, u.ID)
+		if err != nil {
+			logger.WithError(err).WithField("user_id", u.ID).Warn("default group sweep: check memberships failed")
+			continue
+		}
+		if len(userGroups) > 0 {
+			continue
+		}
+		if err := groups.EnsureMember(ctx, g.ID, u.ID); err != nil {
+			logger.WithError(err).WithFields(logrus.Fields{
+				"user_id":  u.ID,
+				"username": u.Username,
+			}).Warn("default group sweep: add member failed")
+			continue
+		}
+		swept++
+	}
+	if swept > 0 {
+		logger.WithField("swept", swept).Info("default group sweep: added existing users")
+	}
 	return nil
 }
 
