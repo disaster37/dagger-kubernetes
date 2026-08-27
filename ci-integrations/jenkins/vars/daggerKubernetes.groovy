@@ -9,7 +9,7 @@
 //     in the background and renders Dagger's internal step tree as nested
 //     scripted-pipeline `stage()` blocks (Blue Ocean) with per-stage logs and
 //     statuses. See docs/design/ADR-024-ci-nested-steps.md.
-def call(Map params = [:], Closure body) {
+def call(Map params = [:], Closure body = null) {
     String serverUrl = params.serverUrl ?: env.DAGGER_KUBERNETES_SERVER
     String token = params.token ?: env.DAGGER_KUBERNETES_TOKEN
     String uiUrl = params.uiUrl ?: env.DAGGER_KUBERNETES_UI ?: serverUrl
@@ -58,21 +58,15 @@ def call(Map params = [:], Closure body) {
             env._EXPERIMENTAL_DAGGER_CACHE_CONFIG = cacheConfig
         }
 
-        def tempLog = File.createTempFile("dagger", ".log")
-        tempLog.deleteOnExit()
-
-        try {
-            body()
-        } catch (e) {
-            echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
-            throw e
-        }
-
-        def logContent = tempLog.text
-        def traceMatch = logContent =~ /[a-f0-9]{32,}/
-        if (traceMatch) {
-            def traceId = traceMatch[0]
-            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/traces/${traceId}"
+        if (body) {
+            try {
+                body()
+            } catch (e) {
+                echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
+                throw e
+            }
+        } else if (!dynamicStages) {
+            error "daggerKubernetes: provide a closure body or set dynamicStages: true with command: '...'"
         }
     }
 }
@@ -200,7 +194,6 @@ void renderStepTree(Map params = [:]) {
     // (plain maps/lists so they stay CPS-serializable across poll iterations).
     def nodes = [:]
     def rootId = null
-    def slurper = new groovy.json.JsonSlurperClassic()
 
     while (!done) {
         String raw = readFile(file: ndjsonFile)
@@ -217,7 +210,7 @@ void renderStepTree(Map params = [:]) {
                     // malformed JSON or a well-formed object of the wrong
                     // shape (missing node/log fields) is skipped, never fatal.
                     try {
-                        def evt = slurper.parseText(line)
+                        def evt = readJSON(text: line)
                         switch (evt.type) {
                             case 'node_started':
                                 def id = evt.node.id
@@ -449,27 +442,23 @@ def provisionCli(Map params = [:]) {
     String binDir = "${WORKSPACE}/.dagger-cli"
     assertShellSafe(binDir, 'workspace path')
 
-    // The Authorization header is written to a 0600 temp file and passed to
+    // The Authorization header is written to a workspace file and passed to
     // curl via -H @file (curl >= 7.55): the token never appears in the build
     // log, in curl's process argv (readable by every local user via ps), nor
     // in the build-wide environment (CWE-214/CWE-532). The file is deleted as
     // soon as provisioning finishes.
-    def headerFile = File.createTempFile('dagger-kubernetes-auth', '.hdr')
-    headerFile.deleteOnExit()
-    headerFile.setReadable(false, false)
-    headerFile.setReadable(true, true)
-    headerFile.setWritable(false, false)
-    headerFile.setWritable(true, true)
-    headerFile.text = "Authorization: Bearer ${token}"
-    assertShellSafe(headerFile.absolutePath, 'temp file path')
+    def headerFile = "${WORKSPACE}/.dagger-kubernetes-auth-${env.BUILD_NUMBER}.hdr"
+    assertShellSafe(headerFile, 'header file path')
+    writeFile(file: headerFile, text: "Authorization: Bearer ${token}")
+    sh "chmod 600 '${headerFile}'"
     try {
         String downloadUrl
         if (version) {
             downloadUrl = "${serverUrl}/api/v1/cli/${version}?os=${osName}&arch=${arch}"
         } else {
             String latestUrl = "${serverUrl}/api/v1/cli/versions/latest?os=${osName}&arch=${arch}"
-            String latest = sh(script: "curl -fsS -H @'${headerFile.absolutePath}' '${latestUrl}'", returnStdout: true).trim()
-            def json = new groovy.json.JsonSlurperClassic().parseText(latest)
+            String latest = sh(script: "curl -fsS -H @'${headerFile}' '${latestUrl}'", returnStdout: true).trim()
+            def json = readJSON(text: latest)
             downloadUrl = json.url
         }
         if (downloadUrl == null || !(downloadUrl ==~ /https?:\/\/\S+/) || isShellUnsafe(downloadUrl)) {
@@ -478,11 +467,11 @@ def provisionCli(Map params = [:]) {
 
         sh """
             mkdir -p "${binDir}"
-            curl -fsS -H @'${headerFile.absolutePath}' '${downloadUrl}' | tar xz -C "${binDir}"
+            curl -fsS -H @'${headerFile}' '${downloadUrl}' | tar xz -C "${binDir}"
             chmod +x "${binDir}/dagger"
         """
     } finally {
-        headerFile.delete()
+        sh "rm -f '${headerFile}'"
     }
     env.PATH = "${binDir}:${env.PATH}"
     echo "[dagger-kubernetes] Provisioned Dagger CLI (${version ?: 'latest'}) at ${binDir}"
