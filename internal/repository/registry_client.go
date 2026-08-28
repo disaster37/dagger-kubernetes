@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -443,7 +444,11 @@ func (c *RegistryStatsClient) UploadBlob(ctx context.Context, repo string, body 
 	}
 
 	// PUT the blob with the digest.
-	putURL := fmt.Sprintf("%s?digest=%s", location, digest)
+	sep := "?"
+	if strings.Contains(location, "?") {
+		sep = "&"
+	}
+	putURL := fmt.Sprintf("%s%sdigest=%s", location, sep, digest)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, buf)
 	if err != nil {
 		return "", 0, fmt.Errorf("build put request: %w", err)
