@@ -18,6 +18,18 @@ if [ -z "$DAGGER_TAG" ]; then
   DAGGER_TAG="${_EXPERIMENTAL_DAGGER_TAG:-}"
 fi
 
+# Auto-discover the installed Dagger CLI version when no explicit tag is set.
+if [ -z "$DAGGER_TAG" ] && command -v dagger >/dev/null 2>&1; then
+  DAGGER_VERSION_OUTPUT=$(dagger version 2>/dev/null) || true
+  if [ -n "$DAGGER_VERSION_OUTPUT" ]; then
+    DISCOVERED=$(echo "$DAGGER_VERSION_OUTPUT" | grep -oP 'v\d+\.\d+\.\d+' | head -1) || true
+    if [ -n "$DISCOVERED" ]; then
+      DAGGER_TAG="$DISCOVERED"
+      echo "Auto-discovered Dagger CLI version: $DAGGER_TAG" >&2
+    fi
+  fi
+fi
+
 if [ -n "$DAGGER_TAG" ]; then
   export _EXPERIMENTAL_DAGGER_TAG="$DAGGER_TAG"
 

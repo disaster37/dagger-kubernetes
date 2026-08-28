@@ -47,9 +47,33 @@ func NewMintingCA(clientCertTTL time.Duration) (*MintingCA, error) {
 func NewMintingCAFromPEM(certPEM, keyPEM []byte, clientCertTTL time.Duration) (*MintingCA, error) {
 	ca := &goca.CA{}
 	if err := ca.LoadCAFromPEM(certPEM, keyPEM); err != nil {
-		return nil, fmt.Errorf("load minting CA from PEM: %w", err)
+		fixedKey, fixErr := fixPKCS1KeyWithWrongHeader(keyPEM)
+		if fixErr != nil {
+			return nil, fmt.Errorf("load minting CA from PEM: %w", err)
+		}
+		if err2 := ca.LoadCAFromPEM(certPEM, fixedKey); err2 != nil {
+			return nil, fmt.Errorf("load minting CA from PEM: %w", err)
+		}
 	}
 	return &MintingCA{gocaCA: ca, clientCertTTL: clientCertTTL}, nil
+}
+
+func fixPKCS1KeyWithWrongHeader(keyPEM []byte) ([]byte, error) {
+	block, _ := pem.Decode(keyPEM)
+	if block == nil {
+		return nil, fmt.Errorf("decode key PEM")
+	}
+	if block.Type != "PRIVATE KEY" {
+		return nil, fmt.Errorf("key PEM type is %q, not PKCS#8", block.Type)
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		return nil, fmt.Errorf("key is valid PKCS#8")
+	}
+	if _, err := x509.ParsePKCS1PrivateKey(block.Bytes); err != nil {
+		return nil, fmt.Errorf("key is neither PKCS#1 nor PKCS#8: %w", err)
+	}
+	fixed := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: block.Bytes})
+	return fixed, nil
 }
 
 // MintClientCert issues a short-lived engine client certificate (client

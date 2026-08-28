@@ -14,6 +14,23 @@ def call(Map params = [:], Closure body = null) {
     String token = params.token ?: env.DAGGER_KUBERNETES_TOKEN
     String uiUrl = params.uiUrl ?: env.DAGGER_KUBERNETES_UI ?: serverUrl
     String version = params.version ?: env.DAGGER_TAG
+
+    // Auto-discover the installed Dagger CLI version when no explicit tag is set.
+    if (!version) {
+        try {
+            String versionOut = sh(script: "dagger version 2>/dev/null || true", returnStdout: true).trim()
+            if (versionOut) {
+                def matcher = versionOut =~ /v(\d+\.\d+\.\d+)/
+                if (matcher) {
+                    version = "v${matcher[0][1]}"
+                    echo "Auto-discovered Dagger CLI version: ${version}"
+                }
+            }
+        } catch (Exception ignored) {
+            // dagger not available — skip auto-discovery
+        }
+    }
+
     boolean dynamicStages = envTruthy(params.dynamicStages, env.DAGGER_KUBERNETES_DYNAMIC_STAGES, false)
     String stepsPollInterval = params.stepsPollInterval ?: env.DAGGER_KUBERNETES_STEPS_POLL_INTERVAL ?: '2s'
     int stepsMaxDepth = (params.stepsMaxDepth ?: env.DAGGER_KUBERNETES_STEPS_MAX_DEPTH ?: 8) as int

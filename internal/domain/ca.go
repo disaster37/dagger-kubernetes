@@ -39,7 +39,11 @@ func (sc *SerializableCertificate) TLSClientCertificate() (tls.Certificate, erro
 
 	key, err := x509.ParsePKCS8PrivateKey(sc.PrivateKey)
 	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("parse private key: %w", err)
+		rsaKey, rsaErr := x509.ParsePKCS1PrivateKey(sc.PrivateKey)
+		if rsaErr != nil {
+			return tls.Certificate{}, fmt.Errorf("parse private key: %w", err)
+		}
+		key = rsaKey
 	}
 
 	return tls.Certificate{
