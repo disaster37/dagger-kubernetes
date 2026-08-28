@@ -651,7 +651,6 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
 | `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21"]` | Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor). |
 | `supervisor.config.cli.enabled` | bool | `true` | Enable on-the-fly Dagger CLI provisioning addon. |
-| `supervisor.config.cli.cacheDir` | string | `""` | Cache dir for verified CLI tarballs (empty = `<database.dir>/cli-cache`). |
 | `supervisor.config.cli.releaseListTtl` | string | `"1h"` | Upstream release-list cache TTL. |
 | `supervisor.config.cli.downloadTimeout` | string | `"5m"` | Outbound upstream fetch timeout. |
 | `supervisor.config.cli.upstream.releasesUrl` | string | `"https://api.github.com/repos/dagger/dagger/releases"` | Release discovery URL (mirror-able). |

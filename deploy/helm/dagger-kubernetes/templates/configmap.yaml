@@ -185,7 +185,6 @@ data:
 {{ toYaml .Values.supervisor.config.version.allowlist | indent 8 }}
     cli:
       enabled: {{ .Values.supervisor.config.cli.enabled }}
-      cache_dir: {{ .Values.supervisor.config.cli.cacheDir | quote }}
       release_list_ttl: {{ .Values.supervisor.config.cli.releaseListTtl | quote }}
       download_timeout: {{ .Values.supervisor.config.cli.downloadTimeout | quote }}
       upstream:

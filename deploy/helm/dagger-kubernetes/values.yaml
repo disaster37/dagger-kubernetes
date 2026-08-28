@@ -336,7 +336,6 @@ supervisor:
       floor: "v0.19.0"
       allowlist: ["0.19", "0.20", "0.21"]
 ## @param supervisor.config.cli.enabled Enable on-the-fly Dagger CLI provisioning addon.
-## @param supervisor.config.cli.cacheDir Cache dir for verified CLI tarballs (empty = <database.dir>/cli-cache).
 ## @param supervisor.config.cli.releaseListTtl Upstream release-list cache TTL.
 ## @param supervisor.config.cli.downloadTimeout Outbound upstream fetch timeout.
 ## @param supervisor.config.cli.upstream.releasesUrl Release discovery URL (mirror-able).
@@ -344,7 +343,6 @@ supervisor:
 ## @param supervisor.config.cli.upstream.githubToken Optional GitHub token for the releases API.
     cli:
       enabled: true
-      cacheDir: ""
       releaseListTtl: "1h"
       downloadTimeout: "5m"
       upstream:
