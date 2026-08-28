@@ -1708,13 +1708,15 @@ or `armv7` (default `linux`/`amd64`).
 list is cached in memory for `cli.release_list_ttl` (default `1h`).
 
 **Integrity:** the supervisor fetches upstream `checksums.txt`, verifies the
-tarball's sha256, and atomically renames it into `cli.cache_dir` before serving.
-A mismatch (or corrupt cached file) is re-fetched or rejected with `502` — a
-corrupt tarball is never served.
+tarball's sha256, and stores it as an OCI artifact on the shared registry
+(`cli.cache_repo`, default `dagger-kubernetes/cli-cache`) before serving. A
+mismatch (or corrupt blob) is rejected with `502` — a corrupt tarball is never
+served. The registry acts as a cluster-wide cache so every supervisor pod can
+serve cached binaries without re-downloading from GitHub.
 
 **Mirror / offline:** point `cli.upstream.releases_url` and
-`cli.upstream.download_base` at a mirror, or pre-seed `cli.cache_dir` to serve
-without upstream. `cli.enabled: false` disables the endpoints (404).
+`cli.upstream.download_base` at a mirror. `cli.enabled: false` disables the
+endpoints (404).
 
 The `dagger-kubernetes-ci` wrapper (`--cli`, `--cli-version`, `--cli-os`,
 `--cli-arch`) and the Jenkins/Drone glue above use these endpoints and extract

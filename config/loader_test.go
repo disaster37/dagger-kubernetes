@@ -733,8 +733,8 @@ func TestLoadCLIDefaults(t *testing.T) {
 	if !cfg.CLI.Enabled {
 		t.Fatal("cli.enabled default should be true")
 	}
-	if cfg.CLI.CacheDir != "" {
-		t.Fatalf("cli.cache_dir default = %q, want empty", cfg.CLI.CacheDir)
+	if cfg.CLI.CacheRepo != "dagger-kubernetes/cli-cache" {
+		t.Fatalf("cli.cache_repo default = %q, want dagger-kubernetes/cli-cache", cfg.CLI.CacheRepo)
 	}
 	if cfg.CLI.ReleaseListTTL != time.Hour {
 		t.Fatalf("cli.release_list_ttl default = %v, want 1h", cfg.CLI.ReleaseListTTL)
@@ -779,6 +779,7 @@ func TestValidateCLIConfig(t *testing.T) {
 		return &domain.Config{
 			CLI: domain.CLIConfig{
 				Enabled:         true,
+				CacheRepo:       "dagger-kubernetes/cli-cache",
 				ReleaseListTTL:  time.Hour,
 				DownloadTimeout: 5 * time.Minute,
 				Upstream: domain.CLIUpstreamConfig{
@@ -800,6 +801,7 @@ func TestValidateCLIConfig(t *testing.T) {
 			c.CLI.Upstream.ReleasesURL = "not-a-url"
 			c.CLI.ReleaseListTTL = 0
 			c.CLI.DownloadTimeout = 0
+			c.CLI.CacheRepo = ""
 		}},
 		{name: "bad releases_url", mut: func(c *domain.Config) {
 			c.CLI.Upstream.ReleasesURL = "ftp://x"
@@ -816,6 +818,12 @@ func TestValidateCLIConfig(t *testing.T) {
 		{name: "negative download_timeout", mut: func(c *domain.Config) {
 			c.CLI.DownloadTimeout = -time.Second
 		}, wantErr: "cli.download_timeout must be > 0"},
+		{name: "empty cache_repo", mut: func(c *domain.Config) {
+			c.CLI.CacheRepo = ""
+		}, wantErr: "cli.cache_repo must not be empty"},
+		{name: "invalid cache_repo", mut: func(c *domain.Config) {
+			c.CLI.CacheRepo = "UPPER/INVALID"
+		}, wantErr: "not a valid OCI repository name"},
 	}
 
 	for _, tt := range tests {

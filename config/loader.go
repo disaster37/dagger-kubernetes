@@ -197,7 +197,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("ci.drone.config_extension", true)
 
 	v.SetDefault("cli.enabled", true)
-	v.SetDefault("cli.cache_dir", "")
+	v.SetDefault("cli.cache_repo", "dagger-kubernetes/cli-cache")
 	v.SetDefault("cli.release_list_ttl", time.Hour)
 	v.SetDefault("cli.download_timeout", 5*time.Minute)
 	v.SetDefault("cli.upstream.releases_url", "https://api.github.com/repos/dagger/dagger/releases")
@@ -552,10 +552,18 @@ func anyEmpty(fields ...string) bool {
 	return false
 }
 
+// validOCIRepoName checks that repo is a non-empty OCI repository name
+// matching [a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*.
+var validOCIRepoNameRe = regexp.MustCompile(`^[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$`)
+
+func validOCIRepoName(repo string) bool {
+	return validOCIRepoNameRe.MatchString(repo)
+}
+
 // validateCLIConfig guards the on-the-fly Dagger CLI provisioning addon. When
 // enabled, the upstream release-discovery and download URLs must be absolute
 // http(s) URLs and the two TTL/timeouts must be positive (a 0 TTL would hot-loop
-// the GitHub Releases API).
+// the GitHub Releases API). The cache repo must be a valid OCI repository name.
 func validateCLIConfig(cfg *domain.Config) error {
 	if !cfg.CLI.Enabled {
 		return nil
@@ -580,6 +588,12 @@ func validateCLIConfig(cfg *domain.Config) error {
 	}
 	if cfg.CLI.DownloadTimeout <= 0 {
 		return fmt.Errorf("cli.download_timeout must be > 0")
+	}
+	if cfg.CLI.CacheRepo == "" {
+		return fmt.Errorf("cli.cache_repo must not be empty")
+	}
+	if !validOCIRepoName(cfg.CLI.CacheRepo) {
+		return fmt.Errorf("cli.cache_repo %q is not a valid OCI repository name", cfg.CLI.CacheRepo)
 	}
 
 	return nil

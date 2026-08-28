@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,6 +13,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -27,6 +29,8 @@ var (
 	ErrRegistryCatalogDisabled = domain.ErrRegistryCatalogDisabled
 	ErrManifestNotFound        = domain.ErrManifestNotFound
 )
+
+var _ domain.CLIRegistryClient = (*RegistryStatsClient)(nil)
 
 // maxRegistryBody caps the size of a registry response body the client will
 // decode (manifests, catalog, tags). A compromised or misbehaving registry
@@ -50,17 +54,17 @@ func validDigest(d string) bool {
 	return digestRe.MatchString(d)
 }
 
-// readBounded reads at most max+1 bytes from r and returns an error when the
-// body exceeds max, so a compromised registry cannot exhaust memory with an
-// oversized response (CWE-400/CWE-770).
-func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
-	lr := io.LimitReader(r, maxBytes+1)
+// readBounded reads at most maxRegistryBody+1 bytes from r and returns an
+// error when the body exceeds maxRegistryBody, so a compromised registry
+// cannot exhaust memory with an oversized response (CWE-400/CWE-770).
+func readBounded(r io.Reader) ([]byte, error) {
+	lr := io.LimitReader(r, maxRegistryBody+1)
 	b, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(b)) > maxBytes {
-		return nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrRegistryUnreachable, maxBytes)
+	if int64(len(b)) > maxRegistryBody {
+		return nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrRegistryUnreachable, maxRegistryBody)
 	}
 	return b, nil
 }
@@ -211,7 +215,7 @@ func (c *RegistryStatsClient) Catalog(ctx context.Context) ([]string, error) {
 	var body struct {
 		Repositories []string `json:"repositories"`
 	}
-	raw, err := readBounded(resp.Body, maxRegistryBody)
+	raw, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read catalog: %w", err)
 	}
@@ -237,7 +241,7 @@ func (c *RegistryStatsClient) Tags(ctx context.Context, repo string) ([]string, 
 	var body struct {
 		Tags []string `json:"tags"`
 	}
-	raw, err := readBounded(resp.Body, maxRegistryBody)
+	raw, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read tags: %w", err)
 	}
@@ -280,7 +284,7 @@ func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string)
 		return nil, "", fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 
-	body, err := readBounded(resp.Body, maxRegistryBody)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("read manifest: %w", err)
 	}
@@ -406,4 +410,169 @@ func (c *RegistryStatsClient) ManifestCreated(ctx context.Context, repo, tag str
 		return time.Time{}, nil
 	}
 	return created, nil
+}
+
+// UploadBlob performs a monolithic blob upload to repo, returning the digest
+// and byte count. Uses the OCI Distribution v2 blob upload flow:
+// POST /v2/<repo>/blobs/uploads/ → PUT <location>?digest=sha256:<hex>.
+func (c *RegistryStatsClient) UploadBlob(ctx context.Context, repo string, body io.Reader) (digest string, size int64, err error) {
+	// Read the entire body into memory so we can compute sha256 and send it
+	// as a monolithic upload (single PUT with digest query param).
+	buf := new(bytes.Buffer)
+	size, err = io.Copy(buf, body)
+	if err != nil {
+		return "", 0, fmt.Errorf("read body: %w", err)
+	}
+	sum := sha256.Sum256(buf.Bytes())
+	digest = fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
+
+	// Initiate a monolithic blob upload.
+	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/v2/%s/blobs/uploads/", c.baseURL(), url.PathEscape(repo)), "")
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	discard(resp)
+
+	if resp.StatusCode != http.StatusAccepted {
+		return "", 0, fmt.Errorf("%w: initiate upload status %d", ErrRegistryUnreachable, resp.StatusCode)
+	}
+
+	location := resp.Header.Get("Location")
+	if location == "" {
+		return "", 0, fmt.Errorf("upload init missing Location header")
+	}
+
+	// PUT the blob with the digest.
+	sep := "?"
+	if strings.Contains(location, "?") {
+		sep = "&"
+	}
+	putURL := fmt.Sprintf("%s%sdigest=%s", location, sep, digest)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, buf)
+	if err != nil {
+		return "", 0, fmt.Errorf("build put request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/octet-stream")
+	if c.username != "" || c.password != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err = c.httpClient.Do(req)
+	if err != nil {
+		return "", 0, fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	discard(resp)
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return "", 0, fmt.Errorf("%w: upload status %d", ErrRegistryUnreachable, resp.StatusCode)
+	}
+
+	// Verify the returned digest matches what we computed.
+	if dgst := resp.Header.Get("Docker-Content-Digest"); dgst != "" && validDigest(dgst) {
+		digest = dgst
+	}
+	return digest, size, nil
+}
+
+// PutManifest pushes an OCI manifest to repo:tag.
+func (c *RegistryStatsClient) PutManifest(ctx context.Context, repo, tag string, manifest *domain.CLIManifest) error {
+	body, err := json.Marshal(manifest)
+	if err != nil {
+		return fmt.Errorf("marshal manifest: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("build put request: %w", err)
+	}
+	req.Header.Set("Content-Type", domain.MediaTypeOCIImageManifest)
+	if c.username != "" || c.password != "" {
+		req.SetBasicAuth(c.username, c.password)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	discard(resp)
+
+	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("%w: put manifest status %d", ErrRegistryUnreachable, resp.StatusCode)
+	}
+	return nil
+}
+
+// GetManifest fetches and decodes a CLI manifest for repo:tag.
+// Returns ErrManifestNotFound on 404.
+func (c *RegistryStatsClient) GetManifest(ctx context.Context, repo, tag string) (*domain.CLIManifest, error) {
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode == http.StatusNotFound {
+		discard(resp)
+		return nil, fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, tag)
+	}
+	if resp.StatusCode != http.StatusOK {
+		discard(resp)
+		return nil, fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
+	}
+
+	body, err := readBounded(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("read manifest: %w", err)
+	}
+
+	var m domain.CLIManifest
+	if err := json.Unmarshal(body, &m); err != nil {
+		return nil, fmt.Errorf("decode manifest: %w", err)
+	}
+	return &m, nil
+}
+
+// GetBlob streams a blob from repo:digest, returning the body and Content-Length.
+func (c *RegistryStatsClient) GetBlob(ctx context.Context, repo, digest string) (io.ReadCloser, int64, error) {
+	if !validDigest(digest) {
+		return nil, 0, fmt.Errorf("invalid digest: must be sha256:<hex>")
+	}
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		_ = resp.Body.Close()
+		return nil, 0, fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, digest)
+	}
+	if resp.StatusCode != http.StatusOK {
+		_ = resp.Body.Close()
+		return nil, 0, fmt.Errorf("%w: get blob status %d", ErrRegistryUnreachable, resp.StatusCode)
+	}
+
+	var size int64 = -1
+	if cl := resp.Header.Get("Content-Length"); cl != "" {
+		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
+			size = n
+		}
+	}
+	return resp.Body, size, nil
+}
+
+// ManifestExists is a HEAD-based check for a manifest (no body download).
+func (c *RegistryStatsClient) ManifestExists(ctx context.Context, repo, tag string) (bool, error) {
+	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	discard(resp)
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
+		return false, nil
+	}
+	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
 }
