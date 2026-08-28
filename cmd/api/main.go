@@ -284,14 +284,15 @@ func run(c *cli.Context) error {
 	// --- On-the-fly Dagger CLI provisioning wiring ---
 	var cliSvc *service.CLIService
 	if cfg.CLI.Enabled {
-		cacheDir := cfg.CLI.CacheDir
-		if cacheDir == "" {
-			cacheDir = filepath.Join(cfg.Database.Dir, "cli-cache")
+		// Use the first backend's client for CLI cache operations.
+		var cliRegClient domain.CLIRegistryClient
+		if len(cacheBackends) > 0 {
+			b := cacheBackends[0]
+			cliRegClient = repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
+		} else {
+			return fmt.Errorf("CLI cache requires at least one registry cache backend")
 		}
-		cliCache, err := repository.NewFileCLICache(cacheDir)
-		if err != nil {
-			return fmt.Errorf("create cli cache: %w", err)
-		}
+		cliCache := repository.NewRegistryCLICache(cliRegClient, cfg.CLI.CacheRepo, os.TempDir(), logger)
 		cliUpstream := repository.NewGitHubCLIUpstream(repository.GitHubCLIUpstreamConfig{
 			ReleasesURL:  cfg.CLI.Upstream.ReleasesURL,
 			DownloadBase: cfg.CLI.Upstream.DownloadBase,

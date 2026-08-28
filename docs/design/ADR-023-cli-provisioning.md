@@ -24,23 +24,33 @@ Requirements:
 3. CI integration for Jenkins and Drone only (GitHub Actions keeps its
    dedicated plugin).
 4. Downloads are sha256-verified server-side before anything is served.
+5. The cache must be shared across all supervisor pods in a multi-node Raft
+   cluster so that each pod does not independently download the tarball from
+   GitHub.
 
 ## Decision
 
-### 1. Dedicated filesystem cache (not the magic cache)
+### 1. OCI registry-backed cache (not local filesystem)
 
-The magic cache (`cache.backend=registry`, ADR-006/012/014) stores BuildKit OCI
-layer blobs under version-tagged refs. It is the wrong tool for a single ~20 MB
-CLI tarball: a CLI binary is not an OCI layer, and the upstream integrity
-artifact is a plain `sha256` checksum of the tarball that maps 1:1 to a
-content-verified file on disk.
+The shared OCI registry (`cache.backend=registry`, ADR-006/012/014) acts as a
+cluster-wide cache accessible to all supervisor pods. Each CLI tarball is stored
+as a full OCI artifact:
 
-Instead, verified tarballs are cached on the supervisor's existing PVC at
-`cli.cache_dir` (default `<database.dir>/cli-cache`, i.e.
-`/var/lib/dagger-kubernetes/cli-cache`), keyed `<version>_<os>_<arch>.tar.gz`.
-The supervisor verifies the `sha256` against upstream `checksums.txt` **before**
-atomically renaming into place (`internal/repository/cli_cache.go`), so clients
-receive a verified tarball and only need to extract it.
+- **Blob**: the raw `dagger_vX.Y.Z_os_arch.tar.gz` file, content-addressed by
+  sha256 digest.
+- **Manifest**: `application/vnd.oci.image.manifest.v1+json` with a single layer
+  referencing the blob, annotated with the tarball's sha256 checksum, version,
+  and filename.
+- **Tag**: `vX.Y.Z-os-arch` (e.g. `v0.21.8-linux-amd64`).
+- **Repository**: configurable via `cli.cache_repo` (default `dagger-kubernetes/cli-cache`).
+
+Retrieval: HEAD manifest → extract blob digest → GET blob → write to temp file
+→ stream. Push: compute sha256 → POST/PUT monolithic blob upload → PUT manifest
+with annotations.
+
+This replaces the previous per-pod filesystem cache at `<database.dir>/cli-cache`
+which required each pod to independently download the tarball from GitHub on
+first request.
 
 ### 2. GitHub Releases discovery
 
@@ -76,11 +86,12 @@ Two supervisor endpoints (both `requireAuth`, consistent with `/api/v1/cache`,
 Follows the dependency rule (`handler → service → domain ← repository`):
 
 - `internal/domain/cli.go` — `CLIArtifact`, `CLIReleaseIndex`, `CLIUpstream`,
-  `CLICache`, sentinel errors (`ErrCLINotFound`, `ErrCLIVersionNotAllowed`,
-  `ErrCLIChecksumMismatch`, `ErrCLIUpstreamUnavailable`), stdlib only.
+  `CLICache`, `CLIRegistryClient`, sentinel errors (`ErrCLINotFound`,
+  `ErrCLIVersionNotAllowed`, `ErrCLIChecksumMismatch`,
+  `ErrCLIUpstreamUnavailable`), stdlib only.
 - `internal/repository/cli_upstream.go` — GitHub releases client (stdlib
   `net/http`, per ADR-007).
-- `internal/repository/cli_cache.go` — sha256-verified atomic filesystem cache.
+- `internal/repository/cli_cache_registry.go` — OCI registry-backed cache.
 - `internal/service/cli_service.go` — resolve-latest, ensure-cached,
   open-for-stream, in-flight dedup (stdlib `sync.Mutex` + per-key channel; no
   new dependency).
@@ -98,25 +109,30 @@ Follows the dependency rule (`handler → service → domain ← repository`):
 
 ## Alternatives considered
 
-- **Push the CLI into the OCI registry cache**: would require implementing OCI
+- **Local filesystem cache on PVC**: per-pod caches on multi-node Raft re-download
+  idempotently but waste bandwidth and increase first-request latency. Rejected
+  in favor of the shared OCI registry (see above).
+- **Push the CLI into the magic cache**: would require implementing OCI
   manifest/blob upload client-side for zero benefit (no layer sharing across
   versions); rejected.
 - **Unauthenticated download**: the CLI is a public artifact, but token-gating
   is kept for consistency with the rest of the API (open-proxy/bandwidth
   protection). Revisit if product wants public downloads (see open questions).
-- **A separate shared RWX volume for a fleet-wide cache**: per-pod caches on
-  multi-node Raft re-download idempotently and cheaply; a shared volume adds
-  operational complexity for no correctness gain.
+- **A separate shared RWX volume for a fleet-wide cache**: adds operational
+  complexity for no correctness gain over the OCI registry approach.
 - **Upstream per-asset `digest` as the primary verification source**: kept as a
   future fallback; `checksums.txt` is the primary source today (both were
   confirmed present for `v0.21.8`).
 
 ## Consequences
 
-- The supervisor pod already mounts `database.dir` on a PVC (fsGroup/uid 10001);
-  the `cli-cache` subdirectory is writable without chart changes.
-- Cache grows ~20 MB per version with no eviction in v1 (accepted short-term; a
-  follow-up TTL/LRU sweep is recommended).
+- The OCI registry stores CLI artifacts alongside engine layers; the repo is
+  configurable (`cli.cache_repo`, default `dagger-kubernetes/cli-cache`).
+- Cache GC applies uniformly to all artifacts in the repo (engine layers + CLI
+  tarballs). No separate eviction policy needed.
+- Temp files created during `Get` (blob download → temp file → stream) accumulate
+  in `os.TempDir()` until OS cleanup. Follow-up can add explicit cleanup or an
+  LRU bound.
 - Unauthenticated GitHub API rate limits (60 req/hr) are mitigated by the 1h TTL
   + optional token; a busy multi-pod fleet re-downloading the list per pod could
   still approach the limit (consider a Raft-stored shared release list later).

@@ -32,6 +32,7 @@ type CLIService struct {
 	releaseTTL       time.Duration
 	releasesInflight *releaseInflight
 	inflight         map[string]*cliInflight // key = version|os|arch
+	meta             map[string]cliMeta      // key = version|os|arch
 }
 
 type cliInflight struct {
@@ -40,9 +41,18 @@ type cliInflight struct {
 	err  error
 }
 
+// cliMeta stores artifact metadata recorded after a successful Put so that
+// EnsureCached can return a CLIArtifact without reading files from disk (the
+// registry backend has no local path).
+type cliMeta struct {
+	sha256 string
+	size   int64
+}
+
 // releaseInflight is the single-flight handle for the upstream release-list
-// fetch, so a burst of concurrent "latest" requests shares one GitHub API call
-// when the TTL cache is cold (mirrors the per-artifact inflight dedup).
+// fetch, so a burst of concurrent callers on a cold cache triggers one
+// upstream API call instead of one per request (mirrors the per-artifact
+// inflight dedup).
 type releaseInflight struct {
 	done     chan struct{}
 	releases []string
@@ -71,6 +81,7 @@ func NewCLIService(
 		metrics:    metrics,
 		releaseTTL: releaseTTL,
 		inflight:   make(map[string]*cliInflight),
+		meta:       make(map[string]cliMeta),
 	}
 }
 
@@ -118,14 +129,21 @@ func (s *CLIService) EnsureCached(ctx context.Context, version, osName, arch str
 	// (e.g. a bare "0.21.8" still resolves the "dagger_v0.21.8_*" asset).
 	version = v.String()
 
-	if path, ok := s.cache.Get(version, osName, arch); ok {
+	// Lightweight existence check via Has (HEAD manifest) before doing a full
+	// Get (which downloads the blob to a temp file).
+	if ok, err := s.cache.Has(ctx, version, osName, arch); err != nil {
+		s.incCache("error")
+		return nil, fmt.Errorf("check cache: %w", err)
+	} else if ok {
 		s.incCache("hit")
-		return s.artifact(version, osName, arch, path), nil
+		return s.artifactFromMeta(version, osName, arch), nil
 	}
 
 	key := fmt.Sprintf("%s|%s|%s", version, osName, arch)
 	s.mu.Lock()
-	if path, ok := s.cache.Get(version, osName, arch); ok {
+	// Double-check after acquiring the lock (Has may have returned true just
+	// before we locked, and another goroutine may have already fetched).
+	if path, ok := s.cache.Get(ctx, version, osName, arch); ok {
 		s.mu.Unlock()
 		s.incCache("hit")
 		return s.artifact(version, osName, arch, path), nil
@@ -158,6 +176,11 @@ func (s *CLIService) EnsureCached(ctx context.Context, version, osName, arch str
 	}
 	inflight.path = path
 	s.incCache("miss")
+	// Use artifactFromMeta for registry-backed cache (path is ""), or artifact
+	// for filesystem-backed cache (path is non-empty).
+	if path == "" {
+		return s.artifactFromMeta(version, osName, arch), nil
+	}
 	return s.artifact(version, osName, arch, path), nil
 }
 
@@ -167,7 +190,7 @@ func (s *CLIService) Open(ctx context.Context, version, osName, arch string) (io
 	if _, err := s.EnsureCached(ctx, version, osName, arch); err != nil {
 		return nil, 0, err
 	}
-	path, ok := s.cache.Get(version, osName, arch)
+	path, ok := s.cache.Get(ctx, version, osName, arch)
 	if !ok {
 		return nil, 0, fmt.Errorf("%w: cached tarball disappeared", domain.ErrCLINotFound)
 	}
@@ -238,16 +261,18 @@ func (s *CLIService) fetchAndCache(ctx context.Context, version, osName, arch st
 		return "", s.failUpstream(fmt.Errorf("%w: no checksum for %s", domain.ErrCLIUpstreamUnavailable, filename), version, osName, arch)
 	}
 
-	rc, _, err := s.upstream.FetchTarball(ctx, version, osName, arch)
+	rc, size, err := s.upstream.FetchTarball(ctx, version, osName, arch)
 	if err != nil {
 		return "", s.failUpstream(err, version, osName, arch)
 	}
 	defer func() { _ = rc.Close() }()
 
-	path, err := s.cache.Put(version, osName, arch, rc, expected)
+	path, err := s.cache.Put(ctx, version, osName, arch, rc, expected)
 	if err != nil {
 		return "", s.failUpstream(err, version, osName, arch)
 	}
+	// Record metadata for artifactFromMeta (registry backend has no local path).
+	s.recordMeta(version, osName, arch, expected, size)
 	s.incUpstream("success")
 	return path, nil
 }
@@ -284,6 +309,35 @@ func (s *CLIService) artifact(version, osName, arch, path string) *domain.CLIArt
 		SHA256:   sha,
 		Size:     size,
 	}
+}
+
+// artifactFromMeta builds a CLIArtifact from in-memory metadata recorded after
+// a successful Put. Used by EnsureCached when Has reports a hit but no local
+// path exists (registry backend).
+func (s *CLIService) artifactFromMeta(version, osName, arch string) *domain.CLIArtifact {
+	key := fmt.Sprintf("%s|%s|%s", version, osName, arch)
+	s.mu.Lock()
+	m := s.meta[key]
+	s.mu.Unlock()
+
+	return &domain.CLIArtifact{
+		Version:  version,
+		OS:       osName,
+		Arch:     arch,
+		Filename: domain.AssetFilename(version, osName, arch),
+		URL:      fmt.Sprintf("%s/api/v1/cli/%s?os=%s&arch=%s", s.publicURL, version, osName, arch),
+		SHA256:   m.sha256,
+		Size:     m.size,
+	}
+}
+
+// recordMeta stores artifact metadata keyed by version|os|arch so that
+// artifactFromMeta can return it without reading files from disk.
+func (s *CLIService) recordMeta(version, osName, arch, sha256 string, size int64) {
+	key := fmt.Sprintf("%s|%s|%s", version, osName, arch)
+	s.mu.Lock()
+	s.meta[key] = cliMeta{sha256: sha256, size: size}
+	s.mu.Unlock()
 }
 
 func (s *CLIService) incCache(result string) {

@@ -12,6 +12,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +23,69 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 	"github.com/disaster/dagger-kubernetes/internal/service"
 )
+
+// stubCLICache is an in-memory cache for integration tests.
+type stubCLICache struct {
+	mu    sync.Mutex
+	items map[string]*stubCacheItem
+}
+
+type stubCacheItem struct {
+	data []byte
+}
+
+func newStubCLICache() *stubCLICache {
+	return &stubCLICache{items: make(map[string]*stubCacheItem)}
+}
+
+func (c *stubCLICache) key(version, osName, arch string) string {
+	return version + "|" + osName + "|" + arch
+}
+
+func (c *stubCLICache) Has(ctx context.Context, version, osName, arch string) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	_, ok := c.items[c.key(version, osName, arch)]
+	return ok, nil
+}
+
+func (c *stubCLICache) Get(ctx context.Context, version, osName, arch string) (string, bool) {
+	c.mu.Lock()
+	item, ok := c.items[c.key(version, osName, arch)]
+	c.mu.Unlock()
+	if !ok {
+		return "", false
+	}
+	f, err := os.CreateTemp("", "cli-cache-*")
+	if err != nil {
+		return "", false
+	}
+	if _, err := f.Write(item.data); err != nil {
+		_ = f.Close()
+		_ = os.Remove(f.Name())
+		return "", false
+	}
+	_ = f.Close()
+	return f.Name(), true
+}
+
+func (c *stubCLICache) Put(ctx context.Context, version, osName, arch string, r io.Reader, sha256Hex string) (string, error) {
+	data, err := io.ReadAll(r)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(data)
+	computed := hex.EncodeToString(sum[:])
+	if computed != sha256Hex {
+		return "", domain.ErrCLIChecksumMismatch
+	}
+	c.mu.Lock()
+	c.items[c.key(version, osName, arch)] = &stubCacheItem{data: data}
+	c.mu.Unlock()
+	return "", nil
+}
+
+func (c *stubCLICache) Dir() string { return "" }
 
 // buildCLITarball returns a gzip'd tar archive containing a single executable
 // `dagger` entry, mimicking the upstream release asset.
@@ -112,10 +177,7 @@ func startCLIServer(t *testing.T, controlAddr, dataAddr string) (serverURL, admi
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
-	cliCache, err := repository.NewFileCLICache(t.TempDir())
-	if err != nil {
-		t.Fatalf("NewFileCLICache: %v", err)
-	}
+	cliCache := newStubCLICache()
 	cliUpstream := repository.NewGitHubCLIUpstream(repository.GitHubCLIUpstreamConfig{
 		ReleasesURL:  upstream.URL + "/releases",
 		DownloadBase: upstream.URL + "/download",

@@ -312,7 +312,7 @@ ci:
 # --- On-the-fly Dagger CLI provisioning ------------------------------------
 cli:
   enabled: true                       # serve verified Dagger CLI tarballs + latest-version resolution.
-  cache_dir: ""                       # "" = <database.dir>/cli-cache (persists on the supervisor PVC).
+  cache_repo: "dagger-kubernetes/cli-cache"  # OCI repository for CLI tarball artifacts (shared across all pods).
   release_list_ttl: "1h"              # how long to cache the upstream release list in memory.
   download_timeout: "5m"              # outbound fetch timeout for the tarball/checksums.
   upstream:
