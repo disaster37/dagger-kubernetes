@@ -89,10 +89,10 @@ func run(c *cli.Context) error {
 	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	logger.WithFields(logrus.Fields{
-		"control_addr": cfg.Server.ControlAddr,
-		"data_addr":    cfg.Server.DataAddr,
-		"public_url":   cfg.Server.PublicURL,
-		"tls_provider": cfg.TLS.Provider,
+		"control_addr":           cfg.Server.ControlAddr,
+		"data_addr":              cfg.Server.DataAddr,
+		"public_url":             cfg.Server.PublicURL,
+		"dataplane_tls_provider": cfg.Supervisor.Dataplane.TLS.Provider,
 	}).Info("dagger-kubernetes supervisor starting")
 
 	// The pipeline-view base URL is server.public_url. config.Load already
@@ -146,11 +146,11 @@ func run(c *cli.Context) error {
 	}
 
 	// Determine control plane TLS cert/key paths based on provider type.
-	controlTLSCertPath := cfg.TLS.CertPath
-	controlTLSKeyPath := cfg.TLS.KeyPath
-	if cfg.TLS.Provider == "embedded" {
-		controlTLSCertPath = filepath.Join(cfg.TLS.CAPath, "server.crt")
-		controlTLSKeyPath = filepath.Join(cfg.TLS.CAPath, "server.key")
+	controlTLSCertPath := cfg.Supervisor.Dataplane.TLS.CertPath
+	controlTLSKeyPath := cfg.Supervisor.Dataplane.TLS.KeyPath
+	if cfg.Supervisor.Dataplane.TLS.Provider == "embedded" {
+		controlTLSCertPath = filepath.Join(cfg.Supervisor.Dataplane.TLS.CAPath, "server.crt")
+		controlTLSKeyPath = filepath.Join(cfg.Supervisor.Dataplane.TLS.CAPath, "server.key")
 	}
 
 	versionResolver, err := service.NewResolver(cfg.Version.Floor, cfg.Version.Allowlist, nil)
@@ -469,8 +469,8 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	if isMultiNode && !cfg.Raft.TLS.ClientAuth {
 		logger.Warn(`raft multi-node is configured with raft.tls.client_auth=false: peers will not verify each other's certificates, so an unauthenticated peer could join the cluster (CWE-295). Keep raft.tls.client_auth=true (mTLS) for multi-node in production.`)
 	}
-	if isMultiNode && cfg.TLS.Provider == "embedded" && (clientset == nil || cfg.CA.MintingCASecret == "") && isMintingCAOnPerPodStorage(cfg) {
-		logger.Warn(`multi-node is configured with the embedded TLS provider but the minting CA cannot be shared across pods (no K8s clientset or ca.minting_ca_secret is empty), and tls.ca_path is stored under the per-pod database directory. Each pod will mint a DISTINCT engine-client CA, so engine mTLS client certs issued by one pod will be REJECTED by other pods' data-plane listeners (CWE-295). To fix: run with a K8s clientset and ca.minting_ca_secret set (the embedded provider then shares the CA via that Secret), mount a shared ReadWriteMany volume at tls.ca_path, or switch tls.provider to cert-manager/external with a shared CA.`)
+	if isMultiNode && cfg.Supervisor.Dataplane.TLS.Provider == "embedded" && (clientset == nil || cfg.CA.MintingCASecret == "") && isMintingCAOnPerPodStorage(cfg) {
+		logger.Warn(`multi-node is configured with the embedded TLS provider but the minting CA cannot be shared across pods (no K8s clientset or ca.minting_ca_secret is empty), and supervisor.dataplane.tls.ca_path is stored under the per-pod database directory. Each pod will mint a DISTINCT engine-client CA, so engine mTLS client certs issued by one pod will be REJECTED by other pods' data-plane listeners (CWE-295). To fix: run with a K8s clientset and ca.minting_ca_secret set (the embedded provider then shares the CA via that Secret), mount a shared ReadWriteMany volume at supervisor.dataplane.tls.ca_path, or switch supervisor.dataplane.tls.provider to cert-manager/external with a shared CA.`)
 	}
 
 	var raftTLS *tls.Config
@@ -1076,15 +1076,15 @@ func selectTLSProvider(cfg *domain.Config, clientset kubernetes.Interface) (doma
 	// regardless of the server-TLS provider below. The provider only decides
 	// where the data/control-plane server certificate comes from.
 	minting := mintingProvider(cfg, clientset)
-	switch cfg.TLS.Provider {
+	switch cfg.Supervisor.Dataplane.TLS.Provider {
 	case "embedded":
 		return minting, nil
 	case "cert-manager":
-		return repository.NewCertManagerProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, minting), nil
+		return repository.NewCertManagerProvider(cfg.Supervisor.Dataplane.TLS.CertPath, cfg.Supervisor.Dataplane.TLS.KeyPath, minting), nil
 	case "external":
-		return repository.NewExternalProvider(cfg.TLS.CertPath, cfg.TLS.KeyPath, minting), nil
+		return repository.NewExternalProvider(cfg.Supervisor.Dataplane.TLS.CertPath, cfg.Supervisor.Dataplane.TLS.KeyPath, minting), nil
 	default:
-		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.TLS.Provider)
+		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.Supervisor.Dataplane.TLS.Provider)
 	}
 }
 
@@ -1102,7 +1102,7 @@ func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *reposi
 		}
 		hostname, _ := os.Hostname()
 		return repository.NewEmbeddedProviderWithSecret(
-			cfg.TLS.CAPath,
+			cfg.Supervisor.Dataplane.TLS.CAPath,
 			cfg.CA.ClientCertTTL,
 			cfg.CA.MintingCASecret,
 			namespace,
@@ -1112,7 +1112,7 @@ func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *reposi
 			cfg.Server.DataHost,
 		)
 	}
-	return repository.NewEmbeddedProvider(cfg.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost)
+	return repository.NewEmbeddedProvider(cfg.Supervisor.Dataplane.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost)
 }
 
 // mintingCABootstrap reports whether this node should generate + share the
@@ -1128,12 +1128,12 @@ func mintingCABootstrap(cfg *domain.Config, hostname string) bool {
 }
 
 // isMintingCAOnPerPodStorage reports whether the embedded minting CA path
-// (tls.ca_path) is stored under the per-pod Raft data directory. With the
-// StatefulSet conversion, each pod has its own PVC at database.dir, so a
-// minting CA under that path is per-pod and breaks engine mTLS trust across
-// pods (CWE-295).
+// (supervisor.dataplane.tls.ca_path) is stored under the per-pod Raft data
+// directory. With the StatefulSet conversion, each pod has its own PVC at
+// database.dir, so a minting CA under that path is per-pod and breaks engine
+// mTLS trust across pods (CWE-295).
 func isMintingCAOnPerPodStorage(cfg *domain.Config) bool {
-	caPath := cfg.TLS.CAPath
+	caPath := cfg.Supervisor.Dataplane.TLS.CAPath
 	dbDir := cfg.Database.Dir
 	if caPath == "" || dbDir == "" {
 		return false

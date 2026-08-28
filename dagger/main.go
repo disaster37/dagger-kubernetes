@@ -36,6 +36,9 @@ var binaries = []struct {
 }
 
 // helmTemplateMatrix lists the --set combinations from the original CI.
+// The TLS variants exercise the three data-plane server-certificate cases
+// (embedded default, cert-manager via dataCert, custom secret via
+// dataIngress.tls.secretName) plus the external-provider keypair rendering.
 var helmTemplateMatrix = [][]string{
 	{},
 	{"--set", "supervisor.enabled=false"},
@@ -47,6 +50,22 @@ var helmTemplateMatrix = [][]string{
 		"--set", "loki.enabled=false",
 		"--set", "victoria.enabled=false",
 		"--set", "grafana.enabled=false",
+	},
+	{
+		"--set", "dataIngress.enabled=true",
+		"--set", "dataIngress.host=data.example.com",
+		"--set", "dataCert.enabled=true",
+		"--set", "dataCert.issuerName=letsencrypt-prod",
+	},
+	{
+		"--set", "dataIngress.enabled=true",
+		"--set", "dataIngress.host=data.example.com",
+		"--set", "dataIngress.tls.secretName=dataplane-certs",
+	},
+	{
+		"--set", "supervisor.dataplane.tls.provider=external",
+		"--set", "supervisor.dataplane.tls.crt=EXTERNAL_CRT",
+		"--set", "supervisor.dataplane.tls.key=EXTERNAL_KEY",
 	},
 }
 

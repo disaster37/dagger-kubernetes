@@ -2,9 +2,12 @@ package handler
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -385,6 +388,12 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 		}
 	}()
 
+	// Log exactly which certificate the data plane is about to serve. When
+	// clients fail to trust it (or hang in "connecting to engine"), this is
+	// the first clue: subject/issuer/SANs/expiry tell the operator whether
+	// the intended (e.g. Let's Encrypt) certificate is actually in use.
+	s.logDataPlaneServingCert(&tlsCert)
+
 	tlsConfig := &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 		ClientAuth:   tls.RequireAndVerifyClientCert,
@@ -410,26 +419,165 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 				s.logger.WithError(err).Error("tcp accept error")
 				continue
 			}
-			conn := tls.Server(raw, tlsConfig)
-			if err := conn.Handshake(); err != nil {
-				s.logger.WithError(err).Debug("tls handshake failed")
-				_ = raw.Close()
-				continue
-			}
-			select {
-			case s.dataConnSem <- struct{}{}:
-				go func() {
-					defer func() { <-s.dataConnSem }()
-					s.handleDataConn(conn)
-				}()
-			default:
-				s.logger.Warn("data plane connection limit reached, dropping connection")
-				_ = conn.Close()
-			}
+			s.serveTLSConn(raw, tlsConfig)
 		}
 	}()
 
 	return nil
+}
+
+// tlsHandshakeInfo collects per-connection context while a data-plane TLS
+// handshake runs, so both success and failure logs can carry the remote
+// address and the SNI the client requested.
+type tlsHandshakeInfo struct {
+	remoteAddr string
+	serverName string
+}
+
+// serveTLSConn performs the mTLS handshake for one accepted data-plane
+// connection and, on success, dispatches it to the L4 engine tunnel. Every
+// outcome is logged: a client that does not trust the server certificate
+// (e.g. a Dagger CLI whose system trust pool rejects the embedded self-signed
+// cert) aborts the handshake with a TLS alert, and without this log the
+// failure is completely silent while the client retries forever.
+func (s *Server) serveTLSConn(raw net.Conn, base *tls.Config) {
+	info := &tlsHandshakeInfo{remoteAddr: raw.RemoteAddr().String()}
+
+	cfg := base.Clone()
+	cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		info.serverName = hello.ServerName
+		return nil, nil
+	}
+
+	conn := tls.Server(raw, cfg)
+	if err := conn.Handshake(); err != nil {
+		reason := classifyTLSHandshakeError(err)
+		s.metrics.DataHandshakeFailuresTotal.WithLabelValues(reason).Inc()
+		s.logger.WithFields(logrus.Fields{
+			"remote_addr": info.remoteAddr,
+			"sni":         info.serverName,
+			"reason":      reason,
+		}).WithError(err).Warn("data plane TLS handshake failed")
+		_ = raw.Close()
+		return
+	}
+
+	state := conn.ConnectionState()
+	s.logger.WithFields(logrus.Fields{
+		"remote_addr":    info.remoteAddr,
+		"sni":            info.serverName,
+		"client_cn":      clientCN(&state),
+		"client_cert_fp": clientFingerprint(&state),
+		"tls_version":    tlsVersionName(state.Version),
+		"cipher_suite":   tls.CipherSuiteName(state.CipherSuite),
+	}).Debug("data plane TLS handshake succeeded")
+
+	select {
+	case s.dataConnSem <- struct{}{}:
+		go func() {
+			defer func() { <-s.dataConnSem }()
+			s.handleDataConn(conn)
+		}()
+	default:
+		s.logger.Warn("data plane connection limit reached, dropping connection")
+		_ = conn.Close()
+	}
+}
+
+// logDataPlaneServingCert logs the certificate the data-plane listener serves
+// once at startup: subject, issuer, DNS SANs, validity window and SHA-256
+// fingerprint. Operators comparing this against the certificate they intended
+// to provide (e.g. via dataIngress.tls.secretName) can spot a wrong keypair
+// immediately instead of debugging client hangs.
+func (s *Server) logDataPlaneServingCert(tlsCert *tls.Certificate) {
+	if tlsCert == nil || len(tlsCert.Certificate) == 0 {
+		s.logger.Warn("data plane TLS certificate is empty; clients will fail the handshake")
+		return
+	}
+	cert := tlsCert.Leaf
+	if cert == nil {
+		parsed, err := x509.ParseCertificate(tlsCert.Certificate[0])
+		if err != nil {
+			s.logger.WithError(err).Warn("data plane TLS certificate could not be parsed; clients may fail the handshake")
+			return
+		}
+		cert = parsed
+	}
+	s.logger.WithFields(logrus.Fields{
+		"subject":        cert.Subject.String(),
+		"issuer":         cert.Issuer.String(),
+		"dns_names":      cert.DNSNames,
+		"not_before":     cert.NotBefore.UTC(),
+		"not_after":      cert.NotAfter.UTC(),
+		"cert_sha256":    hex.EncodeToString(certSHA256(cert.Raw)),
+		"days_to_expiry": int(time.Until(cert.NotAfter).Hours() / 24),
+	}).Info("data plane TLS server certificate")
+}
+
+// certSHA256 returns the SHA-256 fingerprint of a DER-encoded certificate.
+func certSHA256(der []byte) []byte {
+	sum := sha256.Sum256(der)
+	return sum[:]
+}
+
+// classifyTLSHandshakeError maps a server-side handshake error to a stable,
+// grep-friendly reason string. The distinction matters for diagnosing why a
+// Dagger client hangs in "connecting to engine":
+//   - "remote error: tls: bad certificate" / "unknown certificate authority"
+//     means the CLIENT rejected the server certificate (it is not trusted, or
+//     its SANs do not cover the dialed hostname);
+//   - x509 verify errors on the server side mean the supervisor rejected the
+//     client certificate (mTLS), e.g. a lease cert from another pod's CA.
+func classifyTLSHandshakeError(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "remote error: tls: bad certificate"):
+		return "client_rejected_server_certificate"
+	case strings.Contains(msg, "remote error: tls: unknown certificate authority"):
+		return "client_rejected_server_certificate_unknown_ca"
+	case strings.Contains(msg, "remote error: tls: certificate required"):
+		return "client_certificate_required"
+	case strings.Contains(msg, "remote error: tls: handshake failure"):
+		return "remote_handshake_failure"
+	case strings.Contains(msg, "remote error: tls: no application protocol"):
+		return "no_alpn_agreement"
+	case strings.Contains(msg, "remote error: tls:"):
+		return "remote_tls_alert"
+	case strings.Contains(msg, "client didn't provide a certificate"):
+		return "no_client_certificate"
+	case strings.Contains(msg, "certificate signed by unknown authority"):
+		return "client_certificate_unknown_authority"
+	case strings.Contains(msg, "certificate has expired") || strings.Contains(msg, "certificate is not yet valid"):
+		return "client_certificate_not_valid"
+	case strings.Contains(msg, "client certificate authentication failed"):
+		return "client_certificate_authentication_failed"
+	default:
+		return "handshake_error"
+	}
+}
+
+// clientCN returns the subject common name of the peer certificate that
+// authenticated a data-plane connection, or "" when none is present.
+func clientCN(state *tls.ConnectionState) string {
+	if len(state.PeerCertificates) == 0 {
+		return ""
+	}
+	return state.PeerCertificates[0].Subject.CommonName
+}
+
+// tlsVersionName renders a TLS protocol version as a human-readable string.
+func tlsVersionName(v uint16) string {
+	switch v {
+	case tls.VersionTLS12:
+		return "TLS 1.2"
+	case tls.VersionTLS13:
+		return "TLS 1.3"
+	default:
+		return fmt.Sprintf("0x%04x", v)
+	}
 }
 
 // configure builds the Hertz engine with all routes and middleware registered
@@ -928,14 +1076,17 @@ func (s *Server) handleDataConn(conn net.Conn) {
 
 	tlsConn, ok := conn.(*tls.Conn)
 	if !ok {
-		s.logger.Error("not a TLS connection")
+		s.logger.WithField("remote_addr", conn.RemoteAddr().String()).Error("not a TLS connection")
 		return
 	}
 
 	state := tlsConn.ConnectionState()
 	fp := clientFingerprint(&state)
 	if fp == "" {
-		s.logger.Error("no client certificate")
+		s.logger.WithFields(logrus.Fields{
+			"remote_addr": conn.RemoteAddr().String(),
+			"sni":         state.ServerName,
+		}).Error("no client certificate")
 		return
 	}
 

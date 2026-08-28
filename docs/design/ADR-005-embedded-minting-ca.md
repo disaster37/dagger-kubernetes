@@ -1,6 +1,11 @@
 # ADR-005: Embedded Minting CA
 
 **Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-kubernetes team
+**Updated:** 2026-08-28 — `tls.provider` config key renamed to
+`supervisor.dataplane.tls.provider`; the Helm chart now auto-switches the
+provider value when `dataCert.enabled` or `dataIngress.tls.secretName` is set,
+so operators no longer need to manually set it. See also the data-plane TLS
+troubleshooting section in `docs/README.md`.
 
 ## Context
 
@@ -26,12 +31,13 @@ startup and persists it:
   `cert-manager` (external), `external` (user-managed files).
 - **The minting CA is auto-bootstrapped for every server-TLS provider.** It
   is an internal CA that only signs short-lived engine client certs, so it
-  never needs a public/cert-manager issuer. The provider (`tls.provider`)
-  only decides where the server certificate comes from: `embedded` = minting
-  CA issues it; `cert-manager` = a cert-manager `Certificate` issues it;
-  `external` = operator-managed PEM files. In all cases the minting CA is
-  generated in-pod and shared via `ca.minting_ca_secret` in multi-node
-  deployments.
+  never needs a public/cert-manager issuer. The provider
+  (`supervisor.dataplane.tls.provider`) only decides where the server
+  certificate comes from: `embedded` = minting CA issues it; `cert-manager` = a
+  cert-manager `Certificate` issues it; `external` = operator-managed PEM files.
+  In all cases the minting CA is generated in-pod and shared via
+  `ca.minting_ca_secret` in multi-node deployments. The Helm chart auto-switches
+  this value when `dataCert.enabled` or `dataIngress.tls.secretName` is set.
 
 ## Rationale
 

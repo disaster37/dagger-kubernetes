@@ -192,37 +192,58 @@ back the stable pod names used for discovery: <fullname>-headless. */}}
 {{- printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .) -}}
 {{- end -}}
 
-{{/* Resolve the control/data-plane server TLS certificate path. The embedded
-provider issues its own server cert from the minting CA (under tls.ca_path), so
-the path is unused. The cert-manager provider reads the cert-manager-issued
-keypair mounted at /etc/dagger-kubernetes/data-tls (tls.crt). The external
-provider reads the <fullname>-tls Secret mounted at /etc/dagger-kubernetes/tls
-when tls.crt/tls.key are set (the chart auto-wires certPath/keyPath to it), or
-the operator-supplied path when tls.certPath/tls.keyPath are set explicitly. */}}
-{{- define "dagger-kubernetes.controlTLSCertPath" -}}
-{{- if eq (.Values.tls.provider | default "embedded") "cert-manager" -}}
-/etc/dagger-kubernetes/data-tls/tls.crt
-{{- else if eq (.Values.tls.provider | default "embedded") "external" -}}
-{{- if and .Values.tls.crt .Values.tls.key -}}
-/etc/dagger-kubernetes/tls/tls.crt
+{{/* Resolve the data-plane server TLS provider. The chart auto-switches:
+- dataIngress.tls.secretName -> "external" (operator/cert-manager-managed
+  tls.crt/tls.key Secret, mounted at /etc/dagger-kubernetes/data-tls)
+- dataCert.enabled -> "cert-manager" (chart-rendered Certificate, mounted at
+  /etc/dagger-kubernetes/data-tls)
+- otherwise the configured supervisor.dataplane.tls.provider (default
+  "embedded"). When both dataCert.enabled and dataIngress.tls.secretName are
+  set, dataIngress.tls.secretName wins (that secret is mounted and served;
+  cert-manager's dataCert secret is unused). */}}
+{{- define "dagger-kubernetes.dataplaneTLSProvider" -}}
+{{- if .Values.dataIngress.tls.secretName -}}
+external
+{{- else if .Values.dataCert.enabled -}}
+cert-manager
 {{- else -}}
-{{- .Values.tls.certPath | default "" -}}
-{{- end -}}
-{{- else -}}
-{{- .Values.tls.certPath | default "" -}}
+{{- .Values.supervisor.dataplane.tls.provider | default "embedded" -}}
 {{- end -}}
 {{- end -}}
 
-{{- define "dagger-kubernetes.controlTLSKeyPath" -}}
-{{- if eq (.Values.tls.provider | default "embedded") "cert-manager" -}}
-/etc/dagger-kubernetes/data-tls/tls.key
-{{- else if eq (.Values.tls.provider | default "embedded") "external" -}}
-{{- if and .Values.tls.crt .Values.tls.key -}}
-/etc/dagger-kubernetes/tls/tls.key
+{{/* Resolve the control/data-plane server TLS certificate path. The embedded
+provider issues its own server cert from the minting CA (under
+supervisor.dataplane.tls.ca_path), so the path is unused. When dataCert or
+dataIngress.tls.secretName is set, the chart auto-wires the mounted
+data-tls Secret (/etc/dagger-kubernetes/data-tls/tls.crt). The external
+provider reads the <fullname>-tls Secret mounted at
+/etc/dagger-kubernetes/tls when supervisor.dataplane.tls.crt/tls.key are set
+(the chart auto-wires certPath/keyPath to it), or the operator-supplied path
+when supervisor.dataplane.tls.certPath/tls.keyPath are set explicitly. */}}
+{{- define "dagger-kubernetes.dataplaneTLSCertPath" -}}
+{{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName -}}
+/etc/dagger-kubernetes/data-tls/tls.crt
+{{- else if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" -}}
+{{- if and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key -}}
+/etc/dagger-kubernetes/tls/tls.crt
 {{- else -}}
-{{- .Values.tls.keyPath | default "" -}}
+{{- .Values.supervisor.dataplane.tls.certPath | default "" -}}
 {{- end -}}
 {{- else -}}
-{{- .Values.tls.keyPath | default "" -}}
+{{- .Values.supervisor.dataplane.tls.certPath | default "" -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.dataplaneTLSKeyPath" -}}
+{{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName -}}
+/etc/dagger-kubernetes/data-tls/tls.key
+{{- else if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" -}}
+{{- if and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key -}}
+/etc/dagger-kubernetes/tls/tls.key
+{{- else -}}
+{{- .Values.supervisor.dataplane.tls.keyPath | default "" -}}
+{{- end -}}
+{{- else -}}
+{{- .Values.supervisor.dataplane.tls.keyPath | default "" -}}
 {{- end -}}
 {{- end -}}

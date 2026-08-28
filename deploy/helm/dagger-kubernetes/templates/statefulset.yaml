@@ -115,7 +115,7 @@ spec:
               mountPath: /etc/dagger-kubernetes/config.app.yaml
               subPath: config.app.yaml
               readOnly: true
-            {{- if and .Values.tls.crt .Values.tls.key }}
+            {{- if and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key }}
             - name: tls
               mountPath: /etc/dagger-kubernetes/tls
               readOnly: true
@@ -170,7 +170,7 @@ spec:
         - name: config
           configMap:
             name: {{ include "dagger-kubernetes.fullname" . }}-config
-        {{- if and .Values.tls.crt .Values.tls.key }}
+        {{- if and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key }}
         - name: tls
           secret:
             secretName: {{ include "dagger-kubernetes.fullname" . }}-tls

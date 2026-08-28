@@ -458,10 +458,10 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_debug`                            | `false`                                                  | `engine.toml: debug = true`.                                                                                                                  |
 |                 | `engine_log_format`                       | `json`                                                   | `engine.toml: [log] format`; `""` omits.                                                                                                      |
 |                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
-| `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `tls.caCrt`/`tls.caKey` (Helm) to bring an existing CA. |
+| `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
-| `tls`           | `provider`                                | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Minting CA is auto-bootstrapped for all.                  |
-|                 | `cert_path` / `key_path`                  | see loader                                               | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager).                                                        |
+| `supervisor.dataplane.tls` | `provider`                        | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Chart auto-switches when `dataCert.enabled` or `dataIngress.tls.secretName` is set. Minting CA is auto-bootstrapped for all. |
+|                 | `cert_path` / `key_path`                  | see loader                                               | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager/dataIngress to `/etc/dagger-kubernetes/data-tls`).        |
 |                 | `lease_ttl`                               | `2m`                                                     | Lease TTL; clients renew before expiry.                                                                                                       |
 | `version`       | `floor`                                   | `v0.19.0`                                                | Minimum engine version.                                                                                                                       |
 |                 | `allowlist`                               | —                                                        | `major.minor` prefixes to admit.                                                                                                              |
@@ -1119,17 +1119,20 @@ once after upgrading.
 
 The data plane is mTLS-only. The Supervisor:
 
-1. Holds a **server cert** — where it comes from depends on `tls.provider`
-   (see below).
+1. Holds a **server cert** — where it comes from depends on
+   `supervisor.dataplane.tls.provider` (see below). The Helm chart auto-switches
+   this value when you enable `dataCert.enabled` (→ `"cert-manager"`) or set
+   `dataIngress.tls.secretName` (→ `"external"`), and auto-wires the cert/key
+   paths to the mounted secret.
 2. Holds a **minting CA** in `ca.minting_ca_secret`; it signs short-lived
-   (`ca.client_cert_ttl`) client certs at lease grant. The minting CA is
-   **auto-bootstrapped on first boot** for every provider: ordinal 0 of the
-   supervisor StatefulSet generates a goca CA and writes it to the
-   `<release>-minting-ca` Secret; the other pods poll the Secret before
-   issuing anything. The `tls.ca_path` files are kept as a local cache. The
-   Secret contains the CA **private key** (any pod may mint client certs) and
-   must be RBAC-restricted to the supervisor ServiceAccount — the chart
-   already does this.
+    (`ca.client_cert_ttl`) client certs at lease grant. The minting CA is
+    **auto-bootstrapped on first boot** for every provider: ordinal 0 of the
+    supervisor StatefulSet generates a goca CA and writes it to the
+    `<release>-minting-ca` Secret; the other pods poll the Secret before
+    issuing anything. The `supervisor.dataplane.tls.ca_path` files are kept as
+    a local cache. The Secret contains the CA **private key** (any pod may mint
+    client certs) and must be RBAC-restricted to the supervisor ServiceAccount —
+    the chart already does this.
 3. Pins each minted cert's lease to a specific engine pod via the L4 proxy.
 
 The **Raft transport** is likewise mTLS (chart default) with its own
@@ -1138,17 +1141,55 @@ auto-bootstrapped internal CA (`<release>-raft-ca`) — see
 
 ### TLS providers
 
-| `tls.provider` | Server certificate source | Minting CA | Notes |
+| `supervisor.dataplane.tls.provider` | Server certificate source | Minting CA | Notes |
 |---|---|---|---|
-| `embedded` (default) | Self-signed, issued by the auto-generated minting CA | auto-bootstrapped | Zero config. Server cert SANs cover the data host, cache vhost, and pod names automatically. |
-| `cert-manager` | cert-manager `Certificate` (e.g. Let's Encrypt) | auto-bootstrapped | Publicly trusted server cert; the minting CA is still internal. |
-| `external` | Operator-managed PEM files (`tls.cert_path`/`tls.key_path`) | auto-bootstrapped | Bring your own keypair (e.g. from an external PKI). |
+| `embedded` (default) | Self-signed, issued by the auto-generated minting CA | auto-bootstrapped | Zero config. Server cert SANs cover the data host, cache vhost, and pod names automatically. The Helm chart auto-switches to `"cert-manager"` when `dataCert.enabled` is set, or to `"external"` when `dataIngress.tls.secretName` is set — you do not need to set this manually in those cases. |
+| `cert-manager` | cert-manager `Certificate` (e.g. Let's Encrypt) | auto-bootstrapped | Publicly trusted server cert; the minting CA is still internal. Set `dataCert.enabled: true` (the chart auto-wires paths). |
+| `external` | Operator-managed PEM files (`supervisor.dataplane.tls.certPath`/`keyPath`) or `<fullname>-tls` Secret | auto-bootstrapped | Bring your own keypair (e.g. from an external PKI). When `dataIngress.tls.secretName` is set, the chart auto-switches to `"external"` and auto-wires paths to the mounted secret. |
 
 **Zero certificate generation:** with `embedded` (the default) or
 `cert-manager`, you never run `openssl` by hand — the minting CA, the Raft CA,
 and the server cert (embedded) are all generated automatically. To bring an
-existing minting CA (e.g. migrating a prior deployment), set `tls.caCrt`/`tls.caKey`
-in the chart values; the supervisor reuses it instead of generating a new one.
+existing minting CA (e.g. migrating a prior deployment), set
+`supervisor.dataplane.tls.caCrt`/`caKey` in the chart values; the supervisor
+reuses it instead of generating a new one.
+
+### Troubleshooting data-plane TLS failures
+
+When Dagger clients hang in "connecting to engine" with no visible error, check
+the supervisor startup log for the line `data plane TLS server certificate` — it
+shows exactly which cert is being served (subject, issuer, SANs, expiry, SHA-256
+fingerprint). If the client rejects the cert, the supervisor logs a WARN at
+handshake failure time with a stable `reason` field:
+
+- **`client_rejected_server_certificate`** — the client does not trust the
+  server certificate it received. This usually means the embedded self-signed
+  cert is in use but the client verifies against its system trust pool. Fix:
+  serve a publicly trusted cert via `dataCert.enabled` (cert-manager) or
+  `dataIngress.tls.secretName` (custom secret).
+- **`client_rejected_server_certificate_unknown_ca`** — same as above, but the
+  client explicitly reported "unknown certificate authority" (our CA is not in
+  its trust pool). Fix: serve a cert signed by a public CA.
+- **`client_certificate_required`** — the client did not present an mTLS
+  client certificate. Fix: ensure the Dagger CLI has a valid lease cert.
+- **`remote_handshake_failure`** — the remote side aborted the TLS handshake.
+- **`no_alpn_agreement`** — no ALPN protocol was agreed upon.
+- **`remote_tls_alert`** — a generic remote TLS alert.
+- **`no_client_certificate`** — the client did not provide any certificate at
+  all during mTLS negotiation.
+- **`client_certificate_unknown_authority`** — the supervisor rejected the
+  client's mTLS certificate because it was signed by a different CA (e.g. a
+  lease cert minted on another pod that had a distinct minting CA due to missing
+  `ca.minting_ca_secret`). Fix: ensure multi-node deployments share the minting
+  CA via `ca.minting_ca_secret`.
+- **`client_certificate_not_valid`** — the client certificate has expired or is
+  not yet valid.
+- **`client_certificate_authentication_failed`** — the client certificate
+  authentication failed for another reason.
+- **`handshake_error`** — a generic/unclassified TLS error.
+
+The Prometheus metric `dagger_kubernetes_data_handshake_failures_total` (label
+`reason`) provides the same classification for monitoring/alerting.
 
 ### cert-manager (public server certificate)
 
@@ -1175,21 +1216,26 @@ spec:
             class: nginx
 EOF
 
-# 2. Install with the cert-manager provider
+# 2. Install with dataCert enabled — the chart auto-switches provider to "cert-manager"
 helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
-  --set tls.provider=cert-manager \
+  --set dataCert.enabled=true \
+  --set dataCert.issuerName=letsencrypt-prod \
   --set dataIngress.enabled=true \
-  --set dataIngress.host=data.your-domain.com \
-  --set dataIngress.annotations.cert-manager.io/cluster-issuer=letsencrypt-prod \
-  --set dataIngress.tls.secretName=dagger-data-tls
+  --set dataIngress.host=data.your-domain.com
 ```
 
 The chart renders a cert-manager `Certificate` (`dataCert.enabled: true` +
-`dataCert.issuerName`/`issuerKind`) and auto-wires `tls.cert_path`/`key_path`
-to the mounted Secret (`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`).
-The `dataIngress` (nginx `ssl-passthrough`) forwards the raw mTLS handshake to
-the supervisor, which serves the cert-manager certificate.
+`dataCert.issuerName`/`issuerKind`) and auto-wires
+`supervisor.dataplane.tls.certPath`/`keyPath` to the mounted Secret
+(`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`). The `dataIngress` (nginx
+`ssl-passthrough`) forwards the raw mTLS handshake to the supervisor, which
+serves the cert-manager certificate.
+
+> **Two alternative flows:** Use **either** `dataCert.enabled` (chart-rendered
+> cert-manager `Certificate`) **or** `dataIngress.tls.secretName` (operator-
+> managed secret) — not both. When both are set, `dataIngress.tls.secretName`
+> takes mount precedence and the cert-manager Certificate is unused.
 
 > The certificate must include the **cache vhost** (`cache.<public_url host>`,
 > or the `supervisor.config.cache.publicHost` override) as a SAN alongside the
@@ -1780,8 +1826,8 @@ all delegate to (or mirror) this script.
 ## Production checklist
 
 - [ ] Set `grafana.adminPassword` to a strong value
-- [ ] Use `cert-manager` (`tls.provider: cert-manager`) for a publicly trusted server certificate (optional; `embedded` is fully auto-provisioned but self-signed)
-- [ ] Back up the auto-generated `<release>-minting-ca` and `<release>-raft-ca` Secrets (or set `tls.caCrt`/`tls.caKey` explicitly to reuse a known CA)
+- [ ] Use `cert-manager` (`supervisor.dataplane.tls.provider: cert-manager`) for a publicly trusted server certificate (optional; `embedded` is fully auto-provisioned but self-signed)
+- [ ] Back up the auto-generated `<release>-minting-ca` and `<release>-raft-ca` Secrets (or set `supervisor.dataplane.tls.caCrt`/`caKey` explicitly to reuse a known CA)
 - [ ] Configure persistent storage for all stateful components
 - [ ] Set appropriate resource requests/limits per component
 - [ ] Configure ingress with TLS for the control plane
