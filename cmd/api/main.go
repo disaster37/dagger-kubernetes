@@ -673,6 +673,10 @@ func bootstrapAdmin(ctx context.Context, cfg *domain.Config, users *service.User
 	}
 
 	if _, err := users.Create(ctx, username, password, domain.RoleAdmin); err != nil {
+		if errors.Is(err, domain.ErrNotLeader) {
+			logger.Warn("bootstrap admin: not raft leader, skipping")
+			return nil
+		}
 		return fmt.Errorf("create bootstrap admin: %w", err)
 	}
 
@@ -708,6 +712,10 @@ func bootstrapDefaultGroup(ctx context.Context, groups *service.GroupService, us
 		MaxRunnerSessions: 0,
 	})
 	if err != nil {
+		if errors.Is(err, domain.ErrNotLeader) {
+			logger.Warn("bootstrap default group: not raft leader, skipping")
+			return nil
+		}
 		return fmt.Errorf("create default group: %w", err)
 	}
 	logger.WithField("group_id", g.ID).Info("bootstrap default group created")
