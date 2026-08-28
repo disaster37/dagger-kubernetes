@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 
@@ -113,6 +114,15 @@ func (c *RegistryCLICache) Put(ctx context.Context, version, osName, arch string
 	digest, _, err := c.client.UploadBlob(ctx, c.repo, buf)
 	if err != nil {
 		return "", fmt.Errorf("upload blob: %w", err)
+	}
+
+	// Upload the empty JSON config blob referenced by the manifest.
+	// The registry requires all referenced blobs to exist before accepting the manifest.
+	// sha256("{}") = 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
+	emptyJSON := strings.NewReader("{}")
+	if _, _, err := c.client.UploadBlob(ctx, c.repo, emptyJSON); err != nil {
+		// Log a warning but don't fail — the blob may already exist from a previous upload.
+		c.logger.WithError(err).Warn("upload empty config blob (may already exist)")
 	}
 
 	// Build manifest with annotations.
