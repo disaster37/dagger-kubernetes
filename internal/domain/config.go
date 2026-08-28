@@ -3,24 +3,39 @@ package domain
 import "time"
 
 type Config struct {
-	Server    ServerConfig    `mapstructure:"server"`
-	Auth      AuthConfig      `mapstructure:"auth"`
-	Telemetry TelemetryConfig `mapstructure:"telemetry"`
-	Cache     CacheConfig     `mapstructure:"cache"`
-	History   HistoryConfig   `mapstructure:"history"`
-	Fleet     FleetConfig     `mapstructure:"fleet"`
-	CA        CAConfig        `mapstructure:"ca"`
-	TLS       TLSConfig       `mapstructure:"tls"`
-	Version   VersionConfig   `mapstructure:"version"`
-	LeaseTTL  time.Duration   `mapstructure:"lease_ttl"`
-	Pipeline  PipelineConfig  `mapstructure:"pipeline"`
-	CI        CIConfig        `mapstructure:"ci"`
-	LogLevel  string          `mapstructure:"log_level"`
-	LogFormat string          `mapstructure:"log_format"` // "json" (default) | "text"
-	OTel      OTelConfig      `mapstructure:"otel"`
-	Database  DatabaseConfig  `mapstructure:"database"`
-	Raft      RaftConfig      `mapstructure:"raft"`
-	CLI       CLIConfig       `mapstructure:"cli"`
+	Server     ServerConfig     `mapstructure:"server"`
+	Supervisor SupervisorConfig `mapstructure:"supervisor"`
+	Auth       AuthConfig       `mapstructure:"auth"`
+	Telemetry  TelemetryConfig  `mapstructure:"telemetry"`
+	Cache      CacheConfig      `mapstructure:"cache"`
+	History    HistoryConfig    `mapstructure:"history"`
+	Fleet      FleetConfig      `mapstructure:"fleet"`
+	CA         CAConfig         `mapstructure:"ca"`
+	Version    VersionConfig    `mapstructure:"version"`
+	LeaseTTL   time.Duration    `mapstructure:"lease_ttl"`
+	Pipeline   PipelineConfig   `mapstructure:"pipeline"`
+	CI         CIConfig         `mapstructure:"ci"`
+	LogLevel   string           `mapstructure:"log_level"`
+	LogFormat  string           `mapstructure:"log_format"` // "json" (default) | "text"
+	OTel       OTelConfig       `mapstructure:"otel"`
+	Database   DatabaseConfig   `mapstructure:"database"`
+	Raft       RaftConfig       `mapstructure:"raft"`
+	CLI        CLIConfig        `mapstructure:"cli"`
+}
+
+// SupervisorConfig groups the supervisor's own subcomponent configuration.
+// The data plane subsection replaces the former top-level `tls` section: it
+// holds everything about the data-plane server certificate (provider, keypair
+// paths) plus the embedded minting-CA persistence path, so the section name
+// states exactly what it configures (see ADR-005).
+type SupervisorConfig struct {
+	Dataplane SupervisorDataplaneConfig `mapstructure:"dataplane"`
+}
+
+// SupervisorDataplaneConfig configures the mTLS L4 data plane served by the
+// supervisor (the endpoint Dagger clients dial to reach engine sessions).
+type SupervisorDataplaneConfig struct {
+	TLS TLSConfig `mapstructure:"tls"`
 }
 
 type ServerConfig struct {
@@ -322,8 +337,11 @@ type CAConfig struct {
 	ClientCertTTL   time.Duration `mapstructure:"client_cert_ttl"`
 }
 
+// TLSConfig configures the server certificate the supervisor serves on the
+// control and data planes, and the path where the embedded provider persists
+// the auto-bootstrapped minting CA + self-signed server keypair.
 type TLSConfig struct {
-	Provider string `mapstructure:"provider"`
+	Provider string `mapstructure:"provider"` // "embedded" | "cert-manager" | "external"
 	CAPath   string `mapstructure:"ca_path"`
 	CertPath string `mapstructure:"cert_path"`
 	KeyPath  string `mapstructure:"key_path"`

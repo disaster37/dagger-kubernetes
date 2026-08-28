@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"io"
 	"net"
 	"testing"
@@ -188,5 +189,33 @@ func TestServeDataTunnelLeaseNotFound(t *testing.T) {
 func TestClientFingerprint(t *testing.T) {
 	if got := clientFingerprint(&tls.ConnectionState{}); got != "" {
 		t.Fatalf("clientFingerprint(no peer) = %q, want empty", got)
+	}
+}
+
+func TestClassifyTLSHandshakeError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"nil", nil, ""},
+		{"client rejected server cert", errors.New("remote error: tls: bad certificate"), "client_rejected_server_certificate"},
+		{"client unknown CA", errors.New("remote error: tls: unknown certificate authority"), "client_rejected_server_certificate_unknown_ca"},
+		{"client cert required", errors.New("remote error: tls: certificate required"), "client_certificate_required"},
+		{"remote handshake failure", errors.New("remote error: tls: handshake failure"), "remote_handshake_failure"},
+		{"no alpn agreement", errors.New("remote error: tls: no application protocol"), "no_alpn_agreement"},
+		{"remote other alert", errors.New("remote error: tls: unexpected message"), "remote_tls_alert"},
+		{"no client certificate", errors.New("tls: client didn't provide a certificate"), "no_client_certificate"},
+		{"client cert unknown authority", errors.New("tls: failed to verify client certificate: x509: certificate signed by unknown authority"), "client_certificate_unknown_authority"},
+		{"client cert expired", errors.New("tls: failed to verify client certificate: x509: certificate has expired or is not yet valid"), "client_certificate_not_valid"},
+		{"client cert auth failed", errors.New("tls: client certificate authentication failed"), "client_certificate_authentication_failed"},
+		{"fallback", errors.New("EOF"), "handshake_error"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := classifyTLSHandshakeError(tc.err); got != tc.want {
+				t.Fatalf("classifyTLSHandshakeError(%v) = %q, want %q", tc.err, got, tc.want)
+			}
+		})
 	}
 }

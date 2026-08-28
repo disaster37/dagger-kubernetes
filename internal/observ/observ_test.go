@@ -88,6 +88,7 @@ func TestNewMetricsRegisters(t *testing.T) {
 	m.PipelineDisconnectFailedTotal.WithLabelValues("stale_sweep").Inc()
 	m.CLICacheTotal.WithLabelValues("hit").Inc()
 	m.CLIUpstreamFetchTotal.WithLabelValues("success").Inc()
+	m.DataHandshakeFailuresTotal.WithLabelValues("client_rejected_server_certificate").Inc()
 
 	fam, err := reg.Gather()
 	if err != nil {
@@ -126,4 +127,5 @@ func TestNewMetricsNilRegistry(t *testing.T) {
 	// Counters must still be usable without registration (no panic).
 	m.EngineAcquireTotal.WithLabelValues("v0.21.4", "request").Inc()
 	m.ActiveLeases.Inc()
+	m.DataHandshakeFailuresTotal.WithLabelValues("handshake_error").Inc()
 }

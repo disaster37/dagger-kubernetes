@@ -37,11 +37,11 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Cache.InternalAddr != "" {
 		t.Fatalf("cache.internal_addr default = %q, want empty", cfg.Cache.InternalAddr)
 	}
-	if cfg.TLS.CertPath != "/etc/dagger-kubernetes/tls/tls.crt" {
-		t.Fatalf("tls.cert_path default = %q", cfg.TLS.CertPath)
+	if cfg.Supervisor.Dataplane.TLS.CertPath != "/etc/dagger-kubernetes/tls/tls.crt" {
+		t.Fatalf("supervisor.dataplane.tls.cert_path default = %q", cfg.Supervisor.Dataplane.TLS.CertPath)
 	}
-	if cfg.TLS.KeyPath != "/etc/dagger-kubernetes/tls/tls.key" {
-		t.Fatalf("tls.key_path default = %q", cfg.TLS.KeyPath)
+	if cfg.Supervisor.Dataplane.TLS.KeyPath != "/etc/dagger-kubernetes/tls/tls.key" {
+		t.Fatalf("supervisor.dataplane.tls.key_path default = %q", cfg.Supervisor.Dataplane.TLS.KeyPath)
 	}
 	if cfg.LeaseTTL != 2*time.Minute {
 		t.Fatalf("lease_ttl default = %v, want 2m", cfg.LeaseTTL)

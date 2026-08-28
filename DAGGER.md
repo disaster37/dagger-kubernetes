@@ -10,7 +10,7 @@ The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](
 |----------|-------------------|-----|
 | `lint`   | Delegated to `golang` module `Lint` | Upstream provides golangci-lint; custom base image pins v2.12.2 |
 | `build`  | Delegated to `golang` module `Build` ×2 | Upstream handles CGO_ENABLED=0, ldflags, cross-compile |
-| `helm`   | Lint delegated to `helm` module; template matrix local | Upstream `Lint` = `helm dependency update` + `helm lint`; no `helm template` support |
+| `helm`   | Lint delegated to `helm` module; template matrix local | Upstream `Lint` = `helm dependency update` + `helm lint`; no `helm template` support. The local template matrix also covers the three data-plane TLS cases (embedded default, `dataCert.enabled`, `dataIngress.tls.secretName`) plus the external-provider keypair rendering. |
 | `test`   | Local | Upstream hardcodes flags (no `-race`, `-vet=off`); `-race` requires CGO |
 | `ui`     | Local | Upstream has no UI support |
 | `docker` | Local | Upstream has no Dockerfile support |

@@ -263,15 +263,17 @@ ca:
   minting_ca_secret: "supervisor-minting-ca"  # K8s Secret holding the minting CA (AUTO-BOOTSTRAPPED on first boot; holds the CA private key).
   client_cert_ttl: "2h"                        # TTL of client certs minted at lease grant.
 
-# --- TLS ---------------------------------------------------------------------
+# --- Supervisor data plane (server TLS) --------------------------------------
 # The minting CA (above) is AUTO-BOOTSTRAPPED for every provider and shared
 # across pods via ca.minting_ca_secret (ordinal 0 generates it, others poll).
 # `provider` only decides where the server certificate comes from:
-tls:
-  provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external".
-  ca_path: "/var/lib/dagger-kubernetes/ca"   # path to persist the embedded minting CA (Docker bind-mount or PVC); also a local cache of the shared Secret.
-  cert_path: "/etc/dagger-kubernetes/tls/tls.crt"  # PEM cert path for the cert-manager/external providers (the Helm chart auto-wires cert-manager to /etc/dagger-kubernetes/data-tls/tls.crt).
-  key_path: "/etc/dagger-kubernetes/tls/tls.key"   # PEM key path for the cert-manager/external providers.
+supervisor:
+  dataplane:
+    tls:
+      provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external" (custom/operator keypair).
+      ca_path: "/var/lib/dagger-kubernetes/ca"   # path to persist the embedded minting CA (Docker bind-mount or PVC); also a local cache of the shared Secret.
+      cert_path: "/etc/dagger-kubernetes/tls/tls.crt"  # PEM cert path for the cert-manager/external providers (the Helm chart auto-wires cert-manager to /etc/dagger-kubernetes/data-tls/tls.crt).
+      key_path: "/etc/dagger-kubernetes/tls/tls.key"   # PEM key path for the cert-manager/external providers.
 
 # --- Lease -------------------------------------------------------------------
 lease_ttl: "2m"   # TTL of a client's engine lease; renew before this expires.

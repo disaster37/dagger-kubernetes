@@ -52,10 +52,10 @@ List available versions:
 helm show chart oci://ghcr.io/disaster37/charts/dagger-kubernetes | grep version
 ```
 
-> For a publicly trusted server certificate (Let's Encrypt), set
-> `tls.provider: cert-manager` and enable `dataCert` /
-> `dataIngress.tls.secretName` — see [TLS & certificates](#tls--certificates).
-> The minting CA is still auto-bootstrapped.
+> For a publicly trusted server certificate (Let's Encrypt), enable `dataCert`
+> or set `dataIngress.tls.secretName` — the chart auto-switches
+> `supervisor.dataplane.tls.provider` and auto-wires cert paths. See [TLS &
+> certificates](#tls--certificates). The minting CA is still auto-bootstrapped.
 
 ## Exposition & URLs
 
@@ -170,26 +170,32 @@ require manual generation** in a standard Helm install:
 
 | Certificate | Auto-bootstrapped | Notes |
 |---|---|---|
-| **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Set `tls.caCrt`/`tls.caKey` only to bring an existing CA. |
+| **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Set `supervisor.dataplane.tls.caCrt`/`caKey` only to bring an existing CA. |
 | **Raft transport CA** (`<release>-raft-ca`) | Yes | Internal mTLS for the Raft transport. Same bootstrap pattern (see [Raft](#raft-distributed-store)). |
 | **Server certificate** (control + data plane) | `embedded` (default) | Issued by the minting CA, self-signed. SANs cover the data host, cache vhost, and pod names automatically. |
 
 ### TLS providers
 
-`tls.provider` selects where the server certificate comes from. The minting
-CA is auto-bootstrapped for **every** provider.
+`supervisor.dataplane.tls.provider` selects where the server certificate comes
+from. The minting CA is auto-bootstrapped for **every** provider. The Helm chart
+auto-switches this value when you enable `dataCert.enabled` (→ `"cert-manager"`)
+or set `dataIngress.tls.secretName` (→ `"external"`), so you rarely need to set
+it manually.
 
 - **`embedded` (default)** — the minting CA issues a self-signed server
   certificate. Zero config; no public trust, but mTLS authentication is
   unaffected.
 - **`cert-manager`** — cert-manager issues a publicly trusted certificate
   (e.g. Let's Encrypt). Requires cert-manager installed + a `ClusterIssuer`.
-  Enable `dataCert` (chart-rendered `Certificate`) or
-  `dataIngress.tls.secretName` (Let's Encrypt via the Ingress annotation). The
-  chart auto-wires `certPath`/`keyPath` to the mounted Secret
+  Enable `dataCert` (chart-rendered `Certificate`). The chart auto-wires
+  `certPath`/`keyPath` to the mounted Secret
   (`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`).
-- **`external`** — bring your own PEM files via `tls.certPath`/`keyPath`
-  (paths inside the supervisor container).
+- **`external`** — bring your own PEM files via
+  `supervisor.dataplane.tls.certPath`/`keyPath` (paths inside the supervisor
+  container), or provide `crt`/`key` values that the chart renders into the
+  `<fullname>-tls` Secret and mounts at `/etc/dagger-kubernetes/tls`. When
+  `dataIngress.tls.secretName` is set, the chart auto-switches to `"external"`
+  and auto-wires paths to the mounted secret.
 
 ### cert-manager example
 
@@ -212,10 +218,9 @@ spec:
             class: nginx
 EOF
 
-# 2. Install with the cert-manager provider (chart-rendered Certificate)
+# 2. Install with dataCert enabled — the chart auto-switches provider to "cert-manager"
 helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes \
   --version 0.1.0 -f my-values.yaml --namespace dagger-stack \
-  --set tls.provider=cert-manager \
   --set dataCert.enabled=true \
   --set dataCert.issuerName=letsencrypt-prod \
   --set dataIngress.enabled=true \
@@ -367,7 +372,7 @@ grafana:
 - The minting CA and Raft CA are auto-bootstrapped on first boot (see
   [TLS & certificates](#tls--certificates)); back up the resulting
   `<release>-minting-ca` and `<release>-raft-ca` Secrets, or set
-  `tls.caCrt`/`tls.caKey` explicitly to reuse a known CA.
+  `supervisor.dataplane.tls.caCrt`/`caKey` explicitly to reuse a known CA.
 - Configure `ingress.tls` for the control-plane Ingress; the default ships
   with no TLS (`tls: []`) to avoid binding a placeholder secret.
 
@@ -413,10 +418,11 @@ grafana:
 | `auth.oauth.clientSecretRef.name` / `.key` | Reference an existing Secret instead of plaintext `clientSecret` (takes precedence; key empty = `client_secret`) | `""` / `"client_secret"` |
 | `auth.cookie.*` | Session cookie names + Secure flag | see `values.yaml` |
 | `auth.cors.allowedOrigins` | Cross-origin Origin allowlist | `[]` |
-| `tls.provider` | Server cert source: `embedded` \| `cert-manager` \| `external` | `embedded` |
-| `tls.clientCertTtl` | Engine client cert TTL | `2h` |
-| `tls.caCrt` / `tls.caKey` | Minting CA (PEM). Empty = **auto-bootstrap** on first boot | `""` |
-| `tls.crt` / `tls.key` | Server cert/key PEM (only `external` provider). cert-manager auto-wires this | `""` |
+| `supervisor.dataplane.tls.provider` | Server cert source: `embedded` \| `cert-manager` \| `external`. Chart auto-switches when `dataCert.enabled` or `dataIngress.tls.secretName` is set. | `embedded` |
+| `supervisor.dataplane.tls.certPath` / `.keyPath` | PEM paths for `external` provider (chart auto-wires). | `""` |
+| `supervisor.dataplane.tls.clientCertTtl` | Engine client cert TTL | `2h` |
+| `supervisor.dataplane.tls.caCrt` / `.caKey` | Minting CA (PEM). Empty = **auto-bootstrap** on first boot | `""` |
+| `supervisor.dataplane.tls.crt` / `.key` | Server cert/key PEM (only `external` provider, rendered into `<fullname>-tls` Secret). | `""` |
 | `dataCert.enabled` | Render a cert-manager `Certificate` for the data plane | `false` |
 | `dataIngress.tls.secretName` | cert-manager (Let's Encrypt) secret for the data plane | `""` |
 | `ingress.enabled` | Enable control-plane Ingress | `true` |
@@ -694,14 +700,14 @@ Configure it under `supervisor.config.history`:
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `tls.provider` | string | `"embedded"` | TLS provider for the server certificate: "embedded", "cert-manager", or "external". |
-| `tls.certPath` | string | `""` | Server certificate path (only "external"). cert-manager auto-wires the mounted data-tls secret. |
-| `tls.keyPath` | string | `""` | Server key path (only "external"). |
-| `tls.clientCertTtl` | string | `"2h"` | Client certificate TTL (engine session certs minted from the CA). |
-| `tls.caCrt` | string | `""` | PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot. |
-| `tls.caKey` | string | `""` | PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot. |
-| `tls.crt` | string | `""` | PEM-encoded server certificate (only needed for provider "external"). |
-| `tls.key` | string | `""` | PEM-encoded server private key (only needed for provider "external"). |
+| `supervisor.dataplane.tls.provider` | string | `"embedded"` | TLS provider for the server certificate: "embedded", "cert-manager", or "external". The chart auto-switches to "cert-manager" when `dataCert.enabled` is set, and to "external" when `dataIngress.tls.secretName` is set. |
+| `supervisor.dataplane.tls.certPath` | string | `""` | Server certificate path (only "external"). cert-manager/dataIngress auto-wire the mounted data-tls secret. |
+| `supervisor.dataplane.tls.keyPath` | string | `""` | Server key path (only "external"). |
+| `supervisor.dataplane.tls.clientCertTtl` | string | `"2h"` | Client certificate TTL (engine session certs minted from the CA). |
+| `supervisor.dataplane.tls.caCrt` | string | `""` | PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot. |
+| `supervisor.dataplane.tls.caKey` | string | `""` | PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot. |
+| `supervisor.dataplane.tls.crt` | string | `""` | PEM-encoded server certificate (only needed for provider "external", rendered into `<fullname>-tls` Secret). |
+| `supervisor.dataplane.tls.key` | string | `""` | PEM-encoded server private key (only needed for provider "external"). |
 
 ### Services
 

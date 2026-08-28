@@ -88,6 +88,52 @@ supervisor:
 ## @param supervisor.extraEnvFrom [array] Extra envFrom sources for the supervisor container (e.g. proxy env vars from a Secret).
   extraEnvFrom: []
 
+## @section Supervisor data-plane TLS (server certificate)
+
+## @descriptionStart
+## Where the supervisor's data-plane server certificate comes from. Three
+## cases, all auto-wired by the chart:
+## - `embedded` (default): the auto-bootstrapped minting CA issues a
+##   self-signed server cert (SANs cover the data host, cache vhost, pod
+##   names). Zero config, but NOT publicly trusted — Dagger clients that
+##   verify against the system trust pool will fail the handshake.
+## - `cert-manager`: set `dataCert.enabled: true` (chart-rendered
+##   Certificate) — the chart auto-switches `provider` to "cert-manager" and
+##   auto-wires `certPath`/`keyPath` to the mounted data-tls secret.
+## - custom secret: set `dataIngress.tls.secretName` (any tls.crt/tls.key
+##   Secret — cert-manager via Ingress annotation, or operator-managed) —
+##   the chart auto-switches `provider` to "external" and auto-wires
+##   `certPath`/`keyPath` to the mounted data-tls secret.
+## When BOTH dataCert.enabled and dataIngress.tls.secretName are set,
+## dataIngress.tls.secretName wins (that secret is mounted and served;
+## cert-manager's dataCert secret is unused). Operators should set only one
+## of them. When neither is set, `provider` selects embedded (default),
+## cert-manager (operator-managed mounted files), or external (PEM files at
+## certPath/keyPath, or crt/key rendered into the <fullname>-tls Secret).
+## @descriptionEnd
+
+## @param supervisor.dataplane.tls.provider Server certificate source: "embedded" (default) | "cert-manager" | "external". Auto-overridden to "cert-manager" when dataCert.enabled, and to "external" when dataIngress.tls.secretName is set.
+## @param supervisor.dataplane.tls.certPath Server certificate path (only "external", or auto-wired). cert-manager/dataIngress auto-wire the mounted data-tls secret.
+## @param supervisor.dataplane.tls.keyPath Server key path (only "external", or auto-wired).
+## @param supervisor.dataplane.tls.clientCertTtl Client certificate TTL (engine session certs minted from the CA).
+## @param supervisor.dataplane.tls.caCrt [optional] PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot.
+## @param supervisor.dataplane.tls.caKey [optional] PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot.
+##   When both are empty (the default), the supervisor generates the minting CA
+##   on first boot and stores it in the <release>-minting-ca Secret. Only set
+##   these to bring an existing CA (e.g. migrating from a prior deployment).
+## @param supervisor.dataplane.tls.crt [optional] PEM-encoded server certificate (only needed for provider "external").
+## @param supervisor.dataplane.tls.key [optional] PEM-encoded server private key (only needed for provider "external").
+  dataplane:
+    tls:
+      provider: "embedded"
+      certPath: ""
+      keyPath: ""
+      clientCertTtl: "2h"
+      caCrt: ""
+      caKey: ""
+      crt: ""
+      key: ""
+
 ## @section Supervisor configuration
 
 ## @descriptionStart
@@ -432,30 +478,10 @@ auth:
 
 ## @section TLS and certificates
 
-## @param tls.provider TLS provider for the server certificate:
-##   "embedded" (default, minting CA issues a self-signed server cert),
-##   "cert-manager" (cert-manager issues the server cert, see dataCert/dataIngress below),
-##   or "external" (operator-managed PEM files at certPath/keyPath).
-##   The minting CA is auto-bootstrapped for every provider.
-## @param tls.certPath Server certificate path (only "external"). cert-manager auto-wires the mounted data-tls secret.
-## @param tls.keyPath Server key path (only "external"). cert-manager auto-wires the mounted data-tls secret.
-## @param tls.clientCertTtl Client certificate TTL (engine session certs minted from the CA).
-## @param tls.caCrt [optional] PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot.
-## @param tls.caKey [optional] PEM-encoded minting CA private key. Leave empty to AUTO-BOOTSTRAP on first boot.
-##   When both are empty (the default), the supervisor generates the minting CA
-##   on first boot and stores it in the <release>-minting-ca Secret. Only set
-##   these to bring an existing CA (e.g. migrating from a prior deployment).
-## @param tls.crt [optional] PEM-encoded server certificate (only needed for provider "external").
-## @param tls.key [optional] PEM-encoded server private key (only needed for provider "external").
-tls:
-  provider: "embedded"
-  certPath: ""
-  keyPath: ""
-  clientCertTtl: "2h"
-  caCrt: ""
-  caKey: ""
-  crt: ""
-  key: ""
+## The server-certificate and minting-CA values live under
+## `supervisor.dataplane.tls` (see "Supervisor data-plane TLS" above). The
+## old top-level `tls:` block was removed — move any of its keys to
+## `supervisor.dataplane.tls.*`.
 
 ## @section Services
 
@@ -511,10 +537,13 @@ ingress:
 ## @param dataIngress.className Ingress class name.
 ## @param dataIngress.annotations [object] Additional ingress annotations.
 ## @param dataIngress.tls.secretName [string] Secret name for the data-plane TLS cert.
-##   When set, cert-manager issues a Let's Encrypt certificate from this Ingress
-##   (add the annotation `cert-manager.io/cluster-issuer: <issuer>` to dataIngress.annotations).
-##   The secret is mounted into the supervisor, which serves it over ssl-passthrough.
-##   Takes precedence over dataCert.secretName.
+##   When set, the chart auto-switches `supervisor.dataplane.tls.provider` to
+##   "external" and auto-wires certPath/keyPath to this Secret, mounted at
+##   /etc/dagger-kubernetes/data-tls and served by the supervisor over
+##   ssl-passthrough (the client must trust it — e.g. a cert-manager Let's
+##   Encrypt certificate via the annotation
+##   `cert-manager.io/cluster-issuer: <issuer>`, or an operator-managed
+##   keypair). Takes precedence over dataCert.secretName.
 dataIngress:
   enabled: false
   host: "data.supv.example.com"
@@ -527,10 +556,13 @@ dataIngress:
 
 ## @param dataCert.enabled Provision a certificate for the data plane via
 ##   cert-manager (e.g. Let's Encrypt). Requires cert-manager to be installed
-##   in the cluster and `tls.provider: "cert-manager"`. The
-##   resulting Secret is mounted as the supervisor's server certificate; the
-##   chart auto-wires certPath/keyPath to it. The minting CA is still
-##   auto-bootstrapped (it never needs a public issuer).
+##   in the cluster. When enabled, the chart auto-switches
+##   `supervisor.dataplane.tls.provider` to "cert-manager" and auto-wires
+##   certPath/keyPath to the resulting Secret (mounted as the supervisor's
+##   server certificate). The minting CA is still auto-bootstrapped (it never
+##   needs a public issuer). When BOTH dataCert.enabled and
+##   dataIngress.tls.secretName are set, dataIngress.tls.secretName wins —
+##   operators should set only one of them.
 ## @param dataCert.issuerName cert-manager ClusterIssuer name (e.g. letsencrypt-prod).
 ## @param dataCert.issuerKind cert-manager issuer kind: ClusterIssuer or Issuer.
 ## @param dataCert.secretName Secret name where cert-manager stores the certificate.

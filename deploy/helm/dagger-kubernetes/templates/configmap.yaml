@@ -1,7 +1,9 @@
-{{- if eq (.Values.tls.provider | default "embedded") "external" }}
-{{- if not (and .Values.tls.crt .Values.tls.key) }}
-{{- if not (and .Values.tls.certPath .Values.tls.keyPath) }}
-{{- fail "tls.provider=external requires either tls.crt + tls.key (rendered into the <fullname>-tls Secret and mounted at /etc/dagger-kubernetes/tls) or tls.certPath + tls.keyPath (operator-managed PEM files). Without a server keypair the supervisor would serve the control plane in cleartext (fail-closed check)." }}
+{{- if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" }}
+{{- if not (or .Values.dataCert.enabled .Values.dataIngress.tls.secretName) }}
+{{- if not (and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key) }}
+{{- if not (and .Values.supervisor.dataplane.tls.certPath .Values.supervisor.dataplane.tls.keyPath) }}
+{{- fail "supervisor.dataplane.tls.provider=external requires either supervisor.dataplane.tls.crt + supervisor.dataplane.tls.key (rendered into the <fullname>-tls Secret and mounted at /etc/dagger-kubernetes/tls) or supervisor.dataplane.tls.certPath + supervisor.dataplane.tls.keyPath (operator-managed PEM files). Without a server keypair the supervisor cannot serve the mTLS data plane (fail-closed check). (dataCert.enabled / dataIngress.tls.secretName auto-wire the mounted data-tls Secret, so they are exempt.)" }}
+{{- end }}
 {{- end }}
 {{- end }}
 {{- end }}
@@ -169,11 +171,13 @@ data:
 {{ toYaml .Values.supervisor.config.fleet.engineRegistryMirrors | indent 8 }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
-      client_cert_ttl: {{ .Values.tls.clientCertTtl | quote }}
-    tls:
-      provider: {{ .Values.tls.provider | default "embedded" | quote }}
-      cert_path: {{ include "dagger-kubernetes.controlTLSCertPath" . | quote }}
-      key_path: {{ include "dagger-kubernetes.controlTLSKeyPath" . | quote }}
+      client_cert_ttl: {{ .Values.supervisor.dataplane.tls.clientCertTtl | quote }}
+    supervisor:
+      dataplane:
+        tls:
+          provider: {{ include "dagger-kubernetes.dataplaneTLSProvider" . | quote }}
+          cert_path: {{ include "dagger-kubernetes.dataplaneTLSCertPath" . | quote }}
+          key_path: {{ include "dagger-kubernetes.dataplaneTLSKeyPath" . | quote }}
     lease_ttl: {{ .Values.supervisor.config.leaseTtl | quote }}
     version:
       floor: {{ .Values.supervisor.config.version.floor | quote }}

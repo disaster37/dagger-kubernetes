@@ -181,10 +181,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	v.SetDefault("lease_ttl", 2*time.Minute)
 
-	v.SetDefault("tls.provider", "embedded")
-	v.SetDefault("tls.ca_path", "/var/lib/dagger-kubernetes/ca")
-	v.SetDefault("tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")
-	v.SetDefault("tls.key_path", "/etc/dagger-kubernetes/tls/tls.key")
+	v.SetDefault("supervisor.dataplane.tls.provider", "embedded")
+	v.SetDefault("supervisor.dataplane.tls.ca_path", "/var/lib/dagger-kubernetes/ca")
+	v.SetDefault("supervisor.dataplane.tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")
+	v.SetDefault("supervisor.dataplane.tls.key_path", "/etc/dagger-kubernetes/tls/tls.key")
 
 	v.SetDefault("version.floor", "v0.19.0")
 	v.SetDefault("version.allowlist", []string{})

@@ -854,11 +854,11 @@ func TestSelectTLSProvider(t *testing.T) {
 	t.Run("embedded returns provider that shares minting CA via secret", func(t *testing.T) {
 		clientset := fake.NewSimpleClientset()
 		cfg := &domain.Config{
-			CA:     domain.CAConfig{MintingCASecret: "minting-ca", ClientCertTTL: 2 * time.Hour},
-			TLS:    domain.TLSConfig{Provider: "embedded", CAPath: t.TempDir()},
-			Raft:   domain.RaftConfig{Replicas: 1},
-			Fleet:  domain.FleetConfig{Namespace: "ns"},
-			Server: domain.ServerConfig{DataHost: "data.example.com"},
+			CA:         domain.CAConfig{MintingCASecret: "minting-ca", ClientCertTTL: 2 * time.Hour},
+			Supervisor: domain.SupervisorConfig{Dataplane: domain.SupervisorDataplaneConfig{TLS: domain.TLSConfig{Provider: "embedded", CAPath: t.TempDir()}}},
+			Raft:       domain.RaftConfig{Replicas: 1},
+			Fleet:      domain.FleetConfig{Namespace: "ns"},
+			Server:     domain.ServerConfig{DataHost: "data.example.com"},
 		}
 		p, err := selectTLSProvider(cfg, clientset)
 		if err != nil {
@@ -875,11 +875,11 @@ func TestSelectTLSProvider(t *testing.T) {
 	t.Run("cert-manager still bootstraps the minting CA", func(t *testing.T) {
 		clientset := fake.NewSimpleClientset()
 		cfg := &domain.Config{
-			CA:     domain.CAConfig{MintingCASecret: "minting-ca", ClientCertTTL: 2 * time.Hour},
-			TLS:    domain.TLSConfig{Provider: "cert-manager", CAPath: t.TempDir(), CertPath: "unused", KeyPath: "unused"},
-			Raft:   domain.RaftConfig{Replicas: 1},
-			Fleet:  domain.FleetConfig{Namespace: "ns"},
-			Server: domain.ServerConfig{DataHost: "data.example.com"},
+			CA:         domain.CAConfig{MintingCASecret: "minting-ca", ClientCertTTL: 2 * time.Hour},
+			Supervisor: domain.SupervisorConfig{Dataplane: domain.SupervisorDataplaneConfig{TLS: domain.TLSConfig{Provider: "cert-manager", CAPath: t.TempDir(), CertPath: "unused", KeyPath: "unused"}}},
+			Raft:       domain.RaftConfig{Replicas: 1},
+			Fleet:      domain.FleetConfig{Namespace: "ns"},
+			Server:     domain.ServerConfig{DataHost: "data.example.com"},
 		}
 		p, err := selectTLSProvider(cfg, clientset)
 		if err != nil {
@@ -894,7 +894,7 @@ func TestSelectTLSProvider(t *testing.T) {
 	})
 
 	t.Run("unknown provider errors", func(t *testing.T) {
-		cfg := &domain.Config{TLS: domain.TLSConfig{Provider: "bogus"}}
+		cfg := &domain.Config{Supervisor: domain.SupervisorConfig{Dataplane: domain.SupervisorDataplaneConfig{TLS: domain.TLSConfig{Provider: "bogus"}}}}
 		if _, err := selectTLSProvider(cfg, nil); err == nil {
 			t.Fatal("expected error for unknown provider")
 		}
@@ -1095,8 +1095,8 @@ func TestIsMintingCAOnPerPodStorage(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := &domain.Config{
-				Database: domain.DatabaseConfig{Dir: tc.dbDir},
-				TLS:      domain.TLSConfig{CAPath: tc.caPath},
+				Database:   domain.DatabaseConfig{Dir: tc.dbDir},
+				Supervisor: domain.SupervisorConfig{Dataplane: domain.SupervisorDataplaneConfig{TLS: domain.TLSConfig{CAPath: tc.caPath}}},
 			}
 			if got := isMintingCAOnPerPodStorage(cfg); got != tc.want {
 				t.Fatalf("isMintingCAOnPerPodStorage = %v, want %v", got, tc.want)
