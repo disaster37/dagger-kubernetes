@@ -16,11 +16,11 @@ import (
 
 // stubCLIRegistryClient is an in-memory OCI registry client for tests.
 type stubCLIRegistryClient struct {
-	blobs    map[string][]byte          // digest -> raw bytes
+	blobs     map[string][]byte              // digest -> raw bytes
 	manifests map[string]*domain.CLIManifest // tag -> manifest
 	putBlobFn func(repo string, body io.Reader) (digest string, size int64, err error)
 	getBlobFn func(repo, digest string) (io.ReadCloser, int64, error)
-	err      error
+	err       error
 }
 
 func newStubCLIRegistryClient() *stubCLIRegistryClient {
@@ -63,7 +63,7 @@ func (s *stubCLIRegistryClient) GetBlob(ctx context.Context, repo, digest string
 	return io.NopCloser(bytes.NewReader(data)), int64(len(data)), nil
 }
 
-func (s *stubCLIRegistryClient) UploadBlob(ctx context.Context, repo string, body io.Reader) (string, int64, error) {
+func (s *stubCLIRegistryClient) UploadBlob(ctx context.Context, repo string, body io.Reader) (digest string, size int64, err error) {
 	if s.putBlobFn != nil {
 		return s.putBlobFn(repo, body)
 	}
@@ -75,7 +75,7 @@ func (s *stubCLIRegistryClient) UploadBlob(ctx context.Context, repo string, bod
 		return "", 0, err
 	}
 	sum := sha256HexBytes(data)
-	digest := "sha256:" + sum
+	digest = "sha256:" + sum
 	s.blobs[digest] = data
 	return digest, int64(len(data)), nil
 }

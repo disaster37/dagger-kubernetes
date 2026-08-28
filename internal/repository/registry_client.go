@@ -54,17 +54,17 @@ func validDigest(d string) bool {
 	return digestRe.MatchString(d)
 }
 
-// readBounded reads at most max+1 bytes from r and returns an error when the
-// body exceeds max, so a compromised registry cannot exhaust memory with an
-// oversized response (CWE-400/CWE-770).
-func readBounded(r io.Reader, maxBytes int64) ([]byte, error) {
-	lr := io.LimitReader(r, maxBytes+1)
+// readBounded reads at most maxRegistryBody+1 bytes from r and returns an
+// error when the body exceeds maxRegistryBody, so a compromised registry
+// cannot exhaust memory with an oversized response (CWE-400/CWE-770).
+func readBounded(r io.Reader) ([]byte, error) {
+	lr := io.LimitReader(r, maxRegistryBody+1)
 	b, err := io.ReadAll(lr)
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(b)) > maxBytes {
-		return nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrRegistryUnreachable, maxBytes)
+	if int64(len(b)) > maxRegistryBody {
+		return nil, fmt.Errorf("%w: response body exceeds %d bytes", ErrRegistryUnreachable, maxRegistryBody)
 	}
 	return b, nil
 }
@@ -215,7 +215,7 @@ func (c *RegistryStatsClient) Catalog(ctx context.Context) ([]string, error) {
 	var body struct {
 		Repositories []string `json:"repositories"`
 	}
-	raw, err := readBounded(resp.Body, maxRegistryBody)
+	raw, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read catalog: %w", err)
 	}
@@ -241,7 +241,7 @@ func (c *RegistryStatsClient) Tags(ctx context.Context, repo string) ([]string, 
 	var body struct {
 		Tags []string `json:"tags"`
 	}
-	raw, err := readBounded(resp.Body, maxRegistryBody)
+	raw, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read tags: %w", err)
 	}
@@ -284,7 +284,7 @@ func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string)
 		return nil, "", fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 
-	body, err := readBounded(resp.Body, maxRegistryBody)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, "", fmt.Errorf("read manifest: %w", err)
 	}
@@ -520,7 +520,7 @@ func (c *RegistryStatsClient) GetManifest(ctx context.Context, repo, tag string)
 		return nil, fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 
-	body, err := readBounded(resp.Body, maxRegistryBody)
+	body, err := readBounded(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("read manifest: %w", err)
 	}

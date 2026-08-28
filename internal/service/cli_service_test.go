@@ -509,7 +509,9 @@ func TestCLIServiceOpenCachedDisappeared(t *testing.T) {
 type bogusPathCache struct{}
 
 func (bogusPathCache) Has(ctx context.Context, _, _, _ string) (bool, error) { return true, nil }
-func (bogusPathCache) Get(ctx context.Context, _, _, _ string) (string, bool) { return "/nonexistent/tar.gz", true }
+func (bogusPathCache) Get(ctx context.Context, _, _, _ string) (string, bool) {
+	return "/nonexistent/tar.gz", true
+}
 func (bogusPathCache) Put(ctx context.Context, _, _, _ string, _ io.Reader, _ string) (string, error) {
 	return "/nonexistent/tar.gz", nil
 }

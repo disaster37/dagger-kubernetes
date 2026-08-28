@@ -362,7 +362,7 @@ type OTelConfig struct {
 // CLIConfig configures the on-the-fly Dagger CLI provisioning addon.
 type CLIConfig struct {
 	Enabled         bool              `mapstructure:"enabled"`
-	CacheRepo       string            `mapstructure:"cache_repo"`     // OCI repo for CLI tarballs, default "dagger-kubernetes/cli-cache"
+	CacheRepo       string            `mapstructure:"cache_repo"` // OCI repo for CLI tarballs, default "dagger-kubernetes/cli-cache"
 	ReleaseListTTL  time.Duration     `mapstructure:"release_list_ttl"`
 	DownloadTimeout time.Duration     `mapstructure:"download_timeout"`
 	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`

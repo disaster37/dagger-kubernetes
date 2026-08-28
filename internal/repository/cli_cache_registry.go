@@ -148,8 +148,8 @@ func (c *RegistryCLICache) Put(ctx context.Context, version, osName, arch string
 			Size:      size,
 		}},
 		Annotations: map[string]string{
-			"com.dagger-kubernetes.cli.sha256": sha256Hex,
-			"com.dagger-kubernetes.cli.version": version,
+			"com.dagger-kubernetes.cli.sha256":   sha256Hex,
+			"com.dagger-kubernetes.cli.version":  version,
 			"com.dagger-kubernetes.cli.filename": filename,
 		},
 	}

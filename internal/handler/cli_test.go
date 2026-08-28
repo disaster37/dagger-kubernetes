@@ -30,7 +30,6 @@ type stubCLICache struct {
 }
 
 type stubCacheItem struct {
-	path string
 	data []byte
 }
 
