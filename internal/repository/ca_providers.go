@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/disaster37/goca"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -222,21 +221,13 @@ func (p *EmbeddedProvider) writeLocalCA(certPEM, keyPEM []byte) error {
 }
 
 // newMintingCAWithGoca builds a new self-signed minting CA via goca and
-// returns PEM cert+key.
+// returns its PEM encoding.
 func newMintingCAWithGoca() (certPEM, keyPEM []byte, err error) {
-	identity := goca.Identity{
-		Organization:       "dagger-kubernetes",
-		OrganizationalUnit: "engineering",
-		Country:            "US",
-		Locality:           "San Francisco",
-		Province:           "California",
-	}
-
-	caInstance, err := goca.New("dagger-kubernetes-minting-ca", identity)
+	ca, err := NewMintingCA(0)
 	if err != nil {
-		return nil, nil, fmt.Errorf("create goca CA: %w", err)
+		return nil, nil, fmt.Errorf("create minting CA: %w", err)
 	}
-	return []byte(caInstance.GetCertificate()), []byte(caInstance.GetPrivateKey()), nil
+	return ca.EncodePEM()
 }
 
 func (p *EmbeddedProvider) createCA(certPath, keyPath string) (*MintingCA, error) {

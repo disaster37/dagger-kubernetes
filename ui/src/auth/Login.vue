@@ -1,8 +1,20 @@
 <template>
   <div style="max-width: 400px; margin: 80px auto;">
+    <!-- group_required info card — shown above the login form so it is immediately visible -->
+    <div v-if="errorCode === 'group_required'" style="background: #1a2332; border: 1px solid #58a6ff; border-radius: 8px; padding: 20px 24px; margin-bottom: 20px;">
+      <div style="display: flex; align-items: flex-start; gap: 12px;">
+        <span style="font-size: 24px; line-height: 1.4;">🔒</span>
+        <div>
+          <div style="font-weight: 600; font-size: 15px; color: #58a6ff; margin-bottom: 6px;">Access Restricted</div>
+          <p style="color: #c9d1d9; font-size: 13px; line-height: 1.6; margin: 0;">
+            Your account was authenticated successfully, but you are not a member of any authorized group. Please contact your administrator to request access.
+          </p>
+        </div>
+      </div>
+    </div>
     <div class="card">
       <h2 style="margin-bottom: 16px;">Login</h2>
-      <p v-if="errorQuery" style="color: #f85149; font-size: 13px; margin-bottom: 12px;">
+      <p v-if="errorCode === 'oauth'" style="color: #f85149; font-size: 13px; margin-bottom: 12px;">
         OAuth login failed. Please try again.
       </p>
       <form @submit.prevent="handleLogin">
@@ -64,7 +76,7 @@ const error = ref('')
 const loading = ref(false)
 const providers = ref<Providers>({ internal: true, oauth_github: false, oauth_oidc: false })
 
-const errorQuery = computed(() => route.query.error === 'oauth')
+const errorCode = computed(() => (route.query.error as string) || null)
 const githubLoginUrl = computed(() => `/api/v1/auth/oauth/github/login?redirect=${encodeURIComponent(redirectTarget.value)}`)
 const oidcLoginUrl = computed(() => `/api/v1/auth/oauth/oidc/login?redirect=${encodeURIComponent(redirectTarget.value)}`)
 // The redirect query param is attacker-influenceable (login links); only

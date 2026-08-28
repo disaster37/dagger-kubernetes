@@ -1,247 +1,159 @@
 package repository
 
 import (
-	"crypto"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"math/big"
 	"net"
 	"time"
+
+	"github.com/disaster37/goca"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// MintingCA wraps a goca CA for engine/client certificate issuance and
+// TLS server/peer certificate issuance. All key generation and certificate
+// signing is delegated to goca.
 type MintingCA struct {
-	cert    *x509.Certificate
-	key     crypto.Signer
-	certDER []byte
-
+	gocaCA        *goca.CA
 	clientCertTTL time.Duration
 }
 
 var _ domain.MintingCA = (*MintingCA)(nil)
 
+// NewMintingCA creates a new self-signed minting CA via goca. This is the
+// non-Kubernetes fallback path. Production Kubernetes deployments use the
+// auto-bootstrapped CA from ca_providers.go (shared via Secret).
 func NewMintingCA(clientCertTTL time.Duration) (*MintingCA, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	ca, err := goca.New("dagger-kubernetes-minting-ca", goca.Identity{
+		Organization:       "dagger-kubernetes",
+		OrganizationalUnit: "engineering",
+		Country:            "US",
+		Locality:           "San Francisco",
+		Province:           "California",
+		Valid:              3650, // 10 years
+	})
 	if err != nil {
-		return nil, fmt.Errorf("generate CA key: %w", err)
+		return nil, fmt.Errorf("create minting CA: %w", err)
 	}
-
-	template := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject: pkix.Name{
-			CommonName:   "dagger-kubernetes-minting-ca",
-			Organization: []string{"dagger-kubernetes"},
-		},
-		NotBefore:             time.Now(),
-		NotAfter:              time.Now().Add(10 * 365 * 24 * time.Hour),
-		KeyUsage:              x509.KeyUsageCertSign | x509.KeyUsageCRLSign,
-		BasicConstraintsValid: true,
-		IsCA:                  true,
-		MaxPathLenZero:        false,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
-	if err != nil {
-		return nil, fmt.Errorf("create CA cert: %w", err)
-	}
-
-	cert, err := x509.ParseCertificate(certDER)
-	if err != nil {
-		return nil, fmt.Errorf("parse CA cert: %w", err)
-	}
-
-	return &MintingCA{
-		cert:          cert,
-		key:           key,
-		certDER:       certDER,
-		clientCertTTL: clientCertTTL,
-	}, nil
+	return &MintingCA{gocaCA: ca, clientCertTTL: clientCertTTL}, nil
 }
 
+// NewMintingCAFromPEM loads an existing CA from PEM-encoded certificate and
+// private key. Uses goca's LoadCAFromPEM which derives the public key and
+// synthesizes an empty CRL.
 func NewMintingCAFromPEM(certPEM, keyPEM []byte, clientCertTTL time.Duration) (*MintingCA, error) {
-	certBlock, _ := pem.Decode(certPEM)
-	if certBlock == nil {
-		return nil, fmt.Errorf("decode CA cert PEM: no PEM block found")
+	ca := &goca.CA{}
+	if err := ca.LoadCAFromPEM(certPEM, keyPEM); err != nil {
+		return nil, fmt.Errorf("load minting CA from PEM: %w", err)
 	}
-
-	cert, err := x509.ParseCertificate(certBlock.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse CA cert: %w", err)
-	}
-
-	keyBlock, _ := pem.Decode(keyPEM)
-	if keyBlock == nil {
-		return nil, fmt.Errorf("decode CA key PEM: no PEM block found")
-	}
-
-	key, err := parsePrivateKey(keyBlock.Bytes)
-	if err != nil {
-		return nil, fmt.Errorf("parse CA key: %w", err)
-	}
-
-	return &MintingCA{
-		cert:          cert,
-		key:           key,
-		certDER:       certBlock.Bytes,
-		clientCertTTL: clientCertTTL,
-	}, nil
+	return &MintingCA{gocaCA: ca, clientCertTTL: clientCertTTL}, nil
 }
 
+// MintClientCert issues a short-lived engine client certificate (client
+// auth only). The TTL is ca.clientCertTTL (typically 2h).
 func (ca *MintingCA) MintClientCert(commonName string) (*domain.SerializableCertificate, error) {
-	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cert, err := ca.gocaCA.IssueCertificate(commonName, goca.Identity{
+		Organization:       "dagger-kubernetes",
+		OrganizationalUnit: "engine",
+		Country:            "US",
+		Locality:           "San Francisco",
+		Province:           "California",
+		Type:               "client",
+		ValidDuration:      ca.clientCertTTL,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("generate client key: %w", err)
+		return nil, fmt.Errorf("mint engine client cert: %w", err)
 	}
 
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, fmt.Errorf("generate serial: %w", err)
+	// Extract DER: cert PEM → DER, key PEM → DER.
+	certBlock, _ := pem.Decode([]byte(cert.Certificate))
+	if certBlock == nil {
+		return nil, fmt.Errorf("decode issued cert PEM")
 	}
-
-	now := time.Now()
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName: commonName,
-		},
-		NotBefore: now,
-		NotAfter:  now.Add(ca.clientCertTTL),
-		KeyUsage:  x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: []x509.ExtKeyUsage{
-			x509.ExtKeyUsageClientAuth,
-		},
-	}
-
-	clientCertDER, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &clientKey.PublicKey, ca.key)
-	if err != nil {
-		return nil, fmt.Errorf("create client cert: %w", err)
-	}
-
-	clientKeyDER, err := x509.MarshalPKCS8PrivateKey(clientKey)
-	if err != nil {
-		return nil, fmt.Errorf("marshal client key: %w", err)
+	keyBlock, _ := pem.Decode([]byte(cert.PrivateKey))
+	if keyBlock == nil {
+		return nil, fmt.Errorf("decode issued key PEM")
 	}
 
 	return &domain.SerializableCertificate{
-		CertificateChain: [][]byte{clientCertDER},
-		PrivateKey:       clientKeyDER,
+		CertificateChain: [][]byte{certBlock.Bytes},
+		PrivateKey:       keyBlock.Bytes,
 	}, nil
 }
 
+// CertPool returns a CertPool containing this CA's certificate.
 func (ca *MintingCA) CertPool() *x509.CertPool {
 	pool := x509.NewCertPool()
-	pool.AddCert(ca.cert)
+	pool.AddCert(ca.gocaCA.GoCertificate())
 	return pool
 }
 
-// CACertificate returns the parsed CA certificate (for verifying that a
-// previously issued leaf still chains to the current CA).
+// CACertificate returns the parsed CA certificate.
 func (ca *MintingCA) CACertificate() *x509.Certificate {
-	return ca.cert
+	return ca.gocaCA.GoCertificate()
 }
 
+// TLSCertificate returns the CA certificate as a tls.Certificate.
 func (ca *MintingCA) TLSCertificate() (tls.Certificate, error) {
+	// goca stores the certificate as PEM string; decode to DER.
+	certBlock, _ := pem.Decode([]byte(ca.gocaCA.GetCertificate()))
+	if certBlock == nil {
+		return tls.Certificate{}, fmt.Errorf("decode CA cert PEM")
+	}
 	return tls.Certificate{
-		Certificate: [][]byte{ca.certDER},
-		PrivateKey:  ca.key,
+		Certificate: [][]byte{certBlock.Bytes},
+		PrivateKey:  ca.gocaCA.GoSigner(),
 	}, nil
 }
 
+// EncodePEM returns the CA certificate and private key as PEM bytes (for
+// Kubernetes Secret storage). Format: "CERTIFICATE" + "PRIVATE KEY" (PKCS#8).
 func (ca *MintingCA) EncodePEM() (certPEM, keyPEM []byte, err error) {
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ca.certDER})
-
-	keyDER, err := x509.MarshalPKCS8PrivateKey(ca.key)
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal CA key: %w", err)
-	}
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
-
-	return certPEM, keyPEM, nil
+	return []byte(ca.gocaCA.GetCertificate()), []byte(ca.gocaCA.GetPrivateKey()), nil
 }
 
-// IssueServerCertificate signs a TLS server certificate with this CA.
-// Pure crypto — the caller persists the returned PEM bytes.
+// IssueServerCertificate signs a TLS server certificate with DNS SANs.
 func (ca *MintingCA) IssueServerCertificate(commonName, organization string, dnsNames []string, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
-	now := time.Now()
-	return ca.issueCertificate(commonName, organization, dnsNames, nil,
-		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, now, now.Add(ttl), "server")
+	days := int(ttl.Hours() / 24)
+	if days < 1 {
+		days = 1
+	}
+	cert, err := ca.gocaCA.IssueCertificate(commonName, goca.Identity{
+		Organization:       organization,
+		OrganizationalUnit: "engineering",
+		Country:            "US",
+		Locality:           "San Francisco",
+		Province:           "California",
+		Type:               "server",
+		Valid:              days,
+		DNSNames:           dnsNames,
+	})
+	if err != nil {
+		return nil, nil, fmt.Errorf("issue server cert: %w", err)
+	}
+	return []byte(cert.Certificate), []byte(cert.PrivateKey), nil
 }
 
-// IssuePeerCertificate signs a TLS certificate usable as both server and
-// client (mTLS) with the given DNS + IP SANs. Pure crypto — the caller persists
-// the returned PEM bytes.
+// IssuePeerCertificate signs a TLS mTLS peer certificate with DNS + IP SANs.
+// The certificate is backdated 5 minutes for clock-skew tolerance (ADR-016).
 func (ca *MintingCA) IssuePeerCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, ttl time.Duration) (certPEM, keyPEM []byte, err error) {
-	now := time.Now()
-	// Backdate 5 minutes for clock-skew tolerance across pods (ADR-016).
-	return ca.issueCertificate(commonName, organization, dnsNames, ipAddrs,
-		[]x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		now.Add(-5*time.Minute), now.Add(ttl), "peer")
-}
-
-// issueCertificate generates a key + leaf certificate signed by the CA and
-// returns both as PEM. kind labels the key/cert in error messages.
-func (ca *MintingCA) issueCertificate(commonName, organization string, dnsNames []string, ipAddrs []net.IP, extKeyUsage []x509.ExtKeyUsage, notBefore, notAfter time.Time, kind string) (certPEM, keyPEM []byte, err error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	cert, err := ca.gocaCA.IssueCertificate(commonName, goca.Identity{
+		Organization:       organization,
+		OrganizationalUnit: "engineering",
+		Country:            "US",
+		Locality:           "San Francisco",
+		Province:           "California",
+		Type:               "server-client",
+		ValidDuration:      ttl,
+		Backdate:           5 * time.Minute,
+		DNSNames:           dnsNames,
+		IPAddresses:        ipAddrs,
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("generate %s key: %w", kind, err)
+		return nil, nil, fmt.Errorf("issue peer cert: %w", err)
 	}
-
-	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
-	if err != nil {
-		return nil, nil, fmt.Errorf("generate serial: %w", err)
-	}
-
-	template := &x509.Certificate{
-		SerialNumber: serial,
-		Subject: pkix.Name{
-			CommonName:   commonName,
-			Organization: []string{organization},
-		},
-		NotBefore:   notBefore,
-		NotAfter:    notAfter,
-		KeyUsage:    x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage: extKeyUsage,
-		DNSNames:    dnsNames,
-		IPAddresses: ipAddrs,
-	}
-
-	certDER, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create %s cert: %w", kind, err)
-	}
-
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	if err != nil {
-		return nil, nil, fmt.Errorf("marshal %s key: %w", kind, err)
-	}
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-
-	return certPEM, keyPEM, nil
-}
-
-func parsePrivateKey(der []byte) (crypto.Signer, error) {
-	if key, err := x509.ParsePKCS1PrivateKey(der); err == nil {
-		return key, nil
-	}
-	if key, err := x509.ParseECPrivateKey(der); err == nil {
-		return key, nil
-	}
-	key, err := x509.ParsePKCS8PrivateKey(der)
-	if err != nil {
-		return nil, err
-	}
-	signer, ok := key.(crypto.Signer)
-	if !ok {
-		return nil, fmt.Errorf("key type %T does not implement crypto.Signer", key)
-	}
-	return signer, nil
+	return []byte(cert.Certificate), []byte(cert.PrivateKey), nil
 }

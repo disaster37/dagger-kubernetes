@@ -131,7 +131,7 @@ and rationale in **Decisions**.
   message.
 - Allowlist denial: `Complete` returns `domain.ErrForbidden` (unchanged sentinel).
   The OAuth callback is a **redirect** flow, so it maps to the SPA route
-  `/auth/login?error=forbidden` (new distinct code) instead of an HTTP 403. All
+  `/auth/login?error=group_required` (new distinct code) instead of an HTTP 403. All
   other OAuth failures keep `/auth/login?error=oauth`.
 - Mapped-group lookup failures and best-effort team fetches: `logrus` `Warn`
   with `WithError(err)` + `WithField("group", name)`; never fatal.
@@ -594,7 +594,7 @@ Mirror the sample's new keys (add `allowed_teams`, `allowed_groups`,
 | Empty `group_mappings[i].replacement` | `config.Load` fails fast: `auth.oauth.group_mappings[i].replacement must not be empty` |
 | Empty `group_mappings` list | No mapping/no sync (identity at `Map` level; services skip sync via `Active()`). Backward compatible. |
 | No rule matches a provider group | Group dropped (no supervisor membership from it). |
-| Provider returns zero groups, allowlist non-empty | `domain.ErrForbidden` → `/auth/login?error=forbidden`. |
+| Provider returns zero groups, allowlist non-empty | `domain.ErrForbidden` → `/auth/login?error=group_required`. |
 | Provider returns zero groups, allowlist empty | Allowed; no memberships added. |
 | Missing OIDC groups claim | `resolveGroups` → nil; treated as zero groups (see above). |
 | Group name case differences | Case-sensitive regex; use `(?i)` to opt into insensitivity. |
@@ -670,7 +670,7 @@ Mirror the sample's new keys (add `allowed_teams`, `allowed_groups`,
 
 - Add `TestOAuthCallbackForbidden`: stub `service.OAuthProvider` whose `Complete`
   returns `domain.ErrForbidden`; assert the response is a 302 to
-  `/auth/login?error=forbidden`. Keep existing oauth-error redirect tests.
+  `/auth/login?error=group_required`. Keep existing oauth-error redirect tests.
 
 ### Integration (`tests/integration/oauth_oidc_test.go`, optional but recommended)
 
@@ -678,7 +678,7 @@ Mirror the sample's new keys (add `allowed_teams`, `allowed_groups`,
   start a supervisor pointed at it via a temp config file, drive
   `GET /api/v1/auth/oauth/oidc/login` (assert authorize redirect), then assert
   `allowed_groups` denial by completing a login for a user outside the allowlist
-  and expecting a redirect to `/auth/login?error=forbidden`. No real Dagger
+  and expecting a redirect to `/auth/login?error=group_required`. No real Dagger
   client contract is involved (auth feature); this is a black-box OIDC flow test.
 
 ## Sequencing (dependency order)

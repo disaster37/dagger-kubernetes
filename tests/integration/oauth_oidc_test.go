@@ -114,7 +114,7 @@ func (f *oidcIssuer) mintIDToken() string {
 // supervisor pointed at a loopback OIDC issuer, drives the login endpoint to an
 // authorize redirect, then completes the callback for a user whose groups are
 // outside `allowed_groups` and asserts the SPA is redirected to
-// `/auth/login?error=forbidden`.
+// `/auth/login?error=group_required`.
 func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	const clientID = "integration-client"
 	controlAddr, dataAddr := freeAddr(t), freeAddr(t)
@@ -237,8 +237,8 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	if cbResp.StatusCode != http.StatusFound {
 		t.Fatalf("callback status = %d, want 302", cbResp.StatusCode)
 	}
-	if loc := cbResp.Header.Get("Location"); loc != "/auth/login?error=forbidden" {
-		t.Fatalf("callback Location = %q, want /auth/login?error=forbidden", loc)
+	if loc := cbResp.Header.Get("Location"); loc != "/auth/login?error=group_required" {
+		t.Fatalf("callback Location = %q, want /auth/login?error=group_required", loc)
 	}
 }
 

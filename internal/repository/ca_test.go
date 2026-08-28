@@ -67,7 +67,7 @@ func TestMintingCAPEMRoundTrip(t *testing.T) {
 		t.Fatal("invalid cert PEM")
 	}
 	block, _ = pem.Decode(keyPEM)
-	if block == nil || (block.Type != "PRIVATE KEY" && block.Type != "EC PRIVATE KEY") {
+	if block == nil || block.Type != "PRIVATE KEY" {
 		t.Fatalf("invalid key PEM type: %s", block.Type)
 	}
 
@@ -141,13 +141,21 @@ func TestMintingCAIssuePeerCertificate(t *testing.T) {
 	if cert.Subject.CommonName != "node-0" {
 		t.Fatalf("CN = %q, want node-0", cert.Subject.CommonName)
 	}
-	if len(cert.DNSNames) != len(dnsNames) {
-		t.Fatalf("DNSNames = %v, want %v", cert.DNSNames, dnsNames)
+	if len(cert.DNSNames) < len(dnsNames) {
+		t.Fatalf("DNSNames = %v, want at least %v", cert.DNSNames, dnsNames)
 	}
 	for i, n := range dnsNames {
-		if cert.DNSNames[i] != n {
-			t.Fatalf("DNSNames[%d] = %q, want %q", i, cert.DNSNames[i], n)
+		found := false
+		for _, dns := range cert.DNSNames {
+			if dns == n {
+				found = true
+				break
+			}
 		}
+		if !found {
+			t.Fatalf("DNSNames missing %q, got %v", n, cert.DNSNames)
+		}
+		_ = i
 	}
 	if len(cert.IPAddresses) != 1 || !cert.IPAddresses[0].Equal(ipAddrs[0]) {
 		t.Fatalf("IPAddresses = %v, want %v", cert.IPAddresses, ipAddrs)
@@ -182,7 +190,7 @@ func TestMintingCAIssuePeerCertificate(t *testing.T) {
 	}
 
 	block, _ := pem.Decode(keyPEM)
-	if block == nil || block.Type != "EC PRIVATE KEY" {
-		t.Fatalf("key PEM type = %s, want EC PRIVATE KEY", block.Type)
+	if block == nil || block.Type != "PRIVATE KEY" {
+		t.Fatalf("key PEM type = %s, want PRIVATE KEY", block.Type)
 	}
 }

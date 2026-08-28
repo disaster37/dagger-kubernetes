@@ -317,7 +317,7 @@ func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 	access, refresh, _, err := s.oauth.Complete(context.Background(), code)
 	if err != nil {
 		if errors.Is(err, domain.ErrForbidden) {
-			redirectOAuthErrorCode(c, "forbidden")
+			redirectOAuthErrorCode(c, "group_required")
 			return
 		}
 		redirectOAuthErrorCode(c, "oauth")

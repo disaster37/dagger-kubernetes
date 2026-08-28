@@ -5,7 +5,7 @@ go 1.26.5
 require (
 	github.com/cloudwego/hertz v0.10.5
 	github.com/coreos/go-oidc/v3 v3.17.0
-	github.com/disaster37/goca v1.0.6
+	github.com/disaster37/goca v1.0.7
 	github.com/go-jose/go-jose/v4 v4.1.3
 	github.com/go-viper/mapstructure/v2 v2.4.0
 	github.com/golang-jwt/jwt/v5 v5.3.1
@@ -107,5 +107,3 @@ require (
 	sigs.k8s.io/yaml v1.3.0 // indirect
 	software.sslmate.com/src/go-pkcs12 v0.6.0 // indirect
 )
-
-replace github.com/disaster37/goca => /projects/goca

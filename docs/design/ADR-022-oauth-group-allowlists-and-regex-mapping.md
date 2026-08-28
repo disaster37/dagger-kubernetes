@@ -92,7 +92,7 @@ keeps `config` free of a `service` import.
 - Startup: `config.Load` returns `validate group mappings: %w`; `run` wraps
   `load config: %w`.
 - Allowlist denial: `Complete` returns `domain.ErrForbidden`; the OAuth callback
-  is a redirect flow, so it maps to `/auth/login?error=forbidden` (distinct
+  is a redirect flow, so it maps to `/auth/login?error=group_required` (distinct
   code) rather than an HTTP 403. All other OAuth failures keep
   `/auth/login?error=oauth`.
 - Mapped-group lookup failures and best-effort team fetches: `logrus` `Warn`

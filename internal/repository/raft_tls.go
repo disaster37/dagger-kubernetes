@@ -274,21 +274,21 @@ func writePEM(path string, data []byte, what string) error {
 	return nil
 }
 
-// createRaftCAWithGoca builds a new self-signed CA via goca and returns PEM
-// cert+key. Uses the exact API already used in ca_providers.go.
+// createRaftCAWithGoca builds a new self-signed raft CA via goca and returns
+// its PEM encoding.
 func createRaftCAWithGoca(name, organization string) (certPEM, keyPEM []byte, err error) {
-	identity := goca.Identity{
+	ca, err := goca.New(name, goca.Identity{
 		Organization:       organization,
 		OrganizationalUnit: "engineering",
 		Country:            "US",
 		Locality:           "San Francisco",
 		Province:           "California",
-	}
-	caInstance, err := goca.New(name, identity)
+		Valid:              3650, // 10 years
+	})
 	if err != nil {
-		return nil, nil, fmt.Errorf("raft TLS: create goca CA: %w", err)
+		return nil, nil, fmt.Errorf("create raft CA: %w", err)
 	}
-	return []byte(caInstance.GetCertificate()), []byte(caInstance.GetPrivateKey()), nil
+	return []byte(ca.GetCertificate()), []byte(ca.GetPrivateKey()), nil
 }
 
 // issueOrReuseNodeCert issues a per-node leaf cert signed by the CA, persisted

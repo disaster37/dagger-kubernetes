@@ -480,8 +480,8 @@ func TestOAuthCallbackForbidden(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusFound {
 		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
 	}
-	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=forbidden" {
-		t.Fatalf("Location = %q, want forbidden error redirect", loc)
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=group_required" {
+		t.Fatalf("Location = %q, want group_required error redirect", loc)
 	}
 }
 
