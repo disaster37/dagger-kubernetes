@@ -6,6 +6,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+
+	"k8s.io/client-go/kubernetes"
 )
 
 // defaultRaftPort is the fallback Raft port when bind_addr carries no port.
@@ -49,6 +51,32 @@ func NewPeerResolver(cfg *RaftDiscoveryConfig) PeerResolver {
 	}
 }
 
+// NewPeerResolverWithClientset selects a resolver, preferring the Kubernetes
+// API (pod IPs, like Vault's go-discover) over DNS when a clientset is
+// available and the StatefulSet is configured. Falls back to DNS if the K8s
+// API is unreachable or the pod has no IP yet.
+func NewPeerResolverWithClientset(cfg *RaftDiscoveryConfig, clientset kubernetes.Interface, hostname string) (resolver PeerResolver, podIP string) {
+	// Static peers override everything.
+	if len(cfg.Peers) > 0 {
+		return &staticPeerResolver{cfg: *cfg}, ""
+	}
+
+	// Try K8s API-based discovery (like Vault).
+	if clientset != nil && cfg.StatefulSetName != "" && cfg.Namespace != "" && hostname != "" {
+		r, err := NewK8sPeerResolver(clientset, cfg.Namespace, cfg.StatefulSetName, cfg.Replicas, raftPort(cfg), hostname)
+		if err == nil {
+			return r, r.PodIP()
+		}
+	}
+
+	// Fall back to DNS-based discovery.
+	if cfg.StatefulSetName != "" && cfg.HeadlessService != "" {
+		return &dnsPeerResolver{cfg: *cfg, clusterDomain: clusterDomain(cfg)}, ""
+	}
+
+	return &singleNodeResolver{cfg: *cfg}, ""
+}
+
 // clusterDomain returns the configured cluster DNS suffix. The config loader
 // defaults raft.cluster_domain to "cluster.local" (standard clusters); an
 // explicitly empty value makes peer addresses end at ".svc" with no cluster
@@ -73,6 +101,25 @@ func raftPort(cfg *RaftDiscoveryConfig) int {
 // podAddress builds a pod's stable DNS name + port for a given hostname:
 //   - clusterDomain set:   <host>.<headless>.<ns>.svc.<clusterDomain>:<port>
 //   - clusterDomain empty: <host>.<headless>.<ns>.svc:<port>
+//
+// The FQDN form (clusterDomain set, e.g. "cluster.local") is preferred over
+// short names (ending at .svc) because it reduces the NXDOMAIN cache window
+// during bootstrap:
+//
+//   - Short names go through search-domain resolution. The final as-is query
+//     (e.g. <pod>.<headless>.<ns>.svc) does not match the cluster.local zone
+//     and hits the catch-all .:53 zone in node-local-dns, which uses
+//     "cache 30" — stale NXDOMAIN for up to 30 s (negative-cache poisoning).
+//
+//   - FQDN (e.g. <pod>.<headless>.<ns>.svc.cluster.local) matches the
+//     cluster.local zone directly. The node-local-dns Corefile serves this
+//     zone with "denial 9984 5" — NXDOMAIN cached for only 5 s. Combined
+//     with the cluster CoreDNS kubernetes plugin (authoritative, no cache),
+//     the total poison window is at most 5 s vs. 30 s.
+//
+// Per-node DNS caches (Cilium NodeLocal DNSCache with LRP, or the standard
+// node-local-dns addon) amplify the difference: each node independently
+// caches NXDOMAIN, so the 30 s window multiplies across nodes.
 func podAddress(cfg *RaftDiscoveryConfig, clusterDomain, host string) string {
 	name := fmt.Sprintf("%s.%s.%s.svc", host, cfg.HeadlessService, cfg.Namespace)
 	if clusterDomain != "" {

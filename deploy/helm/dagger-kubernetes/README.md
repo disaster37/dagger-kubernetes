@@ -474,7 +474,7 @@ give each pod a stable identity for peer discovery.
 | `supervisor.replicaCount` | `3` | Supervisor pod count = Raft voter count (derived, single source of truth). Use an odd number ≥ 3 for fault tolerance. |
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
-| `supervisor.config.raft.clusterDomain` | `""` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the `.svc` form is the project-wide convention (single NO_PROXY `.svc` entry); set your cluster's real domain (e.g. `cluster.local`) only when `.svc` cannot resolve. |
+| `supervisor.config.raft.clusterDomain` | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` produces fully-qualified names that bypass CoreDNS negative-cache poisoning (short `.svc` names go through the cache plugin which can serve stale NXDOMAIN for up to 30 s during bootstrap). Set to `""` only when your cluster DNS does not serve the `cluster.local` suffix. |
 
 Everything else is **fixed or derived by the chart**: the data dir is
 `/var/lib/dagger-kubernetes` (per-pod PVC), the Raft transport binds `:8081`
@@ -599,7 +599,7 @@ Configure it under `supervisor.config.history`:
 |---|---|---|---|
 | `supervisor.config.raft.tls.enabled` | bool | `true` | Enable mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | bool | `true` | Require and verify peer client certs (mTLS). |
-| `supervisor.config.raft.clusterDomain` | string | `""` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the `.svc` form is the project-wide convention (single NO_PROXY `.svc` entry); set your cluster's real domain (e.g. `cluster.local`) only when `.svc` cannot resolve. |
+| `supervisor.config.raft.clusterDomain` | string | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` produces fully-qualified names that bypass CoreDNS negative-cache poisoning (short `.svc` names go through the cache plugin which can serve stale NXDOMAIN for up to 30 s during bootstrap). Set to `""` only when your cluster DNS does not serve the `cluster.local` suffix. |
 | `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled). |
 | `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled). |
 | `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled). |

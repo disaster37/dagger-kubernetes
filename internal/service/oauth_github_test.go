@@ -160,12 +160,12 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 		ClientID:     "cid",
 		ClientSecret: "csec",
 		AllowedOrgs:  nil,
-		DefaultGroup: "unused-param", // ignored: fallback is now hardcoded "default"
+		DefaultGroup: "default",
 	}
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
-	// Pre-create the hardcoded "default" group (the only group that matters now).
+	// Pre-create the configured "default" group.
 	g, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
@@ -174,7 +174,7 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 	}
 	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
 	if len(groups) != 1 || groups[0].ID != g.ID {
-		t.Fatalf("user should auto-join hardcoded default group, got %v", groups)
+		t.Fatalf("user should auto-join configured default group, got %v", groups)
 	}
 }
 
@@ -429,7 +429,7 @@ func TestCompleteOAuthUserFallbackToDefault(t *testing.T) {
 		ClientID:     "cid",
 		ClientSecret: "csec",
 		AllowedOrgs:  nil,
-		DefaultGroup: "unused-param", // ignored by the new logic
+		DefaultGroup: "default",
 	}
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()

@@ -114,8 +114,8 @@ supervisor:
 ##   the internal CA is auto-bootstrapped in the <release>-raft-ca Secret.
   config:
     raft:
-## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `""` ends peer addresses at `.svc` (no suffix) — the `.svc` form is the convention everywhere in this project (single NO_PROXY `.svc` entry); set your cluster's real domain (e.g. `cluster.local`) only when `.svc` cannot resolve.
-      clusterDomain: ""
+## @param supervisor.config.raft.clusterDomain Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` produces fully-qualified names that bypass CoreDNS negative-cache poisoning (short `.svc` names go through the cache plugin which can serve stale NXDOMAIN for up to 30 s during bootstrap). Set to `""` only when your cluster DNS does not serve the `cluster.local` suffix.
+      clusterDomain: "cluster.local"
       tls:
         enabled: true
         clientAuth: true

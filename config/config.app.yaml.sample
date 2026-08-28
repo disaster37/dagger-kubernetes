@@ -132,7 +132,7 @@ raft:
   statefulset_name: ""     # e.g. "dagger-kubernetes-supervisor" (DNS discovery).
   headless_service: ""     # e.g. "dagger-kubernetes-headless" (DNS discovery).
   namespace: ""            # K8s namespace for pod DNS (default = release ns).
-  cluster_domain: ""                # K8s cluster DNS suffix appended to peer addresses. "" = peer addresses end at .svc (no suffix) — the project-wide convention (single NO_PROXY ".svc" entry); set the real domain only when .svc cannot resolve.
+  cluster_domain: "cluster.local"   # K8s cluster DNS suffix appended to peer addresses. FQDN avoids CoreDNS negative-cache poisoning (short .svc names route through the cache plugin, which can serve stale NXDOMAIN for up to 30 s during bootstrap). Set to "" only when your cluster DNS does not serve the cluster.local suffix.
   apply_timeout: "5s"
   leader_wait_timeout: "30s"
   snapshot_threshold: 1000

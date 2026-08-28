@@ -54,7 +54,7 @@ func joinMappedGroups(ctx context.Context, groups domain.GroupRepository, mapped
 
 // completeOAuthUser is the shared post-verification tail for both OAuth
 // providers: ensure the local user exists, add mapped supervisor groups, fall
-// back to the hardcoded "default" group when the user still has zero
+// back to the configured default_group (or "default") when the user still has zero
 // memberships, and issue a JWT pair.
 func completeOAuthUser(ctx context.Context, users *UserService, groups domain.GroupRepository, jwt *JWTService, logger *logrus.Logger, provider, oauthID, username, defaultGroup string, mappedGroups []string) (access, refresh string, u *domain.User, err error) {
 	u, _, err = users.EnsureOAuthUser(ctx, provider, oauthID, username)
@@ -64,10 +64,15 @@ func completeOAuthUser(ctx context.Context, users *UserService, groups domain.Gr
 	joinMappedGroups(ctx, groups, mappedGroups, u.ID, logger)
 	gids, _ := groups.GroupsForUser(ctx, u.ID)
 	// If the user still has zero group memberships after mapping rules ran,
-	// add them to the hardcoded "default" group (on every login, not just first
-	// creation). This ensures every OAuth user can always provision engines.
+	// add them to the configured default_group (falling back to "default")
+	// on every login, not just first creation. This ensures every OAuth user
+	// can always provision engines.
+	fallbackGroup := defaultGroup
+	if fallbackGroup == "" {
+		fallbackGroup = "default"
+	}
 	if len(gids) == 0 {
-		joinGroupByName(ctx, groups, "default", u.ID, logger)
+		joinGroupByName(ctx, groups, fallbackGroup, u.ID, logger)
 		gids, _ = groups.GroupsForUser(ctx, u.ID)
 	}
 	access, refresh, err = jwt.IssuePair(u, groupIDs(gids))

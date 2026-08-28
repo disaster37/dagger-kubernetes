@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -444,10 +445,20 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 
 	hostname, _ := os.Hostname()
 	discovery := raftDiscoveryConfig(cfg)
-	resolver := repository.NewPeerResolver(&discovery)
+
+	// Prefer K8s API-based peer discovery (like Vault) over DNS.
+	// Returns the pod's IP for TLS SANs when K8s API is available.
+	resolver, podIP := repository.NewPeerResolverWithClientset(&discovery, clientset, hostname)
+
+	// Derive the advertise address: prefer the resolver's self address
+	// (IP-based when K8s API is available, DNS-based otherwise).
 	advertise, err := repository.DeriveAdvertiseAddr(&discovery, hostname)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive raft advertise addr: %w", err)
+	}
+	// When using K8s API, override with IP-based address from resolver.
+	if podIP != "" {
+		advertise = net.JoinHostPort(podIP, fmt.Sprintf("%d", discovery.RaftPort))
 	}
 
 	isMultiNode := cfg.Raft.Replicas > 1 || len(cfg.Raft.Peers) > 1
@@ -464,6 +475,13 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	var raftTLS *tls.Config
 	if cfg.Raft.TLS.Enabled {
 		dnsNames, ipAddrs := repository.PodSANs(&discovery, hostname)
+		// Include the pod's actual IP in the certificate SANs so mTLS
+		// works when peers connect via IP (K8s API-based discovery).
+		if podIP != "" {
+			if ip := net.ParseIP(podIP); ip != nil {
+				ipAddrs = append(ipAddrs, ip)
+			}
+		}
 		raftTLS, err = buildRaftTLSConfig(cfg, isMultiNode, clientset, dnsNames, ipAddrs, raftNodeCommonName(cfg, resolver, hostname), hostname, logger)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("build raft TLS: %w", err)
@@ -838,6 +856,13 @@ func observeLeadership(ctx context.Context, store *repository.RaftStore, clients
 			logger.WithError(err).WithField("is_leader", isLeader).Warn("patch pod raft-leader label failed")
 		}
 	}
+
+	// Set the initial label before entering the event loop. LeaderCh() only
+	// fires on transitions — if leadership was already established before
+	// this goroutine started (the common case at boot), no event would fire
+	// and the label would never be set.
+	patchPodLabel(store.IsLeader())
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -934,12 +959,18 @@ func resolveTokenEncryptionKey(ctx context.Context, store *repository.RaftStore,
 }
 
 // raftDiscoveryConfig maps the domain raft config to the repository discovery
-// config. The raft port is left unset here; the repository derives it from
-// bind_addr (raftDiscoveryConfig's BindAddr) via raftPort.
+// config. The raft port is derived from bind_addr (default 8081) so callers
+// can reference it directly.
 func raftDiscoveryConfig(cfg *domain.Config) repository.RaftDiscoveryConfig {
 	namespace := cfg.Raft.Namespace
 	if namespace == "" {
 		namespace = cfg.Fleet.Namespace
+	}
+	port := 8081
+	if _, portStr, err := net.SplitHostPort(cfg.Raft.BindAddr); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+			port = p
+		}
 	}
 	return repository.RaftDiscoveryConfig{
 		NodeID:          cfg.Raft.NodeID,
@@ -951,6 +982,7 @@ func raftDiscoveryConfig(cfg *domain.Config) repository.RaftDiscoveryConfig {
 		HeadlessService: cfg.Raft.HeadlessService,
 		Namespace:       namespace,
 		ClusterDomain:   cfg.Raft.ClusterDomain,
+		RaftPort:        port,
 	}
 }
 

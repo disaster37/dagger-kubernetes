@@ -74,9 +74,11 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("raft.statefulset_name", "")
 	v.SetDefault("raft.headless_service", "")
 	v.SetDefault("raft.namespace", "")
-	// "" = peer addresses end at .svc (no cluster suffix), e.g.
-	// <pod>.<headless>.<ns>.svc:8081.
-	v.SetDefault("raft.cluster_domain", "")
+	// Fully-qualified DNS names (<pod>.<headless>.<ns>.svc.<clusterDomain>)
+	// avoid CoreDNS negative-cache poisoning: short names (ending at .svc)
+	// go through the cache plugin which can serve stale NXDOMAIN for up to
+	// 30 s, delaying Raft peer discovery during bootstrap.
+	v.SetDefault("raft.cluster_domain", "cluster.local")
 	v.SetDefault("raft.apply_timeout", 5*time.Second)
 	v.SetDefault("raft.leader_wait_timeout", 30*time.Second)
 	v.SetDefault("raft.snapshot_threshold", uint64(1000))
