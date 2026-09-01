@@ -529,7 +529,7 @@ func TestGCRulesReflectConfigAndLastRun(t *testing.T) {
 	svc, _ := newStatsService(t, reg, "", gc)
 
 	rules := svc.GCRules()
-	if !rules.Enabled || rules.MaxAge != "2h0m0s" || rules.Schedule != "30m0s"  {
+	if !rules.Enabled || rules.MaxAge != "2h0m0s" || rules.Schedule != "30m0s" {
 		t.Fatalf("rules = %+v", rules)
 	}
 	if rules.LastRunAt != "" {

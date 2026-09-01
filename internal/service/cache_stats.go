@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
@@ -77,16 +76,6 @@ type cacheEntry struct {
 
 func rfc3339(t time.Time) string {
 	return t.UTC().Format(time.RFC3339)
-}
-
-// repo returns the repository portion of cache.Registry ("dagger-cache" for
-// "cache.reg/dagger-cache").
-func (s *CacheStatsService) repo() string {
-	_, rest, ok := strings.Cut(s.cache.Registry, "/")
-	if !ok {
-		return s.cache.Registry
-	}
-	return rest
 }
 
 // deleteManifestRoute removes a repo+tag routing row. It no-ops when the
@@ -230,7 +219,7 @@ func (s *CacheStatsService) buildCacheRef(ctx context.Context, entries []cacheEn
 		if e.tag != cacheTag {
 			continue
 		}
-		lastUsed := s.lastUsedAt(ctx, e)
+		lastUsed := s.lastUsedAt(ctx, &e)
 		ref = &domain.CacheRef{
 			Ref:        s.cache.CacheRef(),
 			Tag:        cacheTag,
@@ -246,7 +235,7 @@ func (s *CacheStatsService) buildCacheRef(ctx context.Context, entries []cacheEn
 
 // lastUsedAt returns the shared staleness signal for both stats and GC:
 // 1. routing-table LastSeenAt; 2. manifest creation annotation; 3. zero time.
-func (s *CacheStatsService) lastUsedAt(ctx context.Context, e cacheEntry) time.Time {
+func (s *CacheStatsService) lastUsedAt(ctx context.Context, e *cacheEntry) time.Time {
 	// 1. Routing table LastSeenAt.
 	if s.router != nil && s.router.routes != nil {
 		if route, ok, err := s.router.routes.LookupManifest(ctx, e.repo, e.tag); ok && err == nil {
@@ -503,7 +492,7 @@ func (s *CacheStatsService) gcCollectEntries(ctx context.Context) []cacheEntry {
 // backend refuses deletes.
 func (s *CacheStatsService) gcSweepEntries(probeCtx, ctx context.Context, entries []cacheEntry, summary *domain.GCRunSummary) error {
 	for _, e := range entries {
-		used := s.lastUsedAt(probeCtx, e)
+		used := s.lastUsedAt(probeCtx, &e)
 		if used.IsZero() {
 			summary.Skipped++
 			continue // never observed → keep

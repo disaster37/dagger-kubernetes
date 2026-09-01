@@ -68,19 +68,19 @@ type CacheStats struct {
 
 // CacheRef describes the single global cache ref (registry backend).
 type CacheRef struct {
-	Ref        string `json:"ref"`                  // "<host>/<repo>:cache"
-	Tag        string `json:"tag"`                  // "cache"
-	Size       int64  `json:"size"`                 // layer+config bytes; -1 unknown
-	LayerCount int64  `json:"layer_count"`          // number of layers; -1 unknown
-	Digest     string `json:"digest"`               // sha256:...; "" unavailable
+	Ref        string `json:"ref"`                    // "<host>/<repo>:cache"
+	Tag        string `json:"tag"`                    // "cache"
+	Size       int64  `json:"size"`                   // layer+config bytes; -1 unknown
+	LayerCount int64  `json:"layer_count"`            // number of layers; -1 unknown
+	Digest     string `json:"digest"`                 // sha256:...; "" unavailable
 	LastUsedAt string `json:"last_used_at,omitempty"` // RFC3339; "" when unknown
 }
 
 // GCRules describes the auto-clean configuration and last/next run.
 type GCRules struct {
 	Enabled        bool          `json:"enabled"`
-	MaxAge         string        `json:"max_age"`  // duration string e.g. "168h"
-	Schedule       string        `json:"schedule"` // duration string e.g. "1h"
+	MaxAge         string        `json:"max_age"`               // duration string e.g. "168h"
+	Schedule       string        `json:"schedule"`              // duration string e.g. "1h"
 	LastRunAt      string        `json:"last_run_at,omitempty"` // RFC3339
 	LastRunSummary *GCRunSummary `json:"last_run_summary,omitempty"`
 	NextRunAt      string        `json:"next_run_at,omitempty"` // RFC3339 (estimated)
