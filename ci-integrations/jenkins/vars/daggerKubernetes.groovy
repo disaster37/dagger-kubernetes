@@ -49,10 +49,9 @@ def call(Map params = [:], Closure body = null) {
     }
 
     String cacheConfig = ''
-    if (magicCache && version) {
+    if (magicCache) {
         assertShellSafe(cacheRegistry, 'cacheRegistry')
-        String vslug = version.replaceAll(/^v/, '').replaceAll(/\./, '-')
-        cacheConfig = "type=registry,ref=${cacheRegistry}:V${vslug},mode=max"
+        cacheConfig = "type=registry,ref=${cacheRegistry}:cache,mode=max"
     }
 
     if (dynamicStages) {

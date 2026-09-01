@@ -137,6 +137,7 @@ type cacheRouter interface {
 	RecordUploadSession(ctx context.Context, uuid, repo, backendID string) error
 	CompleteUpload(ctx context.Context, uuid, digest, backendID string) error
 	RecordManifest(ctx context.Context, repo, tag, digest, backendID string, storedBytes int64) error
+	TouchManifest(ctx context.Context, repo, tag string) error
 	MarkDown(backendID string)
 }
 
@@ -627,7 +628,6 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/fleet", s.handleFleetInfo)
 	h.GET("/api/v1/cache", s.handleCacheInfo)
 	h.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
-	h.POST("/api/v1/cache/purge-all", s.adminOnly(s.handleCachePurgeAll))
 	h.GET("/api/v1/history", s.handleHistoryInfo)
 	h.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
 	h.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
@@ -1348,7 +1348,7 @@ func (s *Server) routeCacheManifest(ctx context.Context, method string, m []stri
 	switch method {
 	case "GET", "HEAD":
 		b, err := s.router.RouteForPull(ctx, repo, ref)
-		return b, routeOther, err
+		return b, routeManifest, err
 	case "PUT":
 		b, err := s.router.RouteForPush(repo)
 		return b, routeManifest, err
@@ -1440,21 +1440,31 @@ func (s *Server) recordCacheRoute(ctx context.Context, c *app.RequestContext, ba
 }
 
 // recordManifestRoute records a routing-table row for a successful manifest
-// push.
+// push, and touches LastSeenAt on successful pulls.
 func (s *Server) recordManifestRoute(ctx context.Context, method string, status int, path string, c *app.RequestContext, backend domain.RegistryBackend) {
-	if method != "PUT" || (status != consts.StatusCreated && status != consts.StatusAccepted) {
-		return
-	}
 	m := reManifest.FindStringSubmatch(path)
 	if m == nil {
 		return
 	}
-	digest := string(c.Response.Header.Peek("Docker-Content-Digest"))
-	if !validDigest(digest) {
-		digest = ""
-	}
-	if err := s.router.RecordManifest(ctx, m[1], m[2], digest, backend.ID, 0); err != nil {
-		s.logger.WithError(err).Warn("record manifest route failed")
+	switch method {
+	case "PUT":
+		if status != consts.StatusCreated && status != consts.StatusAccepted {
+			return
+		}
+		digest := string(c.Response.Header.Peek("Docker-Content-Digest"))
+		if !validDigest(digest) {
+			digest = ""
+		}
+		if err := s.router.RecordManifest(ctx, m[1], m[2], digest, backend.ID, 0); err != nil {
+			s.logger.WithError(err).Warn("record manifest route failed")
+		}
+	case "GET", "HEAD":
+		if status != consts.StatusOK {
+			return
+		}
+		if err := s.router.TouchManifest(ctx, m[1], m[2]); err != nil {
+			s.logger.WithError(err).Warn("touch manifest route failed")
+		}
 	}
 }
 

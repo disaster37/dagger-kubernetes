@@ -65,14 +65,6 @@ func (v *Version) MinorKey() string {
 	return fmt.Sprintf("%d.%d", v.Major, v.Minor)
 }
 
-func (v *Version) Slug() string {
-	return strings.ReplaceAll(v.Raw, ".", "-")
-}
-
-func (v *Version) CacheRefTag() string {
-	return v.Slug()
-}
-
 func (v *Version) String() string {
 	return v.Raw
 }

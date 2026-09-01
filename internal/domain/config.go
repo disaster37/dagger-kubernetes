@@ -102,6 +102,12 @@ type OAuthConfig struct {
 	UsernameClaim string   `mapstructure:"username_claim"` // default "preferred_username"; fallback "email"
 	GroupsClaim   string   `mapstructure:"groups_claim"`   // default "groups"
 	CACertPath    string   `mapstructure:"ca_cert_path"`   // optional PEM CA cert for verifying the OIDC issuer TLS
+
+	// Revalidation of IdP group membership (ADR-027).
+	RevalidateInterval time.Duration `mapstructure:"revalidate_interval"`  // default 5m; per-user cache TTL
+	RevalidateGrace    time.Duration `mapstructure:"revalidate_grace"`     // default 1h; offline grace window
+	RevalidateFailOpen bool          `mapstructure:"revalidate_fail_open"` // default false (fail closed)
+	SessionMaxAge      time.Duration `mapstructure:"session_max_age"`      // default 0 (disabled); hard refresh-token bound for OAuth users
 }
 
 // GroupMappingRule maps an upstream provider group name to a supervisor group
@@ -258,11 +264,9 @@ type S3Config struct {
 
 // GCConfig governs the cache auto-clean background sweeper.
 type GCConfig struct {
-	Enabled               bool          `mapstructure:"enabled"`
-	MaxAge                time.Duration `mapstructure:"max_age"`
-	Schedule              time.Duration `mapstructure:"schedule"`
-	MinRefsToKeep         int           `mapstructure:"min_refs_to_keep"`
-	ProtectActiveVersions bool          `mapstructure:"protect_active_versions"`
+	Enabled  bool          `mapstructure:"enabled"`
+	MaxAge   time.Duration `mapstructure:"max_age"`
+	Schedule time.Duration `mapstructure:"schedule"`
 }
 
 // HistoryConfig governs pipeline-history retention (trace_meta + logs +

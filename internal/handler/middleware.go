@@ -165,6 +165,8 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusTooManyRequests, "group runner session quota exhausted")
 	case errors.Is(err, domain.ErrUnauthenticated):
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
+	case errors.Is(err, domain.ErrSessionRevoked):
+		writeError(c, consts.StatusUnauthorized, "session revoked; please sign in again")
 	case errors.Is(err, domain.ErrValidation):
 		writeError(c, consts.StatusBadRequest, err.Error())
 	default:

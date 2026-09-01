@@ -32,12 +32,10 @@ fi
 
 if [ -n "$DAGGER_TAG" ]; then
   export _EXPERIMENTAL_DAGGER_TAG="$DAGGER_TAG"
-
-  VSLUG=$(echo "$DAGGER_TAG" | sed 's/\./-/g' | sed 's/^v//')
-  CACHE_REF="${CACHE_REGISTRY}:V${VSLUG}"
-
-  export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=${CACHE_REF},mode=max"
 fi
+
+CACHE_REF="${CACHE_REGISTRY}:cache"
+export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=${CACHE_REF},mode=max"
 
 echo "Dagger Kubernetes: $DAGGER_KUBERNETES_SERVER (version: ${DAGGER_TAG:-auto})" >&2
 

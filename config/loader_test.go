@@ -160,12 +160,6 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Cache.GC.Schedule != time.Hour {
 		t.Fatalf("cache.gc.schedule default = %v, want 1h", cfg.Cache.GC.Schedule)
 	}
-	if cfg.Cache.GC.MinRefsToKeep != 3 {
-		t.Fatalf("cache.gc.min_refs_to_keep default = %d, want 3", cfg.Cache.GC.MinRefsToKeep)
-	}
-	if !cfg.Cache.GC.ProtectActiveVersions {
-		t.Fatal("cache.gc.protect_active_versions default should be true")
-	}
 	if cfg.History.GC.Enabled {
 		t.Fatal("history.gc.enabled default should be false")
 	}

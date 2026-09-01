@@ -76,25 +76,15 @@ literal value everywhere — including the CI snippets — for users who opt in.
 
 ### 5. Single source of truth for the cache-config value
 
-`ConnectService` reuses `service.Cache.BuildCacheConfig(v, "max")` and
-`domain.VersionResolver` (`ResolveMinimal`, `IsAllowed`, `AllReleases`) so the
-`_EXPERIMENTAL_DAGGER_CACHE_CONFIG` value and the version allowlist are
-computed by the same code the CI wrapper and CLI script already use.
+`ConnectService` reuses `service.Cache.BuildCacheConfig("max")` (no version
+argument) so the `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` value is computed by the
+same code the CI wrapper and CLI script already use.
 
 `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` is **always** emitted (for both the
 registry and s3 backends) whenever `BuildCacheConfig` returns a non-empty
-string, regardless of whether an engine version is pinned. The cache ref's
-version tag targets the client's *effective* engine version: the explicitly
-pinned version when provided, otherwise the latest allowed release (the last
-element of `AllReleases()`, which is sorted ascending), falling back to
-`VersionResolver.Floor()` when no releases are known.
-`_EXPERIMENTAL_DAGGER_TAG` remains opt-in and is emitted only when the user
-pins a version.
-
-Trade-off: when no version is pinned, the cache ref targets the platform's
-default version (latest allowed release or floor), which is the best-known
-proxy for the client's real engine version rather than a value read from the
-client itself.
+string. The cache ref uses the fixed global tag `cache`, shared across all
+engine versions. `_EXPERIMENTAL_DAGGER_TAG` remains opt-in and is emitted only
+when the user pins a version.
 
 ### 6. Threat-model trade-off
 

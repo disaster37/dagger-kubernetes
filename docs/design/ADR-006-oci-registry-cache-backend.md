@@ -14,23 +14,23 @@ Support two cache backends:
 
 1. **Registry (OCI)** — a standard OCI Distribution-compatible registry
    (`registry:2` or any OCI-compliant registry). BuildKit cache blobs are
-   stored as OCI manifest layers under a version-tagged repository ref.
-   Default: `cache.reg/dagger-cache:V<slug>`.
+   stored as OCI manifest layers under a single global tag `cache`.
+   Default: `cache.reg/dagger-cache:cache`.
 
 2. **S3** — an S3 bucket. BuildKit's `type=s3` cache config is generated
    from `cache.s3.bucket` and `cache.s3.region`.
 
-The cache ref is derived from the engine version and the configured
-registry. The `cache.ref_per_version` flag (default `true`) appends a
-`:V<maj>-<min>-<patch>` tag to prevent cross-version cache pollution.
+The cache ref uses the fixed global tag `cache`, shared across all engine
+versions. BuildKit cache is content-addressed, so cross-version sharing is
+safe.
 
 ## Rationale
 
 - OCI registries are well-understood, easy to deploy (single Docker
   container), and supported by every major CI platform.
 - S3 is a natural choice for cloud-native deployments.
-- Version-tagged refs prevent accidental cache poisoning between Dagger
-  engine versions.
+- Version-tagged refs are no longer needed: BuildKit cache is
+  content-addressed, so a single global tag is safe across versions.
 
 ## Consequences
 
@@ -44,3 +44,7 @@ registry. The `cache.ref_per_version` flag (default `true`) appends a
 > Supervisor proxy vhost by default; `cache.public_host` is the dedicated
 > cache vhost, and the Supervisor controls registry credentials and
 > load-balances across backend registries.
+>
+> **Superseded in part by ADR-028:** the version-tagged refs and
+> `cache.ref_per_version` flag are removed; the cache uses a single global
+> `:cache` tag shared across all engine versions.

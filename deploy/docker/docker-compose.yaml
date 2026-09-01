@@ -99,6 +99,28 @@ services:
     networks:
       - dagger-kubernetes
 
+  cache-registry-gc:
+    image: registry:2
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        echo "Registry GC starting (running every 24h)"
+        while true; do
+          sleep 86400
+          echo "Running registry garbage-collect --delete-untagged..."
+          /bin/registry garbage-collect --delete-untagged /etc/docker/registry/config.yml || true
+          echo "GC finished."
+        done
+    environment:
+      - REGISTRY_STORAGE_DELETE_ENABLED=true
+    volumes:
+      - registry-data:/var/lib/registry
+    networks:
+      - dagger-kubernetes
+    depends_on:
+      - cache-registry
+
 networks:
   dagger-kubernetes:
 

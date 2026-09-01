@@ -209,10 +209,7 @@ type stubCachePurger struct {
 	err    error
 }
 
-func (p *stubCachePurger) Purge(context.Context, domain.PurgeRequest) (*domain.PurgeResult, error) {
-	return p.result, p.err
-}
-func (p *stubCachePurger) PurgeAll(context.Context) (*domain.PurgeResult, error) {
+func (p *stubCachePurger) Purge(context.Context) (*domain.PurgeResult, error) {
 	return p.result, p.err
 }
 

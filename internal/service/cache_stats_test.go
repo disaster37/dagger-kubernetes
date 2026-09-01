@@ -137,7 +137,7 @@ func newTestRouter(t *testing.T, backends ...domain.RegistryBackend) *RegistryRo
 	return NewRegistryRouter(backends, repository.NewCacheRoutesRepo(newServiceStore(t)), newRegistryClient, observ.NewTestLogger())
 }
 
-func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet domain.FleetProvider, gc domain.GCConfig) (*CacheStatsService, *httptest.Server) {
+func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, gc domain.GCConfig) (*CacheStatsService, *httptest.Server) {
 	t.Helper()
 	ts := httptest.NewServer(reg.handler())
 	t.Cleanup(ts.Close)
@@ -151,11 +151,18 @@ func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, fleet d
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
 		router,
 		mc,
-		fleet,
 		gc,
 		observ.NewTestLogger(),
 		observ.NewMetrics(nil),
 	), ts
+}
+
+func defaultGC() domain.GCConfig {
+	return domain.GCConfig{
+		Enabled:  false,
+		MaxAge:   168 * time.Hour,
+		Schedule: time.Hour,
+	}
 }
 
 // --- fleet stub ------------------------------------------------------------
@@ -186,27 +193,17 @@ func (p *stubFleetProvider) SetVersionIdleSince(string, time.Time) error { retur
 
 var _ domain.FleetProvider = (*stubFleetProvider)(nil)
 
-func defaultGC() domain.GCConfig {
-	return domain.GCConfig{
-		Enabled:               false,
-		MaxAge:                168 * time.Hour,
-		Schedule:              time.Hour,
-		MinRefsToKeep:         3,
-		ProtectActiveVersions: true,
-	}
-}
-
 // --- tests -----------------------------------------------------------------
 
 func TestCacheStatsRegistryOK(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4", "v0-20-0"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 120, 3, "")
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.tags["dagger-cache"] = []string{"cache", "v0-20-0"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 120, 3, "")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 	reg.manifestBody["dagger-cache:v0-20-0"] = manifestJSON("sha256:b", 60, 2, "")
 	reg.manifestDigest["dagger-cache:v0-20-0"] = digestStr("b")
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
@@ -220,14 +217,14 @@ func TestCacheStatsRegistryOK(t *testing.T) {
 	if stats.ObjectCount != 5 {
 		t.Fatalf("object_count = %d, want 5", stats.ObjectCount)
 	}
-	if len(stats.Versions) != 2 {
-		t.Fatalf("versions = %d, want 2", len(stats.Versions))
+	if stats.Ref == nil {
+		t.Fatal("ref should not be nil")
 	}
-	if stats.Versions[0].Version != "v0.21.4" {
-		t.Fatalf("versions[0].version = %q (want newest first)", stats.Versions[0].Version)
+	if stats.Ref.Tag != "cache" {
+		t.Fatalf("ref.tag = %q, want cache", stats.Ref.Tag)
 	}
-	if stats.Versions[0].Ref != "cache.supv.example.com/dagger-cache:v0-21-4" {
-		t.Fatalf("ref = %q", stats.Versions[0].Ref)
+	if stats.Ref.Ref != "cache.supv.example.com/dagger-cache:cache" {
+		t.Fatalf("ref.ref = %q", stats.Ref.Ref)
 	}
 	if stats.HitRate != nil {
 		t.Fatalf("hit_rate = %v, want nil", *stats.HitRate)
@@ -236,10 +233,10 @@ func TestCacheStatsRegistryOK(t *testing.T) {
 
 func TestCacheStatsCacheHitAndExpiry(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
 	first, err := svc.Stats(context.Background())
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
@@ -265,7 +262,7 @@ func TestCacheStatsCacheHitAndExpiry(t *testing.T) {
 
 func TestCacheStatsRegistryUnreachable(t *testing.T) {
 	reg := newFakeRegistry()
-	svc, ts := newStatsService(t, reg, "", nil, defaultGC())
+	svc, ts := newStatsService(t, reg, "", defaultGC())
 	ts.Close()
 
 	stats, err := svc.Stats(context.Background())
@@ -287,7 +284,7 @@ func TestCacheStatsCatalogDisabled(t *testing.T) {
 	reg := newFakeRegistry()
 	reg.catalogStatus = http.StatusNotFound
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
@@ -306,7 +303,7 @@ func TestCacheStatsCatalogDisabled(t *testing.T) {
 func TestCacheStatsS3Unsupported(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "s3", Registry: "my-bucket", S3: domain.S3Ref{Bucket: "my-bucket"}},
-		nil, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
@@ -318,15 +315,15 @@ func TestCacheStatsS3Unsupported(t *testing.T) {
 	if stats.Message != s3UnsupportedMessage {
 		t.Fatalf("message = %q", stats.Message)
 	}
-	if len(stats.Versions) != 0 {
-		t.Fatalf("versions = %d, want 0", len(stats.Versions))
+	if stats.Ref != nil {
+		t.Fatalf("ref should be nil for s3, got %+v", stats.Ref)
 	}
 }
 
 func TestCacheStatsHitRate(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
 
 	ms := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		q := r.URL.Query().Get("query")
@@ -340,7 +337,7 @@ func TestCacheStatsHitRate(t *testing.T) {
 	}))
 	defer ms.Close()
 
-	svc, _ := newStatsService(t, reg, ms.URL, nil, defaultGC())
+	svc, _ := newStatsService(t, reg, ms.URL, defaultGC())
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
@@ -358,15 +355,15 @@ func TestCacheStatsHitRate(t *testing.T) {
 
 func TestCacheStatsHitRateNoData(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
 
 	ms := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"status":"success","data":{"result":[]}}`))
 	}))
 	defer ms.Close()
 
-	svc, _ := newStatsService(t, reg, ms.URL, nil, defaultGC())
+	svc, _ := newStatsService(t, reg, ms.URL, defaultGC())
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
@@ -376,37 +373,22 @@ func TestCacheStatsHitRateNoData(t *testing.T) {
 	}
 }
 
-func TestPurgeInvalidVersion(t *testing.T) {
-	svc, _ := newStatsService(t, newFakeRegistry(), "", nil, defaultGC())
-	_, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "not-a-version"})
-	if !errors.Is(err, domain.ErrValidation) {
-		t.Fatalf("err = %v, want ErrValidation", err)
-	}
-}
-
-func TestPurgeInvalidTag(t *testing.T) {
-	svc, _ := newStatsService(t, newFakeRegistry(), "", nil, defaultGC())
-	_, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "v0.21.4", Tag: "bad tag!"})
-	if !errors.Is(err, domain.ErrValidation) {
-		t.Fatalf("err = %v, want ErrValidation", err)
-	}
-}
-
 func TestPurgeSuccess(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 55, 1, "")
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 55, 1, "")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
-	res, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "v0.21.4"})
+	svc, _ := newStatsService(t, reg, "", defaultGC())
+	res, err := svc.Purge(context.Background())
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
 	if res.Purged != 1 || res.FreedBytes != 55 {
 		t.Fatalf("result = %+v", res)
 	}
-	if len(res.Versions) != 1 || res.Versions[0] != "v0.21.4" {
-		t.Fatalf("versions = %v", res.Versions)
+	if len(res.Tags) != 1 || res.Tags[0] != "cache" {
+		t.Fatalf("tags = %v", res.Tags)
 	}
 	if len(reg.deleted) != 1 || !strings.Contains(reg.deleted[0], digestStr("a")) {
 		t.Fatalf("deleted = %v", reg.deleted)
@@ -414,10 +396,11 @@ func TestPurgeSuccess(t *testing.T) {
 }
 
 func TestPurgeAlreadyPurged(t *testing.T) {
-	reg := newFakeRegistry() // no manifest for v0-21-4 → 404
+	reg := newFakeRegistry()
+	reg.tags["dagger-cache"] = []string{"cache"} // tag exists but no manifest → 404
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
-	res, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "v0.21.4"})
+	svc, _ := newStatsService(t, reg, "", defaultGC())
+	res, err := svc.Purge(context.Background())
 	if err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
@@ -428,12 +411,13 @@ func TestPurgeAlreadyPurged(t *testing.T) {
 
 func TestPurgeDeleteDisabled(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 55, 2, "")
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 55, 2, "")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 	reg.deleteStatus = http.StatusMethodNotAllowed
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
-	_, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "v0.21.4"})
+	svc, _ := newStatsService(t, reg, "", defaultGC())
+	_, err := svc.Purge(context.Background())
 	if !errors.Is(err, domain.ErrRegistryDeleteDisabled) {
 		t.Fatalf("err = %v, want ErrRegistryDeleteDisabled", err)
 	}
@@ -441,14 +425,14 @@ func TestPurgeDeleteDisabled(t *testing.T) {
 
 func TestPurgeAll(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4", "v0-20-0"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 40, 2, "")
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.tags["dagger-cache"] = []string{"cache", "v0-20-0"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 40, 2, "")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 	reg.manifestBody["dagger-cache:v0-20-0"] = manifestJSON("sha256:b", 20, 1, "")
 	reg.manifestDigest["dagger-cache:v0-20-0"] = digestStr("b")
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
-	res, err := svc.PurgeAll(context.Background())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
+	res, err := svc.Purge(context.Background())
 	if err != nil {
 		t.Fatalf("PurgeAll: %v", err)
 	}
@@ -468,8 +452,8 @@ func TestPurgeAllTruncated(t *testing.T) {
 	}
 	reg.tags["dagger-cache"] = tags
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
-	res, err := svc.PurgeAll(context.Background())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
+	res, err := svc.Purge(context.Background())
 	if err != nil {
 		t.Fatalf("PurgeAll: %v", err)
 	}
@@ -486,7 +470,6 @@ func TestRunGCPurgesOldTags(t *testing.T) {
 	gc := defaultGC()
 	gc.Enabled = true
 	gc.MaxAge = 1 * time.Hour
-	gc.MinRefsToKeep = 3
 
 	old := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
 	var tags []string
@@ -498,56 +481,17 @@ func TestRunGCPurgesOldTags(t *testing.T) {
 	}
 	reg.tags["dagger-cache"] = tags
 
-	svc, _ := newStatsService(t, reg, "", nil, gc)
+	svc, _ := newStatsService(t, reg, "", gc)
 	summary, err := svc.RunGC(context.Background())
 	if err != nil {
 		t.Fatalf("RunGC: %v", err)
 	}
-	// 5 tags, keep 3 newest → purge 2 oldest.
-	if summary.PurgedTags != 2 {
-		t.Fatalf("purged_tags = %d, want 2", summary.PurgedTags)
+	// All 5 tags are older than max_age → all purged.
+	if summary.PurgedTags != 5 {
+		t.Fatalf("purged_tags = %d, want 5", summary.PurgedTags)
 	}
-	if summary.FreedBytes != 20 {
-		t.Fatalf("freed_bytes = %d, want 20", summary.FreedBytes)
-	}
-}
-
-func TestRunGCProtectsActiveVersion(t *testing.T) {
-	reg := newFakeRegistry()
-	gc := defaultGC()
-	gc.Enabled = true
-	gc.MaxAge = 1 * time.Hour
-	gc.MinRefsToKeep = 3
-	gc.ProtectActiveVersions = true
-
-	old := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
-	var tags []string
-	for i := 0; i < 5; i++ {
-		tag := fmt.Sprintf("v0-21-%d", i)
-		tags = append(tags, tag)
-		reg.manifestBody[fmt.Sprintf("dagger-cache:%s", tag)] = manifestJSON(fmt.Sprintf("sha256:%d", i), 10, 1, old)
-		reg.manifestDigest[fmt.Sprintf("dagger-cache:%s", tag)] = fmt.Sprintf("sha256:%064d", i)
-	}
-	reg.tags["dagger-cache"] = tags
-
-	fleet := &stubFleetProvider{
-		versions: []string{"v0.21.0"},
-		replicas: map[string][]domain.Replica{
-			"v0.21.0": {{Name: "p0", Version: "v0.21.0", Ready: true}},
-		},
-	}
-
-	svc, _ := newStatsService(t, reg, "", fleet, gc)
-	summary, err := svc.RunGC(context.Background())
-	if err != nil {
-		t.Fatalf("RunGC: %v", err)
-	}
-	// v0-21-0 is oldest but active → skipped; v0-21-1 (old, inactive) purged.
-	if summary.PurgedTags != 1 {
-		t.Fatalf("purged_tags = %d, want 1 (v0-21-0 protected)", summary.PurgedTags)
-	}
-	if summary.Skipped < 1 {
-		t.Fatalf("skipped = %d, want >= 1", summary.Skipped)
+	if summary.FreedBytes != 50 {
+		t.Fatalf("freed_bytes = %d, want 50", summary.FreedBytes)
 	}
 }
 
@@ -556,13 +500,12 @@ func TestRunGCUnknownAgeSkips(t *testing.T) {
 	gc := defaultGC()
 	gc.Enabled = true
 	gc.MaxAge = 1 * time.Hour
-	gc.MinRefsToKeep = 0
 
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
+	reg.tags["dagger-cache"] = []string{"cache"}
 	// No created annotation → unknown age.
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
 
-	svc, _ := newStatsService(t, reg, "", nil, gc)
+	svc, _ := newStatsService(t, reg, "", gc)
 	summary, err := svc.RunGC(context.Background())
 	if err != nil {
 		t.Fatalf("RunGC: %v", err)
@@ -579,14 +522,14 @@ func TestGCRulesReflectConfigAndLastRun(t *testing.T) {
 	gc.MaxAge = 2 * time.Hour
 	gc.Schedule = 30 * time.Minute
 
-	reg.tags["dagger-cache"] = []string{"v0-21-4", "v0-21-3"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.tags["dagger-cache"] = []string{"cache", "v0-21-3"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
 	reg.manifestBody["dagger-cache:v0-21-3"] = manifestJSON("sha256:b", 10, 1, "")
 
-	svc, _ := newStatsService(t, reg, "", nil, gc)
+	svc, _ := newStatsService(t, reg, "", gc)
 
 	rules := svc.GCRules()
-	if !rules.Enabled || rules.MaxAge != "2h0m0s" || rules.Schedule != "30m0s" || rules.MinRefsToKeep != 3 || !rules.ProtectActiveVersions {
+	if !rules.Enabled || rules.MaxAge != "2h0m0s" || rules.Schedule != "30m0s"  {
 		t.Fatalf("rules = %+v", rules)
 	}
 	if rules.LastRunAt != "" {
@@ -606,21 +549,21 @@ func TestGCRulesReflectConfigAndLastRun(t *testing.T) {
 }
 
 func TestStartGCSweeperDisabled(t *testing.T) {
-	svc, _ := newStatsService(t, newFakeRegistry(), "", nil, defaultGC())
+	svc, _ := newStatsService(t, newFakeRegistry(), "", defaultGC())
 	stop := svc.StartGCSweeper(context.Background())
 	stop() // no-op; must not panic
 }
 
 func TestStartGCSweeperEnabled(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
 
 	gc := defaultGC()
 	gc.Enabled = true
 	gc.Schedule = 10 * time.Millisecond
 
-	svc, _ := newStatsService(t, reg, "", nil, gc)
+	svc, _ := newStatsService(t, reg, "", gc)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	stop := svc.StartGCSweeper(ctx)
@@ -642,7 +585,7 @@ func TestStartGCSweeperEnabled(t *testing.T) {
 func TestCacheStatsRegistryNil(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		nil, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
@@ -659,14 +602,14 @@ func TestCacheStatsRegistryNil(t *testing.T) {
 func TestCacheStatsSkipsMissingManifestAndBadTags(t *testing.T) {
 	reg := newFakeRegistry()
 	reg.repos = []string{"dagger-cache", "broken"}
-	reg.tags["dagger-cache"] = []string{"v0-21-4", "missing"}
+	reg.tags["dagger-cache"] = []string{"cache", "missing"}
 	reg.tags["broken"] = []string{"v0-20-0"}
 	reg.tagsStatus["broken"] = http.StatusInternalServerError
 	// "missing" has no manifest body → 404 → skipped.
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 30, 1, "")
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 30, 1, "")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
@@ -674,21 +617,21 @@ func TestCacheStatsSkipsMissingManifestAndBadTags(t *testing.T) {
 	if stats.TotalSize != 30 {
 		t.Fatalf("total_size = %d, want 30", stats.TotalSize)
 	}
-	if len(stats.Versions) != 1 {
-		t.Fatalf("versions = %d, want 1", len(stats.Versions))
+	if stats.Ref == nil || stats.Ref.Tag != "cache" {
+		t.Fatalf("ref should be non-nil with tag cache")
 	}
 }
 
 func TestPurgeRegistryNil(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		nil, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
-	_, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "v0.21.4"})
+	_, err := svc.Purge(context.Background())
 	if err == nil {
 		t.Fatal("expected error for nil registry")
 	}
-	_, err = svc.PurgeAll(context.Background())
+	_, err = svc.Purge(context.Background())
 	if err == nil {
 		t.Fatal("expected error for nil registry")
 	}
@@ -698,8 +641,8 @@ func TestPurgeAllCatalogDisabled(t *testing.T) {
 	reg := newFakeRegistry()
 	reg.catalogStatus = http.StatusNotFound
 
-	svc, _ := newStatsService(t, reg, "", nil, defaultGC())
-	_, err := svc.PurgeAll(context.Background())
+	svc, _ := newStatsService(t, reg, "", defaultGC())
+	_, err := svc.Purge(context.Background())
 	if !errors.Is(err, domain.ErrRegistryCatalogDisabled) {
 		t.Fatalf("err = %v, want ErrRegistryCatalogDisabled", err)
 	}
@@ -708,7 +651,7 @@ func TestPurgeAllCatalogDisabled(t *testing.T) {
 func TestRunGCRegistryNil(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		nil, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	summary, err := svc.RunGC(context.Background())
 	if err == nil || summary == nil {
@@ -721,15 +664,14 @@ func TestRunGCDeleteDisabled(t *testing.T) {
 	gc := defaultGC()
 	gc.Enabled = true
 	gc.MaxAge = 1 * time.Hour
-	gc.MinRefsToKeep = 0
 
 	old := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, old)
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, old)
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 	reg.deleteStatus = http.StatusMethodNotAllowed
 
-	svc, _ := newStatsService(t, reg, "", nil, gc)
+	svc, _ := newStatsService(t, reg, "", gc)
 	_, err := svc.RunGC(context.Background())
 	if !errors.Is(err, domain.ErrRegistryDeleteDisabled) {
 		t.Fatalf("err = %v, want ErrRegistryDeleteDisabled", err)
@@ -756,7 +698,7 @@ func TestStatsPurgeNoDeadlock(t *testing.T) {
 		case r.URL.Path == "/v2/_catalog":
 			_, _ = w.Write([]byte(`{"repositories":["dagger-cache"]}`))
 		case strings.HasSuffix(r.URL.Path, "/tags/list"):
-			_, _ = w.Write([]byte(`{"name":"dagger-cache","tags":["v0-21-4"]}`))
+			_, _ = w.Write([]byte(`{"name":"dagger-cache","tags":["cache"]}`))
 		case r.Method == http.MethodGet && strings.Contains(r.URL.Path, "/manifests/"):
 			blocked <- struct{}{}
 			<-release
@@ -771,19 +713,19 @@ func TestStatsPurgeNoDeadlock(t *testing.T) {
 	defer ts.Close()
 
 	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
-	if err := router.RecordManifest(context.Background(), "dagger-cache", "v0-21-4", digestStr("a"), "default", 0); err != nil {
+	if err := router.RecordManifest(context.Background(), "dagger-cache", "cache", digestStr("a"), "default", 0); err != nil {
 		t.Fatalf("seed route: %v", err)
 	}
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
 		router,
-		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
 	// Purge acquires purgeMu then blocks inside ManifestSize.
 	purgeDone := make(chan error, 1)
 	go func() {
-		_, err := svc.Purge(context.Background(), domain.PurgeRequest{Version: "v0.21.4"})
+		_, err := svc.Purge(context.Background())
 		purgeDone <- err
 	}()
 	select {
@@ -831,33 +773,11 @@ func TestStatsPurgeNoDeadlock(t *testing.T) {
 	}
 }
 
-func TestFleetErrorTreatsAllProtected(t *testing.T) {
-	reg := newFakeRegistry()
-	gc := defaultGC()
-	gc.Enabled = true
-	gc.MaxAge = 1 * time.Hour
-	gc.MinRefsToKeep = 0
-
-	old := time.Now().Add(-48 * time.Hour).Format(time.RFC3339)
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, old)
-
-	fleet := &stubFleetProvider{allErr: errors.New("k8s down")}
-	svc, _ := newStatsService(t, reg, "", fleet, gc)
-	summary, err := svc.RunGC(context.Background())
-	if err != nil {
-		t.Fatalf("RunGC: %v", err)
-	}
-	if summary.PurgedTags != 0 {
-		t.Fatalf("purged_tags = %d, want 0 (unknown fleet → all protected)", summary.PurgedTags)
-	}
-}
-
 func TestCacheStatsMultiBackend(t *testing.T) {
 	reg1 := newFakeRegistry()
-	reg1.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg1.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 120, 3, "")
-	reg1.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg1.tags["dagger-cache"] = []string{"cache"}
+	reg1.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 120, 3, "")
+	reg1.manifestDigest["dagger-cache:cache"] = digestStr("a")
 
 	reg2 := newFakeRegistry()
 	reg2.tags["dagger-cache"] = []string{"v0-20-0"}
@@ -875,7 +795,7 @@ func TestCacheStatsMultiBackend(t *testing.T) {
 	)
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
-		router, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		router, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
 	stats, err := svc.Stats(context.Background())
@@ -891,8 +811,8 @@ func TestCacheStatsMultiBackend(t *testing.T) {
 	if stats.ObjectCount != 5 {
 		t.Fatalf("object_count = %d, want 5", stats.ObjectCount)
 	}
-	if len(stats.Versions) != 2 {
-		t.Fatalf("versions = %d, want 2", len(stats.Versions))
+	if stats.Ref == nil || stats.Ref.Tag != "cache" {
+		t.Fatalf("ref should be non-nil with tag cache")
 	}
 
 	router.mu.RLock()
@@ -906,9 +826,9 @@ func TestCacheStatsMultiBackend(t *testing.T) {
 
 func TestCacheStatsMarkDownFailingBackend(t *testing.T) {
 	reg := newFakeRegistry()
-	reg.tags["dagger-cache"] = []string{"v0-21-4"}
-	reg.manifestBody["dagger-cache:v0-21-4"] = manifestJSON("sha256:a", 10, 1, "")
-	reg.manifestDigest["dagger-cache:v0-21-4"] = digestStr("a")
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
 
 	ts := httptest.NewServer(reg.handler())
 	t.Cleanup(ts.Close)
@@ -926,7 +846,7 @@ func TestCacheStatsMarkDownFailingBackend(t *testing.T) {
 	)
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
-		router, nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		router, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
 	stats, err := svc.Stats(context.Background())

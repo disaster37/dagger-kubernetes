@@ -49,6 +49,10 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.username_claim", "preferred_username")
 	v.SetDefault("auth.oauth.groups_claim", "groups")
 	v.SetDefault("auth.oauth.ca_cert_path", "")
+	v.SetDefault("auth.oauth.revalidate_interval", 5*time.Minute)
+	v.SetDefault("auth.oauth.revalidate_grace", time.Hour)
+	v.SetDefault("auth.oauth.revalidate_fail_open", false)
+	v.SetDefault("auth.oauth.session_max_age", 0)
 
 	v.SetDefault("auth.jwt.secret", "")
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)
@@ -137,8 +141,6 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cache.gc.enabled", false)
 	v.SetDefault("cache.gc.max_age", "168h") // 7d
 	v.SetDefault("cache.gc.schedule", "1h")
-	v.SetDefault("cache.gc.min_refs_to_keep", 3)
-	v.SetDefault("cache.gc.protect_active_versions", true)
 
 	v.SetDefault("history.gc.enabled", false)
 	v.SetDefault("history.gc.max_age", "720h") // 30d
@@ -225,6 +227,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateAuthConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate auth config: %w", err)
+	}
+
+	if err := validateOAuthRevalidation(&cfg); err != nil {
+		return nil, fmt.Errorf("validate oauth revalidation config: %w", err)
 	}
 
 	if err := validateGroupMappings(&cfg); err != nil {
@@ -525,6 +531,25 @@ func validateGroupMappings(cfg *domain.Config) error {
 		}
 	}
 
+	return nil
+}
+
+// validateOAuthRevalidation enforces constraints on the IdP revalidation config.
+// Only validated when auth.oauth.enabled is true.
+func validateOAuthRevalidation(cfg *domain.Config) error {
+	o := cfg.Auth.OAuth
+	if !o.Enabled {
+		return nil
+	}
+	if o.RevalidateInterval <= 0 {
+		return fmt.Errorf("auth.oauth.revalidate_interval must be > 0 when auth.oauth.enabled is true")
+	}
+	if o.RevalidateGrace < 0 {
+		return fmt.Errorf("auth.oauth.revalidate_grace must be >= 0")
+	}
+	if o.SessionMaxAge < 0 {
+		return fmt.Errorf("auth.oauth.session_max_age must be >= 0 (0 disables)")
+	}
 	return nil
 }
 

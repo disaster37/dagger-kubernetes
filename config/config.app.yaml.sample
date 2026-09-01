@@ -82,6 +82,14 @@ auth:
     scopes: ["openid", "profile", "email"]  # "openid" is always included.
     username_claim: "preferred_username"   # fallback: "email"; error if both absent.
     groups_claim: "groups"              # claim holding group names; array or single string; absent = no groups.
+    # --- IdP group-membership revalidation (ADR-027) -----------------------
+    # Detects when a user is removed from the allowed OAuth group (or deleted
+    # from the IdP) while already holding tokens, and revokes their access.
+    revalidate_interval: "5m"   # per-user cache TTL for successful IdP re-checks; bounds the detection delay.
+    revalidate_grace: "1h"      # serve last-known-good membership for this long when the IdP is unreachable.
+    revalidate_fail_open: false # after grace, false = deny (fail-closed), true = allow (fail-open).
+    session_max_age: "0"        # optional hard bound on an OAuth session (refresh-token age); 0 = disabled.
+                                #   Set e.g. "24h" during rollout to bound sessions issued before this change.
 
   # Session cookies (SPA auth). Access/refresh JWTs are delivered in httpOnly
   # cookies instead of localStorage (CWE-922). Bearer auth for CI is unaffected
@@ -198,8 +206,6 @@ cache:
     enabled: false                   # master switch; disabled by default.
     max_age: "168h"                  # purge tags whose manifest is older than this (7d).
     schedule: "1h"                   # background sweeper ticker interval.
-    min_refs_to_keep: 3              # always keep at least this many most-recent tags per version.
-    protect_active_versions: true    # never purge tags for versions with active fleet replicas.
 
 # --- Pipeline history retention ------------------------------------------------
 # Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics

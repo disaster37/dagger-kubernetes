@@ -7,27 +7,26 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func mustVersion(t *testing.T) *domain.Version {
-	t.Helper()
-	v, err := domain.Parse("v0.21.4")
-	if err != nil {
-		t.Fatalf("parse v0.21.4: %v", err)
+func TestCacheRef(t *testing.T) {
+	b := &Cache{Registry: "cache.reg/dagger-cache"}
+	ref := b.CacheRef()
+	if ref != "cache.reg/dagger-cache:cache" {
+		t.Fatalf("ref = %q, want cache.reg/dagger-cache:cache", ref)
 	}
-	return v
 }
 
-func TestCacheRefForVersion(t *testing.T) {
-	b := &Cache{Registry: "cache.reg/dagger-cache"}
-	ref := b.CacheRefForVersion(mustVersion(t))
-	if ref != "cache.reg/dagger-cache:v0-21-4" {
-		t.Fatalf("ref = %q", ref)
+func TestCacheRefPublicHost(t *testing.T) {
+	b := &Cache{Registry: "cache.reg/dagger-cache", PublicHost: "cache.example.com"}
+	ref := b.CacheRef()
+	if ref != "cache.example.com/dagger-cache:cache" {
+		t.Fatalf("ref = %q, want cache.example.com/dagger-cache:cache", ref)
 	}
 }
 
 func TestBuildCacheConfigRegistry(t *testing.T) {
 	b := &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
-	got := b.BuildCacheConfig(mustVersion(t), "max")
-	want := "type=registry,ref=cache.reg/dagger-cache:v0-21-4,mode=max"
+	got := b.BuildCacheConfig("max")
+	want := "type=registry,ref=cache.reg/dagger-cache:cache,mode=max"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -35,8 +34,8 @@ func TestBuildCacheConfigRegistry(t *testing.T) {
 
 func TestBuildCacheConfigRegistryPublicHost(t *testing.T) {
 	b := &Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.example.com"}
-	got := b.BuildCacheConfig(mustVersion(t), "max")
-	want := "type=registry,ref=cache.example.com/dagger-cache:v0-21-4,mode=max"
+	got := b.BuildCacheConfig("max")
+	want := "type=registry,ref=cache.example.com/dagger-cache:cache,mode=max"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -47,8 +46,8 @@ func TestBuildCacheConfigRegistryPublicHost(t *testing.T) {
 // at the Supervisor cache vhost, never the raw registry host.
 func TestBuildCacheConfigRegistryRewritesByDefault(t *testing.T) {
 	b := &Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"}
-	got := b.BuildCacheConfig(mustVersion(t), "max")
-	want := "type=registry,ref=cache.supv.example.com/dagger-cache:v0-21-4,mode=max"
+	got := b.BuildCacheConfig("max")
+	want := "type=registry,ref=cache.supv.example.com/dagger-cache:cache,mode=max"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -59,7 +58,7 @@ func TestBuildCacheConfigRegistryRewritesByDefault(t *testing.T) {
 
 func TestBuildCacheConfigS3(t *testing.T) {
 	b := &Cache{Type: "s3", S3: domain.S3Ref{Bucket: "bkt", Region: "us-east-1"}}
-	got := b.BuildCacheConfig(mustVersion(t), "max")
+	got := b.BuildCacheConfig("max")
 	want := "type=s3,bucket=bkt,region=us-east-1,mode=max"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
@@ -68,7 +67,7 @@ func TestBuildCacheConfigS3(t *testing.T) {
 
 func TestBuildCacheConfigUnknown(t *testing.T) {
 	b := &Cache{Type: "unknown"}
-	if got := b.BuildCacheConfig(mustVersion(t), "max"); got != "" {
+	if got := b.BuildCacheConfig("max"); got != "" {
 		t.Fatalf("expected empty for unknown backend, got %q", got)
 	}
 }

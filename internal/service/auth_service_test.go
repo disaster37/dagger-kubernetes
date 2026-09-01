@@ -153,3 +153,96 @@ func TestAuthRefresh(t *testing.T) {
 		t.Fatalf("bad refresh: %v", err)
 	}
 }
+
+func TestAuthResolveDeactivatedUser(t *testing.T) {
+	asvc, usvc, urepo, grepo := newAuthForTest(t, nil)
+	ctx := context.Background()
+	u, _ := usvc.Create(ctx, "bob", "password123", domain.RoleUser)
+	grepo.memberships["g1"] = map[string]bool{u.ID: true}
+
+	access, _, _, _ := asvc.Login(ctx, "bob", "password123")
+
+	// Deactivate the user.
+	now := time.Now()
+	dbUser, _ := urepo.Get(ctx, u.ID)
+	dbUser.DeactivatedAt = &now
+	urepo.users[dbUser.ID] = dbUser
+
+	// Resolve with access JWT should fail.
+	if _, err := asvc.Resolve(ctx, access); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("resolve deactivated: %v", err)
+	}
+}
+
+func TestAuthRefreshDeactivated(t *testing.T) {
+	asvc, usvc, urepo, _ := newAuthForTest(t, nil)
+	ctx := context.Background()
+	u, _ := usvc.Create(ctx, "carol", "password123", domain.RoleUser)
+	_, refresh, _, _ := asvc.Login(ctx, "carol", "password123")
+
+	// Deactivate the user.
+	now := time.Now()
+	dbUser, _ := urepo.Get(ctx, u.ID)
+	dbUser.DeactivatedAt = &now
+	urepo.users[dbUser.ID] = dbUser
+
+	// Refresh should fail.
+	if _, _, err := asvc.Refresh(ctx, refresh); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("refresh deactivated: %v", err)
+	}
+}
+
+func TestAuthRefreshSessionMaxAge(t *testing.T) {
+	asvc, usvc, _, grepo := newAuthForTest(t, nil)
+	ctx := context.Background()
+	u, _ := usvc.Create(ctx, "dave", "password123", domain.RoleUser)
+	grepo.memberships["g1"] = map[string]bool{u.ID: true}
+
+	// Set up a revalidator with max age.
+	fakeProv := &fakeRevalidateProvider{groups: []string{"g1"}}
+	rv := NewOAuthRevalidator(fakeProv, nil, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
+		SessionMaxAge: 5 * time.Minute,
+	})
+	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+	asvc.SetOAuthRevalidator(rv)
+
+	// Login to get a fresh token.
+	_, refresh, _, _ := asvc.Login(ctx, "dave", "password123")
+
+	// Simulate an old issued-at by parsing and checking.
+	// The refresh was just minted so it should be within max age.
+	_, _, err := asvc.Refresh(ctx, refresh)
+	if err != nil {
+		t.Fatalf("fresh refresh should succeed: %v", err)
+	}
+}
+
+func TestAuthRefreshRevalidatesOAuth(t *testing.T) {
+	asvc, usvc, urepo, grepo := newAuthForTest(t, nil)
+	ctx := context.Background()
+	u, _ := usvc.Create(ctx, "eve", "password123", domain.RoleUser)
+	grepo.memberships["g1"] = map[string]bool{u.ID: true}
+
+	// Set up OAuth user with revalidator that returns ErrForbidden.
+	fakeProv := &fakeRevalidateProvider{err: domain.ErrForbidden}
+	rv := NewOAuthRevalidator(fakeProv, nil, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
+		Interval: 5 * time.Minute,
+		Grace:    time.Hour,
+	})
+	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+	asvc.SetOAuthRevalidator(rv)
+
+	// Make the user look like an OAuth user.
+	dbUser, _ := urepo.Get(ctx, u.ID)
+	dbUser.OAuthProvider = "github"
+	dbUser.OAuthTokenCiphertext = "some-ciphertext"
+	urepo.users[dbUser.ID] = dbUser
+
+	// Login to get tokens.
+	_, refresh, _, _ := asvc.Login(ctx, "eve", "password123")
+
+	// Refresh should trigger revalidation which denies.
+	if _, _, err := asvc.Refresh(ctx, refresh); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("refresh with revoked OAuth: %v", err)
+	}
+}

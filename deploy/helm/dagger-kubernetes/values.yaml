@@ -226,14 +226,10 @@ supervisor:
 ## @param supervisor.config.cache.gc.enabled Enable the cache auto-purge sweeper. When enabled, orphaned cache refs older than maxAge are purged on each tick. Disabled by default.
 ## @param supervisor.config.cache.gc.maxAge Purge cache refs older than this (7d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.cache.gc.schedule Cache sweeper ticker interval.
-## @param supervisor.config.cache.gc.minRefsToKeep Minimum version-tagged refs to retain per version during a GC sweep. Default: 3.
-## @param supervisor.config.cache.gc.protectActiveVersions Skip purge for version refs currently pinned by a running engine fleet. Default: true.
       gc:
         enabled: false
         maxAge: "168h"
         schedule: "1h"
-        minRefsToKeep: 3
-        protectActiveVersions: true
 ## @param supervisor.config.history.gc.enabled Master switch for the history auto-purge sweeper.
 ## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.history.gc.schedule History sweeper ticker interval.
@@ -657,6 +653,7 @@ registry:
   replicaCount: 1
   persistence:
     enabled: true
+    deleteEnabled: true
     size: 50Gi
     storageClass: ""
   storage: filesystem
@@ -667,6 +664,11 @@ registry:
     limits:
       cpu: 500m
       memory: 512Mi
+  gc:
+    ## @param registry.gc.enabled Enable the registry garbage-collect CronJob. GC runs daily at 3 AM to reclaim space from untagged manifests.
+    enabled: true
+    ## @param registry.gc.schedule Cron schedule for the GC job. Default: "0 3 * * *" (daily at 3 AM UTC).
+    schedule: "0 3 * * *"
 
 ## @skip tempo
 ## @param tempo.enabled Install Grafana Tempo subchart (traces).

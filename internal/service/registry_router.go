@@ -284,6 +284,15 @@ func (r *RegistryRouter) RecordManifest(ctx context.Context, repo, tag, digest, 
 	return r.routes.UpsertManifest(ctx, repo, tag, digest, backendID, storedBytes)
 }
 
+// TouchManifest updates the LastSeenAt on an existing manifest route.
+// Best-effort: no-op when the route is absent or the routing table is unavailable.
+func (r *RegistryRouter) TouchManifest(ctx context.Context, repo, tag string) error {
+	if r.routes == nil {
+		return nil
+	}
+	return r.routes.TouchManifest(ctx, repo, tag)
+}
+
 // RefreshCharges recomputes the charge map from the routing table (fallback
 // when no catalog walk has run yet).
 func (r *RegistryRouter) RefreshCharges(ctx context.Context) error {

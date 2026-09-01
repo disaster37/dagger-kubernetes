@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"strings"
+	"time"
 
 	"github.com/sirupsen/logrus"
 
@@ -11,12 +12,13 @@ import (
 
 // AuthService resolves bearer tokens to identities and handles login/refresh.
 type AuthService struct {
-	users  *UserService
-	groups domain.GroupRepository
-	tokens *TokenService
-	jwt    *JWTService
-	legacy domain.TokenValidator // nil when no tokens_file
-	logger *logrus.Logger
+	users       *UserService
+	groups      domain.GroupRepository
+	tokens      *TokenService
+	jwt         *JWTService
+	legacy      domain.TokenValidator // nil when no tokens_file
+	logger      *logrus.Logger
+	revalidator *OAuthRevalidator // nil = revalidation disabled
 }
 
 // NewAuthService returns an AuthService. legacy may be nil when no tokens_file
@@ -38,6 +40,10 @@ func NewAuthService(
 		logger: logger,
 	}
 }
+
+// SetOAuthRevalidator wires the OAuth membership revalidator. nil (default)
+// disables revalidation; only wired when OAuth is the configured provider.
+func (a *AuthService) SetOAuthRevalidator(r *OAuthRevalidator) { a.revalidator = r }
 
 // Resolve maps a bearer token to an Identity. Resolution order:
 // 1. empty bearer -> ErrUnauthenticated
@@ -80,21 +86,46 @@ func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Ident
 
 // identityForUser loads a fresh user + group membership from the DB (claims
 // can be stale) and builds the Identity. A missing user yields
-// ErrUnauthenticated.
+// ErrUnauthenticated. For OAuth users, IdP revalidation is enforced.
 func (a *AuthService) identityForUser(ctx context.Context, userID string, method domain.AuthMethod) (*domain.Identity, error) {
 	u, err := a.users.Get(ctx, userID)
 	if err != nil {
 		a.logger.WithError(err).Debug("resolved user missing")
 		return nil, domain.ErrUnauthenticated
 	}
-	gids, _ := a.groups.GroupsForUser(ctx, u.ID)
+	gids, err := a.loadAuthorizedGroups(ctx, u)
+	if err != nil {
+		return nil, err
+	}
 	return &domain.Identity{
 		UserID:   u.ID,
 		Username: u.Username,
 		Role:     u.Role,
-		GroupIDs: groupIDs(gids),
+		GroupIDs: gids,
 		Method:   method,
 	}, nil
+}
+
+// loadAuthorizedGroups returns the user's current effective supervisor group
+// IDs, enforcing deactivation and (for OAuth users) IdP revalidation. A
+// non-nil error means DENY (unauthenticated).
+func (a *AuthService) loadAuthorizedGroups(ctx context.Context, u *domain.User) ([]string, error) {
+	if u.Deactivated() {
+		a.logger.WithField("user_id", u.ID).Debug("user deactivated by IdP revalidation")
+		return nil, domain.ErrUnauthenticated
+	}
+	if u.OAuthProvider != "" && a.revalidator != nil {
+		gids, err := a.revalidator.Check(ctx, u)
+		if err != nil {
+			a.logger.WithError(err).WithFields(logrus.Fields{
+				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
+			}).Warn("oauth revalidation denied")
+			return nil, domain.ErrUnauthenticated
+		}
+		return gids, nil
+	}
+	gids, _ := a.groups.GroupsForUser(ctx, u.ID)
+	return groupIDs(gids), nil
 }
 
 // Login authenticates a user and issues a fresh JWT pair.
@@ -104,7 +135,8 @@ func (a *AuthService) Login(ctx context.Context, username, password string) (acc
 		a.logger.WithField("username", username).Debug("login failed")
 		return "", "", nil, err
 	}
-	access, refresh, err = a.issuePairForUser(ctx, u)
+	gids, _ := a.groups.GroupsForUser(ctx, u.ID)
+	access, refresh, err = a.jwt.IssuePair(u, groupIDs(gids))
 	if err != nil {
 		return "", "", nil, err
 	}
@@ -112,7 +144,8 @@ func (a *AuthService) Login(ctx context.Context, username, password string) (acc
 	return access, refresh, u, nil
 }
 
-// Refresh validates a refresh token, reloads the user, and issues a new pair
+// Refresh validates a refresh token, reloads the user, enforces session max age
+// (for OAuth users), revalidates IdP membership, and issues a new pair
 // (rotation).
 func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (access, refresh string, err error) {
 	claims, err := a.jwt.ParseRefresh(refreshToken)
@@ -123,13 +156,24 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (access,
 	if err != nil {
 		return "", "", domain.ErrUnauthenticated
 	}
-	return a.issuePairForUser(ctx, u)
-}
 
-// issuePairForUser issues a JWT pair with the user's current group membership.
-func (a *AuthService) issuePairForUser(ctx context.Context, u *domain.User) (access, refresh string, err error) {
-	gids, _ := a.groups.GroupsForUser(ctx, u.ID)
-	return a.jwt.IssuePair(u, groupIDs(gids))
+	// Session max-age backstop for OAuth users.
+	if a.revalidator != nil && u.OAuthProvider != "" {
+		if maxAge := a.revalidator.SessionMaxAge(); maxAge > 0 {
+			if age := time.Since(claims.IssuedAt.Time); age > maxAge {
+				a.logger.WithFields(logrus.Fields{
+					"user_id": u.ID, "age": age, "max_age": maxAge,
+				}).Warn("oauth session exceeded max age; re-login required")
+				return "", "", domain.ErrSessionRevoked
+			}
+		}
+	}
+
+	gids, err := a.loadAuthorizedGroups(ctx, u)
+	if err != nil {
+		return "", "", err
+	}
+	return a.jwt.IssuePair(u, gids)
 }
 
 func groupIDs(gs []*domain.Group) []string {

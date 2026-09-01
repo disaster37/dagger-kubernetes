@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -62,6 +63,7 @@ type OIDCOAuthService struct {
 	jwt           *JWTService
 	logger        *logrus.Logger
 	mapper        *GroupMapper
+	encKey        []byte // AES-256 key for encrypting upstream credentials; nil = disabled
 
 	// httpClient is the HTTP client used for OIDC provider discovery, token
 	// exchange, and userinfo. When nil, http.DefaultClient is used (via
@@ -92,21 +94,29 @@ func defaultOIDCProviderFactory(ctx context.Context, issuerURL string) (oidcProv
 }
 
 // NewOIDCOAuthService returns an OIDCOAuthService. The issuer URL is
-// trailing-slash-normalized; "openid" is appended to scopes when missing; and
-// empty claim names fall back to preferred_username/groups.
+// trailing-slash-normalized; "openid" and "offline_access" are appended to scopes
+// when missing; empty claim names fall back to preferred_username/groups.
 // httpClient is the HTTP client for OIDC provider calls; nil uses the default.
-func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, httpClient *http.Client) *OIDCOAuthService {
-	scopes := make([]string, 0, len(cfg.Scopes)+1)
+// encKey is the AES-256 key used to encrypt upstream OAuth credentials at rest;
+// nil disables encryption.
+func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, httpClient *http.Client, encKey []byte) *OIDCOAuthService {
+	scopes := make([]string, 0, len(cfg.Scopes)+2)
 	scopes = append(scopes, cfg.Scopes...)
 	hasOpenID := false
+	hasOffline := false
 	for _, sc := range scopes {
 		if sc == "openid" {
 			hasOpenID = true
-			break
+		}
+		if sc == "offline_access" {
+			hasOffline = true
 		}
 	}
 	if !hasOpenID {
 		scopes = append(scopes, "openid")
+	}
+	if !hasOffline {
+		scopes = append(scopes, "offline_access")
 	}
 
 	usernameClaim := cfg.UsernameClaim
@@ -136,6 +146,7 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *Us
 		mapper:          mapper,
 		httpClient:      httpClient,
 		providerFactory: defaultOIDCProviderFactory,
+		encKey:          encKey,
 	}
 }
 
@@ -284,7 +295,13 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 
 	mappedGroups := s.mapper.mapIfActive(groups)
 
-	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "oidc", sub, username, s.defaultGroup, mappedGroups)
+	cred := &oauthCredential{
+		Provider:     "oidc",
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		ExpiresAt:    tok.Expiry,
+	}
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "oidc", sub, username, s.defaultGroup, mappedGroups, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("oidc oauth: %w", err)
 	}
@@ -382,6 +399,130 @@ func claimString(claims map[string]any, key string) string {
 func claimMissing(claims map[string]any, key string) bool {
 	_, ok := claims[key]
 	return !ok
+}
+
+// Revalidate re-checks the user's current IdP group membership using the stored
+// credential and returns the current provider group names. Returns
+// domain.ErrSessionRevoked when the credential is invalid/expired beyond refresh
+// (user must re-login) and domain.ErrForbidden when membership no longer
+// satisfies the allowlist.
+func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]string, error) {
+	if u.OAuthTokenCiphertext == "" {
+		return nil, errOAuthNoCredential
+	}
+	cred, err := decryptOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
+	if err != nil || cred == nil {
+		return nil, domain.ErrSessionRevoked
+	}
+	if s.httpClient != nil {
+		ctx = oidc.ClientContext(ctx, s.httpClient)
+	}
+	p, err := s.discover(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("oidc: discover provider: %w", err)
+	}
+
+	ts := s.tokenSource(ctx, p, u, cred)
+
+	ui, err := p.UserInfo(ctx, ts)
+	if err != nil {
+		if !oauthTokenRevoked(err) {
+			return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport => unavailable
+		}
+		// Userinfo 401: the access token may simply be expired while the
+		// credential is still valid. Attempt one refresh via tokenSource,
+		// then retry userinfo once before concluding the credential is
+		// revoked (CWE-613 residual risk: clock-skew false revocation).
+		s.logger.WithField("user_id", u.ID).Debug("oidc: userinfo returned 401, attempting token refresh")
+		if _, refreshErr := ts.Token(); refreshErr != nil {
+			if oauthTokenRevoked(refreshErr) {
+				return nil, domain.ErrSessionRevoked
+			}
+			return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport on refresh => unavailable
+		}
+		ui, err = p.UserInfo(ctx, ts)
+		if err != nil {
+			if oauthTokenRevoked(err) {
+				return nil, domain.ErrSessionRevoked
+			}
+			return nil, fmt.Errorf("oidc: userinfo: %w", err)
+		}
+	}
+	var claims map[string]any
+	if err := ui.Claims(&claims); err != nil {
+		return nil, fmt.Errorf("oidc: userinfo decode: %w", err)
+	}
+	groups := s.resolveGroups(claims)
+	if allowlist := s.effectiveAllowedGroups(); len(allowlist) > 0 && !orgsIntersect(allowlist, groups) {
+		return nil, domain.ErrForbidden
+	}
+	return groups, nil
+}
+
+// tokenSource returns a TokenSource for cred that refreshes (and best-effort
+// persists) the stored credential when the access token is expired.
+func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *domain.User, cred *oauthCredential) oauth2.TokenSource {
+	return &refreshingSource{s: s, ctx: ctx, p: p, u: u, cred: cred, logger: s.logger}
+}
+
+// oauthTokenRevoked reports whether err represents a definitive token
+// revocation from the OIDC provider: a refresh rejected with invalid_grant /
+// invalid_token (user deleted or consent revoked), or a userinfo 401. Any other
+// error (network, 5xx) is treated as a transient IdP-unavailable condition.
+func oauthTokenRevoked(err error) bool {
+	var rerr *oauth2.RetrieveError
+	if !errors.As(err, &rerr) {
+		return false
+	}
+	if rerr.ErrorCode == "invalid_grant" || rerr.ErrorCode == "invalid_token" {
+		return true
+	}
+	return rerr.Response != nil && rerr.Response.StatusCode == http.StatusUnauthorized
+}
+
+// refreshingSource wraps an oauth2.TokenSource that refreshes the upstream
+// credential and persists it back to the user record on success.
+type refreshingSource struct {
+	s      *OIDCOAuthService
+	ctx    context.Context
+	p      oidcProvider
+	u      *domain.User
+	cred   *oauthCredential
+	logger *logrus.Logger
+}
+
+func (rs *refreshingSource) Token() (*oauth2.Token, error) {
+	baseSrc := rs.s.oauth2Config(rs.p.Endpoint()).TokenSource(rs.ctx, &oauth2.Token{
+		AccessToken:  rs.cred.AccessToken,
+		RefreshToken: rs.cred.RefreshToken,
+		Expiry:       rs.cred.ExpiresAt,
+	})
+	tok, err := baseSrc.Token()
+	if err != nil {
+		return nil, err
+	}
+	// Persist the refreshed credential best-effort (log Warn; never fail
+	// revalidation on a write error). Rotated refresh tokens are saved so
+	// subsequent revalidations use the fresh token. Uses a detached context
+	// so a cancelled request cannot lose the refreshed token (the next
+	// revalidation would try the old token, which the IdP may have rotated).
+	if tok.AccessToken != rs.cred.AccessToken || tok.RefreshToken != rs.cred.RefreshToken {
+		rs.cred.AccessToken = tok.AccessToken
+		rs.cred.RefreshToken = tok.RefreshToken
+		rs.cred.ExpiresAt = tok.Expiry
+		ct, err := encryptOAuthCredential(rs.s.encKey, rs.cred)
+		if err != nil {
+			rs.logger.WithError(err).WithField("user_id", rs.u.ID).Warn("oauth: re-encrypt refreshed credential failed")
+		} else if ct != "" {
+			rs.u.OAuthTokenCiphertext = ct
+			persistCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			if err := rs.s.users.Update(persistCtx, rs.u); err != nil {
+				rs.logger.WithError(err).WithField("user_id", rs.u.ID).Warn("oauth: persist refreshed credential failed")
+			}
+		}
+	}
+	return tok, nil
 }
 
 var _ OAuthProvider = (*OIDCOAuthService)(nil)

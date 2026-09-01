@@ -32,10 +32,12 @@ type GitHubOAuthService struct {
 	jwt          *JWTService
 	logger       *logrus.Logger
 	mapper       *GroupMapper
+	encKey       []byte // AES-256 key for encrypting upstream credentials; nil = disabled
 }
 
-// NewGitHubOAuthService returns a GitHubOAuthService.
-func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger) *GitHubOAuthService {
+// NewGitHubOAuthService returns a GitHubOAuthService. encKey is the AES-256 key
+// used to encrypt upstream OAuth credentials at rest; nil disables encryption.
+func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, encKey []byte) *GitHubOAuthService {
 	return &GitHubOAuthService{ //nolint:gosec // G101: OAuth client secret is config-derived, not hardcoded.
 		clientID:     cfg.ClientID,
 		clientSecret: cfg.ClientSecret,
@@ -51,6 +53,7 @@ func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *
 		jwt:          jwtSvc,
 		logger:       logger,
 		mapper:       mapper,
+		encKey:       encKey,
 	}
 }
 
@@ -111,7 +114,8 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 
 	mappedGroups := s.mapper.mapIfActive(providerGroups)
 
-	access, refresh, u, err = completeOAuthUser(ctx, s.users, s.groups, s.jwt, s.logger, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, mappedGroups)
+	cred := &oauthCredential{Provider: "github", AccessToken: accessToken}
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, mappedGroups, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("github oauth: %w", err)
 	}
@@ -225,6 +229,48 @@ func (s *GitHubOAuthService) getJSON(ctx context.Context, path, accessToken stri
 		return fmt.Errorf("github api %s status %d", path, resp.StatusCode)
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// Revalidate re-checks the user's current IdP group membership using the stored
+// credential and returns the current provider group names. Returns
+// domain.ErrSessionRevoked when the credential is invalid/expired beyond refresh
+// (user must re-login) and domain.ErrForbidden when membership no longer
+// satisfies the allowlist.
+func (s *GitHubOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]string, error) {
+	if u.OAuthTokenCiphertext == "" {
+		return nil, errOAuthNoCredential
+	}
+	cred, err := decryptOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
+	if err != nil || cred == nil {
+		return nil, domain.ErrSessionRevoked
+	}
+	if _, err := s.fetchUser(ctx, cred.AccessToken); err != nil {
+		return nil, domain.ErrSessionRevoked // 401/404 => user/token gone
+	}
+	orgs, err := s.fetchOrgs(ctx, cred.AccessToken)
+	if err != nil {
+		return nil, fmt.Errorf("fetch github orgs: %w", err)
+	}
+	var teams []string
+	if len(s.allowedTeams) > 0 || s.mapper.Active() {
+		teams, err = s.fetchTeams(ctx, cred.AccessToken)
+		if err != nil {
+			if len(s.allowedTeams) > 0 {
+				return nil, fmt.Errorf("fetch github teams: %w", err)
+			}
+			s.logger.WithError(err).Warn("oauth: github teams fetch failed during revalidation")
+		}
+	}
+	if len(s.allowedOrgs) > 0 && !orgsIntersect(s.allowedOrgs, orgs) {
+		return nil, domain.ErrForbidden
+	}
+	if len(s.allowedTeams) > 0 && !orgsIntersect(s.allowedTeams, teams) {
+		return nil, domain.ErrForbidden
+	}
+	out := make([]string, 0, len(orgs)+len(teams))
+	out = append(out, orgs...)
+	out = append(out, teams...)
+	return out, nil
 }
 
 var _ OAuthProvider = (*GitHubOAuthService)(nil)

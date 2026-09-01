@@ -25,7 +25,7 @@ func newOAuthService(t *testing.T, cfg *domain.OAuthConfig, ghSrv *httptest.Serv
 	if err != nil {
 		t.Fatalf("NewGroupMapper: %v", err)
 	}
-	svc := NewGitHubOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger)
+	svc := NewGitHubOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger, nil)
 	if ghSrv != nil {
 		svc.tokenURL = ghSrv.URL + "/login/oauth/access_token"
 		svc.apiBaseURL = ghSrv.URL

@@ -217,8 +217,10 @@ func run(c *cli.Context) error {
 
 	var oauthSvc service.OAuthProvider
 	var oauthProvider string
+	var mapper *service.GroupMapper
 	if cfg.Auth.OAuth.Enabled {
-		mapper, err := service.NewGroupMapper(cfg.Auth.OAuth.GroupMappings)
+		var err error
+		mapper, err = service.NewGroupMapper(cfg.Auth.OAuth.GroupMappings)
 		if err != nil {
 			return fmt.Errorf("compile group mappings: %w", err)
 		}
@@ -228,14 +230,23 @@ func run(c *cli.Context) error {
 		}
 		switch cfg.Auth.OAuth.Provider {
 		case "github":
-			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger)
+			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, tokenEncKey)
 		case "oidc":
-			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient)
+			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient, tokenEncKey)
 		default:
 			// validateAuthConfig already rejected this, but fail closed.
 			return fmt.Errorf("unsupported oauth provider: %s", cfg.Auth.OAuth.Provider)
 		}
 		oauthProvider = cfg.Auth.OAuth.Provider
+
+		// Wire OAuth revalidation when OAuth is enabled.
+		revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
+			Interval:      cfg.Auth.OAuth.RevalidateInterval,
+			Grace:         cfg.Auth.OAuth.RevalidateGrace,
+			FailOpen:      cfg.Auth.OAuth.RevalidateFailOpen,
+			SessionMaxAge: cfg.Auth.OAuth.SessionMaxAge,
+		})
+		authSvc.SetOAuthRevalidator(revalidator)
 	}
 
 	// --- Fleet + telemetry wiring ---
@@ -276,7 +287,7 @@ func run(c *cli.Context) error {
 		logger.Warn("cache proxy auth disabled (no cache.auth_token and no engine-registry-auth secret token): dev mode only")
 	}
 
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, metricsClient, provider, cfg.Cache.GC, logger, metrics)
+	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, metricsClient, cfg.Cache.GC, logger, metrics)
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
 	statusSvc := service.NewStatusService(cfg, cacheBackend, router, fleetManager, logger, raftStore)
 	connectSvc := service.NewConnectService(cfg, cacheBackend, versionResolver, tokensSvc, logger)

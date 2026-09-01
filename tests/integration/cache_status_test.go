@@ -1,7 +1,6 @@
 package integration
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -35,11 +34,11 @@ func registryStub(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"repositories":["dagger-cache"]}`))
 		case r.URL.Path == "/v2/dagger-cache/tags/list":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"name":"dagger-cache","tags":["v0-21-4"]}`))
-		case r.Method == http.MethodGet && r.URL.Path == "/v2/dagger-cache/manifests/v0-21-4":
+			_, _ = w.Write([]byte(`{"name":"dagger-cache","tags":["cache"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v2/dagger-cache/manifests/cache":
 			w.Header().Set("Docker-Content-Digest", dgst)
 			_, _ = w.Write([]byte(manifest))
-		case r.Method == http.MethodHead && r.URL.Path == "/v2/dagger-cache/manifests/v0-21-4":
+		case r.Method == http.MethodHead && r.URL.Path == "/v2/dagger-cache/manifests/cache":
 			w.Header().Set("Docker-Content-Digest", dgst)
 			w.WriteHeader(http.StatusOK)
 		case r.Method == http.MethodDelete && r.URL.Path == fmt.Sprintf("/v2/dagger-cache/manifests/%s", dgst):
@@ -81,8 +80,8 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	if stats.ObjectCount != 2 {
 		t.Fatalf("object_count = %d, want 2", stats.ObjectCount)
 	}
-	if len(stats.Versions) != 1 || stats.Versions[0].Version != "v0.21.4" {
-		t.Fatalf("versions = %+v", stats.Versions)
+	if stats.Ref == nil || stats.Ref.Tag != "cache" {
+		t.Fatalf("ref = %+v", stats.Ref)
 	}
 
 	// --- GET /api/v1/status ---
@@ -114,8 +113,7 @@ func TestCacheStatusAndPurgeIntegration(t *testing.T) {
 	}
 
 	// --- POST /api/v1/cache/purge (admin) ---
-	body, _ := json.Marshal(map[string]string{"version": "v0.21.4"})
-	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/cache/purge", base), bytes.NewReader(body))
+	req, _ = http.NewRequest("POST", fmt.Sprintf("%s/api/v1/cache/purge", base), http.NoBody)
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", adminToken))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
@@ -201,8 +199,8 @@ func newCacheStatusTestEnv(t *testing.T, raftCleanState domain.RaftCleanState) *
 		},
 		logger,
 	)
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, provider, domain.GCConfig{
-		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour, MinRefsToKeep: 3, ProtectActiveVersions: true,
+	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, domain.GCConfig{
+		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour,
 	}, logger, observ.NewMetrics(nil))
 	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger, raftCleanState)
 

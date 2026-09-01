@@ -45,6 +45,7 @@ const (
 	kindDeleteTrace
 	kindUpsertSession
 	kindTouchSession
+	kindTouchManifestRoute
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -87,15 +88,18 @@ func applyPayload[T any](cmd *command, label string, fn func(T) error) error {
 // command payloads (JSON-serialized into command.Data).
 type (
 	cmdUser struct {
-		ID            string      `json:"id"`
-		Username      string      `json:"username"`
-		Role          domain.Role `json:"role"`
-		PasswordHash  string      `json:"password_hash"`
-		OAuthProvider string      `json:"oauth_provider"`
-		OAuthID       string      `json:"oauth_id"`
-		CreatedAt     time.Time   `json:"created_at"`
-		UpdatedAt     time.Time   `json:"updated_at"`
-		Create        bool        `json:"create,omitempty"` // true = insert-only; false = update-only
+		ID                   string      `json:"id"`
+		Username             string      `json:"username"`
+		Role                 domain.Role `json:"role"`
+		PasswordHash         string      `json:"password_hash"`
+		OAuthProvider        string      `json:"oauth_provider"`
+		OAuthID              string      `json:"oauth_id"`
+		OAuthTokenCiphertext string      `json:"oauth_token_ciphertext"`
+		OAuthGroupIDs        []string    `json:"oauth_group_ids,omitempty"`
+		DeactivatedAt        *time.Time  `json:"deactivated_at,omitempty"`
+		CreatedAt            time.Time   `json:"created_at"`
+		UpdatedAt            time.Time   `json:"updated_at"`
+		Create               bool        `json:"create,omitempty"` // true = insert-only; false = update-only
 	}
 
 	cmdGroup struct {
@@ -186,19 +190,29 @@ type (
 		CertFP string    `json:"cert_fp"`
 		At     time.Time `json:"at"`
 	}
+
+	// cmdTouchManifestRoute updates the LastSeenAt on an existing manifest route.
+	cmdTouchManifestRoute struct {
+		Repo string `json:"repo"`
+		Tag  string `json:"tag"`
+		At   string `json:"at"` // RFC3339
+	}
 )
 
 // toDomain converts a command user payload into a domain.User.
 func (c *cmdUser) toDomain() *domain.User {
 	return &domain.User{
-		ID:            c.ID,
-		Username:      c.Username,
-		Role:          c.Role,
-		PasswordHash:  c.PasswordHash,
-		OAuthProvider: c.OAuthProvider,
-		OAuthID:       c.OAuthID,
-		CreatedAt:     c.CreatedAt,
-		UpdatedAt:     c.UpdatedAt,
+		ID:                   c.ID,
+		Username:             c.Username,
+		Role:                 c.Role,
+		PasswordHash:         c.PasswordHash,
+		OAuthProvider:        c.OAuthProvider,
+		OAuthID:              c.OAuthID,
+		OAuthTokenCiphertext: c.OAuthTokenCiphertext,
+		OAuthGroupIDs:        c.OAuthGroupIDs,
+		DeactivatedAt:        c.DeactivatedAt,
+		CreatedAt:            c.CreatedAt,
+		UpdatedAt:            c.UpdatedAt,
 	}
 }
 
@@ -206,14 +220,17 @@ func (c *cmdUser) toDomain() *domain.User {
 // the password hash that the domain JSON tag hides).
 func cmdUserFrom(u *domain.User) *cmdUser {
 	return &cmdUser{
-		ID:            u.ID,
-		Username:      u.Username,
-		Role:          u.Role,
-		PasswordHash:  u.PasswordHash,
-		OAuthProvider: u.OAuthProvider,
-		OAuthID:       u.OAuthID,
-		CreatedAt:     u.CreatedAt,
-		UpdatedAt:     u.UpdatedAt,
+		ID:                   u.ID,
+		Username:             u.Username,
+		Role:                 u.Role,
+		PasswordHash:         u.PasswordHash,
+		OAuthProvider:        u.OAuthProvider,
+		OAuthID:              u.OAuthID,
+		OAuthTokenCiphertext: u.OAuthTokenCiphertext,
+		OAuthGroupIDs:        u.OAuthGroupIDs,
+		DeactivatedAt:        u.DeactivatedAt,
+		CreatedAt:            u.CreatedAt,
+		UpdatedAt:            u.UpdatedAt,
 	}
 }
 
@@ -480,6 +497,11 @@ func (s *fsmState) applySessionCommand(cmd *command) (error, bool) {
 			if s.sessionSink != nil {
 				s.sessionSink.ApplySessionTouched(p.CertFP, p.At)
 			}
+			return nil
+		}), true
+	case kindTouchManifestRoute:
+		return applyPayload(cmd, "touch manifest route", func(p cmdTouchManifestRoute) error {
+			s.touchManifestRoute(p.Repo, p.Tag, p.At)
 			return nil
 		}), true
 	default:
@@ -899,6 +921,16 @@ func (s *fsmState) upsertManifestRoute(cr *domain.CacheRoute) {
 		cp.CreatedAt = existing.CreatedAt
 	}
 	s.cacheObjectRoutes[key] = &cp
+}
+
+// touchManifestRoute updates LastSeenAt on an existing route only (no-op when absent).
+func (s *fsmState) touchManifestRoute(repo, tag, at string) {
+	key := manifestRouteKey(repo, tag)
+	route, ok := s.cacheObjectRoutes[key]
+	if !ok {
+		return
+	}
+	route.LastSeenAt = at
 }
 
 func (s *fsmState) upsertBlobRoute(digest, backendID, createdAt string) {

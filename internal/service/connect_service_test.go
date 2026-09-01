@@ -107,7 +107,7 @@ func TestConnectEnvNoVersionMasked(t *testing.T) {
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_TAG"); got != "" {
 		t.Fatalf("TAG = %q, want empty (not pinned)", got)
 	}
-	want := registryCache().BuildCacheConfig(fx.vr.Floor(), "max")
+	want := registryCache().BuildCacheConfig("max")
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
 		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
 	}
@@ -129,7 +129,7 @@ func TestConnectEnvNoVersionRevealed(t *testing.T) {
 	if got := envValue(snap.EnvVars, "DAGGER_CLOUD_TOKEN"); got != plaintext {
 		t.Fatalf("revealed token = %q, want plaintext", got)
 	}
-	want := registryCache().BuildCacheConfig(fx.vr.Floor(), "max")
+	want := registryCache().BuildCacheConfig("max")
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
 		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
 	}
@@ -140,10 +140,6 @@ func TestConnectEnvWithVersion(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	v, err := fx.vr.ResolveMinimal("v0.21.4")
-	if err != nil {
-		t.Fatalf("ResolveMinimal: %v", err)
-	}
 	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "v0.21.4", false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
@@ -157,8 +153,8 @@ func TestConnectEnvWithVersion(t *testing.T) {
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_TAG"); got != "v0.21.4" {
 		t.Fatalf("TAG = %q", got)
 	}
-	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != registryCache().BuildCacheConfig(v, "max") {
-		t.Fatalf("CACHE_CONFIG = %q, want %q", got, registryCache().BuildCacheConfig(v, "max"))
+	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != registryCache().BuildCacheConfig("max") {
+		t.Fatalf("CACHE_CONFIG = %q, want %q", got, registryCache().BuildCacheConfig("max"))
 	}
 }
 
@@ -168,10 +164,6 @@ func TestConnectEnvS3Backend(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	v, err := fx.vr.ResolveMinimal("v0.21.4")
-	if err != nil {
-		t.Fatalf("ResolveMinimal: %v", err)
-	}
 	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "v0.21.4", false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
@@ -179,8 +171,8 @@ func TestConnectEnvS3Backend(t *testing.T) {
 	if snap.CacheBackend != "s3" {
 		t.Fatalf("CacheBackend = %q", snap.CacheBackend)
 	}
-	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != cache.BuildCacheConfig(v, "max") {
-		t.Fatalf("CACHE_CONFIG = %q, want %q", got, cache.BuildCacheConfig(v, "max"))
+	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != cache.BuildCacheConfig("max") {
+		t.Fatalf("CACHE_CONFIG = %q, want %q", got, cache.BuildCacheConfig("max"))
 	}
 }
 
@@ -190,15 +182,11 @@ func TestConnectEnvRegistryPublicHost(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	v, err := fx.vr.ResolveMinimal("v0.21.4")
-	if err != nil {
-		t.Fatalf("ResolveMinimal: %v", err)
-	}
 	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "v0.21.4", false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
-	want := cache.BuildCacheConfig(v, "max")
+	want := cache.BuildCacheConfig("max")
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
 		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
 	}
@@ -323,7 +311,7 @@ func TestConnectEnvNoVersionLatestRelease(t *testing.T) {
 	if latest.String() == fx.vr.Floor().String() {
 		t.Fatalf("latest release %q equals floor, want a later release", latest)
 	}
-	want := registryCache().BuildCacheConfig(latest, "max")
+	want := registryCache().BuildCacheConfig("max")
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
 		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
 	}
@@ -342,7 +330,7 @@ func TestConnectEnvNoVersionS3(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
-	want := cache.BuildCacheConfig(fx.vr.Floor(), "max")
+	want := cache.BuildCacheConfig("max")
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
 		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
 	}

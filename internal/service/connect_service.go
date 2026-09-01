@@ -58,7 +58,6 @@ func (s *ConnectService) ConnectEnv(ctx context.Context, userID, version string,
 		{Name: "_EXPERIMENTAL_DAGGER_RUNNER_HOST", Value: "dagger-cloud://self", Required: true, Description: "Tells the CLI to provision a remote engine via the cloud driver."},
 	}
 
-	effective := s.defaultVersion()
 	if version != "" {
 		v, err := s.versionResolver.ResolveMinimal(version)
 		if err != nil {
@@ -68,30 +67,21 @@ func (s *ConnectService) ConnectEnv(ctx context.Context, userID, version string,
 			return nil, fmt.Errorf("%w: version %s not allowed (floor %s)", domain.ErrValidation, v, s.versionResolver.Floor())
 		}
 		snap.SelectedVersion = v.String()
-		effective = v
 		envs = append(envs, domain.ConnectEnvVar{
 			Name: "_EXPERIMENTAL_DAGGER_TAG", Value: v.String(), Required: false,
 			Description: "Pins the engine version (recommended for cache locality).",
 		})
 	}
 
-	if cc := s.cache.BuildCacheConfig(effective, "max"); cc != "" {
+	if cc := s.cache.BuildCacheConfig("max"); cc != "" {
 		envs = append(envs, domain.ConnectEnvVar{
 			Name: "_EXPERIMENTAL_DAGGER_CACHE_CONFIG", Value: cc, Required: false,
-			Description: fmt.Sprintf("Remote shared cache (MagicCache) ref for the effective engine version (%s).", effective),
+			Description: "Remote shared cache (MagicCache) ref — one global cache shared across all engine versions.",
 		})
 	}
 
 	snap.EnvVars = envs
 	return snap, nil
-}
-
-func (s *ConnectService) defaultVersion() *domain.Version {
-	releases := s.versionResolver.AllReleases()
-	if len(releases) > 0 {
-		return releases[len(releases)-1]
-	}
-	return s.versionResolver.Floor()
 }
 
 func (s *ConnectService) tokenMeta(ctx context.Context, userID string) domain.ConnectTokenMeta {

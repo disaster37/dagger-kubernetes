@@ -91,6 +91,16 @@ func (r *CacheRoutesRepo) DeleteManifestRoute(ctx context.Context, repo, tag str
 	return r.store.applyCtx(ctx, kindDeleteManifestRoute, cmdDeleteManifestRoute{Repo: repo, Tag: tag})
 }
 
+// TouchManifest updates the LastSeenAt on an existing manifest route.
+// Best-effort: no-op when the route is absent or the routing table is unavailable.
+func (r *CacheRoutesRepo) TouchManifest(ctx context.Context, repo, tag string) error {
+	return r.store.applyCtx(ctx, kindTouchManifestRoute, cmdTouchManifestRoute{
+		Repo: repo,
+		Tag:  tag,
+		At:   nowRFC3339(),
+	})
+}
+
 // ReapUploadSessions deletes upload sessions older than maxAge (housekeeping).
 // The FSM returns the count of reaped sessions as the apply response.
 func (r *CacheRoutesRepo) ReapUploadSessions(ctx context.Context, maxAge time.Duration) (int, error) {

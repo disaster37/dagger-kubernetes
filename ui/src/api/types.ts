@@ -133,14 +133,12 @@ export interface FleetInfo {
   ordinals: FleetReplica[]
 }
 
-export interface CacheVersionRef {
-  version: string
-  tag: string
+export interface CacheRef {
   ref: string
+  tag: string
   size: number
   layer_count: number
   digest: string
-  protected: boolean
   last_used_at?: string
 }
 
@@ -158,8 +156,6 @@ export interface GCRules {
   enabled: boolean
   max_age: string
   schedule: string
-  min_refs_to_keep: number
-  protect_active_versions: boolean
   last_run_at?: string
   last_run_summary?: GCRunSummary
   next_run_at?: string
@@ -172,7 +168,7 @@ export interface CacheInfo {
   reachable: boolean
   total_size: number
   object_count: number
-  versions: CacheVersionRef[]
+  ref: CacheRef | null
   hit_rate: number | null
   hit_count: number
   miss_count: number
@@ -181,15 +177,10 @@ export interface CacheInfo {
   gc: GCRules
 }
 
-export interface PurgeRequest {
-  version: string
-  tag?: string
-}
-
 export interface PurgeResult {
   purged: number
   freed_bytes: number
-  versions: string[]
+  tags: string[]
   already_purged: number
   message?: string
 }

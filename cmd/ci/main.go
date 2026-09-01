@@ -137,8 +137,9 @@ func run(c *cli.Context) error {
 
 	if version != "" {
 		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", version)
-		vslug := strings.ReplaceAll(strings.ReplaceAll(version, ".", "-"), "v", "")
-		cacheRef := fmt.Sprintf("%s:V%s", cacheRegistry, vslug)
+	}
+	if c.IsSet("cache-registry") {
+		cacheRef := fmt.Sprintf("%s:%s", cacheRegistry, "cache")
 		_ = os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
 	}
 

@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"sort"
 
 	"github.com/sirupsen/logrus"
 
@@ -13,6 +15,12 @@ import (
 type OAuthProvider interface {
 	LoginURL(state string) string
 	Complete(ctx context.Context, code string) (access, refresh string, u *domain.User, err error)
+	// Revalidate re-checks the user's current IdP group membership using the
+	// stored credential and returns the current provider group names. Returns
+	// domain.ErrSessionRevoked when the credential is invalid/expired beyond
+	// refresh (user must re-login) and domain.ErrForbidden when membership no
+	// longer satisfies the allowlist.
+	Revalidate(ctx context.Context, u *domain.User) ([]string, error)
 }
 
 // orgsIntersect reports whether any element of allowed is present in have.
@@ -44,25 +52,41 @@ func joinGroupByName(ctx context.Context, groups domain.GroupRepository, name, u
 	}
 }
 
-// joinMappedGroups adds userID to each supervisor group named in mappedGroups
-// that exists (never fatal, never auto-creates groups).
-func joinMappedGroups(ctx context.Context, groups domain.GroupRepository, mappedGroups []string, userID string, logger *logrus.Logger) {
-	for _, name := range mappedGroups {
-		joinGroupByName(ctx, groups, name, userID, logger)
-	}
-}
-
-// completeOAuthUser is the shared post-verification tail for both OAuth
-// providers: ensure the local user exists, add mapped supervisor groups, fall
-// back to the configured default_group (or "default") when the user still has zero
-// memberships, and issue a JWT pair.
-func completeOAuthUser(ctx context.Context, users *UserService, groups domain.GroupRepository, jwt *JWTService, logger *logrus.Logger, provider, oauthID, username, defaultGroup string, mappedGroups []string) (access, refresh string, u *domain.User, err error) {
+// completeOAuthLogin is the shared post-verification tail for both OAuth
+// providers: ensure the local user exists, clear any prior deactivation,
+// reconcile OAuth-managed memberships, fall back to the configured default_group
+// (or "default") when the user still has zero memberships, persist the stored
+// credential, and issue a JWT pair.
+func completeOAuthLogin(
+	ctx context.Context,
+	users *UserService,
+	groups domain.GroupRepository,
+	jwt *JWTService,
+	logger *logrus.Logger,
+	encKey []byte,
+	provider, oauthID, username, defaultGroup string,
+	mappedGroups []string,
+	credential *oauthCredential,
+) (access, refresh string, u *domain.User, err error) {
 	u, _, err = users.EnsureOAuthUser(ctx, provider, oauthID, username)
 	if err != nil {
 		return "", "", nil, err
 	}
-	joinMappedGroups(ctx, groups, mappedGroups, u.ID, logger)
-	gids, _ := groups.GroupsForUser(ctx, u.ID)
+
+	// A successful IdP login re-authorizes: clear any prior deactivation.
+	if u.DeactivatedAt != nil {
+		u.DeactivatedAt = nil
+	}
+
+	// Reconcile OAuth-managed memberships: add new, remove stale. Called even
+	// when mappedGroups is empty so memberships that no longer map are removed.
+	if oauthGids, rerr := reconcileMemberships(ctx, groups, logger, u, mappedGroups); rerr != nil {
+		logger.WithError(rerr).WithField("user_id", u.ID).Warn("oauth: membership reconciliation failed")
+	} else {
+		u.OAuthGroupIDs = oauthGids
+	}
+
+	memberGroups, _ := groups.GroupsForUser(ctx, u.ID)
 	// If the user still has zero group memberships after mapping rules ran,
 	// add them to the configured default_group (falling back to "default")
 	// on every login, not just first creation. This ensures every OAuth user
@@ -71,10 +95,75 @@ func completeOAuthUser(ctx context.Context, users *UserService, groups domain.Gr
 	if fallbackGroup == "" {
 		fallbackGroup = "default"
 	}
-	if len(gids) == 0 {
+	if len(memberGroups) == 0 {
 		joinGroupByName(ctx, groups, fallbackGroup, u.ID, logger)
-		gids, _ = groups.GroupsForUser(ctx, u.ID)
+		memberGroups, _ = groups.GroupsForUser(ctx, u.ID)
 	}
-	access, refresh, err = jwt.IssuePair(u, groupIDs(gids))
+
+	// Persist the encrypted credential.
+	ct, err := encryptOAuthCredential(encKey, credential)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("encrypt oauth credential: %w", err)
+	}
+	u.OAuthTokenCiphertext = ct
+
+	if err := users.Update(ctx, u); err != nil {
+		return "", "", nil, fmt.Errorf("persist oauth user: %w", err)
+	}
+
+	access, refresh, err = jwt.IssuePair(u, groupIDs(memberGroups))
 	return access, refresh, u, err
+}
+
+// reconcileMemberships applies the desired OAuth-managed supervisor group
+// memberships for u: add memberships for names that newly resolve, remove
+// memberships for previously OAuth-managed names that no longer resolve.
+// Admin-managed memberships (groups not in u.OAuthGroupIDs) are never touched.
+// Returns the resulting supervisor group IDs.
+func reconcileMemberships(
+	ctx context.Context,
+	groups domain.GroupRepository,
+	logger *logrus.Logger,
+	u *domain.User,
+	mappedNames []string,
+) ([]string, error) {
+	wanted := make(map[string]bool, len(mappedNames))
+	for _, name := range mappedNames {
+		g, err := groups.GetByName(ctx, name)
+		if err != nil {
+			logger.WithError(err).WithField("group", name).Warn("oauth: group not found during revalidation, skipping")
+			continue
+		}
+		wanted[g.ID] = true
+	}
+
+	previous := make(map[string]bool, len(u.OAuthGroupIDs))
+	for _, gid := range u.OAuthGroupIDs {
+		previous[gid] = true
+	}
+
+	// adds
+	for gid := range wanted {
+		if !previous[gid] {
+			if err := addGroupMember(ctx, groups, gid, u.ID); err != nil {
+				return nil, fmt.Errorf("add oauth group %s: %w", gid, err)
+			}
+		}
+	}
+	// removes (only within the previously OAuth-managed set)
+	for gid := range previous {
+		if !wanted[gid] {
+			if err := removeGroupMember(ctx, groups, gid, u.ID); err != nil {
+				return nil, fmt.Errorf("remove oauth group %s: %w", gid, err)
+			}
+		}
+	}
+
+	out := make([]string, 0, len(wanted))
+	for gid := range wanted {
+		out = append(out, gid)
+	}
+	sort.Strings(out)
+	u.OAuthGroupIDs = out
+	return out, nil
 }

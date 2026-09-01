@@ -78,8 +78,11 @@ func (s *stubCacheRouter) CompleteUpload(_ context.Context, uuid, digest, _ stri
 	return s.recordErr
 }
 func (s *stubCacheRouter) RecordManifest(_ context.Context, repo, tag, digest, _ string, _ int64) error {
-	s.recordedManifest = append(s.recordedManifest, repo+":"+tag+":"+digest)
+	s.recordedManifest = append(s.recordedManifest, repo+":"+tag)
 	return s.manifestErr
+}
+func (s *stubCacheRouter) TouchManifest(_ context.Context, repo, tag string) error {
+	return nil
 }
 func (s *stubCacheRouter) MarkDown(id string) { s.markedDown = append(s.markedDown, id) }
 
@@ -179,8 +182,8 @@ func TestRouteCacheRequest(t *testing.T) {
 		wantMethod string // which stub method should be called
 	}{
 		{"ping", noBackend(), "GET", "/v2/", "", "b1", routeOther, nil, "push"},
-		{"manifest-get", noBackend(), "GET", "/v2/dagger-cache/manifests/v0-21-4", "", "b1", routeOther, nil, "pull"},
-		{"manifest-head", noBackend(), "HEAD", "/v2/dagger-cache/manifests/v0-21-4", "", "b1", routeOther, nil, "pull"},
+		{"manifest-get", noBackend(), "GET", "/v2/dagger-cache/manifests/v0-21-4", "", "b1", routeManifest, nil, "pull"},
+		{"manifest-head", noBackend(), "HEAD", "/v2/dagger-cache/manifests/v0-21-4", "", "b1", routeManifest, nil, "pull"},
 		{"manifest-put", noBackend(), "PUT", "/v2/dagger-cache/manifests/v0-21-4", "", "b1", routeManifest, nil, "push"},
 		{"upload-start", noBackend(), "POST", "/v2/dagger-cache/blobs/uploads/", "", "b1", routeUploadStart, nil, "start"},
 		{"upload-patch", noBackend(), "PATCH", "/v2/dagger-cache/blobs/uploads/uuid1", "", "b1", routeOther, nil, "resume"},
@@ -429,7 +432,7 @@ func TestRecordCacheRoute(t *testing.T) {
 		c.Response.Header.Set("Docker-Content-Digest", testDigest)
 
 		s.recordCacheRoute(context.Background(), c, backend, routeManifest)
-		if len(stub.recordedManifest) != 1 || stub.recordedManifest[0] != "dagger-cache:v0-21-4:"+testDigest {
+		if len(stub.recordedManifest) != 1 || stub.recordedManifest[0] != "dagger-cache:v0-21-4" {
 			t.Fatalf("recordedManifest = %v", stub.recordedManifest)
 		}
 	})
@@ -442,7 +445,7 @@ func TestRecordCacheRoute(t *testing.T) {
 		c.Response.Header.Set("Docker-Content-Digest", "../../v2/_catalog")
 
 		s.recordCacheRoute(context.Background(), c, backend, routeManifest)
-		if len(stub.recordedManifest) != 1 || stub.recordedManifest[0] != "dagger-cache:v0-21-4:" {
+		if len(stub.recordedManifest) != 1 || stub.recordedManifest[0] != "dagger-cache:v0-21-4" {
 			t.Fatalf("recordedManifest = %v", stub.recordedManifest)
 		}
 	})

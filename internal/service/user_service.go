@@ -235,6 +235,12 @@ func (s *UserService) Count(ctx context.Context) (int, error) {
 	return s.users.Count(ctx)
 }
 
+// Update persists a modified user (OAuth credential, OAuth-managed groups,
+// deactivation flag). Mirrors UpdateRole's shape.
+func (s *UserService) Update(ctx context.Context, u *domain.User) error {
+	return s.users.Update(ctx, u)
+}
+
 func validateUsername(username string) error {
 	if !usernameRe.MatchString(username) {
 		return fmt.Errorf("username must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{1,63}$: %w", domain.ErrValidation)

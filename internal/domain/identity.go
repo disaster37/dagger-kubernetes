@@ -55,4 +55,8 @@ var (
 	ErrNotLeader           = errors.New("not the raft leader")
 	ErrConflict            = errors.New("resource already exists")
 	ErrRaftTimeout         = errors.New("raft apply timeout")
+	// ErrSessionRevoked indicates IdP revalidation determined the principal is no
+	// longer authorized (removed from allowed groups, or deleted from the IdP).
+	// Handlers map it to 401 with a distinct message so the SPA can force re-login.
+	ErrSessionRevoked = errors.New("authorization revoked by identity provider")
 )

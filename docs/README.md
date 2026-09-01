@@ -196,8 +196,8 @@ export _EXPERIMENTAL_DAGGER_TAG=v0.21.4
 
 # Remote shared cache ref. The Supervisor rewrites the ref to its dedicated
 # cache vhost (cache.public_host), so the CLI/engine never talks to the raw
-# registry. Refs are always tagged per engine version (V0-21-4 here).
-export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=cache.supv.example.com/dagger-cache:V0-21-4,mode=max"
+# registry. The global tag `cache` is shared across all engine versions.
+export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=cache.supv.example.com/dagger-cache:cache,mode=max"
 
 dagger call github.com/your-org/ci@v1.0.0 build
 ```
@@ -214,9 +214,8 @@ Instead of hand-assembling the variables above, use the **Connect** page in
 the web UI (log in, then click **Connect** in the nav):
 
 The Connect page **always** includes the remote shared cache ("MagicCache")
-env var `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, targeting the client's effective
-engine version (the latest allowed release, or the version floor when no
-release list is available). `_EXPERIMENTAL_DAGGER_TAG` is only added when you
+env var `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, targeting the single global
+`cache` tag shared across all engine versions. `_EXPERIMENTAL_DAGGER_TAG` is only added when you
 explicitly pin a version.
 
 1. Pick an engine version from the dropdown (optional — leave "No pin" to use
@@ -604,7 +603,7 @@ across one or more backend registries. Engines push/pull cache layers per
 solve; the client picks the cache ref via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`:
 
 ```
-type=registry,ref=cache.supv.example.com/dagger-cache:V0-21-4,mode=max
+type=registry,ref=cache.supv.example.com/dagger-cache:cache,mode=max
 ```
 
 The emitted ref always points at the **Supervisor's cache vhost**
@@ -616,10 +615,10 @@ In single-backend mode (the default), the Supervisor proxies to
 `cache.internal_addr` is empty). With `cache.registries[]` configured, it
 load-balances across all of them instead.
 
-Refs are always tagged per engine version: the wrapper script
-automatically derives the `:V<maj>-<min>-<patch>` tag from
-`_EXPERIMENTAL_DAGGER_TAG`, giving each engine version its own cache
-namespace and avoiding cross-version cache poisoning.
+The cache ref uses the fixed global tag `cache`, shared across all engine
+versions. BuildKit cache is content-addressed, so cross-version sharing is
+safe. The wrapper script always emits `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`
+with the `:cache` tag.
 
 ### Multi-registry cache
 
@@ -681,31 +680,58 @@ cache:
 
 ### Cache auto-clean (GC)
 
-A background sweeper can purge stale cache tags. It is **disabled by default**:
+A background sweeper can purge the global cache tag when it has not been
+*used* (pulled or pushed) for `cache.gc.max_age`. It is **disabled by default**:
 
 ```yaml
 cache:
   gc:
     enabled: true                 # master switch
-    max_age: "168h"               # purge tags older than 7d ("7d" also accepted)
+    max_age: "168h"               # purge the cache tag when unused for 7d ("7d" also accepted)
     schedule: "1h"                # sweeper interval
-    min_refs_to_keep: 3           # keep the newest N tags per minor version
-    protect_active_versions: true # never purge tags for versions with running engines
 ```
 
-Age is taken from the manifest's `org.opencontainers.image.created` annotation;
-tags without it are never purged (conservative). GC never purges cache refs for
-versions that still have active engine replicas when
-`protect_active_versions` is set.
+"Last used" is determined by the supervisor's own routing-table observation
+(falling back to the manifest's `org.opencontainers.image.created` annotation).
+Tags with no observation and no creation annotation are never purged
+(conservative). Legacy `vX-Y-Z` tags from before the global-cache migration are
+also swept by creation age.
+
+Orphaned blob reclamation is NOT done by the supervisor — run the registry's
+`garbage-collect` job periodically (see below).
 
 ### Purging cache (admin)
 
 The registry must be started with delete enabled
 (`REGISTRY_STORAGE_DELETE_ENABLED=true`) for purge to work. From the MagicCache
-page, admins can purge a single version's cache ref or all tags. The underlying
-endpoints are `POST /api/v1/cache/purge` and `POST /api/v1/cache/purge-all`
-(admin-only); a delete-disabled registry returns `409 "registry delete not
-enabled"`.
+page, admins can purge the global cache (and any legacy version tags) with a
+single button. The underlying endpoint is `POST /api/v1/cache/purge`
+(admin-only); a delete-disabled registry returns `409 "registry delete not enabled"`.
+
+### Registry garbage collection
+
+With a single global `cache` tag, orphaned blobs accumulate over time as old
+manifests are deleted but their layers remain on disk. The supervisor's GC sweeper
+deletes stale manifests at the OCI level, but **blob-level reclamation** requires
+the registry's own `garbage-collect` job.
+
+**Kubernetes:** A CronJob (`registry-gc-cronjob.yaml`) runs daily at 3 AM by
+default. It executes:
+
+```bash
+/bin/registry garbage-collect --delete-untagged /etc/docker/registry/config.yml
+```
+
+The `--delete-untagged` flag removes all manifest layers that are no longer
+referenced by any tag — this is safe because the supervisor's GC sweeper already
+deleted the stale tags before the CronJob runs.
+
+**Docker Compose:** A `cache-registry-gc` service runs the same command every 24
+hours in a loop. It depends on `cache-registry` and shares the `registry-data`
+volume.
+
+Both approaches require `REGISTRY_STORAGE_DELETE_ENABLED=true` in the registry
+configuration.
 
 ---
 
@@ -824,6 +850,47 @@ are looked up by group name and the user is **added** to those that exist
 applied on every login and existing memberships are never removed. An empty
 `group_mappings` list means no mapping and no membership sync — only
 `default_group` auto-join applies.
+
+### IdP group-membership revalidation (ADR-027)
+
+When OAuth is enabled, the supervisor can detect when a user is removed from an
+allowed group (or deleted from the IdP) while already holding tokens, and revoke
+their access. This closes the de-provisioning gap described in ADR-027.
+
+The mechanism works as follows:
+
+1. At OAuth login, the upstream credential (GitHub access token or OIDC
+   access+refresh token) is encrypted at rest on the user record.
+2. On every **refresh** and on **Resolve** (when the per-user cache is stale),
+   the supervisor re-validates the user's current IdP group membership using
+   the stored credential. Results are cached behind a TTL-bounded, single-flight
+   cache (default interval: 5m).
+3. On revocation (user removed from allowed groups, or IdP returns 401/404),
+   the user is marked **deactivated** cluster-wide (Raft-replicated) and their
+   API token is revoked. All pods reject their JWTs within the revalidation
+   interval.
+4. When the IdP is unreachable, a configurable **grace window** (default 1h)
+   serves last-known-good membership. After grace expires, behavior is
+   fail-closed (deny) by default, or fail-open if `revalidate_fail_open: true`.
+5. An optional `session_max_age` forces full re-login for OAuth users whose
+   session exceeds the bound, closing the window even for pre-upgrade users
+   without stored credentials.
+
+Config keys:
+
+| Key | Default | Description |
+|---|---|---|
+| `auth.oauth.revalidate_interval` | `5m` | Per-user cache TTL for successful IdP re-checks. |
+| `auth.oauth.revalidate_grace` | `1h` | Serve last-known-good when IdP is unreachable. |
+| `auth.oauth.revalidate_fail_open` | `false` | After grace: false = deny, true = allow. |
+| `auth.oauth.session_max_age` | `0` | Hard bound on OAuth session age; 0 = disabled. |
+
+During rollout, set `session_max_age: "24h"` to force re-login for pre-upgrade
+users, which then captures a credential and enables revalidation.
+
+For OIDC providers, the service now requests `offline_access` scope
+(automatically appended when missing) so a refresh token is returned for later
+revalidation. Operators may need to enable it for the client on the IdP.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
   at most one token; the plaintext is shown once at creation/regeneration.
   Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext
@@ -1361,8 +1428,8 @@ Features:
 - **Fleet dashboard** — active engines, replicas per version, session counts
 - **MagicCache dashboard** (`/cache`) — cache running state, total size,
   object (layer) count, hit rate (from VictoriaMetrics BuildKit counters),
-  per-version cache refs (size, layers, digest, protected flag), auto-clean
-  (GC) rules with last/next run, and admin-only purge buttons
+  single global cache ref (size, layers, digest, last-used timestamp), auto-clean
+  (GC) rules with last/next run, and admin-only purge button
 - **History dashboard** (`/history`) — pipeline-history trace count + oldest
   update, auto-purge (GC) rules with last/next run summary, and admin-only
   per-trace / purge-all buttons
@@ -1372,8 +1439,8 @@ Features:
 - **Connect page** (`/connect`) — ready-to-copy Dagger CLI environment:
   every required env var (`DAGGER_CLOUD_URL`, `DAGGER_CLOUD_TOKEN`,
   `_EXPERIMENTAL_DAGGER_RUNNER_HOST`, and the always-present
-  `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, plus `_EXPERIMENTAL_DAGGER_TAG` only
-  when you pin a version) with one-click copy of bash/zsh exports,
+  `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` with the global `:cache` tag, plus
+  `_EXPERIMENTAL_DAGGER_TAG` only when you pin a version) with one-click copy of bash/zsh exports,
   a `.bashrc` snippet, GitHub Actions `env:`, GitLab CI `variables:`, and a
   "Copy token value" button. The token is masked by default; checking "Show
   token plaintext" reveals it on demand (including in the CI snippets, which
@@ -1436,16 +1503,15 @@ step summary with the trace link and Check Runs annotated with cache stats.
 
 #### Magic cache (GitHub Actions)
 
-When `version` is set, the GHA integration automatically derives a version-pinned
-cache ref from `CACHE_REGISTRY` (default `cache.reg/dagger-cache`) and sets
-`_EXPERIMENTAL_DAGGER_CACHE_CONFIG` — no extra flags needed:
+The GHA integration always emits `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` with the
+global `:cache` tag derived from `CACHE_REGISTRY` (default
+`cache.reg/dagger-cache`). No `version` is required for cache:
 
 ```yaml
 - uses: ./ci-integrations/gha
   with:
     server-url: https://supv.example.com
     token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
-    version: v0.21.4              # magic cache enabled automatically
     module: github.com/org/ci@v1.0.0
     args: build
 ```
@@ -1487,33 +1553,30 @@ and prepends it to `PATH`. See [CLI provisioning](#cli-provisioning).
 
 #### Magic cache (Jenkins)
 
-Enable with `magicCache: true` and a pinned `version`:
+Enable with `magicCache: true` (no `version` required):
 
 ```groovy
 daggerKubernetes(serverUrl: 'https://supv.example.com',
             token: env.DAGGER_CLOUD_TOKEN,
-            version: 'v0.21.4',
             magicCache: true) {
   sh 'dagger call github.com/org/ci@v1.0.0 build'
 }
 ```
 
 The library derives `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` from `cacheRegistry`
-(default `cache.reg/dagger-cache`) and the version slug (e.g. `v0.21.4` →
-`V0-21-4`), producing a ref like `cache.reg/dagger-cache:V0-21-4`. Override
-the registry:
+(default `cache.reg/dagger-cache`) with the global `:cache` tag, producing a
+ref like `cache.reg/dagger-cache:cache`. Override the registry:
 
 ```groovy
 daggerKubernetes(serverUrl: 'https://supv.example.com',
             token: env.DAGGER_CLOUD_TOKEN,
-            version: 'v0.21.4',
             magicCache: true,
             cacheRegistry: 'my-registry.example.com/dagger-cache') {
   sh 'dagger call github.com/org/ci@v1.0.0 build'
 }
 ```
 
-`magicCache` requires `version` — without it the flag is a no-op. When
+`magicCache` emits the global `:cache` ref unconditionally. When
 `dynamicStages: true`, the cache config is passed to the background wrapper
 via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`.
 
@@ -1725,13 +1788,12 @@ steps:
     environment:
       DAGGER_CLOUD_TOKEN:
         from_secret: dagger_kubernetes_token
-      _EXPERIMENTAL_DAGGER_CACHE_CONFIG: type=registry,ref=cache.reg/dagger-cache:V0-21-4,mode=max
+      _EXPERIMENTAL_DAGGER_CACHE_CONFIG: type=registry,ref=cache.reg/dagger-cache:cache,mode=max
     commands:
       - dagger call github.com/org/ci@v1.0.0 build
 ```
 
-The cache ref tag must match the version slug: dots replaced with dashes,
-leading `v` stripped (e.g. `v0.21.4` → `V0-21-4`).
+The cache ref uses the global `:cache` tag — no version slug derivation needed.
 
 ### CLI provisioning
 
@@ -1784,9 +1846,9 @@ export DAGGER_TAG=v0.21.4          # optional
 ./scripts/dagger-kubernetes.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
-It derives the cache ref (`cache.<public_host>/dagger-cache:V0-21-4`) from
-`DAGGER_TAG`, sets `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, runs `dagger "$@"`,
-then greps the run log for the trace ID and prints a boxed link to
+It always emits the global cache ref (`cache.<public_host>/dagger-cache:cache`)
+via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, runs `dagger "$@"`, then greps the run
+log for the trace ID and prints a boxed link to
 `$DAGGER_KUBERNETES_UI/traces/<id>`. The GHA, Jenkins, and Drone integrations
 all delegate to (or mirror) this script.
 

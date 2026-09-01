@@ -102,7 +102,7 @@ func TestConnectEnvDefaultMasked(t *testing.T) {
 	if !ok {
 		t.Fatal("cache backend is not *service.Cache")
 	}
-	want := cache.BuildCacheConfig(env.server.versionResolver.Floor(), "max")
+	want := cache.BuildCacheConfig("max")
 	if got := snapshotEnvValue(&snap, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
 		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
 	}

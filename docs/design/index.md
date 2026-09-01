@@ -33,3 +33,5 @@ the decision.
 | 024  | [CI integration — nested Dagger step view](ADR-024-ci-nested-steps.md) |
 | 025  | [Robust config decoding — extended durations and dot-safe map keys](ADR-025-config-decode-durations-dotted-keys.md) |
 | 026  | [Replicated session leases + leader-routed Services](ADR-026-replicated-session-leases.md) |
+| 027  | [OAuth group-membership revalidation & token invalidation](ADR-027-oauth-membership-revalidation.md) |
+| 028  | [Single global BuildKit cache (tag `cache`)](ADR-028-global-cache.md) |

@@ -47,13 +47,6 @@ func TestVersionCompare(t *testing.T) {
 	}
 }
 
-func TestVersionSlug(t *testing.T) {
-	v, _ := Parse("v0.21.4")
-	if slug := v.Slug(); slug != "v0-21-4" {
-		t.Fatalf("expected v0-21-4, got %s", slug)
-	}
-}
-
 func TestIsFullVersion(t *testing.T) {
 	tests := []struct {
 		raw  string

@@ -264,6 +264,7 @@ func (fakeOAuthProvider) LoginURL(state string) string {
 func (fakeOAuthProvider) Complete(ctx context.Context, code string) (accessToken, refreshToken string, user *domain.User, err error) {
 	return "a", "r", &domain.User{ID: "u1", Username: "alice"}, nil
 }
+func (fakeOAuthProvider) Revalidate(context.Context, *domain.User) ([]string, error) { return nil, nil }
 
 // forbiddenOAuthProvider is an OAuthProvider stub whose Complete fails with
 // ErrForbidden (allowlist denial).
@@ -274,6 +275,9 @@ func (forbiddenOAuthProvider) LoginURL(state string) string {
 }
 func (forbiddenOAuthProvider) Complete(ctx context.Context, code string) (accessToken, refreshToken string, user *domain.User, err error) {
 	return "", "", nil, domain.ErrForbidden
+}
+func (forbiddenOAuthProvider) Revalidate(context.Context, *domain.User) ([]string, error) {
+	return nil, domain.ErrForbidden
 }
 
 // TestHandleProvidersOIDC verifies providers reports oauth_oidc for the oidc

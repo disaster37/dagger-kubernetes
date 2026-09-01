@@ -213,13 +213,13 @@ func TestCacheProxyMultiBackendIntegration(t *testing.T) {
 	}
 
 	// 3. Manifest push → least-charged backend (reg-2).
-	status, _ = doReq(http.MethodPut, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), strings.NewReader(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`), nil)
+	status, _ = doReq(http.MethodPut, fmt.Sprintf("%s/v2/dagger-cache/manifests/cache", base), strings.NewReader(`{"config":{"digest":"sha256:cfg","size":0},"layers":[]}`), nil)
 	if status != http.StatusCreated {
 		t.Fatalf("manifest push status = %d, want 201", status)
 	}
 
 	// 4. Manifest pull → routes back to reg-2 (routing-table hit).
-	status, _ = doReq(http.MethodGet, fmt.Sprintf("%s/v2/dagger-cache/manifests/v0-21-4", base), nil, nil)
+	status, _ = doReq(http.MethodGet, fmt.Sprintf("%s/v2/dagger-cache/manifests/cache", base), nil, nil)
 	if status != http.StatusOK {
 		t.Fatalf("manifest pull status = %d, want 200", status)
 	}

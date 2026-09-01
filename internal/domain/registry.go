@@ -31,6 +31,7 @@ type CacheRoutesStore interface {
 	DeleteUpload(ctx context.Context, uuid string) error
 	UpsertBlob(ctx context.Context, digest, backendID string) error
 	UpsertManifest(ctx context.Context, repo, tag, digest, backendID string, storedBytes int64) error
+	TouchManifest(ctx context.Context, repo, tag string) error
 	AllCharges(ctx context.Context) (map[string]int64, error)
 	DeleteManifestRoute(ctx context.Context, repo, tag string) error
 }

@@ -41,7 +41,6 @@ func newTestEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/fleet", s.handleFleetInfo)
 	e.GET("/api/v1/cache", s.handleCacheInfo)
 	e.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
-	e.POST("/api/v1/cache/purge-all", s.adminOnly(s.handleCachePurgeAll))
 	e.GET("/api/v1/history", s.handleHistoryInfo)
 	e.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
 	e.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))

@@ -1,0 +1,41 @@
+{{- if and .Values.registry.enabled .Values.registry.gc.enabled }}
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}-registry-gc
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.registry.gc.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: gc
+              image: {{ .Values.registry.image | default "registry" }}:{{ .Values.registry.imageTag | default "2" }}
+              command:
+                - /bin/registry
+              args:
+                - garbage-collect
+                - --delete-untagged
+                - /etc/docker/registry/config.yml
+              volumeMounts:
+                - name: registry-storage
+                  mountPath: /var/lib/registry
+                - name: registry-config
+                  mountPath: /etc/docker/registry
+                  readOnly: true
+          volumes:
+            - name: registry-storage
+              persistentVolumeClaim:
+                claimName: {{ .Release.Name }}-registry
+            - name: registry-config
+              configMap:
+                name: {{ .Release.Name }}-registry
+{{- end }}

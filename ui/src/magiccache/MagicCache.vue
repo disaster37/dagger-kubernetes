@@ -35,34 +35,16 @@
       </div>
 
       <div class="card">
-        <h3>Cache Versions</h3>
-        <p v-if="info.versions.length === 0" style="color: #8b949e; margin-top: 8px;">No version refs discovered.</p>
+        <h3>Global Cache</h3>
+        <p v-if="!info.ref" style="color: #8b949e; margin-top: 8px;">No cache yet.</p>
         <table v-else style="margin-top: 12px;">
-          <thead>
-            <tr>
-              <th>Version</th>
-              <th>Tag</th>
-              <th>Size</th>
-              <th>Layers</th>
-              <th>Protected</th>
-              <th v-if="auth.isAdmin">Actions</th>
-            </tr>
-          </thead>
           <tbody>
-            <tr v-for="v in info.versions" :key="v.ref">
-              <td>{{ v.version }}</td>
-              <td><code>{{ v.tag }}</code></td>
-              <td>{{ formatBytes(v.size) }}</td>
-              <td>{{ v.layer_count < 0 ? 'unknown' : v.layer_count }}</td>
-              <td>
-                <span :class="['badge', v.protected ? 'badge-success' : 'badge-running']">
-                  {{ v.protected ? 'protected' : 'unprotected' }}
-                </span>
-              </td>
-              <td v-if="auth.isAdmin">
-                <button class="btn btn-danger" @click="purgeVersion(v.version, v.tag)">Purge</button>
-              </td>
-            </tr>
+            <tr><td>Ref</td><td><code>{{ info.ref.ref }}</code></td></tr>
+            <tr><td>Tag</td><td><code>{{ info.ref.tag }}</code></td></tr>
+            <tr><td>Size</td><td>{{ formatBytes(info.ref.size) }}</td></tr>
+            <tr><td>Layers</td><td>{{ info.ref.layer_count < 0 ? 'unknown' : info.ref.layer_count }}</td></tr>
+            <tr><td>Digest</td><td><code>{{ info.ref.digest }}</code></td></tr>
+            <tr v-if="info.ref.last_used_at"><td>Last used</td><td>{{ formatTime(info.ref.last_used_at) }}</td></tr>
           </tbody>
         </table>
       </div>
@@ -77,8 +59,6 @@
           <tbody>
             <tr><td>Max age</td><td>{{ info.gc.max_age }}</td></tr>
             <tr><td>Schedule</td><td>{{ info.gc.schedule }}</td></tr>
-            <tr><td>Keep (most recent per minor)</td><td>{{ info.gc.min_refs_to_keep }}</td></tr>
-            <tr><td>Protect active versions</td><td>{{ info.gc.protect_active_versions ? 'yes' : 'no' }}</td></tr>
             <tr v-if="info.gc.last_run_at"><td>Last run</td><td>{{ formatTime(info.gc.last_run_at) }}</td></tr>
             <tr v-if="info.gc.next_run_at"><td>Next run (est.)</td><td>{{ formatTime(info.gc.next_run_at) }}</td></tr>
           </tbody>
@@ -97,7 +77,7 @@
         <p style="font-size: 13px; color: #8b949e; margin: 8px 0;">
           Purge removes cache blobs from the OCI registry. The registry must have delete enabled.
         </p>
-        <button class="btn btn-danger" @click="purgeAll">Purge all cache tags</button>
+        <button class="btn btn-danger" @click="purgeAll">Purge cache</button>
         <p v-if="purgeMessage" style="margin-top: 12px; font-size: 13px;">{{ purgeMessage }}</p>
       </div>
     </div>
@@ -106,7 +86,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
-import { fetchCacheInfo, purgeCache, purgeAllCache } from '@/api/client'
+import { fetchCacheInfo, purgeCache } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import type { CacheInfo } from '@/api/types'
 
@@ -125,12 +105,12 @@ function emptyCache(): CacheInfo {
     reachable: false,
     total_size: -1,
     object_count: -1,
-    versions: [],
+    ref: null,
     hit_rate: null,
     hit_count: 0,
     miss_count: 0,
     collected_at: '',
-    gc: { enabled: false, max_age: '', schedule: '', min_refs_to_keep: 0, protect_active_versions: false },
+    gc: { enabled: false, max_age: '', schedule: '' },
   }
 }
 
@@ -157,25 +137,11 @@ async function load(): Promise<void> {
   }
 }
 
-async function purgeVersion(version: string, tag: string): Promise<void> {
-  if (!confirm(`Purge cache for ${version} (tag ${tag})?`)) return
-  purgeMessage.value = ''
-  try {
-    const res = await purgeCache({ version, tag })
-    purgeMessage.value = res.purged > 0
-      ? `Purged ${res.purged} tag(s), freed ${formatBytes(res.freed_bytes)}.`
-      : res.message || 'Nothing to purge.'
-    await load()
-  } catch (e: any) {
-    purgeMessage.value = e.response?.data?.message || 'Purge failed'
-  }
-}
-
 async function purgeAll(): Promise<void> {
-  if (!confirm('Purge ALL cache tags? This removes every cache blob in the registry.')) return
+  if (!confirm('Purge the global cache? This removes all cache blobs.')) return
   purgeMessage.value = ''
   try {
-    const res = await purgeAllCache()
+    const res = await purgeCache()
     purgeMessage.value = `Purged ${res.purged} tag(s), ${res.already_purged} already absent, freed ${formatBytes(res.freed_bytes)}.`
     await load()
   } catch (e: any) {

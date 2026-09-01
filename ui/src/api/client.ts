@@ -13,7 +13,6 @@ import type {
   PlatformStatus,
   Project,
   Providers,
-  PurgeRequest,
   PurgeResult,
   TokenMeta,
   TraceDetail,
@@ -195,12 +194,8 @@ export async function fetchCacheInfo(): Promise<CacheInfo> {
   const { data } = await api.get('/api/v1/cache')
   return data as CacheInfo
 }
-export async function purgeCache(payload: PurgeRequest): Promise<PurgeResult> {
-  const { data } = await api.post('/api/v1/cache/purge', payload)
-  return data as PurgeResult
-}
-export async function purgeAllCache(): Promise<PurgeResult> {
-  const { data } = await api.post('/api/v1/cache/purge-all')
+export async function purgeCache(): Promise<PurgeResult> {
+  const { data } = await api.post('/api/v1/cache/purge')
   return data as PurgeResult
 }
 export async function fetchHistoryInfo(): Promise<HistoryInfo> {

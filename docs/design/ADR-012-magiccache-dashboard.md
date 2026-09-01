@@ -15,8 +15,8 @@ to reclaim space by deleting stale cache tags. The health endpoints
 
 We needed:
 
-1. Rich cache information: size, object count, per-version refs, hit rate, GC
-   rules.
+1. Rich cache information: size, object count, single global cache ref, hit
+   rate, GC rules.
 2. A dedicated all-services status page and a header status indicator.
 3. An admin-gated purge capability and a background auto-clean (GC) sweeper.
 
@@ -36,9 +36,9 @@ We needed:
   (`buildkit_cache_hits_total` / `buildkit_cache_misses_total`). The PromQL is
   isolated in constants so it can be tuned post-deployment. Any failure yields
   `hit_rate: null` (graceful).
-- Per-version `CacheVersionRef`s are derived by reversing the tag slug
-  (`v0-21-4` → `v0.21.4`); a version is marked `protected` when the fleet has
-  active (ready) replicas for it.
+- A single global `CacheRef` is built from the first entry whose tag is
+  `cache`. `total_size` and `object_count` sum across all discovered
+  manifests (including legacy version tags).
 - The full payload is TTL-cached for 15s; concurrent `Stats()` calls share a
   mutex and return the freshly computed result.
 
@@ -58,18 +58,20 @@ traffic when the cache is unreachable.
 
 ### 3. Admin-gated purge + auto-clean (GC) sweeper
 
-`POST /api/v1/cache/purge` (single version) and
-`POST /api/v1/cache/purge-all` are admin-only. Purge is idempotent: a missing
-tag counts as `already_purged` and returns 200, so retries are safe. The
-registry must have delete enabled (`REGISTRY_STORAGE_DELETE_ENABLED=true`);
+`POST /api/v1/cache/purge` (single endpoint, no body) is admin-only. It
+purges every tag in the `dagger-cache` repo (the global `cache` tag plus any
+pre-migration legacy version tags), capped at 1000 tags. Purge is idempotent:
+a missing tag counts as `already_purged` and returns 200, so retries are safe.
+The registry must have delete enabled (`REGISTRY_STORAGE_DELETE_ENABLED=true`);
 a 405/403 from `DELETE` maps to 409 "registry delete not enabled".
 
 `cache.gc.*` config governs a background sweeper (`CacheStatsService.RunGC`,
-ticker via `StartGCSweeper`): tags older than `max_age` are purged unless the
-version has active fleet replicas (`protect_active_versions`), always keeping
-the newest `min_refs_to_keep` tags per minor version line. Age comes from the
-OCI `org.opencontainers.image.created` annotation; unknown age is never purged
-(conservative).
+ticker via `StartGCSweeper`): the global `cache` tag is deleted when not
+*used* (pulled or pushed) for `max_age`. "Last used" is the routing-table
+`LastSeenAt` (touched on every manifest pull and push), falling back to
+manifest creation time. Tags with no observation and no creation annotation
+are never purged (conservative). Legacy `vX-Y-Z` tags are swept by creation
+age. `min_refs_to_keep` and `protect_active_versions` are removed.
 
 ### 4. Polling (not SSE) for status
 
@@ -91,16 +93,15 @@ AWS SDK v2 and amend AGENTS.md.
 
 - Operators can observe and reclaim cache space from the UI without shell
   access to the registry.
-- The GC sweeper protects cache refs for versions that still have engine
-  replicas, even if `fleet.version_retention` would otherwise allow STS
-  deletion — preventing purging cache an engine pod might still pull.
-
-  > **Implemented (2026-08-21):** `fleet.version_retention` is now implemented.
-  > When it deletes an idle version's StatefulSet (and Service), that version's
-  > cache tags become unprotected (no active replicas) and may be purged by the
-  > cache GC on its next run — the intended interaction with
-  > `cache.gc.protect_active_versions`.
+- The GC sweeper uses the supervisor's own last-seen observation (routing
+  table) as the primary staleness signal, falling back to manifest creation
+  time. This is more accurate than creation time alone because a cache that
+  is actively pulled stays fresh regardless of when it was first created.
 - The registry must enable delete for purge/GC; otherwise the UI surfaces a
   clear 409 message and no state changes.
 - No new third-party dependencies were introduced (stdlib `net/http` for the
   registry client; existing Hertz/Viper/logrus stack).
+
+> **Superseded in part by ADR-028:** per-version refs, per-version purge,
+> `purge-all`, `min_refs_to_keep`, and `protect_active_versions` are removed.
+> Stats now emit a single `ref`; GC is a single-tag last-used staleness rule.
