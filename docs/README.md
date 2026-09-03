@@ -596,7 +596,8 @@ full rationale and alternatives considered.
 
 ## Remote shared cache
 
-Self-hosted OCI registry (`registry:2`) storing BuildKit cache blobs. The
+Self-hosted OCI registry (`registry:3` via the `docker-registry` Helm chart;
+`registry:2` in the Compose dev stack) storing BuildKit cache blobs. The
 Supervisor acts as a reverse proxy in front of the registry(ies): it holds the
 registry credentials, validates the engine's cache token, and load-balances
 across one or more backend registries. Engines push/pull cache layers per
@@ -715,11 +716,13 @@ manifests are deleted but their layers remain on disk. The supervisor's GC sweep
 deletes stale manifests at the OCI level, but **blob-level reclamation** requires
 the registry's own `garbage-collect` job.
 
-**Kubernetes:** A CronJob (`registry-gc-cronjob.yaml`) runs daily at 3 AM by
-default. It executes:
+**Kubernetes:** The `docker-registry` subchart (twuni) ships its own
+garbage-collect CronJob, enabled with `registry.garbageCollect.enabled: true`
+(daily at 3 AM by default, tunable via `registry.garbageCollect.schedule`). It
+executes:
 
 ```bash
-/bin/registry garbage-collect --delete-untagged /etc/docker/registry/config.yml
+/bin/registry garbage-collect --delete-untagged /etc/distribution/config.yml
 ```
 
 The `--delete-untagged` flag removes all manifest layers that are no longer

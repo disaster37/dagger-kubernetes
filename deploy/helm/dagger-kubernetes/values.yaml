@@ -647,7 +647,7 @@ opentelemetry-collector:
           exporters: [prometheusremotewrite]
 
 ## @skip registry
-## @param registry.enabled Install Docker Registry subchart (cache backend).
+## @param registry.enabled Install Docker Registry subchart (cache backend). Uses the twuni docker-registry chart (https://helm.twun.io), packaging the registry v3 image.
 registry:
   enabled: true
   replicaCount: 1
@@ -664,10 +664,16 @@ registry:
     limits:
       cpu: 500m
       memory: 512Mi
-  gc:
-    ## @param registry.gc.enabled Enable the registry garbage-collect CronJob. GC runs daily at 3 AM to reclaim space from untagged manifests.
+  extraEnvVars:
+    ## registry v3 initializes OpenTelemetry unconditionally and OTel autoexport
+    ## defaults to an OTLP exporter on localhost:4318; with no collector there it
+    ## spams "traces export: connection refused" errors. "none" disables the exporter.
+    - name: OTEL_TRACES_EXPORTER
+      value: "none"
+  garbageCollect:
+    ## @param registry.garbageCollect.enabled Enable the registry garbage-collect CronJob shipped by the docker-registry subchart. GC runs daily at 3 AM to reclaim space from untagged manifests.
     enabled: true
-    ## @param registry.gc.schedule Cron schedule for the GC job. Default: "0 3 * * *" (daily at 3 AM UTC).
+    ## @param registry.garbageCollect.schedule Cron schedule for the GC job. Default: "0 3 * * *" (daily at 3 AM UTC).
     schedule: "0 3 * * *"
 
 ## @skip tempo

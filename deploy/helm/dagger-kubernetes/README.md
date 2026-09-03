@@ -97,7 +97,7 @@ configurable (`service.control.port`, `service.data.port`).
 | Dependency | Chart | Default | Purpose |
 |---|---|---|---|
 | OpenTelemetry Collector | `opentelemetry-collector` ([repo](https://open-telemetry.github.io/opentelemetry-helm-charts)) | enabled | OTLP ingest from Dagger CLI & supervisor; fans out to Tempo / Loki / VictoriaMetrics |
-| OCI Registry | `docker-registry` ([stable](https://charts.helm.sh/stable), aliased `registry`) | enabled | Backs the remote shared cache (BuildKit cache blobs) |
+| OCI Registry | `docker-registry` ([twuni](https://twuni.github.io/docker-registry.helm), aliased `registry`) | enabled | Backs the remote shared cache (BuildKit cache blobs); ships the registry v3 image and its garbage-collect CronJob |
 | Grafana Tempo | `tempo` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Distributed tracing backend, stores OTLP traces |
 | Grafana Loki | `loki` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Log aggregation backend, stores OTLP logs |
 | VictoriaMetrics | `victoria-metrics-single` ([victoriametrics](https://victoriametrics.github.io/helm-charts/)) | enabled | PromQL-compatible metrics backend |
