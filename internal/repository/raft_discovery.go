@@ -6,8 +6,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-
-	"k8s.io/client-go/kubernetes"
 )
 
 // defaultRaftPort is the fallback Raft port when bind_addr carries no port.
@@ -49,32 +47,6 @@ func NewPeerResolver(cfg *RaftDiscoveryConfig) PeerResolver {
 	default:
 		return &singleNodeResolver{cfg: *cfg}
 	}
-}
-
-// NewPeerResolverWithClientset selects a resolver, preferring the Kubernetes
-// API (pod IPs, like Vault's go-discover) over DNS when a clientset is
-// available and the StatefulSet is configured. Falls back to DNS if the K8s
-// API is unreachable or the pod has no IP yet.
-func NewPeerResolverWithClientset(cfg *RaftDiscoveryConfig, clientset kubernetes.Interface, hostname string) (resolver PeerResolver, podIP string) {
-	// Static peers override everything.
-	if len(cfg.Peers) > 0 {
-		return &staticPeerResolver{cfg: *cfg}, ""
-	}
-
-	// Try K8s API-based discovery (like Vault).
-	if clientset != nil && cfg.StatefulSetName != "" && cfg.Namespace != "" && hostname != "" {
-		r, err := NewK8sPeerResolver(clientset, cfg.Namespace, cfg.StatefulSetName, cfg.Replicas, raftPort(cfg), hostname)
-		if err == nil {
-			return r, r.PodIP()
-		}
-	}
-
-	// Fall back to DNS-based discovery.
-	if cfg.StatefulSetName != "" && cfg.HeadlessService != "" {
-		return &dnsPeerResolver{cfg: *cfg, clusterDomain: clusterDomain(cfg)}, ""
-	}
-
-	return &singleNodeResolver{cfg: *cfg}, ""
 }
 
 // clusterDomain returns the configured cluster DNS suffix. The config loader

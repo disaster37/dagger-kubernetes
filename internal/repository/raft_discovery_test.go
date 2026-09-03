@@ -3,11 +3,8 @@ package repository
 import (
 	"fmt"
 	"net"
+	"slices"
 	"testing"
-
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes/fake"
 )
 
 func TestNewPeerResolverSelection(t *testing.T) {
@@ -376,237 +373,80 @@ func TestPodOrdinal(t *testing.T) {
 }
 
 func TestPodSANs(t *testing.T) {
-	cfg := RaftDiscoveryConfig{
-		HeadlessService: "headless",
-		Namespace:       "ns",
-		ClusterDomain:   "cluster.local",
+	tests := []struct {
+		name     string
+		cfg      RaftDiscoveryConfig
+		hostname string
+		wantDNS  []string
+		wantFQDN string // must be contained in the DNS SAN set ("" = not asserted)
+	}{
+		{
+			// Locks in the FQDN-only invariant: the DNS set contains the
+			// full FQDN and the IP set is exactly [127.0.0.1] — never pod IPs.
+			name: "fqdn san present, loopback ip only",
+			cfg: RaftDiscoveryConfig{
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "cluster.local",
+			},
+			hostname: "sts-0",
+			wantDNS: []string{
+				"sts-0",
+				"localhost",
+				"sts-0.headless",
+				"sts-0.headless.ns",
+				"sts-0.headless.ns.svc",
+				"sts-0.headless.ns.svc.cluster.local",
+			},
+			wantFQDN: "sts-0.headless.ns.svc.cluster.local",
+		},
+		{
+			name:     "no headless service → only hostname + localhost",
+			cfg:      RaftDiscoveryConfig{},
+			hostname: "plain-host",
+			wantDNS:  []string{"plain-host", "localhost"},
+		},
+		{
+			name: "empty cluster domain → SANs end at .svc",
+			cfg: RaftDiscoveryConfig{
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "",
+			},
+			hostname: "sts-0",
+			wantDNS: []string{
+				"sts-0",
+				"localhost",
+				"sts-0.headless",
+				"sts-0.headless.ns",
+				"sts-0.headless.ns.svc",
+			},
+		},
 	}
-	dns, ips := PodSANs(&cfg, "sts-0")
-	want := []string{
-		"sts-0",
-		"localhost",
-		"sts-0.headless",
-		"sts-0.headless.ns",
-		"sts-0.headless.ns.svc",
-		"sts-0.headless.ns.svc.cluster.local",
-	}
-	if len(dns) != len(want) {
-		t.Fatalf("podSANs dns = %v, want %v", dns, want)
-	}
-	for i := range want {
-		if dns[i] != want[i] {
-			t.Fatalf("podSANs dns[%d] = %q, want %q", i, dns[i], want[i])
-		}
-	}
-	if len(ips) != 1 || !ips[0].Equal(net.ParseIP("127.0.0.1")) {
-		t.Fatalf("podSANs ips = %v, want [127.0.0.1]", ips)
-	}
-
-	// No headless service → only hostname + localhost + IP.
-	dns2, _ := PodSANs(&RaftDiscoveryConfig{}, "plain-host")
-	if len(dns2) != 2 || dns2[0] != "plain-host" || dns2[1] != "localhost" {
-		t.Fatalf("podSANs (no headless) = %v", dns2)
-	}
-
-	// Empty cluster domain → SANs end at .svc (no FQDN entry).
-	dns3, _ := PodSANs(&RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns", ClusterDomain: ""}, "sts-0")
-	want3 := []string{
-		"sts-0",
-		"localhost",
-		"sts-0.headless",
-		"sts-0.headless.ns",
-		"sts-0.headless.ns.svc",
-	}
-	if len(dns3) != len(want3) {
-		t.Fatalf("podSANs (svc-only) dns = %v, want %v", dns3, want3)
-	}
-	for i := range want3 {
-		if dns3[i] != want3[i] {
-			t.Fatalf("podSANs (svc-only) dns[%d] = %q, want %q", i, dns3[i], want3[i])
-		}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			dns, ips := PodSANs(&tc.cfg, tc.hostname)
+			if len(dns) != len(tc.wantDNS) {
+				t.Fatalf("dns SANs = %v, want %v", dns, tc.wantDNS)
+			}
+			for i := range tc.wantDNS {
+				if dns[i] != tc.wantDNS[i] {
+					t.Fatalf("dns SANs[%d] = %q, want %q", i, dns[i], tc.wantDNS[i])
+				}
+			}
+			if tc.wantFQDN != "" && !slices.Contains(dns, tc.wantFQDN) {
+				t.Fatalf("dns SANs %v must contain the FQDN %q", dns, tc.wantFQDN)
+			}
+			// No pod IPs: discovery is FQDN-only, so the IP SAN set is
+			// exactly [127.0.0.1].
+			if len(ips) != 1 || !ips[0].Equal(net.ParseIP("127.0.0.1")) {
+				t.Fatalf("ip SANs = %v, want exactly [127.0.0.1]", ips)
+			}
+		})
 	}
 }
 
 // typeName returns the dynamic type name of v for resolver-selection tests.
 func typeName(v interface{}) string {
 	return fmt.Sprintf("%T", v)
-}
-
-func TestNewPeerResolverWithClientset(t *testing.T) {
-	t.Run("static peers preferred over K8s", func(t *testing.T) {
-		clientset := fake.NewSimpleClientset()
-		cfg := &RaftDiscoveryConfig{
-			Peers:           []RaftPeer{{ID: "a", Address: "a:1"}},
-			StatefulSetName: "sts",
-			HeadlessService: "headless",
-			Namespace:       "ns",
-			Replicas:        3,
-			RaftPort:        8081,
-		}
-		resolver, podIP := NewPeerResolverWithClientset(cfg, clientset, "sts-0")
-		got := typeName(resolver)
-		if got != "*repository.staticPeerResolver" {
-			t.Fatalf("resolver type = %s, want *repository.staticPeerResolver", got)
-		}
-		if podIP != "" {
-			t.Fatalf("podIP should be empty for static peers, got %q", podIP)
-		}
-	})
-
-	t.Run("singleNodeResolver when no clientset and no headless", func(t *testing.T) {
-		cfg := &RaftDiscoveryConfig{
-			StatefulSetName: "sts",
-			Namespace:       "ns",
-			BindAddr:        ":8081",
-			Replicas:        3,
-		}
-		resolver, podIP := NewPeerResolverWithClientset(cfg, nil, "sts-0")
-		got := typeName(resolver)
-		if got != "*repository.singleNodeResolver" {
-			t.Fatalf("resolver type = %s, want *repository.singleNodeResolver", got)
-		}
-		if podIP != "" {
-			t.Fatalf("podIP should be empty, got %q", podIP)
-		}
-	})
-
-	t.Run("k8sPeerResolver preferred when clientset available", func(t *testing.T) {
-		clientset := fake.NewSimpleClientset(&corev1.Pod{
-			ObjectMeta: metav1.ObjectMeta{
-				Name:      "sts-0",
-				Namespace: "ns",
-			},
-			Status: corev1.PodStatus{
-				PodIP: "10.0.0.1",
-			},
-		})
-		cfg := &RaftDiscoveryConfig{
-			StatefulSetName: "sts",
-			HeadlessService: "headless",
-			Namespace:       "ns",
-			Replicas:        3,
-			RaftPort:        8081,
-		}
-		resolver, podIP := NewPeerResolverWithClientset(cfg, clientset, "sts-0")
-		got := typeName(resolver)
-		if got != "*repository.k8sPeerResolver" {
-			t.Fatalf("resolver type = %s, want *repository.k8sPeerResolver", got)
-		}
-		if podIP != "10.0.0.1" {
-			t.Fatalf("podIP = %q, want 10.0.0.1", podIP)
-		}
-	})
-
-	t.Run("dnsPeerResolver fallback when clientset but pod not found", func(t *testing.T) {
-		clientset := fake.NewSimpleClientset()
-		cfg := &RaftDiscoveryConfig{
-			StatefulSetName: "sts",
-			HeadlessService: "headless",
-			Namespace:       "ns",
-			Replicas:        3,
-			RaftPort:        8081,
-		}
-		resolver, podIP := NewPeerResolverWithClientset(cfg, clientset, "sts-0")
-		got := typeName(resolver)
-		if got != "*repository.dnsPeerResolver" {
-			t.Fatalf("resolver type = %s, want *repository.dnsPeerResolver", got)
-		}
-		if podIP != "" {
-			t.Fatalf("podIP should be empty on fallback, got %q", podIP)
-		}
-	})
-}
-
-func TestK8sPeerResolver(t *testing.T) {
-	t.Run("Resolve with all pods running", func(t *testing.T) {
-		clientset := fake.NewSimpleClientset(
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "sts-0", Namespace: "ns"},
-				Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
-			},
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "sts-1", Namespace: "ns"},
-				Status:     corev1.PodStatus{PodIP: "10.0.0.2"},
-			},
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "sts-2", Namespace: "ns"},
-				Status:     corev1.PodStatus{PodIP: "10.0.0.3"},
-			},
-		)
-		r := &k8sPeerResolver{
-			clientset: clientset,
-			namespace: "ns",
-			stsName:   "sts",
-			replicas:  3,
-			raftPort:  8081,
-			hostname:  "sts-1",
-			podIP:     "10.0.0.2",
-		}
-		peers, err := r.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve: %v", err)
-		}
-		if len(peers) != 3 {
-			t.Fatalf("Resolve = %d peers, want 3", len(peers))
-		}
-		want := []RaftPeer{
-			{ID: "sts-0", Address: "10.0.0.1:8081"},
-			{ID: "sts-1", Address: "10.0.0.2:8081"},
-			{ID: "sts-2", Address: "10.0.0.3:8081"},
-		}
-		for i := range want {
-			if peers[i] != want[i] {
-				t.Fatalf("peers[%d] = %+v, want %+v", i, peers[i], want[i])
-			}
-		}
-	})
-
-	t.Run("Resolve skips pods without IP", func(t *testing.T) {
-		clientset := fake.NewSimpleClientset(
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "sts-0", Namespace: "ns"},
-				Status:     corev1.PodStatus{PodIP: "10.0.0.1"},
-			},
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "sts-1", Namespace: "ns"},
-				Status:     corev1.PodStatus{PodIP: ""}, // not yet running
-			},
-			&corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Name: "sts-2", Namespace: "ns"},
-				Status:     corev1.PodStatus{PodIP: "10.0.0.3"},
-			},
-		)
-		r := &k8sPeerResolver{
-			clientset: clientset,
-			namespace: "ns",
-			stsName:   "sts",
-			replicas:  3,
-			raftPort:  8081,
-			hostname:  "sts-1",
-			podIP:     "",
-		}
-		peers, err := r.Resolve()
-		if err != nil {
-			t.Fatalf("Resolve: %v", err)
-		}
-		if len(peers) != 2 {
-			t.Fatalf("Resolve = %d peers, want 2 (skipped no-IP pod)", len(peers))
-		}
-	})
-
-	t.Run("Self returns IP-based address", func(t *testing.T) {
-		r := &k8sPeerResolver{
-			hostname: "sts-1",
-			podIP:    "10.0.0.2",
-			raftPort: 8081,
-		}
-		self, err := r.Self()
-		if err != nil {
-			t.Fatalf("Self: %v", err)
-		}
-		want := RaftPeer{ID: "sts-1", Address: "10.0.0.2:8081"}
-		if self != want {
-			t.Fatalf("Self = %+v, want %+v", self, want)
-		}
-	})
 }

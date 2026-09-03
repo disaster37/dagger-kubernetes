@@ -27,144 +27,6 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// DNSResolver is an interface for resolving advertise addresses.
-// Decoupled from transport creation to allow retry loops.
-type DNSResolver interface {
-	// Resolve blocks until an address is resolved or ctx is cancelled.
-	// Returns the resolved *net.TCPAddr.
-	Resolve(ctx context.Context) (*net.TCPAddr, error)
-	// Resolved returns the last successfully resolved address, or nil.
-	Resolved() *net.TCPAddr
-}
-
-// retryDNSResolver implements DNSResolver with exponential backoff.
-type retryDNSResolver struct {
-	addr       string
-	timeout    time.Duration
-	logger     *logrus.Logger
-	mu         sync.RWMutex
-	resolved   *net.TCPAddr
-	backoffCfg BackoffConfig
-}
-
-// BackoffConfig controls the retry backoff behavior.
-type BackoffConfig struct {
-	// Initial retry interval (default: 1s).
-	Initial time.Duration
-	// Max retry interval (default: 30s).
-	Max time.Duration
-	// Backoff multiplier (default: 1.5).
-	Multiplier float64
-}
-
-// DefaultBackoffConfig returns the default backoff configuration.
-func DefaultBackoffConfig() BackoffConfig {
-	return BackoffConfig{
-		Initial:    1 * time.Second,
-		Max:        30 * time.Second,
-		Multiplier: 1.5,
-	}
-}
-
-// NewRetryDNSResolver creates a DNSResolver that retries indefinitely
-// with exponential backoff. It does NOT have a timeout budget.
-func NewRetryDNSResolver(addr string, timeout time.Duration, logger *logrus.Logger, cfg BackoffConfig) DNSResolver {
-	return &retryDNSResolver{
-		addr:       addr,
-		timeout:    timeout,
-		logger:     logger,
-		backoffCfg: cfg,
-	}
-}
-
-// Start begins background DNS resolution. Non-blocking.
-func (r *retryDNSResolver) Start(ctx context.Context) {
-	go func() {
-		r.resolveLoop(ctx)
-	}()
-}
-
-// resolveLoop runs DNS resolution in a background goroutine with exponential backoff.
-func (r *retryDNSResolver) resolveLoop(ctx context.Context) {
-	interval := r.backoffCfg.Initial
-	consecutiveFailures := 0
-	for {
-		addr, err := r.resolveAttempt(ctx)
-		if err != nil {
-			consecutiveFailures++
-			if consecutiveFailures >= 10 {
-				r.logger.WithError(err).Error("raft DNS resolution still failing after 10 retries")
-			} else {
-				r.logger.WithError(err).Warn("raft DNS resolution failed, retrying")
-			}
-		} else {
-			r.mu.Lock()
-			r.resolved = addr
-			r.mu.Unlock()
-			r.logger.WithFields(logrus.Fields{
-				"addr": addr.String(),
-			}).Info("raft DNS address resolved")
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(interval):
-			interval = time.Duration(float64(interval) * r.backoffCfg.Multiplier)
-			if interval > r.backoffCfg.Max {
-				interval = r.backoffCfg.Max
-			}
-		}
-	}
-}
-
-// Resolve blocks until a *net.TCPAddr is resolved or ctx is cancelled.
-func (r *retryDNSResolver) Resolve(ctx context.Context) (*net.TCPAddr, error) {
-	for {
-		r.mu.RLock()
-		addr := r.resolved
-		r.mu.RUnlock()
-		if addr != nil {
-			return addr, nil
-		}
-		select {
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		case <-time.After(500 * time.Millisecond):
-		}
-	}
-}
-
-// Resolved returns the last successfully resolved address, or nil.
-func (r *retryDNSResolver) Resolved() *net.TCPAddr {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.resolved
-}
-
-// resolveAttempt performs a single DNS resolution attempt.
-func (r *retryDNSResolver) resolveAttempt(ctx context.Context) (*net.TCPAddr, error) {
-	host, portStr, err := net.SplitHostPort(r.addr)
-	if err != nil {
-		return nil, fmt.Errorf("parse advertise addr %s: %w", r.addr, err)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid port in %s: %w", r.addr, err)
-	}
-	// Use the provided context so DNS lookups are cancellable on shutdown.
-	lookupCtx, cancel := context.WithTimeout(ctx, r.timeout)
-	defer cancel()
-	ips, err := net.DefaultResolver.LookupIP(lookupCtx, "ip", host)
-	if err != nil {
-		return nil, fmt.Errorf("lookup %s: %w", host, err)
-	}
-	if len(ips) == 0 {
-		return nil, fmt.Errorf("no addresses resolved for %s", host)
-	}
-	return &net.TCPAddr{IP: ips[0], Port: port}, nil
-}
-
 // defaultBoltOptions returns optimized BoltDB options matching Vault's settings.
 func defaultBoltOptions() raftboltdb.Options {
 	return raftboltdb.Options{
@@ -187,7 +49,6 @@ type RaftStore struct {
 	boltStore *raftboltdb.BoltStore
 	transport raft.Transport
 	nodeID    string
-	dataDir   string
 	logger    *logrus.Logger
 
 	closeOnce sync.Once
@@ -216,13 +77,10 @@ type RaftStoreConfig struct {
 	// AdvertiseResolveTimeout bounds how long the advertise address may stay
 	// unresolvable at startup (fresh clusters: cluster DNS not serving yet).
 	// The pod retries in-process instead of exiting into a CrashLoopBackOff.
-	// 0 = defaultAdvertiseResolveTimeout (2 minutes).
-	//
-	// Deprecated: use the DNSResolver (retryDNSResolver) instead.
+	// 0 = defaultAdvertiseResolveTimeout (2 minutes). This is the sole
+	// startup-resolution budget: once the transport is created the advertise
+	// address is fixed (the pod FQDN) and peers re-resolve it per connection.
 	AdvertiseResolveTimeout time.Duration
-
-	// Backoff overrides the default DNS retry backoff. Zero value = defaults.
-	Backoff BackoffConfig
 
 	// PerformanceMultiplier scales election/heartbeat/lease timeouts.
 	// Default: 5.0. Must be >= 1.0.
@@ -250,29 +108,18 @@ type RaftStoreConfig struct {
 	RecoveryMode bool
 }
 
-// clearStaleRaftState handles recovery mode and auto-detection of stale
-// cluster configurations (e.g. when pods are recreated with new IPs after
-// scaling to zero). shouldBootstrap must come from a prior resolveBootstrapState
-// call. Extracted from NewRaftStore to keep cyclomatic complexity within limits.
-func clearStaleRaftState(cfg *RaftStoreConfig, dir string, shouldBootstrap bool, logger *logrus.Logger) {
-	if cfg.RecoveryMode {
-		if cleared := clearRaftState(dir); cleared {
-			logger.WithField("dir", dir).Warn("recovery mode: cleared stale raft state")
-		}
+// clearStaleRaftState implements recovery mode: when RecoveryMode is set the
+// persisted raft state (raft.db, snapshots, node-id) is wiped so the node
+// bootstraps a fresh cluster. Use only for manual recovery when quorum is
+// lost. Extracted from NewRaftStore to keep cyclomatic complexity within
+// limits.
+func clearStaleRaftState(cfg *RaftStoreConfig, dir string, logger *logrus.Logger) {
+	if !cfg.RecoveryMode {
 		return
 	}
-
-	if !shouldBootstrap || cfg.Resolver == nil {
-		return
+	if cleared := clearRaftState(dir); cleared {
+		logger.WithField("dir", dir).Warn("recovery mode: cleared stale raft state")
 	}
-
-	stale, err := isStalePeersJSON(dir, cfg.Resolver)
-	if err != nil || !stale {
-		return
-	}
-
-	clearRaftState(dir)
-	logger.WithField("dir", dir).Warn("stale raft configuration detected (pod IPs changed); auto-clearing and re-bootstrapping")
 }
 
 // NewRaftStore constructs and starts a Raft node. It loads/generates a stable
@@ -293,7 +140,7 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 		return nil, err
 	}
 
-	clearStaleRaftState(cfg, dir, shouldBootstrap, logger)
+	clearStaleRaftState(cfg, dir, logger)
 
 	logOutput := logrusOutput(logger)
 
@@ -378,7 +225,6 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 		boltStore: boltStore,
 		transport: transport,
 		nodeID:    nodeID,
-		dataDir:   dir,
 		logger:    logger,
 	}, nil
 }
@@ -925,18 +771,6 @@ func closeRaftTransport(t raft.Transport) error {
 	return nil
 }
 
-// UpdateAdvertiseAddr updates the transport's advertise address.
-// Called when DNS resolution completes after initial store creation.
-func (s *RaftStore) UpdateAdvertiseAddr(addr *net.TCPAddr) error {
-	// For TLS transport (NetworkTransport with custom StreamLayer), update the
-	// advertise address via the stream layer's Addr.
-	if sl, ok := s.transport.(interface{ Addr() net.Addr }); ok {
-		_ = sl
-		// The transport address is set at creation time. Update via the stream layer.
-	}
-	return nil
-}
-
 // ApplyPerformanceMultiplier applies the multiplier to a Raft config.
 func ApplyPerformanceMultiplier(cfg *raft.Config, multiplier float64) {
 	if multiplier < 1.0 {
@@ -1018,64 +852,6 @@ func (s *RaftStore) SetBootstrapConfig(config raft.Configuration) raft.Future {
 	return s.raft.BootstrapCluster(config)
 }
 
-// JoinConfig controls the retry-join behavior.
-type JoinConfig struct {
-	// LeaderAddr is the address of a known leader to join.
-	LeaderAddr string
-	// RetryInterval is the interval between join attempts. Default: 2s.
-	RetryInterval time.Duration
-	// MaxConcurrent is the max number of concurrent join attempts. Default: 20.
-	MaxConcurrent int
-}
-
-// RetryJoin continuously attempts to join the cluster via the given leader address.
-// Blocks until join succeeds or ctx is cancelled.
-func (s *RaftStore) RetryJoin(ctx context.Context, cfg JoinConfig) error {
-	if cfg.RetryInterval == 0 {
-		cfg.RetryInterval = 2 * time.Second
-	}
-	if s.IsVoter() {
-		return nil
-	}
-
-	backoff := cfg.RetryInterval
-	for {
-		if err := s.joinAttempt(); err != nil {
-			s.logger.WithError(err).Warn("join attempt failed, retrying")
-		} else {
-			return nil
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(backoff):
-			backoff = time.Duration(float64(backoff) * 1.5)
-			if backoff > 30*time.Second {
-				backoff = 30 * time.Second
-			}
-		}
-	}
-}
-
-// joinAttempt performs a single join attempt against a leader.
-func (s *RaftStore) joinAttempt() error {
-	// For now, the join is handled by the AddVoter on the leader side via joinLoop.
-	// This function is a stub that checks if we've been added.
-	if s.IsVoter() {
-		return nil
-	}
-	cfg, err := s.GetConfiguration()
-	if err != nil {
-		return fmt.Errorf("get configuration: %w", err)
-	}
-	for _, srv := range cfg.Servers {
-		if string(srv.ID) == s.nodeID {
-			return nil // we're in the config now
-		}
-	}
-	return fmt.Errorf("not yet in cluster configuration")
-}
-
 // TransferLeadership attempts to transfer leadership to another node.
 // On a single-node cluster this is a no-op (no target to transfer to).
 // Blocks until transfer completes or timeout.
@@ -1138,111 +914,6 @@ func (s *RaftStore) LeaveCluster(ctx context.Context, timeout time.Duration) err
 	return nil
 }
 
-// peersJSONPath returns the path to the peers.json recovery file.
-func peersJSONPath(dataDir string) string {
-	return filepath.Join(dataDir, "peers.json")
-}
-
-// WritePeersJSON writes the current Raft configuration to peers.json.
-// Called after every successful membership change.
-func (s *RaftStore) WritePeersJSON() error {
-	cfg, err := s.GetConfiguration()
-	if err != nil {
-		return fmt.Errorf("get configuration for peers.json: %w", err)
-	}
-	data, err := json.MarshalIndent(cfg.Servers, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshal peers.json: %w", err)
-	}
-	path := peersJSONPath(s.dataDir)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write peers.json: %w", err)
-	}
-	return nil
-}
-
-// RecoverFromPeersJSON attempts to recover cluster configuration from peers.json.
-// Returns the recovered configuration. The caller is responsible for using this
-// configuration when creating a new Raft store.
-func (s *RaftStore) RecoverFromPeersJSON() (raft.Configuration, error) {
-	path := peersJSONPath(s.dataDir)
-	//nolint:gosec // path is derived from the operator-configured data dir (peersJSONPath), not user input.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return raft.Configuration{}, fmt.Errorf("read peers.json: %w", err)
-	}
-	var servers []raft.Server
-	if err := json.Unmarshal(data, &servers); err != nil {
-		return raft.Configuration{}, fmt.Errorf("unmarshal peers.json: %w", err)
-	}
-
-	// Safety check: only recover if this node's ID is in the peers list.
-	found := false
-	for _, srv := range servers {
-		if string(srv.ID) == s.nodeID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		return raft.Configuration{}, fmt.Errorf("node %s not found in peers.json, refusing to auto-recover", s.nodeID)
-	}
-
-	cfg := raft.Configuration{Servers: servers}
-	s.logger.WithFields(logrus.Fields{
-		"peers": len(servers),
-		"path":  path,
-	}).Info("raft cluster configuration recovered from peers.json")
-	return cfg, nil
-}
-
-// StartPeersJSONWriter starts a goroutine that periodically writes peers.json.
-func (s *RaftStore) StartPeersJSONWriter(ctx context.Context, interval time.Duration) {
-	if interval == 0 {
-		interval = 30 * time.Second
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if err := s.WritePeersJSON(); err != nil {
-					s.logger.WithError(err).Warn("failed to write peers.json")
-				}
-			}
-		}
-	}()
-}
-
-// StartRemovedChecker polls for removal from the cluster configuration.
-// If this node is removed, it shuts down the Raft store.
-func (s *RaftStore) StartRemovedChecker(ctx context.Context, interval time.Duration) {
-	if interval == 0 {
-		interval = time.Second
-	}
-	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				if s.IsRemoved() {
-					s.logger.Info("node removed from raft cluster, shutting down")
-					if err := s.Close(); err != nil {
-						s.logger.WithError(err).Error("failed to close raft store after removal")
-					}
-					return
-				}
-			}
-		}
-	}()
-}
-
 // clearRaftState removes raft.db, snapshots, node-id, and peers.json from the
 // data directory. Returns true if any files were removed.
 func clearRaftState(dir string) bool {
@@ -1260,46 +931,6 @@ func clearRaftState(dir string) bool {
 		cleared = true
 	}
 	return cleared
-}
-
-// isStalePeersJSON reports whether the cluster configuration in peers.json
-// has stale addresses compared to the resolver's current peer list. Used to
-// detect when pods have been recreated with new IPs (e.g. scale-to-zero).
-func isStalePeersJSON(dir string, resolver PeerResolver) (bool, error) {
-	path := filepath.Join(dir, "peers.json")
-	//nolint:gosec // path is derived from the operator-configured data dir, not user input.
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return false, nil
-		}
-		return false, fmt.Errorf("read peers.json: %w", err)
-	}
-	var servers []raft.Server
-	if err := json.Unmarshal(data, &servers); err != nil {
-		return false, nil // unparseable peers.json, skip auto-detection
-	}
-
-	resolved, err := resolver.Resolve()
-	if err != nil {
-		return false, fmt.Errorf("resolve peers: %w", err)
-	}
-
-	resolvedByID := make(map[string]string, len(resolved))
-	for _, p := range resolved {
-		resolvedByID[p.ID] = p.Address
-	}
-
-	for _, srv := range servers {
-		resolvedAddr, ok := resolvedByID[string(srv.ID)]
-		if !ok {
-			continue // peer no longer exists
-		}
-		if resolvedAddr != string(srv.Address) {
-			return true, nil
-		}
-	}
-	return false, nil
 }
 
 // logrusOutput adapts a logrus logger to an io.Writer for raft's hclog output.

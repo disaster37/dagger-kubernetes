@@ -154,7 +154,9 @@ type RaftConfig struct {
 	NoSnapshotRestoreOnStart bool `mapstructure:"no_snapshot_restore_on_start"`
 	// TerminationGracePeriod for the pod. Default: 60s.
 	TerminationGracePeriod time.Duration `mapstructure:"termination_grace_period"`
-	// RecoveryMode enables peers.json auto-recovery. Default: false.
+	// RecoveryMode clears stale raft state (raft.db, snapshots, node-id) on
+	// startup and bootstraps a fresh cluster. Manual quorum-loss recovery
+	// only. Default: false.
 	RecoveryMode bool `mapstructure:"recovery_mode"`
 
 	// Autopilot configuration.
