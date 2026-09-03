@@ -250,6 +250,31 @@ type RaftStoreConfig struct {
 	RecoveryMode bool
 }
 
+// clearStaleRaftState handles recovery mode and auto-detection of stale
+// cluster configurations (e.g. when pods are recreated with new IPs after
+// scaling to zero). shouldBootstrap must come from a prior resolveBootstrapState
+// call. Extracted from NewRaftStore to keep cyclomatic complexity within limits.
+func clearStaleRaftState(cfg *RaftStoreConfig, dir string, shouldBootstrap bool, logger *logrus.Logger) {
+	if cfg.RecoveryMode {
+		if cleared := clearRaftState(dir); cleared {
+			logger.WithField("dir", dir).Warn("recovery mode: cleared stale raft state")
+		}
+		return
+	}
+
+	if !shouldBootstrap || cfg.Resolver == nil {
+		return
+	}
+
+	stale, err := isStalePeersJSON(dir, cfg.Resolver)
+	if err != nil || !stale {
+		return
+	}
+
+	clearRaftState(dir)
+	logger.WithField("dir", dir).Warn("stale raft configuration detected (pod IPs changed); auto-clearing and re-bootstrapping")
+}
+
 // NewRaftStore constructs and starts a Raft node. It loads/generates a stable
 // node ID, opens the bolt log+stable store and file snapshot store, creates
 // the transport (plaintext TCP or TLS via tlsStreamLayer), and bootstraps the
@@ -263,29 +288,12 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 		return nil, fmt.Errorf("mkdir data dir %s: %w", dir, err)
 	}
 
-	if cfg.RecoveryMode {
-		boltPath := filepath.Join(dir, "raft.db")
-		snapDir := filepath.Join(dir, "snapshots")
-		nodeIDPath := filepath.Join(dir, "node-id")
-		peersPath := filepath.Join(dir, "peers.json")
-		cleared := false
-		for _, p := range []string{boltPath, nodeIDPath, peersPath} {
-			if err := os.Remove(p); err == nil {
-				cleared = true
-			}
-		}
-		if err := os.RemoveAll(snapDir); err == nil {
-			cleared = true
-		}
-		if cleared {
-			logger.WithField("dir", dir).Warn("recovery mode: cleared stale raft state")
-		}
-	}
-
 	nodeID, shouldBootstrap, err := resolveBootstrapState(cfg, dir)
 	if err != nil {
 		return nil, err
 	}
+
+	clearStaleRaftState(cfg, dir, shouldBootstrap, logger)
 
 	logOutput := logrusOutput(logger)
 
@@ -1233,6 +1241,65 @@ func (s *RaftStore) StartRemovedChecker(ctx context.Context, interval time.Durat
 			}
 		}
 	}()
+}
+
+// clearRaftState removes raft.db, snapshots, node-id, and peers.json from the
+// data directory. Returns true if any files were removed.
+func clearRaftState(dir string) bool {
+	cleared := false
+	for _, p := range []string{
+		filepath.Join(dir, "raft.db"),
+		filepath.Join(dir, "node-id"),
+		filepath.Join(dir, "peers.json"),
+	} {
+		if err := os.Remove(p); err == nil {
+			cleared = true
+		}
+	}
+	if err := os.RemoveAll(filepath.Join(dir, "snapshots")); err == nil {
+		cleared = true
+	}
+	return cleared
+}
+
+// isStalePeersJSON reports whether the cluster configuration in peers.json
+// has stale addresses compared to the resolver's current peer list. Used to
+// detect when pods have been recreated with new IPs (e.g. scale-to-zero).
+func isStalePeersJSON(dir string, resolver PeerResolver) (bool, error) {
+	path := filepath.Join(dir, "peers.json")
+	//nolint:gosec // path is derived from the operator-configured data dir, not user input.
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("read peers.json: %w", err)
+	}
+	var servers []raft.Server
+	if err := json.Unmarshal(data, &servers); err != nil {
+		return false, nil // unparseable peers.json, skip auto-detection
+	}
+
+	resolved, err := resolver.Resolve()
+	if err != nil {
+		return false, fmt.Errorf("resolve peers: %w", err)
+	}
+
+	resolvedByID := make(map[string]string, len(resolved))
+	for _, p := range resolved {
+		resolvedByID[p.ID] = p.Address
+	}
+
+	for _, srv := range servers {
+		resolvedAddr, ok := resolvedByID[string(srv.ID)]
+		if !ok {
+			continue // peer no longer exists
+		}
+		if resolvedAddr != string(srv.Address) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // logrusOutput adapts a logrus logger to an io.Writer for raft's hclog output.
