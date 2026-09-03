@@ -242,6 +242,12 @@ type RaftStoreConfig struct {
 	// usually the pod-local session store). Set before NewRaftStore so log
 	// replay restores sessions into the local store on every pod.
 	SessionSink domain.SessionStateSink
+
+	// RecoveryMode clears stale raft state (raft.db, snapshots, node-id) and
+	// bootstraps a fresh cluster. Use only for manual recovery when quorum is
+	// lost (e.g. all pods were deleted simultaneously and the configuration is
+	// empty). Default: false.
+	RecoveryMode bool
 }
 
 // NewRaftStore constructs and starts a Raft node. It loads/generates a stable
@@ -255,6 +261,25 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 	dir := cfg.Dir
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("mkdir data dir %s: %w", dir, err)
+	}
+
+	if cfg.RecoveryMode {
+		boltPath := filepath.Join(dir, "raft.db")
+		snapDir := filepath.Join(dir, "snapshots")
+		nodeIDPath := filepath.Join(dir, "node-id")
+		peersPath := filepath.Join(dir, "peers.json")
+		cleared := false
+		for _, p := range []string{boltPath, nodeIDPath, peersPath} {
+			if err := os.Remove(p); err == nil {
+				cleared = true
+			}
+		}
+		if err := os.RemoveAll(snapDir); err == nil {
+			cleared = true
+		}
+		if cleared {
+			logger.WithField("dir", dir).Warn("recovery mode: cleared stale raft state")
+		}
 	}
 
 	nodeID, shouldBootstrap, err := resolveBootstrapState(cfg, dir)
