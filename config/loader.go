@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"os"
 	"reflect"
 	"regexp"
 	"strconv"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/go-viper/mapstructure/v2"
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -84,7 +86,7 @@ func Load(configFile string) (*domain.Config, error) {
 	// 30 s, delaying Raft peer discovery during bootstrap.
 	v.SetDefault("raft.cluster_domain", "cluster.local")
 	v.SetDefault("raft.apply_timeout", 5*time.Second)
-	v.SetDefault("raft.leader_wait_timeout", 30*time.Second)
+	v.SetDefault("raft.leader_wait_timeout", 120*time.Second)
 	v.SetDefault("raft.snapshot_threshold", uint64(1000))
 	v.SetDefault("raft.snapshot_interval", 10*time.Minute)
 	v.SetDefault("raft.trailing_logs", uint64(256))
@@ -221,7 +223,7 @@ func Load(configFile string) (*domain.Config, error) {
 	}
 
 	var cfg domain.Config
-	if err := unmarshalConfig(v, &cfg); err != nil {
+	if err := unmarshalConfig(v, &cfg, configFile); err != nil {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
@@ -268,8 +270,13 @@ func Load(configFile string) (*domain.Config, error) {
 // weak-typing hooks Viper uses, plus a duration parser that also accepts day
 // ("d") and week ("w") units, which Go's time.ParseDuration rejects with
 // "unknown unit".
-func unmarshalConfig(v *viper.Viper, cfg *domain.Config) error {
-	return decodeSettings(collectSettings(v), cfg)
+//
+// To preserve the original case of map keys (which Viper lowercases
+// internally), the raw config file is read via yaml.v3 and used as a
+// case-preserving reference during settings tree construction.
+func unmarshalConfig(v *viper.Viper, cfg *domain.Config, configFile string) error {
+	rawConfig := readRawConfig(configFile)
+	return decodeSettings(collectSettings(v, rawConfig), cfg)
 }
 
 // decodeSettings decodes the nested settings map into result using the same
@@ -290,20 +297,49 @@ func decodeSettings(settings map[string]any, result any) error {
 	return decoder.Decode(settings)
 }
 
+// readRawConfig reads the YAML config file into a case-preserving map.
+// Returns nil if the file cannot be read (e.g. missing, env-only config).
+func readRawConfig(configFile string) map[string]any {
+	if configFile == "" {
+		return nil
+	}
+	// #nosec G304 -- configFile is an intentional user-provided path.
+	raw, err := os.ReadFile(configFile)
+	if err != nil {
+		return nil
+	}
+	var m map[string]any
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		return nil
+	}
+	return m
+}
+
 // collectSettings rebuilds the merged settings as a nested map. Each leaf key
 // reported by viper.AllKeys is resolved with v.Get (which applies the
 // override/flags/env/config/defaults priority and resolves map keys
 // containing dots via prefix search) and inserted by walking the real key
 // structure of the sources, so dotted map keys are preserved instead of being
 // split into nested maps.
-func collectSettings(v *viper.Viper) map[string]any {
+//
+// rawConfig is an optional case-preserving map from the config file, used to
+// recover the original case of map keys that Viper lowercases internally.
+func collectSettings(v *viper.Viper, rawConfig map[string]any) map[string]any {
 	settings := map[string]any{}
 	for _, key := range v.AllKeys() {
 		val := v.Get(key)
 		if val == nil {
 			continue
 		}
-		insertSetting(v, settings, key, val)
+		// Viper returns both individual leaf keys and the whole map
+		// as a single key (e.g. fleet.engine_extra_env_from). The
+		// whole map has lowercased keys and would overwrite the
+		// case-corrected subtree built from individual leaf keys.
+		// Skip non-leaf map values — the leaf keys cover them.
+		if _, isMap := val.(map[string]interface{}); isMap {
+			continue
+		}
+		insertSetting(v, settings, key, val, rawConfig)
 	}
 	return settings
 }
@@ -313,9 +349,15 @@ func collectSettings(v *viper.Viper) map[string]any {
 // traversed so far) to find the longest remaining prefix that is an actual
 // map key, so keys containing dots stay intact. When no structural hint is
 // available the walk falls back to consuming a single path element.
-func insertSetting(v *viper.Viper, dst map[string]any, key string, val any) {
+//
+// rawConfig is an optional case-preserving map from the original config file.
+// When non-nil, each map key discovered via exactKeyPrefix is looked up
+// case-insensitively in the corresponding rawConfig subtree to recover the
+// original case that Viper lowercased.
+func insertSetting(v *viper.Viper, dst map[string]any, key string, val any, rawConfig map[string]any) {
 	parts := strings.Split(key, ".")
 	cur := dst
+	curRaw := rawConfig
 	prefix := ""
 	i := 0
 	for i < len(parts) {
@@ -323,6 +365,12 @@ func insertSetting(v *viper.Viper, dst map[string]any, key string, val any) {
 		keyPart := exactKeyPrefix(v.Get(prefix), rest)
 		if keyPart == "" {
 			keyPart = parts[i]
+		}
+		// Recover original case from the raw config file when available.
+		if curRaw != nil {
+			if rawKey := casePreservingKey(curRaw, keyPart); rawKey != "" {
+				keyPart = rawKey
+			}
 		}
 		consumed := strings.Split(keyPart, ".")
 		if i+len(consumed) >= len(parts) {
@@ -335,12 +383,31 @@ func insertSetting(v *viper.Viper, dst map[string]any, key string, val any) {
 			cur[keyPart] = next
 		}
 		cur = next
+		// Walk rawConfig alongside the source tree.
+		if curRaw != nil {
+			if rawNext, ok := curRaw[keyPart].(map[string]any); ok {
+				curRaw = rawNext
+			} else {
+				curRaw = nil
+			}
+		}
 		if prefix != "" {
 			prefix += "."
 		}
 		prefix += keyPart
 		i += len(consumed)
 	}
+}
+
+// casePreservingKey returns the key in m that matches lowerKey
+// case-insensitively, or "" if no match is found.
+func casePreservingKey(m map[string]any, lowerKey string) string {
+	for k := range m {
+		if strings.EqualFold(k, lowerKey) {
+			return k
+		}
+	}
+	return ""
 }
 
 // exactKeyPrefix returns the longest prefix of the dot-joined key that exists

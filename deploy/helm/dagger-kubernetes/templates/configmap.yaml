@@ -74,7 +74,7 @@ data:
       namespace: {{ include "dagger-kubernetes.namespace" . | quote }}
       cluster_domain: {{ .Values.supervisor.config.raft.clusterDomain | quote }}
       apply_timeout: "5s"
-      leader_wait_timeout: "30s"
+      leader_wait_timeout: "120s"
       snapshot_threshold: 1000
       snapshot_interval: "10m"
       trailing_logs: 256

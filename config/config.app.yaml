@@ -62,7 +62,7 @@ raft:
   namespace: ""                # K8s namespace for pod DNS (default = release ns).
   cluster_domain: "cluster.local"   # K8s cluster DNS suffix; "" = peer addresses end at .svc (no suffix).
   apply_timeout: "5s"
-  leader_wait_timeout: "30s"
+  leader_wait_timeout: "120s"
   snapshot_threshold: 1000
   snapshot_interval: "10m"
   trailing_logs: 256

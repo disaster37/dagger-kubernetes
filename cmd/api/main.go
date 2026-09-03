@@ -173,9 +173,26 @@ func run(c *cli.Context) error {
 	ctx, cancel := context.WithCancel(c.Context)
 	defer cancel()
 
-	raftStore, jwtSecret, tokenEncKey, err := initRaftStore(ctx, cfg, clientset, sessions, logger)
-	if err != nil {
-		return err
+	const raftInitMaxRetries = 3
+	const raftInitRetryDelay = 5 * time.Second
+
+	var raftStore *repository.RaftStore
+	var jwtSecret, tokenEncKey []byte
+	for attempt := 0; attempt < raftInitMaxRetries; attempt++ {
+		raftStore, jwtSecret, tokenEncKey, err = initRaftStore(ctx, cfg, clientset, sessions, logger)
+		if err == nil {
+			break
+		}
+		if attempt < raftInitMaxRetries-1 {
+			logger.WithError(err).WithField("attempt", attempt+1).Warn("raft initialization failed, retrying")
+			select {
+			case <-ctx.Done():
+				return fmt.Errorf("raft initialization cancelled: %w", ctx.Err())
+			case <-time.After(raftInitRetryDelay):
+			}
+		} else {
+			return fmt.Errorf("raft initialization failed after %d attempts: %w", raftInitMaxRetries, err)
+		}
 	}
 	defer func() { _ = raftStore.Close() }()
 	jwtSvc := service.NewJWTService(jwtSecret, cfg.Auth.JWT.AccessTTL, cfg.Auth.JWT.RefreshTTL)

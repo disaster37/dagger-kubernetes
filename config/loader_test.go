@@ -64,8 +64,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Raft.ApplyTimeout != 5*time.Second {
 		t.Fatalf("raft.apply_timeout default = %v, want 5s", cfg.Raft.ApplyTimeout)
 	}
-	if cfg.Raft.LeaderWaitTimeout != 30*time.Second {
-		t.Fatalf("raft.leader_wait_timeout default = %v, want 30s", cfg.Raft.LeaderWaitTimeout)
+	if cfg.Raft.LeaderWaitTimeout != 120*time.Second {
+		t.Fatalf("raft.leader_wait_timeout default = %v, want 120s", cfg.Raft.LeaderWaitTimeout)
 	}
 	if cfg.Raft.SnapshotThreshold != 1000 {
 		t.Fatalf("raft.snapshot_threshold default = %d, want 1000", cfg.Raft.SnapshotThreshold)
@@ -254,6 +254,74 @@ log_format: "text"
 	}
 	if !cfg.Fleet.EngineDebug {
 		t.Error("engine_debug = false, want true")
+	}
+}
+
+func TestLoadPreservesCaseOfMapKeys(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`
+fleet:
+  engine_extra_env:
+    HTTP_PROXY: "http://proxy.corp.example:3128"
+    HTTPS_PROXY: "http://proxy.corp.example:3128"
+    NO_PROXY: "localhost,.corp.example"
+  engine_extra_env_from:
+    HTTP_PROXY:
+      secretName: "proxy"
+      key: "HTTP_PROXY"
+    HTTPS_PROXY:
+      secretName: "proxy"
+      key: "HTTPS_PROXY"
+    NO_PROXY:
+      secretName: "proxy"
+      key: "NO_PROXY"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+
+	if len(cfg.Fleet.EngineExtraEnv) != 3 {
+		t.Fatalf("engine_extra_env = %v, want 3 entries", cfg.Fleet.EngineExtraEnv)
+	}
+	if _, ok := cfg.Fleet.EngineExtraEnv["HTTP_PROXY"]; !ok {
+		t.Errorf("engine_extra_env missing HTTP_PROXY (case not preserved): %v", cfg.Fleet.EngineExtraEnv)
+	}
+	if _, ok := cfg.Fleet.EngineExtraEnv["HTTPS_PROXY"]; !ok {
+		t.Errorf("engine_extra_env missing HTTPS_PROXY (case not preserved): %v", cfg.Fleet.EngineExtraEnv)
+	}
+	if _, ok := cfg.Fleet.EngineExtraEnv["NO_PROXY"]; !ok {
+		t.Errorf("engine_extra_env missing NO_PROXY (case not preserved): %v", cfg.Fleet.EngineExtraEnv)
+	}
+
+	if len(cfg.Fleet.EngineExtraEnvFrom) != 3 {
+		t.Fatalf("engine_extra_env_from = %v, want 3 entries", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	src, ok := cfg.Fleet.EngineExtraEnvFrom["HTTP_PROXY"]
+	if !ok {
+		t.Errorf("engine_extra_env_from missing HTTP_PROXY (case not preserved): %v", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	if src.SecretName != "proxy" || src.Key != "HTTP_PROXY" {
+		t.Errorf("engine_extra_env_from.HTTP_PROXY = %+v, want {proxy HTTP_PROXY}", src)
+	}
+	src2, ok2 := cfg.Fleet.EngineExtraEnvFrom["HTTPS_PROXY"]
+	if !ok2 {
+		t.Errorf("engine_extra_env_from missing HTTPS_PROXY (case not preserved): %v", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	if src2.SecretName != "proxy" || src2.Key != "HTTPS_PROXY" {
+		t.Errorf("engine_extra_env_from.HTTPS_PROXY = %+v, want {proxy HTTPS_PROXY}", src2)
+	}
+	src3, ok3 := cfg.Fleet.EngineExtraEnvFrom["NO_PROXY"]
+	if !ok3 {
+		t.Errorf("engine_extra_env_from missing NO_PROXY (case not preserved): %v", cfg.Fleet.EngineExtraEnvFrom)
+	}
+	if src3.SecretName != "proxy" || src3.Key != "NO_PROXY" {
+		t.Errorf("engine_extra_env_from.NO_PROXY = %+v, want {proxy NO_PROXY}", src3)
 	}
 }
 
@@ -1231,7 +1299,7 @@ func TestInsertSetting(t *testing.T) {
 	t.Run("fallback walk without structure", func(t *testing.T) {
 		v := viper.New()
 		dst := map[string]any{}
-		insertSetting(v, dst, "x.y.z", "v")
+		insertSetting(v, dst, "x.y.z", "v", nil)
 		sub, ok := dst["x"].(map[string]any)
 		if !ok {
 			t.Fatalf("dst = %#v, want nested maps", dst)
@@ -1247,8 +1315,8 @@ func TestInsertSetting(t *testing.T) {
 		v.Set("a.b", 1)
 		v.Set("a.c", 2)
 		dst := map[string]any{}
-		insertSetting(v, dst, "a.b", 1)
-		insertSetting(v, dst, "a.c", 2)
+		insertSetting(v, dst, "a.b", 1, nil)
+		insertSetting(v, dst, "a.c", 2, nil)
 		sub, ok := dst["a"].(map[string]any)
 		if !ok || sub["b"] != 1 || sub["c"] != 2 {
 			t.Fatalf("dst = %#v, want a.b = 1 and a.c = 2", dst)
@@ -1259,7 +1327,7 @@ func TestInsertSetting(t *testing.T) {
 		v := viper.New()
 		v.Set("fleet.engine_registry_mirrors", map[string]any{"docker.io": []any{"mirror.gcr.io"}})
 		dst := map[string]any{}
-		insertSetting(v, dst, "fleet.engine_registry_mirrors.docker.io", []string{"mirror.gcr.io"})
+		insertSetting(v, dst, "fleet.engine_registry_mirrors.docker.io", []string{"mirror.gcr.io"}, nil)
 		fleet, ok := dst["fleet"].(map[string]any)
 		if !ok {
 			t.Fatalf("dst = %#v, want fleet subtree", dst)
@@ -1280,7 +1348,7 @@ func TestInsertSetting(t *testing.T) {
 		v := viper.New()
 		v.Set("fleet.engine_extra_env_from", map[string]any{"http.proxy": map[string]any{"secretName": "proxy", "key": "HTTP_PROXY"}})
 		dst := map[string]any{}
-		insertSetting(v, dst, "fleet.engine_extra_env_from.http.proxy.secretname", "proxy")
+		insertSetting(v, dst, "fleet.engine_extra_env_from.http.proxy.secretname", "proxy", nil)
 		fleet, ok := dst["fleet"].(map[string]any)
 		if !ok {
 			t.Fatalf("dst = %#v, want fleet subtree", dst)
@@ -1308,7 +1376,7 @@ func TestCollectSettingsSkipsShadowedKeys(t *testing.T) {
 	v.SetDefault("server.control_addr", ":8080")
 	v.SetDefault("log_level", "info")
 
-	settings := collectSettings(v)
+	settings := collectSettings(v, nil)
 	if _, ok := settings["server"]; ok {
 		t.Fatalf("settings = %#v, want server subtree shadowed by env and skipped", settings)
 	}

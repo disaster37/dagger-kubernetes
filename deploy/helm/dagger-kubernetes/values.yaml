@@ -651,6 +651,8 @@ opentelemetry-collector:
 registry:
   enabled: true
   replicaCount: 1
+  image:
+    tag: "3.1.1"
   persistence:
     enabled: true
     deleteEnabled: true
