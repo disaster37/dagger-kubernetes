@@ -11,7 +11,7 @@
 //     statuses. See docs/design/ADR-024-ci-nested-steps.md.
 def call(Map params = [:], Closure body = null) {
     String serverUrl = params.serverUrl ?: env.DAGGER_KUBERNETES_SERVER
-    String token = params.token ?: env.DAGGER_KUBERNETES_TOKEN
+    String token = (params.token ?: env.DAGGER_KUBERNETES_TOKEN)?.trim()
     String uiUrl = params.uiUrl ?: env.DAGGER_KUBERNETES_UI ?: serverUrl
     String version = params.version ?: env.DAGGER_TAG
 
@@ -146,6 +146,18 @@ void dynamicStagesRun(Map params = [:]) {
     String wrapper = env.DAGGER_KUBERNETES_CI_BIN ?: 'dagger-kubernetes-ci'
     if (!(wrapper ==~ /[A-Za-z0-9._\/-]+/)) {
         error "daggerKubernetes: DAGGER_KUBERNETES_CI_BIN must be a plain binary name or path"
+    }
+
+    // Pre-flight: verify the wrapper binary exists on PATH before launching the
+    // background subshell. When it's missing the subshell may not write the exit
+    // file (shell-dependent), causing renderStepTree to loop with 1-second sleeps
+    // until the enclosing timeout (often 30 minutes). Fail fast instead.
+    def wrapperCheck = sh(script: "command -v '${wrapper}' > /dev/null 2>&1 && echo found || echo missing", returnStdout: true).trim()
+    if (wrapperCheck != 'found') {
+        error """daggerKubernetes: '${wrapper}' not found on PATH.
+Build it from this repo (go build -o dagger-kubernetes-ci ./cmd/ci) and include it in your agent image,
+or set env.DAGGER_KUBERNETES_CI_BIN to the binary path.
+When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger CLI."""
     }
 
     String stepsDir = "${WORKSPACE}/.dagger-kubernetes"
@@ -461,7 +473,7 @@ def withStages(serverUrl, token, uiUrl) {
 
 def provisionCli(Map params = [:]) {
     String serverUrl = params.serverUrl ?: env.DAGGER_KUBERNETES_SERVER
-    String token = params.token ?: env.DAGGER_KUBERNETES_TOKEN
+    String token = (params.token ?: env.DAGGER_KUBERNETES_TOKEN)?.trim()
     String version = params.version ?: env.DAGGER_KUBERNETES_CLI_VERSION ?: ''
     String osName = params.os ?: 'linux'
     String arch = params.arch ?: 'amd64'
@@ -510,6 +522,19 @@ def provisionCli(Map params = [:]) {
             curl -fsS -H @'${headerFile}' '${downloadUrl}' | tar xz -C "${binDir}"
             chmod +x "${binDir}/dagger"
         """
+
+        // Provision the CI wrapper binary alongside the Dagger CLI. A missing
+        // endpoint (e.g. older supervisor) is non-fatal: the wrapper is only
+        // needed for dynamicStages mode, and dynamicStagesRun has its own
+        // pre-flight check that fails with a clear error when it's absent.
+        String ciWrapperUrl = "${serverUrl}/api/v1/cli/ci-wrapper/latest?os=${osName}&arch=${arch}"
+        int ciWrapperStatus = sh(script: "curl -fsS -w '%{http_code}' -o '${binDir}/dagger-kubernetes-ci' -H @'${headerFile}' '${ciWrapperUrl}'", returnStdout: true).trim() as int
+        if (ciWrapperStatus == 200) {
+            sh "chmod +x '${binDir}/dagger-kubernetes-ci'"
+            echo "[dagger-kubernetes] Provisioned CI wrapper at ${binDir}"
+        } else {
+            echo "[dagger-kubernetes] CI wrapper not available from supervisor (status ${ciWrapperStatus}); dynamicStages mode will use the agent's pre-installed binary"
+        }
     } finally {
         sh "rm -f '${headerFile}'"
     }

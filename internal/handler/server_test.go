@@ -47,6 +47,7 @@ func newTestEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/status", s.handlePlatformStatus)
 	e.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
 	e.GET("/api/v1/cli/:version", s.handleCLIDownload)
+	e.GET("/api/v1/cli/ci-wrapper/latest", s.handleCIWrapperDownload)
 	return e
 }
 

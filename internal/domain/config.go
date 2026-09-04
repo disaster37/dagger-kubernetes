@@ -390,6 +390,7 @@ type CLIConfig struct {
 	ReleaseListTTL  time.Duration     `mapstructure:"release_list_ttl"`
 	DownloadTimeout time.Duration     `mapstructure:"download_timeout"`
 	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`
+	CIWrapperPath   string            `mapstructure:"ci_wrapper_path"` // path to pre-built dagger-kubernetes-ci binary
 }
 
 // CLIUpstreamConfig points at the Dagger release source (mirror-able for

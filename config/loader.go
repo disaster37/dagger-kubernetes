@@ -207,6 +207,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cli.upstream.releases_url", "https://api.github.com/repos/dagger/dagger/releases")
 	v.SetDefault("cli.upstream.download_base", "https://github.com/dagger/dagger/releases/download")
 	v.SetDefault("cli.upstream.github_token", "")
+	v.SetDefault("cli.ci_wrapper_path", "/usr/local/bin/dagger-kubernetes-ci")
 
 	v.SetDefault("log_level", "info")
 	v.SetDefault("log_format", "json")

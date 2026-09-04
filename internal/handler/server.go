@@ -237,6 +237,7 @@ type Deps struct {
 	LiveHub              service.TraceEventBroadcaster // concrete *repository.LiveHub satisfies it; nil = create one
 	Lifecycle            *service.PipelineLifecycle
 	CLI                  *service.CLIService
+	CIWrapperPath        string // path to pre-built dagger-kubernetes-ci binary
 	StartupProvider      domain.StartupProvider
 }
 
@@ -306,6 +307,7 @@ type Server struct {
 	startupProvider domain.StartupProvider
 	connect         *service.ConnectService
 	cli             *service.CLIService
+	ciWrapperPath   string // path to pre-built dagger-kubernetes-ci binary
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -351,6 +353,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		startupProvider: deps.StartupProvider,
 		connect:         deps.Connect,
 		cli:             deps.CLI,
+		ciWrapperPath:   deps.CIWrapperPath,
 		cacheToken:      cfg.CacheToken,
 	}
 
@@ -635,6 +638,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/connect/env", s.handleConnectEnv)
 	h.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
 	h.GET("/api/v1/cli/:version", s.handleCLIDownload)
+	h.GET("/api/v1/cli/ci-wrapper/latest", s.handleCIWrapperDownload)
 
 	// Auth (public + self).
 	h.POST("/api/v1/auth/login", s.handleLogin)

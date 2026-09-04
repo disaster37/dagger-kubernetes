@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -111,4 +113,50 @@ func (s *Server) writeCLIError(c *app.RequestContext, err error) {
 	}
 	s.logger.WithError(err).Error("cli provisioning failed")
 	writeError(c, consts.StatusBadGateway, "cli provisioning failed")
+}
+
+// handleCIWrapperDownload serves the pre-built dagger-kubernetes-ci binary from
+// the supervisor image. The binary is read from the configured path (default
+// /usr/local/bin/dagger-kubernetes-ci) and served as an octet-stream download.
+func (s *Server) handleCIWrapperDownload(ctx context.Context, c *app.RequestContext) {
+	if !s.requireAuth(c) {
+		return
+	}
+	osName, arch, ok := s.parseCLIOSArch(c)
+	if !ok {
+		return
+	}
+	if osName != "linux" || (arch != "amd64" && arch != "arm64") {
+		writeError(c, consts.StatusBadRequest, "ci wrapper only available for linux/amd64 and linux/arm64")
+		return
+	}
+
+	binaryPath := s.ciWrapperPath
+	if binaryPath == "" {
+		binaryPath = "/usr/local/bin/dagger-kubernetes-ci"
+	}
+
+	// #nosec G304 -- binaryPath is a config value that points to the pre-built
+	// CI wrapper binary baked into the container image at build time.
+	f, err := os.Open(binaryPath)
+	if err != nil {
+		s.logger.WithError(err).WithField("path", binaryPath).Error("ci wrapper binary not found")
+		writeError(c, consts.StatusNotFound, "ci wrapper binary not found")
+		return
+	}
+
+	st, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		s.logger.WithError(err).Error("stat ci wrapper binary failed")
+		writeError(c, consts.StatusInternalServerError, "internal error")
+		return
+	}
+
+	c.Response.Header.Set("Content-Type", "application/octet-stream")
+	c.Response.Header.Set("Content-Disposition", `attachment; filename="dagger-kubernetes-ci"`)
+	c.Response.Header.Set("Content-Length", strconv.FormatInt(st.Size(), 10))
+	c.SetStatusCode(consts.StatusOK)
+	// Hertz closes the stream after reading it; do not close it here.
+	c.SetBodyStream(f, int(st.Size()))
 }

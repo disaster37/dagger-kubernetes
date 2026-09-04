@@ -379,6 +379,7 @@ func run(c *cli.Context) error {
 		LiveHub:              liveHub,
 		Lifecycle:            pipelineLifecycle,
 		CLI:                  cliSvc,
+		CIWrapperPath:        cfg.CLI.CIWrapperPath,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {

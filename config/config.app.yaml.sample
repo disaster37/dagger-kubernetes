@@ -329,6 +329,7 @@ cli:
     releases_url: "https://api.github.com/repos/dagger/dagger/releases"   # release discovery (mirror-able).
     download_base: "https://github.com/dagger/dagger/releases/download"   # tarball + checksums.txt base (mirror-able).
     github_token: ""                  # optional; set via DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN (raises rate limit).
+  ci_wrapper_path: "/usr/local/bin/dagger-kubernetes-ci"  # path to the pre-built CI wrapper binary served at /api/v1/cli/ci-wrapper/latest.
 
 # --- Logging -----------------------------------------------------------------
 log_level: "info"    # debug | info | warn | error

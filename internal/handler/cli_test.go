@@ -365,3 +365,76 @@ func TestWriteCLIErrorVersionNotAllowed(t *testing.T) {
 		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
 	}
 }
+
+func TestHandleCIWrapperDownload(t *testing.T) {
+	env := newTestEnv(t)
+	s := env.server
+	e := newTestEngine(s)
+
+	bin, err := os.CreateTemp("", "dagger-kubernetes-ci-test-*")
+	if err != nil {
+		t.Fatalf("create temp binary: %v", err)
+	}
+	defer os.Remove(bin.Name())
+	if _, err := bin.WriteString("fake-ci-wrapper-binary"); err != nil {
+		t.Fatalf("write temp binary: %v", err)
+	}
+	bin.Close()
+
+	s.ciWrapperPath = bin.Name()
+
+	auth := env.loginAsAdmin(t)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/cli/ci-wrapper/latest?os=linux&arch=amd64", nil,
+		ut.Header{Key: "Authorization", Value: auth})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+	if ct := resp.Result().Header.Get("Content-Type"); ct != "application/octet-stream" {
+		t.Fatalf("Content-Type = %q, want application/octet-stream", ct)
+	}
+	if cd := resp.Result().Header.Get("Content-Disposition"); cd != `attachment; filename="dagger-kubernetes-ci"` {
+		t.Fatalf("Content-Disposition = %q", cd)
+	}
+	if got := string(resp.Result().Body()); got != "fake-ci-wrapper-binary" {
+		t.Fatalf("body = %q, want %q", got, "fake-ci-wrapper-binary")
+	}
+}
+
+func TestHandleCIWrapperDownloadAuthGating(t *testing.T) {
+	env := newTestEnv(t)
+	s := env.server
+	e := newTestEngine(s)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/cli/ci-wrapper/latest?os=linux&arch=amd64", nil)
+	if resp.Result().StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d", resp.Result().StatusCode())
+	}
+}
+
+func TestHandleCIWrapperDownloadBinaryNotFound(t *testing.T) {
+	env := newTestEnv(t)
+	s := env.server
+	e := newTestEngine(s)
+
+	s.ciWrapperPath = "/nonexistent/dagger-kubernetes-ci"
+
+	auth := env.loginAsAdmin(t)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/cli/ci-wrapper/latest?os=linux&arch=amd64", nil,
+		ut.Header{Key: "Authorization", Value: auth})
+	if resp.Result().StatusCode() != http.StatusNotFound {
+		t.Fatalf("expected 404, got %d", resp.Result().StatusCode())
+	}
+}
+
+func TestHandleCIWrapperDownloadUnsupportedPlatform(t *testing.T) {
+	env := newTestEnv(t)
+	s := env.server
+	e := newTestEngine(s)
+
+	auth := env.loginAsAdmin(t)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/cli/ci-wrapper/latest?os=darwin&arch=amd64", nil,
+		ut.Header{Key: "Authorization", Value: auth})
+	if resp.Result().StatusCode() != http.StatusBadRequest {
+		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
+	}
+}
