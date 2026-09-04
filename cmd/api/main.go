@@ -538,6 +538,19 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	go observeLeadership(ctx, raftStore, clientset, cfg.Fleet.Namespace, logger)
 	go joinLoop(ctx, raftStore, resolver, logger)
 
+	// Startup barrier: the FSM must be caught up (Leader/Follower,
+	// commit_index == applied_index, fsm_pending == 0) before reading secrets
+	// from the local FSM. A follower that joined the cluster but hasn't
+	// installed the leader's snapshot yet would see an empty meta store and
+	// timeout on jwt_secret/token_encryption_key resolution.
+	cleanCtx, cleanCancel := context.WithTimeout(ctx, cfg.Raft.LeaderWaitTimeout)
+	err = raftStore.WaitForCleanState(cleanCtx)
+	cleanCancel()
+	if err != nil {
+		_ = raftStore.Close()
+		return nil, nil, nil, fmt.Errorf("wait for raft clean state: %w", err)
+	}
+
 	metaStore := repository.NewMetaStore(raftStore)
 	jwtSecret, err = resolveJWTSecret(ctx, raftStore, metaStore, cfg.Auth.JWT.Secret, cfg.Raft.LeaderWaitTimeout, logger)
 	if err != nil {
@@ -550,18 +563,9 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		return nil, nil, nil, fmt.Errorf("load token encryption key: %w", err)
 	}
 
-	// Startup barrier: the Hertz control/data plane must not start until the
-	// Raft layer is clean (Leader/Follower, commit_index == applied_index,
-	// fsm_pending == 0). Without it a follower still applying its backlog —
-	// or a node caught in an election — would serve the API with a store that
-	// is not settled. The readyz probe keeps gating pod readiness afterwards.
-	cleanCtx, cleanCancel := context.WithTimeout(ctx, cfg.Raft.LeaderWaitTimeout)
-	err = raftStore.WaitForCleanState(cleanCtx)
-	cleanCancel()
-	if err != nil {
-		_ = raftStore.Close()
-		return nil, nil, nil, fmt.Errorf("wait for raft clean state: %w", err)
-	}
+	// The readyz probe keeps gating pod readiness afterwards; this final
+	// check is removed since WaitForCleanState now runs before secret
+	// resolution.
 
 	return raftStore, jwtSecret, tokenEncKey, nil
 }
