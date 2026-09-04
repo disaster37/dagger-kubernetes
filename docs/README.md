@@ -1037,18 +1037,29 @@ dependency has been removed from the project entirely.
   itself as the only voter and is always the leader.
 - **Multi-node:** the Helm chart ships a `StatefulSet` + headless Service.
   Peers are discovered from the StatefulSet's stable pod DNS names
-  (`<sts>-<i>.<headless>.<ns>.svc:8081` for
-  `i=0..replicas-1`; `raft.cluster_domain` defaults to `""` so peer addresses
-  end at `.svc` — the project-wide convention that keeps a single `.svc`
-  NO_PROXY entry; set your cluster's real domain when `.svc` cannot resolve) —
-  pure DNS arithmetic, no K8s API calls. The headless
+  (`<sts>-<i>.<headless>.<ns>.svc.<cluster_domain>:8081` for
+  `i=0..replicas-1`; `raft.cluster_domain` defaults to `"cluster.local"`,
+  so peer addresses are full FQDNs — set `""` only when your cluster DNS
+  does not serve the `cluster.local` suffix) —
+  pure DNS arithmetic, no K8s API calls and no pod IPs. The headless
   Service sets `publishNotReadyAddresses: true` so pods resolve (and can
   elect a leader) before they are Ready. Each pod advertises its **stable pod
   DNS name**, not `127.0.0.1` and not its pod IP (pod IPs change on every pod
   recreation, which would invalidate certificates and the durable raft
   addresses). Startup resolution of the advertise address retries in-process
   for up to 2 minutes instead of exiting, so a brand-new cluster whose DNS is
-  still warming up does not crash-loop the pods. In the chart the voter count is derived from
+  still warming up does not crash-loop the pods.
+  **NodeLocal DNSCache bypass:** when the cluster runs the NodeLocal DNSCache
+  add-on, its `cache 30` can serve a stale positive A record for up to 30 s
+  after a pod is recreated. The chart therefore renders `dnsPolicy: None` +
+  `dnsConfig` on the supervisor StatefulSet by default
+  (`supervisor.dns.enabled: true`), pointing the pod straight at the cluster's
+  kube-dns/CoreDNS service (`supervisor.dns.nameserver` — k3s `10.43.0.10`,
+  kubeadm `10.96.0.10`) with `ndots: 1`. Set `supervisor.dns.enabled: false`
+  to restore the cluster default DNS; in that case reduce the add-on's
+  `cache 30` → `cache 5` for the `cluster.local` zone (a cluster add-on
+  ConfigMap change, not a chart change) to shorten the stale window.
+  In the chart the voter count is derived from
   `supervisor.replicaCount` (each supervisor pod is one voter; there is no
   separate `raft.replicas` knob). Set it to an **odd number ≥ 3** for quorum
   fault tolerance; a 2-node cluster loses quorum on a single failure.

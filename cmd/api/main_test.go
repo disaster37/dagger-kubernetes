@@ -977,6 +977,18 @@ func TestValidateRaftConfig(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			// FQDN-only discovery: a StatefulSet name is sufficient for
+			// multi-node — no K8s clientset or pod IP is required.
+			name: "multi-node with statefulset and no clientset ok",
+			mut: func(c *domain.Config) {
+				c.Raft.Replicas = 3
+				c.Raft.StatefulSetName = "sts"
+				c.Raft.HeadlessService = "headless"
+				c.Raft.Namespace = "ns"
+			},
+			clientset: nil,
+		},
+		{
 			name: "tls manual all set",
 			mut: func(c *domain.Config) {
 				c.Raft.TLS.Enabled = true

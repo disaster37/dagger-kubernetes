@@ -87,6 +87,20 @@ supervisor:
   #       name: "proxy-settings"
 ## @param supervisor.extraEnvFrom [array] Extra envFrom sources for the supervisor container (e.g. proxy env vars from a Secret).
   extraEnvFrom: []
+## @param supervisor.dns.enabled Bypass NodeLocal DNSCache for the Raft pods (fix #3).
+##   When true (default), the StatefulSet renders dnsPolicy: None + dnsConfig pointing
+##   directly at the cluster's kube-dns (CoreDNS) service, avoiding the ~30s stale
+##   positive-A-record window after a pod is recreated. Set false to restore the
+##   cluster's default DNS (NodeLocal DNSCache when installed).
+## @param supervisor.dns.nameserver kube-dns (CoreDNS) service ClusterIP. Helm cannot
+##   query the cluster, so set this to your cluster's value:
+##     kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'
+##   k3s: 10.43.0.10 (this repo's reference cluster); kubeadm/standard: 10.96.0.10.
+## @param supervisor.dns.ndots resolv.conf ndots for the supervisor pod (FQDN Raft peers).
+  dns:
+    enabled: true
+    nameserver: "10.43.0.10"
+    ndots: 1
 
 ## @section Supervisor data-plane TLS (server certificate)
 
@@ -177,7 +191,7 @@ supervisor:
       noSnapshotRestoreOnStart: true
 ## @param supervisor.config.raft.terminationGracePeriodSeconds Pod termination grace period. Default: 60.
       terminationGracePeriodSeconds: 60
-## @param supervisor.config.raft.recoveryMode Enable peers.json auto-recovery on startup. Default: false.
+## @param supervisor.config.raft.recoveryMode Clear stale raft state (raft.db, snapshots, node-id) on startup and bootstrap a fresh cluster. Manual quorum-loss recovery only. Default: false.
       recoveryMode: false
 ## @param supervisor.config.raft.autopilot.enabled Enable autopilot subsystem.
 ## @param supervisor.config.raft.autopilot.cleanupDeadServers Auto-remove dead servers.

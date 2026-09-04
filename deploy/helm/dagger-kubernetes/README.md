@@ -481,11 +481,14 @@ give each pod a stable identity for peer discovery.
 | `supervisor.config.raft.tls.enabled` | `true` | mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | `true` | Require + verify peer client certs (mTLS). |
 | `supervisor.config.raft.clusterDomain` | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` produces fully-qualified names that bypass CoreDNS negative-cache poisoning (short `.svc` names go through the cache plugin which can serve stale NXDOMAIN for up to 30 s during bootstrap). Set to `""` only when your cluster DNS does not serve the `cluster.local` suffix. |
+| `supervisor.dns.enabled` | `true` | Bypass NodeLocal DNSCache for the Raft pods: render `dnsPolicy: None` + `dnsConfig` pointing directly at the cluster's kube-dns (CoreDNS) service, avoiding the ~30 s stale positive-A-record window after a pod is recreated. `false` restores the cluster's default DNS (NodeLocal DNSCache when installed). |
+| `supervisor.dns.nameserver` | `"10.43.0.10"` | kube-dns (CoreDNS) service ClusterIP. Helm cannot query the cluster, so set this to your cluster's value (`kubectl -n kube-system get svc kube-dns -o jsonpath='{.spec.clusterIP}'`): k3s `10.43.0.10`, kubeadm/standard `10.96.0.10`. Required (fail-closed) when `supervisor.dns.enabled` is true. |
+| `supervisor.dns.ndots` | `1` | `resolv.conf` `ndots` for the supervisor pod (FQDN Raft peers). |
 
 Everything else is **fixed or derived by the chart**: the data dir is
 `/var/lib/dagger-kubernetes` (per-pod PVC), the Raft transport binds `:8081`
-and advertises `<pod>.<headless>.<ns>.svc` (stable pod DNS
-names — pod IPs are deliberately NOT advertised, they change on every pod
+and advertises `<pod>.<headless>.<ns>.svc.<clusterDomain>` (stable pod FQDN —
+pod IPs are deliberately NOT advertised, they change on every pod
 recreation), node IDs are the
 StatefulSet pod names (downward-API), peers are discovered via DNS from the
 headless Service (which sets `publishNotReadyAddresses: true` so pods resolve
@@ -495,6 +498,24 @@ advertise-address resolution in-process for up to 2 minutes instead of
 exiting: on a fresh cluster the DNS service may not be serving yet, and an
 immediate exit would put every pod into a `CrashLoopBackOff` that delays the
 whole bootstrap.
+
+**NodeLocal DNSCache bypass (default ON):** when the cluster runs the
+NodeLocal DNSCache add-on, its `cache 30` can serve a stale positive A record
+for up to 30 s after a pod is recreated — long enough to disturb raft
+re-election. With `supervisor.dns.enabled: true` (default) the StatefulSet
+renders `dnsPolicy: None` + `dnsConfig` so Raft pods query the cluster's
+kube-dns (CoreDNS) service directly (`supervisor.dns.nameserver`,
+`ndots: 1`). `supervisor.dns.nameserver` is **fail-closed**: rendering fails
+when it is empty, with the `kubectl -n kube-system get svc kube-dns` command
+and the k3s (`10.43.0.10`) / kubeadm (`10.96.0.10`) values in the message.
+Set `supervisor.dns.enabled: false` to escape-hatch back to the cluster
+default DNS; the complementary add-on change (reduce the `nodelocaldns`
+Corefile's `cache 30` → `cache 5` for the `cluster.local` zone) then remains
+the way to shorten the stale window on a cluster that keeps NodeLocal DNSCache
+for other workloads. Note the bypass affects every supervisor DNS lookup:
+in-cluster `<service>.<ns>.svc` short names still resolve via the search
+suffix (one extra NXDOMAIN round-trip), and external names forward through
+CoreDNS as usual.
 
 **TLS auto-CA:** pod-0 generates the internal CA with `goca`, writes it to the
 `<release>-raft-ca` Secret, and issues itself a leaf; pods 1..N-1 poll the
@@ -598,6 +619,9 @@ Configure it under `supervisor.config.history`:
 | `supervisor.serviceAccount.annotations` | object | `{}` | Annotations for the supervisor ServiceAccount. |
 | `supervisor.serviceAccount.clusterScope` | bool | `false` | Use ClusterRole instead of namespaced Role/RoleBinding (cluster-wide access - security-sensitive). |
 | `supervisor.extraEnv` | array | `[]` | Extra environment variables for the supervisor container. |
+| `supervisor.dns.enabled` | bool | `true` | Bypass NodeLocal DNSCache for the supervisor pod: render `dnsPolicy: None` + `dnsConfig` pointing at kube-dns (CoreDNS) directly. `false` renders neither key (cluster default DNS). |
+| `supervisor.dns.nameserver` | string | `"10.43.0.10"` | kube-dns (CoreDNS) service ClusterIP used by the bypass (k3s `10.43.0.10`, kubeadm `10.96.0.10`). Fail-closed: required when `supervisor.dns.enabled` is true. |
+| `supervisor.dns.ndots` | int | `1` | `resolv.conf` `ndots` for the supervisor pod. |
 
 ### Supervisor configuration
 

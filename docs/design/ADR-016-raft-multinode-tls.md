@@ -1,9 +1,16 @@
 # ADR-016: Multi-node Raft with TLS (goca-issued internal PKI) + StatefulSet discovery
 
-- **Status:** Accepted
+- **Status:** Accepted (revised by ADR-029)
 - **Date:** 2026-08-17
 - **Builds on:** ADR-015 (Raft replaces SQLite)
 - **Related:** ADR-005 (embedded minting CA, goca), ADR-009 (clean architecture layering), ADR-015 (Raft replaces SQLite)
+
+> **Revision (2026-09-03, ADR-029):** the `k8sPeerResolver` pod-IP discovery
+> path is removed — DNS FQDN is the sole discovery path, the advertise
+> address and TLS SANs are always derived from stable pod DNS names, and the
+> live cluster migrated from the `.svc`-only `clusterDomain` override back to
+> the `cluster.local` FQDN default (leaf certs lacking the FQDN SAN are
+> re-issued in place under the same CA). See ADR-029.
 
 ## Context
 

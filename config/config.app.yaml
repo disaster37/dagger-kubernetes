@@ -60,6 +60,8 @@ raft:
   statefulset_name: ""         # e.g. "dagger-kubernetes-supervisor" (DNS discovery).
   headless_service: ""         # e.g. "dagger-kubernetes-headless" (DNS discovery).
   namespace: ""                # K8s namespace for pod DNS (default = release ns).
+  # Peer discovery and the advertise address are DNS-FQDN only: stable pod DNS
+  # names, never pod IPs (pod IPs change on every pod recreation).
   cluster_domain: "cluster.local"   # K8s cluster DNS suffix; "" = peer addresses end at .svc (no suffix).
   apply_timeout: "5s"
   leader_wait_timeout: "120s"
@@ -85,7 +87,7 @@ raft:
   raft_log_cache_size: 512       # in-memory log cache size
   no_snapshot_restore_on_start: true  # disable auto snapshot restore on start
   termination_grace_period: "60s"     # pod termination grace period
-  recovery_mode: false            # enable peers.json auto-recovery on startup
+  recovery_mode: false            # clear stale raft state (raft.db, snapshots, node-id) and bootstrap fresh — manual quorum-loss recovery only
 
   # Autopilot — dead server detection and removal
   autopilot:

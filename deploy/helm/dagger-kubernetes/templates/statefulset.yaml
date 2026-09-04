@@ -5,6 +5,9 @@
 {{- if hasKey .Values.supervisor.config.raft "replicas" }}
 {{- fail "supervisor.config.raft.replicas was removed: the Raft voter count is now derived from supervisor.replicaCount (each supervisor pod is one Raft voter). Delete the supervisor.config.raft.replicas key from your values." }}
 {{- end }}
+{{- if and .Values.supervisor.dns.enabled (not .Values.supervisor.dns.nameserver) }}
+{{- fail "supervisor.dns.nameserver is required when supervisor.dns.enabled is true: set it to your kube-dns ClusterIP (kubectl -n kube-system get svc kube-dns; k3s=10.43.0.10, kubeadm=10.96.0.10), or set supervisor.dns.enabled=false to keep NodeLocal DNSCache." }}
+{{- end }}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -31,6 +34,23 @@ spec:
         {{- end }}
     spec:
       serviceAccountName: {{ include "dagger-kubernetes.fullname" . }}
+      {{- if .Values.supervisor.dns.enabled }}
+      # NodeLocal DNSCache bypass (fix #3, ADR-029): query kube-dns (CoreDNS)
+      # directly to avoid the ~30s stale positive-A-record window after a pod
+      # is recreated. Raft peer addresses are stable FQDNs, so a fresh A
+      # record must be visible promptly at the next dial.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers:
+          - {{ .Values.supervisor.dns.nameserver | quote }}
+        searches:
+          - {{ printf "%s.svc.%s" (include "dagger-kubernetes.namespace" .) (.Values.supervisor.config.raft.clusterDomain | default "cluster.local") | quote }}
+          - {{ printf "svc.%s" (.Values.supervisor.config.raft.clusterDomain | default "cluster.local") | quote }}
+          - {{ .Values.supervisor.config.raft.clusterDomain | default "cluster.local" | quote }}
+        options:
+          - name: ndots
+            value: {{ .Values.supervisor.dns.ndots | quote }}
+      {{- end }}
       terminationGracePeriodSeconds: {{ .Values.supervisor.config.raft.terminationGracePeriodSeconds | default 60 }}
       {{- with .Values.supervisor.image.pullSecrets }}
       imagePullSecrets:

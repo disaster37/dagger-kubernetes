@@ -698,3 +698,46 @@ func TestResolveAdvertiseAddrRetriesThenFails(t *testing.T) {
 		t.Fatalf("retry budget not enforced: waited %v for a 500ms budget", elapsed)
 	}
 }
+
+func TestClearStaleRaftState(t *testing.T) {
+	seed := func(t *testing.T) string {
+		t.Helper()
+		dir := t.TempDir()
+		files := []string{"raft.db", "node-id", "peers.json"}
+		for _, name := range files {
+			if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+				t.Fatalf("seed %s: %v", name, err)
+			}
+		}
+		if err := os.Mkdir(filepath.Join(dir, "snapshots"), 0o700); err != nil {
+			t.Fatalf("seed snapshots: %v", err)
+		}
+		return dir
+	}
+
+	t.Run("recovery mode off is a no-op", func(t *testing.T) {
+		dir := seed(t)
+		clearStaleRaftState(&RaftStoreConfig{Dir: dir}, dir, testLogger())
+		for _, name := range []string{"raft.db", "node-id", "peers.json"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
+				t.Fatalf("non-recovery run removed %s: %v", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, "snapshots")); err != nil {
+			t.Fatalf("non-recovery run removed snapshots dir: %v", err)
+		}
+	})
+
+	t.Run("recovery mode on clears state", func(t *testing.T) {
+		dir := seed(t)
+		clearStaleRaftState(&RaftStoreConfig{Dir: dir, RecoveryMode: true}, dir, testLogger())
+		for _, name := range []string{"raft.db", "node-id", "peers.json"} {
+			if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+				t.Fatalf("recovery run left %s behind (stat err=%v)", name, err)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(dir, "snapshots")); !os.IsNotExist(err) {
+			t.Fatalf("recovery run left snapshots dir behind (stat err=%v)", err)
+		}
+	})
+}

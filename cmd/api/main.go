@@ -475,27 +475,12 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	hostname, _ := os.Hostname()
 	discovery := raftDiscoveryConfig(cfg)
 
-	// Prefer K8s API-based peer discovery (like Vault) over DNS.
-	// Returns the pod's IP for TLS SANs when K8s API is available.
-	resolver, podIP := repository.NewPeerResolverWithClientset(&discovery, clientset, hostname)
+	resolver := repository.NewPeerResolver(&discovery)
 
-	// When K8s API-based discovery is configured but the API call to get the
-	// pod's own IP failed, try to detect it from network interfaces. This
-	// ensures the cert always includes the pod IP when peers use K8s API-based
-	// discovery, even if the API is temporarily unavailable.
-	if podIP == "" && clientset != nil && discovery.StatefulSetName != "" {
-		podIP = detectPodIP()
-	}
-
-	// Derive the advertise address: prefer the resolver's self address
-	// (IP-based when K8s API is available, DNS-based otherwise).
+	// Derive the advertise address (pod FQDN for StatefulSet pods).
 	advertise, err := repository.DeriveAdvertiseAddr(&discovery, hostname)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive raft advertise addr: %w", err)
-	}
-	// When using K8s API, override with IP-based address from resolver.
-	if podIP != "" {
-		advertise = net.JoinHostPort(podIP, fmt.Sprintf("%d", discovery.RaftPort))
 	}
 
 	isMultiNode := cfg.Raft.Replicas > 1 || len(cfg.Raft.Peers) > 1
@@ -512,13 +497,6 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	var raftTLS *tls.Config
 	if cfg.Raft.TLS.Enabled {
 		dnsNames, ipAddrs := repository.PodSANs(&discovery, hostname)
-		// Include the pod's actual IP in the certificate SANs so mTLS
-		// works when peers connect via IP (K8s API-based discovery).
-		if podIP != "" {
-			if ip := net.ParseIP(podIP); ip != nil {
-				ipAddrs = append(ipAddrs, ip)
-			}
-		}
 		raftTLS, err = buildRaftTLSConfig(cfg, isMultiNode, clientset, dnsNames, ipAddrs, raftNodeCommonName(cfg, resolver, hostname), hostname, logger)
 		if err != nil {
 			return nil, nil, nil, fmt.Errorf("build raft TLS: %w", err)
@@ -1476,39 +1454,4 @@ func parseTolerations(raw []string) []corev1.Toleration {
 		tols = append(tols, tol)
 	}
 	return tols
-}
-
-// detectPodIP returns this pod's primary IPv4 address by examining non-loopback
-// network interfaces. Used as a fallback when the K8s API is unavailable at
-// startup but other peers may still connect via IP (K8s API-based discovery).
-func detectPodIP() string {
-	ifaces, err := net.Interfaces()
-	if err != nil {
-		return ""
-	}
-	for _, iface := range ifaces {
-		if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
-			continue
-		}
-		addrs, err := iface.Addrs()
-		if err != nil {
-			continue
-		}
-		for _, addr := range addrs {
-			var ip net.IP
-			switch v := addr.(type) {
-			case *net.IPNet:
-				ip = v.IP
-			case *net.IPAddr:
-				ip = v.IP
-			}
-			if ip == nil || ip.IsLoopback() {
-				continue
-			}
-			if ip4 := ip.To4(); ip4 != nil {
-				return ip4.String()
-			}
-		}
-	}
-	return ""
 }
