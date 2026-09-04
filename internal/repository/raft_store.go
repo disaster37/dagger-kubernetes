@@ -737,6 +737,13 @@ func (s *RaftStore) IsCleanState() bool {
 	if stats["fsm_pending"] != "0" {
 		return false
 	}
+	// A follower whose commit_index is still 0 has not received any data
+	// (snapshot or log entries) from the leader yet — the local FSM is
+	// empty and secret resolution would fail. The leader may legitimately
+	// have commit_index == 0 before writing the first log entry.
+	if state == "Follower" && stats["commit_index"] == "0" {
+		return false
+	}
 	return true
 }
 
