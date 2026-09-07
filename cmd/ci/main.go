@@ -125,6 +125,12 @@ func run(c *cli.Context) error {
 	steps, pollInterval, maxDepth := resolveSteps(c, cfg)
 
 	cmdArgs := c.Args().Slice()
+	// The shell-script form `dagger call ...` leaves "dagger" as the first
+	// positional arg after wrapper flags. Strip it so we don't end up executing
+	// `dagger dagger call ...`.
+	if len(cmdArgs) > 0 && cmdArgs[0] == "dagger" {
+		cmdArgs = cmdArgs[1:]
+	}
 	if len(cmdArgs) == 0 {
 		return fmt.Errorf("no dagger command specified")
 	}

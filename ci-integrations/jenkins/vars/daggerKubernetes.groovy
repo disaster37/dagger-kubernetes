@@ -193,7 +193,7 @@ When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger C
                 --steps-poll-interval '${stepsPollInterval}' \\
                 --steps-max-depth '${stepsMaxDepth}' \\
                 --timeout '${wrapperTimeout}m' ${versionArgs} \\
-                ${daggerCommand} > '${ndjsonFile}' 2> '${stderrFile}'
+                -- ${daggerCommand} > '${ndjsonFile}' 2> '${stderrFile}'
               echo \$? > '${exitFile}' ) > /dev/null 2>&1 &
             echo \$! > '${pidFile}'
         """
