@@ -103,7 +103,7 @@ func Load(configFile string) (*domain.Config, error) {
 
 	v.SetDefault("raft.performance_multiplier", 5.0)
 	v.SetDefault("raft.raft_log_cache_size", 512)
-	v.SetDefault("raft.no_snapshot_restore_on_start", true)
+	v.SetDefault("raft.no_snapshot_restore_on_start", false)
 	v.SetDefault("raft.termination_grace_period", "60s")
 	v.SetDefault("raft.recovery_mode", false)
 	v.SetDefault("raft.transport_max_pool", 1)

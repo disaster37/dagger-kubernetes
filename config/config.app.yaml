@@ -85,7 +85,7 @@ raft:
   # Performance tuning
   performance_multiplier: 5.0    # scales election/heartbeat/lease timeouts (default 5.0)
   raft_log_cache_size: 512       # in-memory log cache size
-  no_snapshot_restore_on_start: true  # disable auto snapshot restore on start
+  no_snapshot_restore_on_start: false  # restore from latest snapshot on start (required for correct recovery after log compaction)
   termination_grace_period: "60s"     # pod termination grace period
   recovery_mode: false            # clear stale raft state (raft.db, snapshots, node-id) and bootstrap fresh — manual quorum-loss recovery only
   transport_max_pool: 1           # raft transport connection pool per peer; smaller = fresher DNS on StatefulSet pod IP changes

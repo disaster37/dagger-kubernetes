@@ -187,8 +187,8 @@ supervisor:
       performanceMultiplier: 5.0
 ## @param supervisor.config.raft.raftLogCacheSize In-memory Raft log cache size. Default: 512.
       raftLogCacheSize: 512
-## @param supervisor.config.raft.noSnapshotRestoreOnStart Disable automatic snapshot restore on start. Default: true.
-      noSnapshotRestoreOnStart: true
+## @param supervisor.config.raft.noSnapshotRestoreOnStart Disable automatic snapshot restore on start. When true, the FSM replays only the Raft log on restart, which silently loses all snapshotted data after log compaction. Set to true only when snapshots are managed externally. Default: false.
+      noSnapshotRestoreOnStart: false
 ## @param supervisor.config.raft.terminationGracePeriodSeconds Pod termination grace period. Default: 60.
       terminationGracePeriodSeconds: 60
 ## @param supervisor.config.raft.recoveryMode Clear stale raft state (raft.db, snapshots, node-id) on startup and bootstrap a fresh cluster. Manual quorum-loss recovery only. Default: false.

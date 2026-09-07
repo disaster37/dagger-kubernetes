@@ -90,7 +90,10 @@ type RaftStoreConfig struct {
 	RaftLogCacheSize int
 
 	// NoSnapshotRestoreOnStart disables automatic snapshot restore on start.
-	// Default: true (we manage snapshots ourselves).
+	// When true, the FSM replays only the Raft log on restart. After a snapshot
+	// has been taken and the log compacted, this silently loses all data that
+	// was in the snapshot — set to true only when snapshots are managed externally.
+	// Default: false.
 	NoSnapshotRestoreOnStart bool
 
 	// BoltOptions overrides the default BoltDB options. Nil = use defaults.
@@ -193,7 +196,9 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 	raftConfig.LogOutput = logOutput
 	raftConfig.LogLevel = "WARN"
 
-	// Disable auto snapshot restore on start.
+	// Apply the NoSnapshotRestoreOnStart setting. When false (default),
+	// Raft restores from the latest snapshot on start, which is required
+	// for correct data recovery after log compaction.
 	if cfg.NoSnapshotRestoreOnStart {
 		raftConfig.NoSnapshotRestoreOnStart = true
 	}

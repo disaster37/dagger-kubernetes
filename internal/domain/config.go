@@ -150,7 +150,11 @@ type RaftConfig struct {
 	PerformanceMultiplier float64 `mapstructure:"performance_multiplier"`
 	// RaftLogCacheSize is the in-memory log cache size. Default: 512.
 	RaftLogCacheSize int `mapstructure:"raft_log_cache_size"`
-	// NoSnapshotRestoreOnStart disables auto snapshot restore on start. Default: true.
+	// NoSnapshotRestoreOnStart disables auto snapshot restore on start.
+	// When true, the FSM replays only the Raft log on restart. After a snapshot
+	// has been taken and the log compacted, this silently loses all data that
+	// was in the snapshot — set to true only when snapshots are managed externally.
+	// Default: false.
 	NoSnapshotRestoreOnStart bool `mapstructure:"no_snapshot_restore_on_start"`
 	// TerminationGracePeriod for the pod. Default: 60s.
 	TerminationGracePeriod time.Duration `mapstructure:"termination_grace_period"`
