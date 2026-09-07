@@ -388,6 +388,16 @@ func (p *K8sProvider) initContainers(image string) []corev1.Container {
 			ImagePullPolicy: p.cfg.PullPolicy,
 			Command:         []string{"/bin/sh", "-c"},
 			Args:            []string{"cp /tmp/ca-secret/* /usr/local/share/ca-certificates/"},
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse(p.cfg.CPURequest),
+					corev1.ResourceMemory: resource.MustParse(p.cfg.MemoryRequest),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse(p.cfg.CPULimit),
+					corev1.ResourceMemory: resource.MustParse(p.cfg.MemoryLimit),
+				},
+			},
 			VolumeMounts: []corev1.VolumeMount{
 				{
 					Name:      volumeCASecret,
