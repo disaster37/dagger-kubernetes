@@ -144,10 +144,10 @@ func run(c *cli.Context) error {
 		_ = os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
 	}
 
-	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	timeout := c.Duration("timeout")
 	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), timeout)
 	defer cmdCancel()
+	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
 	// In --steps mode stdout is reserved for the NDJSON event protocol, so the
