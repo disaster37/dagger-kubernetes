@@ -28,10 +28,9 @@ at supervisor startup and rendered into the engine StatefulSet pod template:
    `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` and any future env.
 2. **D2 — CA bundle** (`fleet.engine_ca_secret` + `engine_ca_secret_key`,
    default `ca.crt`): references an existing K8s Secret. Mounted read-only
-   at fixed path `/etc/ssl/certs/custom-ca.pem` (Secret key normalized to
-   file `ca.crt` via volume `Items`); `SSL_CERT_FILE` and
-   `NODE_EXTRA_CA_CERTS` point at it. NOT `Optional` — a missing Secret/key
-   fails the pod loudly.
+   as a directory at `/usr/local/share/ca-certificates` (Dagger auto-detects
+   and installs CAs from this directory on startup — no env vars needed).
+   NOT `Optional` — a missing Secret fails the pod loudly.
 3. **D3 — Generated `engine.toml`** (`fleet.engine_debug`,
    `fleet.engine_log_format`, `fleet.engine_registry_mirrors`): structured,
    validated fields. The K8s provider renders TOML by hand (`fmt.Sprintf`
@@ -92,10 +91,10 @@ at supervisor startup and rendered into the engine StatefulSet pod template:
 - **Sidecar injection** (an init container that writes `engine.toml`) —
   rejected: a ConfigMap + `subPath` mount is simpler, has no image
   dependency, and is what the upstream Dagger docs recommend.
-- **Configurable CA mount path** — rejected: a fixed well-known path
-  (`/etc/ssl/certs/custom-ca.pem`) keeps the `SSL_CERT_FILE`/`NODE_EXTRA_CA_CERTS`
-  env vars predictable. The escape hatch is `engine_extra_env` for
-  additional env-based pointers.
+- **Configurable CA mount path** — rejected: the fixed path
+  `/usr/local/share/ca-certificates` is where Dagger auto-detects CAs on
+  startup (per the upstream docs). No env vars are needed — the engine
+  handles installation automatically.
 - **Plaintext proxy credentials in `engine_extra_env`** — rejected in
   favor of Secret references (`engine_extra_env_from`): credentials in
   Helm values / config files / git are unacceptable for authenticated

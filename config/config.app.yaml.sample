@@ -260,7 +260,7 @@ fleet:
     # HTTPS_PROXY:
     #   secretName: "proxy-credentials"
     #   key: "https_proxy"
-  engine_ca_secret: ""                            # K8s Secret with a custom CA PEM bundle for engine pods; empty = disabled.
+  engine_ca_secret: ""                            # K8s Secret with a custom CA PEM bundle for engine pods; mounted at /usr/local/share/ca-certificates. Dagger auto-detects CAs from this directory on startup. Empty = disabled.
   engine_ca_secret_key: "ca.crt"                  # key inside engine_ca_secret holding the PEM bundle.
   engine_debug: false                             # engine.toml: debug = true (verbose engine logging).
   engine_log_format: "json"                       # engine.toml: [log] format; "" omits the section.

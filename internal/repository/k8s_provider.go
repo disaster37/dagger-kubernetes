@@ -30,9 +30,8 @@ const (
 	engineConfigMapName    = "dagger-engine-config"
 	engineTOMLKey          = "engine.toml"
 	engineTOMLPath         = "/etc/dagger-config/engine.toml"
-	engineCAMountPath      = "/etc/ssl/certs/custom-ca.pem"
-	engineAuthSecretName   = "engine-registry-auth" // holds the cache token; mounted as /etc/dagger
-	caCertFileName         = "ca.crt"               // normalized file name of the CA bundle in engine pods
+	engineCAMountPath      = "/usr/local/share/ca-certificates" // Dagger auto-detects CAs here on startup
+	engineAuthSecretName   = "engine-registry-auth"             // holds the cache token; mounted as /etc/dagger
 	volumeDaggerKubernetes = "dagger-kubernetes"
 	volumeEngineConfig     = "engine-config"
 	volumeDaggerConfig     = "dagger-config"
@@ -107,7 +106,7 @@ func NewK8sProvider(clientset kubernetes.Interface, cfg K8sProviderConfig) *K8sP
 		cfg.PullPolicy = corev1.PullIfNotPresent
 	}
 	if cfg.CAKey == "" {
-		cfg.CAKey = caCertFileName
+		cfg.CAKey = "ca.crt"
 	}
 	return &K8sProvider{
 		clientset: clientset,
@@ -277,8 +276,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 
 // engineEnv returns the engine container environment: the cache token
 // (always, sourced from the auth secret), then operator-supplied literal and
-// secret-sourced vars (each group sorted by name for deterministic specs),
-// and finally the CA bundle pointers when CA injection is enabled.
+// secret-sourced vars (each group sorted by name for deterministic specs).
 func (p *K8sProvider) engineEnv() []corev1.EnvVar {
 	env := []corev1.EnvVar{secretEnvVar("DAGGER_KUBERNETES_TOKEN", engineAuthSecretName, "token")}
 	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
@@ -287,12 +285,6 @@ func (p *K8sProvider) engineEnv() []corev1.EnvVar {
 	for _, name := range sortedKeys(p.cfg.ExtraEnvFrom) {
 		src := p.cfg.ExtraEnvFrom[name]
 		env = append(env, secretEnvVar(name, src.SecretName, src.Key))
-	}
-	if p.cfg.CASecret != "" {
-		env = append(env,
-			corev1.EnvVar{Name: "SSL_CERT_FILE", Value: engineCAMountPath},
-			corev1.EnvVar{Name: "NODE_EXTRA_CA_CERTS", Value: engineCAMountPath},
-		)
 	}
 	return env
 }
@@ -324,7 +316,6 @@ func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      volumeCABundle,
 			MountPath: engineCAMountPath,
-			SubPath:   caCertFileName,
 			ReadOnly:  true,
 		})
 	}
@@ -357,7 +348,6 @@ func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
 			VolumeSource: corev1.VolumeSource{
 				Secret: &corev1.SecretVolumeSource{
 					SecretName: p.cfg.CASecret,
-					Items:      []corev1.KeyToPath{{Key: p.cfg.CAKey, Path: caCertFileName}},
 				},
 			},
 		})

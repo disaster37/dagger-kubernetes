@@ -1155,13 +1155,11 @@ func TestK8sEngineExtraEnvCombinedOrder(t *testing.T) {
 	container := ensureEngineSet(t, p, cs).Spec.Template.Spec.Containers[0]
 
 	// Deterministic order: token → sorted literal envs → sorted secret-sourced
-	// envs → CA envs.
+	// envs.
 	requireEnvNames(t, container.Env, []string{
 		"DAGGER_KUBERNETES_TOKEN",
 		"NO_PROXY",
 		"HTTP_PROXY",
-		"SSL_CERT_FILE",
-		"NODE_EXTRA_CA_CERTS",
 	})
 }
 
@@ -1173,7 +1171,7 @@ func TestK8sEngineCAInjection(t *testing.T) {
 
 	sts := ensureEngineSet(t, p, cs)
 
-	// Volume ca-bundle with secret name and Items tls-ca.crt→ca.crt.
+	// Volume ca-bundle with secret name.
 	caVol := volumeByName(sts, volumeCABundle)
 	if caVol == nil {
 		t.Fatalf("expected %s volume, got %+v", volumeCABundle, sts.Spec.Template.Spec.Volumes)
@@ -1181,22 +1179,24 @@ func TestK8sEngineCAInjection(t *testing.T) {
 	if caVol.Secret == nil || caVol.Secret.SecretName != "custom-ca-bundle" {
 		t.Errorf("expected secret custom-ca-bundle, got %+v", caVol.Secret)
 	}
-	if len(caVol.Secret.Items) != 1 || caVol.Secret.Items[0].Key != "tls-ca.crt" || caVol.Secret.Items[0].Path != "ca.crt" {
-		t.Errorf("expected Items tls-ca.crt→ca.crt, got %+v", caVol.Secret.Items)
+	if len(caVol.Secret.Items) != 0 {
+		t.Errorf("expected no Items, got %+v", caVol.Secret.Items)
 	}
 
-	// Mounted read-only at the well-known path, with env vars pointing at it.
+	// Mounted read-only at /usr/local/share/ca-certificates (directory, not subPath).
 	container := sts.Spec.Template.Spec.Containers[0]
 	caMount := mountByName(&container, volumeCABundle)
 	if caMount == nil {
 		t.Fatalf("expected %s mount, got %+v", volumeCABundle, container.VolumeMounts)
 	}
-	if caMount.MountPath != engineCAMountPath || caMount.SubPath != "ca.crt" || !caMount.ReadOnly {
-		t.Errorf("CA mount = %+v, want path %s subPath ca.crt readOnly", caMount, engineCAMountPath)
+	if caMount.MountPath != engineCAMountPath || caMount.SubPath != "" || !caMount.ReadOnly {
+		t.Errorf("CA mount = %+v, want path %s, no subPath, readOnly", caMount, engineCAMountPath)
 	}
+
+	// No SSL_CERT_FILE or NODE_EXTRA_CA_CERTS env vars (Dagger auto-detects CAs).
 	for _, name := range []string{"SSL_CERT_FILE", "NODE_EXTRA_CA_CERTS"} {
-		if env := envByName(container.Env, name); env == nil || env.Value != engineCAMountPath {
-			t.Errorf("%s = %+v, want value %s", name, env, engineCAMountPath)
+		if env := envByName(container.Env, name); env != nil {
+			t.Errorf("%s should not be set, got %+v", name, env)
 		}
 	}
 }
@@ -1214,6 +1214,9 @@ func TestK8sEngineCAInjectionDisabled(t *testing.T) {
 	}
 	if env := envByName(container.Env, "SSL_CERT_FILE"); env != nil {
 		t.Errorf("expected no SSL_CERT_FILE env, got %+v", env)
+	}
+	if env := envByName(container.Env, "NODE_EXTRA_CA_CERTS"); env != nil {
+		t.Errorf("expected no NODE_EXTRA_CA_CERTS env, got %+v", env)
 	}
 }
 

@@ -1207,13 +1207,8 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 // refuse at StatefulSet admission (duplicate container env names) or that is
 // internally inconsistent. Called once at startup (fail fast).
 func validateFleetEnv(fleet *domain.FleetConfig) error {
-	// DAGGER_KUBERNETES_TOKEN is always injected from a secret; SSL_CERT_FILE and
-	// NODE_EXTRA_CA_CERTS are injected when CA injection is enabled.
+	// DAGGER_KUBERNETES_TOKEN is always injected from a secret.
 	reserved := map[string]bool{"DAGGER_KUBERNETES_TOKEN": true}
-	if fleet.EngineCASecret != "" {
-		reserved["SSL_CERT_FILE"] = true
-		reserved["NODE_EXTRA_CA_CERTS"] = true
-	}
 	for name := range fleet.EngineExtraEnv {
 		if err := validateEnvName(name, "engine_extra_env", reserved); err != nil {
 			return err

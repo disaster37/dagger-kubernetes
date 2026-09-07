@@ -253,25 +253,6 @@ func TestValidateFleetEnv(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "SSL_CERT_FILE in engine_extra_env with CA secret set",
-			fleet: domain.FleetConfig{
-				EngineCASecret: "custom-ca-bundle",
-				EngineExtraEnv: map[string]string{
-					"SSL_CERT_FILE": "/etc/ssl/certs/other.pem",
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "SSL_CERT_FILE in engine_extra_env without CA secret",
-			fleet: domain.FleetConfig{
-				EngineExtraEnv: map[string]string{
-					"SSL_CERT_FILE": "/etc/ssl/certs/other.pem",
-				},
-			},
-			wantErr: false,
-		},
-		{
 			name: "EngineCASecret set with empty EngineCASecretKey",
 			fleet: domain.FleetConfig{
 				EngineCASecret:    "custom-ca-bundle",
@@ -332,16 +313,6 @@ func TestValidateFleetEnv(t *testing.T) {
 			fleet: domain.FleetConfig{
 				EngineExtraEnvFrom: map[string]domain.EnvVarSource{
 					"": {SecretName: "s", Key: "k"},
-				},
-			},
-			wantErr: true,
-		},
-		{
-			name: "SSL_CERT_FILE in engine_extra_env_from with CA secret set",
-			fleet: domain.FleetConfig{
-				EngineCASecret: "custom-ca-bundle",
-				EngineExtraEnvFrom: map[string]domain.EnvVarSource{
-					"SSL_CERT_FILE": {SecretName: "s", Key: "k"},
 				},
 			},
 			wantErr: true,

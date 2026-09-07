@@ -101,12 +101,6 @@ spec:
                   name: {{ .Values.auth.oauth.clientSecretRef.name | default (printf "%s-oauth" (include "dagger-kubernetes.fullname" .)) }}
                   key: {{ .Values.auth.oauth.clientSecretRef.key | default "client_secret" }}
             {{- end }}
-            {{- if .Values.supervisor.config.fleet.engineCaSecret }}
-            - name: SSL_CERT_FILE
-              value: /etc/ssl/certs/custom-ca.pem
-            - name: NODE_EXTRA_CA_CERTS
-              value: /etc/ssl/certs/custom-ca.pem
-            {{- end }}
             {{- with .Values.supervisor.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -151,8 +145,7 @@ spec:
               mountPath: /tmp
             {{- if .Values.supervisor.config.fleet.engineCaSecret }}
             - name: ca-bundle
-              mountPath: /etc/ssl/certs/custom-ca.pem
-              subPath: ca.crt
+              mountPath: /usr/local/share/ca-certificates
               readOnly: true
             {{- end }}
           startupProbe:
@@ -206,9 +199,6 @@ spec:
         - name: ca-bundle
           secret:
             secretName: {{ .Values.supervisor.config.fleet.engineCaSecret }}
-            items:
-              - key: {{ .Values.supervisor.config.fleet.engineCaSecretKey }}
-                path: ca.crt
         {{- end }}
         {{- if not .Values.supervisor.persistence.enabled }}
         - name: db
