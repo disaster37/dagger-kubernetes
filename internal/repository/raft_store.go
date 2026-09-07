@@ -719,10 +719,22 @@ func (s *RaftStore) IsLeader() bool {
 	return s.raft.State() == raft.Leader
 }
 
+// followerLastContactThreshold is how long a follower may go without
+// hearing from the leader before IsCleanState reports false. Set to
+// 3 × the default election timeout (5 s with multiplier 5) to avoid
+// false positives while still rejecting followers that are disconnected
+// from the cluster (e.g. after a pod restart while the leader's transport
+// has not re-established the connection).
+const followerLastContactThreshold = 15 * time.Second
+
 // IsCleanState reports whether the Raft consensus layer is in a clean state:
 //   - the node is a Leader or Follower (not Candidate or Shutdown)
 //   - all committed log entries have been applied (commit_index == applied_index)
 //   - there are no pending FSM mutations (fsm_pending == 0)
+//   - followers must have recent contact with the leader (last_contact ≤ 15 s);
+//     a follower whose local commit_index == applied_index but that has not
+//     received heartbeats since restarting is behind the leader's log and its
+//     FSM is stale — secret resolution would time out.
 //
 // When the state is not clean the supervisor pod should not be considered ready.
 func (s *RaftStore) IsCleanState() bool {
@@ -743,6 +755,16 @@ func (s *RaftStore) IsCleanState() bool {
 	// have commit_index == 0 before writing the first log entry.
 	if state == "Follower" && stats["commit_index"] == "0" {
 		return false
+	}
+	if state == "Follower" {
+		lastContact := stats["last_contact"]
+		if lastContact == "never" || lastContact == "" {
+			return false
+		}
+		d, err := time.ParseDuration(lastContact)
+		if err != nil || d > followerLastContactThreshold {
+			return false
+		}
 	}
 	return true
 }
