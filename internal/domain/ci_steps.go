@@ -66,4 +66,5 @@ type CIEventSink interface {
 type TraceSnapshotSource interface {
 	GetTrace(traceID string) (*TraceInfo, error)
 	QueryTraceLogs(traceID string, start, end time.Time, limit int) ([]LogEntry, error)
+	ListTraces(limit int) ([]TraceListResult, error)
 }

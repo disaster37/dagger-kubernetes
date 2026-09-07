@@ -491,6 +491,10 @@ func (s *stubSnapshotSource) QueryTraceLogs(_ string, start, _ time.Time, _ int)
 	return s.logs, s.logsErr
 }
 
+func (s *stubSnapshotSource) ListTraces(_ int) ([]domain.TraceListResult, error) {
+	return nil, nil
+}
+
 type collectSink struct {
 	events []domain.CIEvent
 }
@@ -501,70 +505,6 @@ func (s *collectSink) Emit(e *domain.CIEvent) error {
 }
 
 func (s *collectSink) Flush() error { return nil }
-
-func TestLiveCaptureWriterPassesThroughAndCaptures(t *testing.T) {
-	var dst bytes.Buffer
-	var gotID string
-	w := &liveCaptureWriter{dst: &dst, onID: func(id string) { gotID = id }}
-
-	// Feed the trace id split across writes to prove the buffer accumulates.
-	for _, chunk := range []string{"prefix ", testTraceID[:16], testTraceID[16:], " suffix\n"} {
-		if _, err := w.Write([]byte(chunk)); err != nil {
-			t.Fatalf("Write(%q): %v", chunk, err)
-		}
-	}
-
-	if gotID != testTraceID {
-		t.Fatalf("captured id = %q, want %q", gotID, testTraceID)
-	}
-	if dst.String() != "prefix "+testTraceID+" suffix\n" {
-		t.Fatalf("dst = %q", dst.String())
-	}
-
-	// A later write must not re-trigger onID (found flag latched).
-	calls := 0
-	w.onID = func(string) { calls++ }
-	if _, err := w.Write([]byte("more\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if calls != 0 {
-		t.Fatalf("onID re-fired %d times after first capture", calls)
-	}
-}
-
-func TestLiveCaptureWriterNoID(t *testing.T) {
-	var dst bytes.Buffer
-	fired := false
-	w := &liveCaptureWriter{dst: &dst, onID: func(string) { fired = true }}
-	if _, err := w.Write([]byte("no trace id here\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if fired {
-		t.Fatal("onID fired without a trace id")
-	}
-	if dst.String() != "no trace id here\n" {
-		t.Fatalf("dst = %q", dst.String())
-	}
-}
-
-func TestLiveCaptureWriterBoundedBuffer(t *testing.T) {
-	var dst bytes.Buffer
-	var gotID string
-	w := &liveCaptureWriter{dst: &dst, onID: func(id string) { gotID = id }}
-
-	// A large non-hex stream must not grow the scan buffer unbounded, and a
-	// trace id arriving afterwards must still be captured.
-	noise := strings.Repeat("z", liveCaptureMaxBuf*3)
-	if _, err := w.Write([]byte(noise)); err != nil {
-		t.Fatalf("Write noise: %v", err)
-	}
-	if _, err := w.Write([]byte(testTraceID)); err != nil {
-		t.Fatalf("Write id: %v", err)
-	}
-	if gotID != testTraceID {
-		t.Fatalf("captured id = %q, want %q", gotID, testTraceID)
-	}
-}
 
 func TestResolveStepsFlagDefaultsFromConfig(t *testing.T) {
 	cfg := &domain.Config{CI: domain.CIConfig{Jenkins: domain.JenkinsConfig{

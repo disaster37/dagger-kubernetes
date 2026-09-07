@@ -36,10 +36,10 @@ const ciStepsHTTPTimeout = 10 * time.Second
 // ciLogQueryLimit is the per-poll log query limit for the CI step stream.
 const ciLogQueryLimit = 1000
 
-// liveCaptureMaxBuf caps the pending-bytes buffer the liveCaptureWriter keeps
-// while scanning for the trace id, so a pathological stderr stream cannot grow
-// it unbounded (CWE-400).
-const liveCaptureMaxBuf = 8192
+// traceDiscoveryInterval is the poll cadence for discovering the trace ID from
+// the supervisor after the dagger command starts. The engine provision happens
+// early (during the "connect" step), so a 1s interval catches the trace quickly.
+const traceDiscoveryInterval = 1 * time.Second
 
 // cliHTTPClient is used for the provisioning/download requests so a stalled
 // supervisor cannot hang a CI job indefinitely (http.DefaultClient has no
@@ -176,35 +176,21 @@ func run(c *cli.Context) error {
 
 	var logBuf strings.Builder
 
-	// Steps-mode plumbing. The captured trace id is shared between the
-	// streamSteps goroutine and the final flush via capturedID (mutex-guarded);
-	// stepsCh (buffered 1) wakes the goroutine once the id is known.
+	// Steps-mode plumbing. The trace ID is discovered by polling the
+	// supervisor's trace list — the dagger CLI never outputs its trace ID to
+	// stderr, and scanning for arbitrary hex strings captures Docker digests
+	// and other OCI hashes instead.
 	var (
-		stepsWG      sync.WaitGroup
-		stepsCancel  context.CancelFunc
-		stepsSrc     domain.TraceSnapshotSource
-		stepsBuilder *service.StepEventBuilder
-		stepsSink    domain.CIEventSink
-		capturedMu   sync.Mutex
-		capturedID   string
-		stepsCh      = make(chan string, 1)
+		stepsWG       sync.WaitGroup
+		stepsCancel   context.CancelFunc
+		stepsSrc      domain.TraceSnapshotSource
+		stepsBuilder  *service.StepEventBuilder
+		stepsSink     domain.CIEventSink
+		discoveredMu  sync.Mutex
+		discoveredID  string
 	)
 
-	capture := &liveCaptureWriter{
-		dst: io.MultiWriter(os.Stderr, &logBuf),
-		onID: func(id string) {
-			capturedMu.Lock()
-			if capturedID == "" {
-				capturedID = id
-			}
-			capturedMu.Unlock()
-			select {
-			case stepsCh <- id:
-			default:
-			}
-		},
-	}
-	cmd.Stderr = capture
+	cmd.Stderr = io.MultiWriter(os.Stderr, &logBuf)
 
 	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
@@ -244,16 +230,29 @@ func run(c *cli.Context) error {
 		stepsWG.Add(1)
 		go func() {
 			defer stepsWG.Done()
-			var traceID string
-			select {
-			case traceID = <-stepsCh:
-			case <-ctx.Done():
-				return
+			ticker := time.NewTicker(traceDiscoveryInterval)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-ticker.C:
+					traces, err := stepsSrc.ListTraces(1)
+					if err != nil {
+						logger.WithError(err).Debug("trace discovery poll failed")
+						continue
+					}
+					if len(traces) > 0 && traces[0].TraceID != "" {
+						id := traces[0].TraceID
+						discoveredMu.Lock()
+						discoveredID = id
+						discoveredMu.Unlock()
+						fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] discovered trace %s from supervisor\n", id)
+						streamSteps(ctx, stepsSrc, stepsBuilder, stepsSink, id, pollInterval, logger)
+						return
+					}
+				}
 			}
-			if traceID == "" {
-				return
-			}
-			streamSteps(ctx, stepsSrc, stepsBuilder, stepsSink, traceID, pollInterval, logger)
 		}()
 	}
 
@@ -267,9 +266,9 @@ func run(c *cli.Context) error {
 	// Final flush: capture terminal state + pipeline_done once the dagger
 	// command has exited and the poller has stopped. Errors here are non-fatal.
 	if stepsBuilder != nil {
-		capturedMu.Lock()
-		id := capturedID
-		capturedMu.Unlock()
+		discoveredMu.Lock()
+		id := discoveredID
+		discoveredMu.Unlock()
 		if id != "" {
 			if perr := pollTraceOnce(stepsSrc, stepsBuilder, stepsSink, id, stepsBuilder.LogMark()); perr != nil {
 				logger.WithError(perr).WithField("trace_id", id).Debug("final ci step flush failed")
@@ -324,36 +323,6 @@ func run(c *cli.Context) error {
 	return err
 }
 
-// liveCaptureWriter scans an underlying writer line-by-line for the first
-// trace id (traceIDRe) and records it via onID; it always passes bytes through
-// to the underlying writer. Used to learn the trace id while dagger still runs.
-type liveCaptureWriter struct {
-	dst   io.Writer
-	onID  func(string)
-	found bool
-	buf   []byte
-}
-
-// Write passes p through to dst unchanged, then scans the accumulated stream
-// for the first trace id. The returned n/err are exactly dst's so callers see
-// pass-through behaviour; scanning never affects them.
-func (w *liveCaptureWriter) Write(p []byte) (int, error) {
-	n, err := w.dst.Write(p)
-	if !w.found {
-		w.buf = append(w.buf, p...)
-		if m := traceIDRe.Find(w.buf); m != nil {
-			w.found = true
-			w.buf = nil
-			w.onID(string(m))
-		} else if len(w.buf) > liveCaptureMaxBuf {
-			// Keep only the tail: a trace id never spans more than the tail we
-			// retain, and this bounds memory under a noisy stderr stream.
-			w.buf = w.buf[len(w.buf)-liveCaptureMaxBuf/2:]
-		}
-	}
-	return n, err
-}
-
 // clampPollInterval enforces the minimum step-stream poll cadence so a
 // misconfigured flag or config value (e.g. 1ns) cannot hot-loop the
 // supervisor's REST API (CWE-400).
@@ -388,7 +357,7 @@ func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 			return
 		}
 		if err := pollTraceOnce(src, builder, sink, traceID, builder.LogMark()); err != nil {
-			logger.WithError(err).WithField("trace_id", traceID).Debug("ci step poll failed")
+			logger.WithError(err).WithField("trace_id", traceID).Warn("ci step poll failed")
 		}
 	}
 

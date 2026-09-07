@@ -111,3 +111,18 @@ func (c *SupervisorTraceClient) getJSON(u string, out any) error {
 	}
 	return nil
 }
+
+// ListTraces fetches GET /api/v1/traces?limit=N (Bearer auth) and returns the
+// most recent traces for the authenticated identity. Used by the CI wrapper to
+// discover the trace ID of a just-launched pipeline.
+func (c *SupervisorTraceClient) ListTraces(limit int) ([]domain.TraceListResult, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	var out []domain.TraceListResult
+	u := fmt.Sprintf("%s/api/v1/traces?limit=%d", c.baseURL, limit)
+	if err := c.getJSON(u, &out); err != nil {
+		return nil, fmt.Errorf("list traces: %w", err)
+	}
+	return out, nil
+}
