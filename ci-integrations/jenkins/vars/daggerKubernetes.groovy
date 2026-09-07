@@ -163,12 +163,12 @@ or set env.DAGGER_KUBERNETES_CI_BIN to the binary path.
 When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger CLI."""
     }
 
-    String stepsDir = "${WORKSPACE}/.dagger-kubernetes"
+    String stepsDir = "/tmp/dagger-kubernetes-${env.BUILD_NUMBER}"
     String ndjsonFile = "${stepsDir}/steps-${env.BUILD_NUMBER}.ndjson"
     String stderrFile = "${stepsDir}/dagger-${env.BUILD_NUMBER}.log"
     String exitFile = "${stepsDir}/exit-${env.BUILD_NUMBER}"
     String pidFile = "${stepsDir}/pid-${env.BUILD_NUMBER}"
-    [ndjsonFile, stderrFile, exitFile, pidFile].each { assertShellSafe(it, 'workspace file path') }
+    [ndjsonFile, stderrFile, exitFile, pidFile].each { assertShellSafe(it, 'temp file path') }
 
     // The token is exported into the environment and consumed by the wrapper
     // through its DAGGER_KUBERNETES_TOKEN env source. The script below only
@@ -399,10 +399,10 @@ void renderStepTree(Map params = [:]) {
     }
     echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${finalTraceId(stderr)}"
 
-    // Best-effort cleanup: the per-build stream files must not accumulate in
-    // the workspace across builds (disk exhaustion, CWE-400). The paths were
+    // Best-effort cleanup: the per-build temp files and directory must not
+    // accumulate across builds (disk exhaustion, CWE-400). The paths were
     // validated as shell-safe before the launch script was built.
-    sh "rm -f '${ndjsonFile}' '${stderrFile}' '${exitFile}' '${pidFile}'"
+    sh "rm -rf '${stepsDir}'"
 
     boolean failed = exitCode != '0' || finalStatus == 'failed' || finalStatus == 'canceled'
     echo "[dagger-kubernetes] failed=${failed} (exitCode=${exitCode} finalStatus=${finalStatus})"
@@ -537,15 +537,15 @@ def provisionCli(Map params = [:]) {
     assertShellSafe(osName, 'os')
     assertShellSafe(arch, 'arch')
 
-    String binDir = "${WORKSPACE}/.dagger-cli"
-    assertShellSafe(binDir, 'workspace path')
+    String binDir = "/tmp/dagger-cli-${env.BUILD_NUMBER}"
+    assertShellSafe(binDir, 'temp dir path')
 
-    // The Authorization header is written to a workspace file and passed to
-    // curl via -H @file (curl >= 7.55): the token never appears in the build
-    // log, in curl's process argv (readable by every local user via ps), nor
-    // in the build-wide environment (CWE-214/CWE-532). The file is deleted as
-    // soon as provisioning finishes.
-    def headerFile = "${WORKSPACE}/.dagger-kubernetes-auth-${env.BUILD_NUMBER}.hdr"
+    // The Authorization header is written to a temp file and passed to curl
+    // via -H @file (curl >= 7.55): the token never appears in the build log,
+    // in curl's process argv (readable by every local user via ps), nor in the
+    // build-wide environment (CWE-214/CWE-532). The file is deleted as soon as
+    // provisioning finishes.
+    def headerFile = "/tmp/dagger-kubernetes-auth-${env.BUILD_NUMBER}.hdr"
     assertShellSafe(headerFile, 'header file path')
     writeFile(file: headerFile, text: "Authorization: Bearer ${token}")
     sh "chmod 600 '${headerFile}'"
