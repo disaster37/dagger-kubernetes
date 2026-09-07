@@ -536,6 +536,7 @@ def provisionCli(Map params = [:]) {
     assertShellSafe(version, 'version')
     assertShellSafe(osName, 'os')
     assertShellSafe(arch, 'arch')
+    assertShellSafe(token, 'token')
 
     String binDir = "/tmp/dagger-cli-${env.BUILD_NUMBER}"
     assertShellSafe(binDir, 'temp dir path')
@@ -547,8 +548,7 @@ def provisionCli(Map params = [:]) {
     // provisioning finishes.
     def headerFile = "/tmp/dagger-kubernetes-auth-${env.BUILD_NUMBER}.hdr"
     assertShellSafe(headerFile, 'header file path')
-    writeFile(file: headerFile, text: "Authorization: Bearer ${token}")
-    sh "chmod 600 '${headerFile}'"
+    sh "printf 'Authorization: Bearer %s' '${token}' > '${headerFile}' && chmod 600 '${headerFile}'"
     try {
         String downloadUrl
         if (version) {
