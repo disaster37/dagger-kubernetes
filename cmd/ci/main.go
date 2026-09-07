@@ -87,6 +87,7 @@ func ciFlags() []cli.Flag {
 		&cli.BoolFlag{Name: "steps", Usage: "stream nested Dagger steps as NDJSON events on stdout"},
 		&cli.DurationFlag{Name: "steps-poll-interval", Usage: "poll cadence for the CI step stream (default from ci.jenkins.steps_poll_interval)"},
 		&cli.IntFlag{Name: "steps-max-depth", Usage: "maximum nested step depth surfaced (0 = unlimited; default from ci.jenkins.steps_max_depth)"},
+		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "maximum time the dagger command is allowed to run"},
 	}
 }
 
@@ -144,7 +145,10 @@ func run(c *cli.Context) error {
 	}
 
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
-	cmd := exec.Command("dagger", cmdArgs...)
+	timeout := c.Duration("timeout")
+	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), timeout)
+	defer cmdCancel()
+	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
 	// In --steps mode stdout is reserved for the NDJSON event protocol, so the
 	// dagger command's own stdout is redirected to stderr (alongside its

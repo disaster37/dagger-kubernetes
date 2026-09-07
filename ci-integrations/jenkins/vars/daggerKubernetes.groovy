@@ -182,12 +182,17 @@ When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger C
         // are redirected to /dev/null so the `sh` step returns immediately
         // instead of waiting for the background process to close the log pipe
         // (which would otherwise hang the enclosing node until the run ends).
+        // Set the wrapper's own timeout slightly inside the Jenkins timeout
+        // so it has time to finalize (emit pipeline_done, flush stderr)
+        // before Jenkins kills the entire step.
+        int wrapperTimeout = Math.max(1, timeoutMinutes - 1)
         sh """
             set +e
             ( ${wrapper} --server '${serverUrl}' \\
                 --ui-url '${uiUrl}' --steps \\
                 --steps-poll-interval '${stepsPollInterval}' \\
-                --steps-max-depth '${stepsMaxDepth}' ${versionArgs} \\
+                --steps-max-depth '${stepsMaxDepth}' \\
+                --timeout '${wrapperTimeout}m' ${versionArgs} \\
                 ${daggerCommand} > '${ndjsonFile}' 2> '${stderrFile}'
               echo \$? > '${exitFile}' ) > /dev/null 2>&1 &
             echo \$! > '${pidFile}'
