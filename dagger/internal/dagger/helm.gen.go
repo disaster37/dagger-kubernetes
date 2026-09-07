@@ -10,7 +10,7 @@ import (
 )
 
 // Retrieve the binding value, as type Helm
-func (r *Binding) AsHelm() *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L29)
+func (r *Binding) AsHelm() *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L29)
 	q := r.query.Select("asHelm")
 
 	return &Helm{
@@ -19,7 +19,7 @@ func (r *Binding) AsHelm() *Helm { // helm (https://github.com/disaster37/dagger
 }
 
 // Create or update a binding of type Helm in the environment
-func (r *Env) WithHelmInput(name string, value *Helm, description string) *Env { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L29)
+func (r *Env) WithHelmInput(name string, value *Helm, description string) *Env { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L29)
 	assertNotNil("value", value)
 	q := r.query.Select("withHelmInput")
 	q = q.Arg("name", name)
@@ -32,7 +32,7 @@ func (r *Env) WithHelmInput(name string, value *Helm, description string) *Env {
 }
 
 // Declare a desired Helm output to be assigned in the environment
-func (r *Env) WithHelmOutput(name string, description string) *Env { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L29)
+func (r *Env) WithHelmOutput(name string, description string) *Env { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L29)
 	q := r.query.Select("withHelmOutput")
 	q = q.Arg("name", name)
 	q = q.Arg("description", description)
@@ -42,11 +42,12 @@ func (r *Env) WithHelmOutput(name string, description string) *Env { // helm (ht
 	}
 }
 
-type Helm struct { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L29)
+type Helm struct { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L29)
 	query *querybuilder.Selection
 
-	id   *ID
-	lint *string
+	id      *ID
+	lint    *string
+	pushUrl *string
 }
 type WithHelmFunc func(r *Helm) *Helm
 
@@ -69,59 +70,59 @@ type HelmCiOpts struct {
 	// The registry
 	// You need to provide it if run from CI
 	//
-	Registry string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L26)
+	Registry string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L26)
 	//
 	// The repository inside the registry
 	// You need to provide it if run from CI
 	//
-	Repository string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L31)
+	Repository string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L31)
 	//
 	// The helm paths
 	//
 	//
 	// Default: ["."]
-	HelmPaths []string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L36)
+	HelmPaths []string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L36)
 	//
 	// If you are on CI, provide the CI type to set the right stuff when commit to ovoid loop for ever
 	//
-	Ci string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L40)
+	Ci string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L40)
 	//
 	// The image version to publish
 	// You need to provide it if run from CI
 	//
-	Version string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L45)
+	Version string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L45)
 	//
 	// The registry username
 	// You need to provide it if run from CI
 	//
-	RegistryUsername *Secret // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L50)
+	RegistryUsername *Secret // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L50)
 	//
 	// The registry password
 	// You need to provide it if run from CI
 	//
-	RegistryPassword *Secret // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L55)
+	RegistryPassword *Secret // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L55)
 	//
 	// The git token
 	// You need to provide it if run from CI
 	//
-	GitToken *Secret // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L60)
+	GitToken *Secret // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L60)
 	//
 	// The git repo URL
 	// You need to provide it when you are on PullRequest
 	//
-	GitRepoURL string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L65)
+	GitRepoURL string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L65)
 	//
 	// The git branch where you should to push
 	// You need to provide it when you are on PullRequest or on Tag
 	//
-	GitBranch string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L70)
+	GitBranch string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L70)
 	//
 	// Dry-run: skip push and git commit/push even when --ci is set.
 	//
-	DryRun bool // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L74)
+	DryRun bool // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L74)
 }
 
-func (r *Helm) Ci(opts ...HelmCiOpts) *Directory { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L20)
+func (r *Helm) Ci(opts ...HelmCiOpts) *Directory { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L20)
 	q := r.query.Select("ci")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `registry` optional argument
@@ -182,68 +183,68 @@ type HelmGenerateCiOpts struct {
 	//
 	//
 	// Default: ["main"]
-	Branches []string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L251)
+	Branches []string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L265)
 	//
 	// Helm chart directory paths
 	//
 	//
 	// Default: ["."]
-	HelmPaths []string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L256)
+	HelmPaths []string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L270)
 	//
 	// Dagger CLI version to use in CI (empty = engine default)
 	//
-	DaggerVersion string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L260)
+	DaggerVersion string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L274)
 	//
 	// OCI registry URL. Empty = renderer default (ghcr.io on GitHub).
 	//
-	Registry string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L264)
+	Registry string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L278)
 	//
 	// Repository path inside the registry.
 	//
-	Repository string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L268)
+	Repository string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L282)
 	//
 	// Branch commits land here when running on a tag.
 	//
 	//
 	// Default: "main"
-	DefaultBranch string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L273)
+	DefaultBranch string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L287)
 	//
 	// Configurable dagger module reference.
 	// Defaults to this module's current version (auto-detected).
 	//
-	ModuleRef string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L278)
+	ModuleRef string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L292)
 	//
 	// GitHub: secret name for registry username (empty = github.actor).
 	//
-	RegistryUsernameKey string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L282)
+	RegistryUsernameKey string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L296)
 	//
 	// GitHub: secret name for registry password (empty = GITHUB_TOKEN).
 	//
-	RegistryPasswordKey string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L286)
+	RegistryPasswordKey string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L300)
 	//
 	// Jenkins: credential id for registry username/password.
 	//
-	RegistryCredential string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L290)
+	RegistryCredential string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L304)
 	//
 	// Jenkins: credential id for git token.
 	//
-	GitTokenCredential string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L294)
+	GitTokenCredential string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L308)
 	//
 	// GitLab: CI/CD variable name for registry username.
 	//
-	RegistryUsernameVar string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L298)
+	RegistryUsernameVar string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L312)
 	//
 	// GitLab: CI/CD variable name for registry password.
 	//
-	RegistryPasswordVar string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L302)
+	RegistryPasswordVar string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L316)
 	//
 	// GitLab: CI/CD variable name for git token.
 	//
-	GitTokenVar string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L306)
+	GitTokenVar string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L320)
 }
 
 // GenerateCi generates CI pipeline files for the given CI system.
-func (r *Helm) GenerateCi(ci string, opts ...HelmGenerateCiOpts) *Directory { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/pipeline.go#L241)
+func (r *Helm) GenerateCi(ci string, opts ...HelmGenerateCiOpts) *Directory { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/pipeline.go#L255)
 	q := r.query.Select("generateCi")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `branches` optional argument
@@ -317,16 +318,16 @@ type HelmGenerateDocumentationOpts struct {
 	//
 	//
 	// Default: "README.md"
-	TargetFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/generate_doc.go#L16)
+	TargetFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/generate_doc.go#L16)
 	//
 	// Config file for readme-generator
 	//
-	ConfigFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/generate_doc.go#L20)
+	ConfigFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/generate_doc.go#L20)
 }
 
 // GenerateDocumentation permit to generate helm documentation
 // It will return the readme file
-func (r *Helm) GenerateDocumentation(opts ...HelmGenerateDocumentationOpts) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/generate_doc.go#L11)
+func (r *Helm) GenerateDocumentation(opts ...HelmGenerateDocumentationOpts) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/generate_doc.go#L11)
 	q := r.query.Select("generateDocumentation")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `targetFile` optional argument
@@ -351,16 +352,16 @@ type HelmGenerateSchemaOpts struct {
 	//
 	//
 	// Default: "values.schema.json"
-	TargetFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/generate_schema.go#L16)
+	TargetFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/generate_schema.go#L16)
 	//
 	// Config file for readme-generator
 	//
-	ConfigFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/generate_schema.go#L20)
+	ConfigFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/generate_schema.go#L20)
 }
 
 // GenerateSchema permit to generate helm schema
 // It will return the values.schema.json file
-func (r *Helm) GenerateSchema(opts ...HelmGenerateSchemaOpts) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/generate_schema.go#L11)
+func (r *Helm) GenerateSchema(opts ...HelmGenerateSchemaOpts) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/generate_schema.go#L11)
 	q := r.query.Select("generateSchema")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `targetFile` optional argument
@@ -378,7 +379,7 @@ func (r *Helm) GenerateSchema(opts ...HelmGenerateSchemaOpts) *File { // helm (h
 	}
 }
 
-func (r *Helm) GeneratorContainer() *Container { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L33)
+func (r *Helm) GeneratorContainer() *Container { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L33)
 	q := r.query.Select("generatorContainer")
 
 	return &Container{
@@ -386,7 +387,7 @@ func (r *Helm) GeneratorContainer() *Container { // helm (https://github.com/dis
 	}
 }
 
-func (r *Helm) HelmContainer() *Container { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L32)
+func (r *Helm) HelmContainer() *Container { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L32)
 	q := r.query.Select("helmContainer")
 
 	return &Container{
@@ -444,7 +445,7 @@ func (r *Helm) UnmarshalJSON(bs []byte) error {
 }
 
 // Lint permit to lint helm chart
-func (r *Helm) Lint(ctx context.Context) (string, error) { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/lint.go#L10)
+func (r *Helm) Lint(ctx context.Context) (string, error) { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/lint.go#L10)
 	if r.lint != nil {
 		return *r.lint, nil
 	}
@@ -463,15 +464,15 @@ type HelmMigrateValuesTagsOpts struct {
 	//
 	//
 	// Default: "values.yaml"
-	ValuesFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/migrate.go#L22)
+	ValuesFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/migrate.go#L22)
 	//
 	// Config file for readme-generator
 	//
-	ConfigFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/migrate.go#L26)
+	ConfigFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/migrate.go#L26)
 	//
 	// Output file path. If empty, valuesFile is rewritten in place.
 	//
-	OutputFile string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/migrate.go#L30)
+	OutputFile string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/migrate.go#L30)
 }
 
 // MigrateValuesTags permit to migrate values.yaml metadata tags
@@ -480,7 +481,7 @@ type HelmMigrateValuesTagsOpts struct {
 // readme-generator-for-helm fork. The operation is idempotent and only modifies
 // metadata comment lines; YAML values, modifiers, and descriptions are preserved.
 // It returns the migrated values file.
-func (r *Helm) MigrateValuesTags(opts ...HelmMigrateValuesTagsOpts) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/migrate.go#L16)
+func (r *Helm) MigrateValuesTags(opts ...HelmMigrateValuesTagsOpts) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/migrate.go#L16)
 	q := r.query.Select("migrateValuesTags")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `valuesFile` optional argument
@@ -504,7 +505,7 @@ func (r *Helm) MigrateValuesTags(opts ...HelmMigrateValuesTagsOpts) *File { // h
 
 // Push helm chart on registry (OCI format only)
 // It will return the updated Chart.yaml file with the expected version
-func (r *Helm) Push(registryUrl string, repositoryName string, version string) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/push.go#L15)
+func (r *Helm) Push(registryUrl string, repositoryName string, version string) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/push.go#L15)
 	q := r.query.Select("push")
 	q = q.Arg("registryUrl", registryUrl)
 	q = q.Arg("repositoryName", repositoryName)
@@ -515,8 +516,25 @@ func (r *Helm) Push(registryUrl string, repositoryName string, version string) *
 	}
 }
 
+// PushUrl returns the OCI chart URL that would be pushed.
+// This is useful as a summary/report at the end of a CI run.
+func (r *Helm) PushURL(ctx context.Context, registryUrl string, repositoryName string, version string) (string, error) { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/push_url.go#L12)
+	if r.pushUrl != nil {
+		return *r.pushUrl, nil
+	}
+	q := r.query.Select("pushUrl")
+	q = q.Arg("registryUrl", registryUrl)
+	q = q.Arg("repositoryName", repositoryName)
+	q = q.Arg("version", version)
+
+	var response string
+
+	q = q.Bind(&response)
+	return response, q.Execute(ctx)
+}
+
 // Update Chart.yaml file
-func (r *Helm) UpdateChart(key string, value string) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/update.go#L10)
+func (r *Helm) UpdateChart(key string, value string) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/update.go#L10)
 	q := r.query.Select("updateChart")
 	q = q.Arg("key", key)
 	q = q.Arg("value", value)
@@ -527,7 +545,7 @@ func (r *Helm) UpdateChart(key string, value string) *File { // helm (https://gi
 }
 
 // Update values.yaml file
-func (r *Helm) UpdateValues(key string, value string) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/update.go#L30)
+func (r *Helm) UpdateValues(key string, value string) *File { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/update.go#L30)
 	q := r.query.Select("updateValues")
 	q = q.Arg("key", key)
 	q = q.Arg("value", value)
@@ -543,15 +561,15 @@ type HelmWithRepositoryOpts struct {
 	// The repository name
 	// You need to set it when is not OCI format
 	//
-	Name string // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L95)
+	Name string // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L95)
 	//
 	// Is it an OCI repository
 	//
-	IsOci bool // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L103)
+	IsOci bool // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L103)
 }
 
 // WithRepository permit to login on private helm repository
-func (r *Helm) WithRepository(url string, username *Secret, password *Secret, opts ...HelmWithRepositoryOpts) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L89)
+func (r *Helm) WithRepository(url string, username *Secret, password *Secret, opts ...HelmWithRepositoryOpts) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L89)
 	assertNotNil("username", username)
 	assertNotNil("password", password)
 	q := r.query.Select("withRepository")
@@ -575,7 +593,7 @@ func (r *Helm) WithRepository(url string, username *Secret, password *Secret, op
 }
 
 // WithSource permit to update the current source
-func (r *Helm) WithSource(src *Directory) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L136)
+func (r *Helm) WithSource(src *Directory) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L136)
 	assertNotNil("src", src)
 	q := r.query.Select("withSource")
 	q = q.Arg("src", src)
@@ -586,7 +604,7 @@ func (r *Helm) WithSource(src *Directory) *Helm { // helm (https://github.com/di
 }
 
 // WithWorkDir change the working directory on all containers
-func (r *Helm) WithWorkDir(path string) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L152)
+func (r *Helm) WithWorkDir(path string) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L152)
 	q := r.query.Select("withWorkDir")
 	q = q.Arg("path", path)
 
@@ -595,7 +613,7 @@ func (r *Helm) WithWorkDir(path string) *Helm { // helm (https://github.com/disa
 	}
 }
 
-func (r *Helm) YqContainer() *Container { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L34)
+func (r *Helm) YqContainer() *Container { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L34)
 	q := r.query.Select("yqContainer")
 
 	return &Container{
@@ -617,17 +635,17 @@ type HelmOpts struct {
 	// base helm container
 	// It need contain helm
 	//
-	BaseHelmContainer *Container // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L45)
+	BaseHelmContainer *Container // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L45)
 	//
 	// Base generator container
 	// It need contain readme-generator-for-helm
 	//
-	BaseGeneratorContainer *Container // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L50)
+	BaseGeneratorContainer *Container // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L50)
 	//
 	// Base YQ container
 	// It need contain yq
 	//
-	BaseYqContainer *Container // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L55)
+	BaseYqContainer *Container // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L55)
 }
 
 // A generated module for Helm functions
@@ -643,7 +661,7 @@ type HelmOpts struct {
 // The first line in this comment block is a short description line and the
 // rest is a long description with more detail on the module's purpose or usage,
 // if appropriate. All modules should have a short description.
-func (r *Query) Helm(src *Directory, opts ...HelmOpts) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/b753e824a9c4beec16d624fb1b7f59b073934c78/helm/main.go#L37)
+func (r *Query) Helm(src *Directory, opts ...HelmOpts) *Helm { // helm (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/helm/main.go#L37)
 	assertNotNil("src", src)
 	q := r.query.Select("helm")
 	for i := len(opts) - 1; i >= 0; i-- {

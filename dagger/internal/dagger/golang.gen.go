@@ -318,7 +318,7 @@ type GolangGenerateCiOpts struct {
 }
 
 // GenerateCi generates CI pipeline files for the given CI system.
-func (r *Golang) GenerateCi(ci string, opts ...GolangGenerateCiOpts) *Directory { // golang (../../../dagger/deps/golang/pipeline.go:50:1)
+func (r *Golang) GenerateCi(ci Void, opts ...GolangGenerateCiOpts) *Directory { // golang (../../../dagger/deps/golang/pipeline.go:50:1)
 	q := r.query.Select("generateCi")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `branches` optional argument

@@ -11,8 +11,8 @@
     },
     {
       "name": "helm",
-      "source": "github.com/disaster37/dagger-library-go/helm@2.0.10",
-      "pin": "b753e824a9c4beec16d624fb1b7f59b073934c78"
+      "source": "github.com/disaster37/dagger-library-go/helm@2.0.12",
+      "pin": "69b57f8ff6f970a8e28480741f14c58ae4aac014"
     }
   ]
 }
