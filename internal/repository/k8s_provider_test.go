@@ -1170,27 +1170,63 @@ func TestK8sEngineCAInjection(t *testing.T) {
 	})
 
 	sts := ensureEngineSet(t, p, cs)
+	podSpec := sts.Spec.Template.Spec
 
-	// Volume ca-bundle with secret name.
+	// Init container ca-init copies CA from secret volume into writable emptyDir.
+	initContainers := podSpec.InitContainers
+	if len(initContainers) != 1 {
+		t.Fatalf("expected 1 init container, got %d", len(initContainers))
+	}
+	ic := initContainers[0]
+	if ic.Name != "ca-init" {
+		t.Errorf("init container name = %q, want ca-init", ic.Name)
+	}
+	hasCASecret := false
+	hasCABundle := false
+	for _, m := range ic.VolumeMounts {
+		if m.Name == volumeCASecret {
+			hasCASecret = true
+			if m.MountPath != "/tmp/ca-secret" || !m.ReadOnly {
+				t.Errorf("ca-secret mount in init container = %+v, want path /tmp/ca-secret, readOnly", m)
+			}
+		}
+		if m.Name == volumeCABundle {
+			hasCABundle = true
+			if m.MountPath != "/usr/local/share/ca-certificates" {
+				t.Errorf("ca-bundle mount in init container = %+v, want path /usr/local/share/ca-certificates", m)
+			}
+		}
+	}
+	if !hasCASecret || !hasCABundle {
+		t.Errorf("init container missing mounts: hasCASecret=%v hasCABundle=%v", hasCASecret, hasCABundle)
+	}
+
+	// Volume ca-bundle is now an emptyDir (writable).
 	caVol := volumeByName(sts, volumeCABundle)
 	if caVol == nil {
-		t.Fatalf("expected %s volume, got %+v", volumeCABundle, sts.Spec.Template.Spec.Volumes)
+		t.Fatalf("expected %s volume, got %+v", volumeCABundle, podSpec.Volumes)
 	}
-	if caVol.Secret == nil || caVol.Secret.SecretName != "custom-ca-bundle" {
-		t.Errorf("expected secret custom-ca-bundle, got %+v", caVol.Secret)
-	}
-	if len(caVol.Secret.Items) != 0 {
-		t.Errorf("expected no Items, got %+v", caVol.Secret.Items)
+	if caVol.EmptyDir == nil {
+		t.Errorf("expected emptyDir for %s, got %+v", volumeCABundle, caVol.VolumeSource)
 	}
 
-	// Mounted read-only at /usr/local/share/ca-certificates (directory, not subPath).
+	// Separate ca-secret volume holds the K8s Secret (mounted only in init container).
+	caSecVol := volumeByName(sts, volumeCASecret)
+	if caSecVol == nil {
+		t.Fatalf("expected %s volume, got %+v", volumeCASecret, podSpec.Volumes)
+	}
+	if caSecVol.Secret == nil || caSecVol.Secret.SecretName != "custom-ca-bundle" {
+		t.Errorf("expected secret custom-ca-bundle, got %+v", caSecVol.Secret)
+	}
+
+	// Mounted at /usr/local/share/ca-certificates (NOT read-only — emptyDir is writable).
 	container := sts.Spec.Template.Spec.Containers[0]
 	caMount := mountByName(&container, volumeCABundle)
 	if caMount == nil {
 		t.Fatalf("expected %s mount, got %+v", volumeCABundle, container.VolumeMounts)
 	}
-	if caMount.MountPath != engineCAMountPath || caMount.SubPath != "" || !caMount.ReadOnly {
-		t.Errorf("CA mount = %+v, want path %s, no subPath, readOnly", caMount, engineCAMountPath)
+	if caMount.MountPath != engineCAMountPath || caMount.SubPath != "" || caMount.ReadOnly {
+		t.Errorf("CA mount = %+v, want path %s, no subPath, writable", caMount, engineCAMountPath)
 	}
 
 	// No SSL_CERT_FILE or NODE_EXTRA_CA_CERTS env vars (Dagger auto-detects CAs).
@@ -1205,8 +1241,14 @@ func TestK8sEngineCAInjectionDisabled(t *testing.T) {
 	p, cs := defaultK8sProvider()
 	sts := ensureEngineSet(t, p, cs)
 
+	if len(sts.Spec.Template.Spec.InitContainers) != 0 {
+		t.Errorf("expected no init containers, got %d", len(sts.Spec.Template.Spec.InitContainers))
+	}
 	if vol := volumeByName(sts, volumeCABundle); vol != nil {
 		t.Errorf("expected no %s volume, got %+v", volumeCABundle, vol)
+	}
+	if vol := volumeByName(sts, volumeCASecret); vol != nil {
+		t.Errorf("expected no %s volume, got %+v", volumeCASecret, vol)
 	}
 	container := sts.Spec.Template.Spec.Containers[0]
 	if mount := mountByName(&container, volumeCABundle); mount != nil {

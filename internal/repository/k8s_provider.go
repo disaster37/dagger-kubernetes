@@ -36,6 +36,7 @@ const (
 	volumeEngineConfig     = "engine-config"
 	volumeDaggerConfig     = "dagger-config"
 	volumeCABundle         = "ca-bundle"
+	volumeCASecret         = "ca-secret" // K8s Secret volume (read-only); mounted only in init container
 
 	engineIdleSinceAnnotation = "dagger-kubernetes.io/idle-since"
 )
@@ -251,6 +252,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 				ObjectMeta: metav1.ObjectMeta{Labels: labelMap},
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: &graceSec,
+					InitContainers:                p.initContainers(image),
 					Containers:                    []corev1.Container{container},
 					Volumes:                       p.podVolumes(daggerTOML),
 					Tolerations:                   p.cfg.Tolerations,
@@ -316,7 +318,6 @@ func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount
 		mounts = append(mounts, corev1.VolumeMount{
 			Name:      volumeCABundle,
 			MountPath: engineCAMountPath,
-			ReadOnly:  true,
 		})
 	}
 	if daggerTOML != "" {
@@ -343,14 +344,22 @@ func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
 		},
 	}
 	if p.cfg.CASecret != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: volumeCABundle,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{
-					SecretName: p.cfg.CASecret,
+		volumes = append(volumes,
+			corev1.Volume{
+				Name: volumeCABundle,
+				VolumeSource: corev1.VolumeSource{
+					EmptyDir: &corev1.EmptyDirVolumeSource{},
 				},
 			},
-		})
+			corev1.Volume{
+				Name: volumeCASecret,
+				VolumeSource: corev1.VolumeSource{
+					Secret: &corev1.SecretVolumeSource{
+						SecretName: p.cfg.CASecret,
+					},
+				},
+			},
+		)
 	}
 	if daggerTOML != "" {
 		volumes = append(volumes, corev1.Volume{
@@ -363,6 +372,35 @@ func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
 		})
 	}
 	return volumes
+}
+
+// initContainers returns init containers for the engine pod. When a custom CA
+// secret is configured, it copies the CA files from the read-only secret volume
+// into a writable emptyDir so Dagger can rehash and install them at startup.
+func (p *K8sProvider) initContainers(image string) []corev1.Container {
+	if p.cfg.CASecret == "" {
+		return nil
+	}
+	return []corev1.Container{
+		{
+			Name:            "ca-init",
+			Image:           image,
+			ImagePullPolicy: p.cfg.PullPolicy,
+			Command:         []string{"/bin/sh", "-c"},
+			Args:            []string{"cp /tmp/ca-secret/* /usr/local/share/ca-certificates/"},
+			VolumeMounts: []corev1.VolumeMount{
+				{
+					Name:      volumeCASecret,
+					MountPath: "/tmp/ca-secret",
+					ReadOnly:  true,
+				},
+				{
+					Name:      volumeCABundle,
+					MountPath: "/usr/local/share/ca-certificates",
+				},
+			},
+		},
+	}
 }
 
 // sortedKeys returns the keys of m in ascending order so map-driven pod specs
