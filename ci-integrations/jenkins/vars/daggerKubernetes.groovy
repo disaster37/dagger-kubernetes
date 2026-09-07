@@ -34,6 +34,7 @@ def call(Map params = [:], Closure body = null) {
     boolean dynamicStages = envTruthy(params.dynamicStages, env.DAGGER_KUBERNETES_DYNAMIC_STAGES, false)
     String stepsPollInterval = params.stepsPollInterval ?: env.DAGGER_KUBERNETES_STEPS_POLL_INTERVAL ?: '2s'
     int stepsMaxDepth = (params.stepsMaxDepth ?: env.DAGGER_KUBERNETES_STEPS_MAX_DEPTH ?: 8) as int
+    int stepsRenderDepth = (params.stepsRenderDepth ?: env.DAGGER_KUBERNETES_STEPS_RENDER_DEPTH ?: 0) as int
     int timeoutMinutes = (params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES ?: 30) as int
     boolean magicCache = envTruthy(params.magicCache, env.DAGGER_KUBERNETES_MAGIC_CACHE, false)
     String cacheRegistry = params.cacheRegistry ?: env.DAGGER_KUBERNETES_CACHE_REGISTRY ?: 'cache.reg/dagger-cache'
@@ -57,7 +58,8 @@ def call(Map params = [:], Closure body = null) {
     if (dynamicStages) {
         dynamicStagesRun(serverUrl: serverUrl, token: token, uiUrl: uiUrl,
                          version: version, stepsPollInterval: stepsPollInterval,
-                         stepsMaxDepth: stepsMaxDepth, timeoutMinutes: timeoutMinutes,
+                         stepsMaxDepth: stepsMaxDepth, stepsRenderDepth: stepsRenderDepth,
+                         timeoutMinutes: timeoutMinutes,
                          command: params.command, cacheConfig: cacheConfig)
         return
     }
@@ -126,6 +128,7 @@ void dynamicStagesRun(Map params = [:]) {
     String version = params.version
     String stepsPollInterval = params.stepsPollInterval
     int stepsMaxDepth = params.stepsMaxDepth
+    int stepsRenderDepth = params.stepsRenderDepth
     int timeoutMinutes = params.timeoutMinutes
     String daggerCommand = params.command ?: env.DAGGER_COMMAND
     String cacheConfig = params.cacheConfig ?: ''
@@ -201,7 +204,8 @@ When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger C
 
     timeout(time: timeoutMinutes, unit: 'MINUTES') {
         renderStepTree(ndjsonFile: ndjsonFile, stderrFile: stderrFile,
-                       exitFile: exitFile, pidFile: pidFile, uiUrl: uiUrl)
+                       exitFile: exitFile, pidFile: pidFile, uiUrl: uiUrl,
+                       renderDepth: stepsRenderDepth)
     }
 }
 
@@ -218,6 +222,7 @@ void renderStepTree(Map params = [:]) {
     String exitFile = params.exitFile
     String pidFile = params.pidFile
     String uiUrl = params.uiUrl
+    int renderDepth = params.renderDepth ?: 0
 
     int offset = 0
     boolean done = false
@@ -259,6 +264,9 @@ void renderStepTree(Map params = [:]) {
                     // shape (missing node/log fields) is skipped, never fatal.
                     try {
                         def evt = readJSON(text: line)
+                        if (evt.type == 'pipeline_done') {
+                            echo "[dagger-kubernetes] received pipeline_done status=${evt.status}"
+                        }
                         switch (evt.type) {
                             case 'node_started':
                                 def id = evt.node.id
@@ -319,6 +327,8 @@ void renderStepTree(Map params = [:]) {
         echo "[dagger-kubernetes] wrapper exited without a terminal pipeline_done event; treating the run as failed"
     }
 
+    echo "[dagger-kubernetes] step-tree loop done (done=${done} exited=${wrapperExited} finalStatus=${finalStatus})"
+
     // Link children to parents (child-before-parent finish is fine: both are
     // already fully present once pipeline_done has arrived).
     for (def e : nodes.entrySet()) {
@@ -334,7 +344,7 @@ void renderStepTree(Map params = [:]) {
     // against a forged cyclic parent chain (defense-in-depth: the wrapper
     // emits a tree, but the file is on a shared workspace).
     if (rootId != null && nodes.containsKey(rootId)) {
-        renderNode(nodes, rootId, [] as Set)
+        renderNode(nodes, rootId, [] as Set, renderDepth)
     } else {
         stage("dagger") {
             echo "[dagger-kubernetes] no step tree was captured (status ${finalStatus})"
@@ -355,18 +365,30 @@ void renderStepTree(Map params = [:]) {
         pid = ''
     }
     if (pid) {
-        // Poll for the process to disappear, bounded by the enclosing timeout.
+        // Poll for the process to disappear. Bounded to 30s: the subshell
+        // writes the exit file immediately after the wrapper exits, so if the
+        // wrapper process is stuck (orphaned child, hung I/O) we give up and
+        // read the exit file directly rather than spinning until the enclosing
+        // timeout aborts the whole build as ABORTED.
+        echo "[dagger-kubernetes] waiting for wrapper pid ${pid} to exit"
+        long deadline = System.currentTimeMillis() + 30_000
         String alive = sh(script: "kill -0 ${pid} 2>/dev/null && echo yes || echo no", returnStdout: true).trim()
         while (alive == 'yes') {
+            if (System.currentTimeMillis() > deadline) {
+                echo "[dagger-kubernetes] wrapper pid ${pid} still alive after 30s; giving up"
+                break
+            }
             sleep(time: 1, unit: 'SECONDS')
             alive = sh(script: "kill -0 ${pid} 2>/dev/null && echo yes || echo no", returnStdout: true).trim()
         }
+        echo "[dagger-kubernetes] wrapper pid ${pid} has exited"
     }
     String exitCode = '1'
     try {
         exitCode = readFile(file: exitFile).trim()
     } catch (Exception ignored) {
     }
+    echo "[dagger-kubernetes] wrapper exit code: ${exitCode}"
     String stderr = ''
     try {
         stderr = readFile(file: stderrFile)
@@ -383,6 +405,7 @@ void renderStepTree(Map params = [:]) {
     sh "rm -f '${ndjsonFile}' '${stderrFile}' '${exitFile}' '${pidFile}'"
 
     boolean failed = exitCode != '0' || finalStatus == 'failed' || finalStatus == 'canceled'
+    echo "[dagger-kubernetes] failed=${failed} (exitCode=${exitCode} finalStatus=${finalStatus})"
     if (failed) {
         currentBuild.result = 'FAILURE'
         error "dagger-kubernetes: pipeline failed (exit ${exitCode})"
@@ -401,7 +424,7 @@ String finalTraceId(String stderr) {
 // per-stage failure via catchError so the build can still render siblings
 // before the final result is applied. The visited set makes the recursion
 // terminate even on a forged cyclic parent chain (defense-in-depth).
-void renderNode(def nodes, String nodeId, Set visited) {
+void renderNode(def nodes, String nodeId, Set visited, int renderDepth = 0) {
     if (!visited.add(nodeId)) {
         return
     }
@@ -409,11 +432,29 @@ void renderNode(def nodes, String nodeId, Set visited) {
     String name = node.name
     boolean isFailed = node.state == 'failed'
 
+    // When renderDepth > 0, nodes deeper than renderDepth are collapsed:
+    // their children render flat and their logs are echoed inline, but they
+    // don't create separate stage() blocks.
+    int depth = (node.depth ?: 0) as int
+    boolean collapsed = renderDepth > 0 && depth >= renderDepth
+
+    if (collapsed) {
+        if (node.children) {
+            for (String childId : node.children) {
+                renderNode(nodes, childId, visited, renderDepth)
+            }
+        }
+        for (String l : node.logs) {
+            echo l
+        }
+        return
+    }
+
     if (isFailed) {
         catchError(stageResult: 'FAILURE') {
             stage(name) {
                 for (String childId : node.children) {
-                    renderNode(nodes, childId, visited)
+                    renderNode(nodes, childId, visited, renderDepth)
                 }
                 for (String l : node.logs) {
                     echo l
@@ -424,7 +465,7 @@ void renderNode(def nodes, String nodeId, Set visited) {
     } else {
         stage(name) {
             for (String childId : node.children) {
-                renderNode(nodes, childId, visited)
+                renderNode(nodes, childId, visited, renderDepth)
             }
             for (String l : node.logs) {
                 echo l

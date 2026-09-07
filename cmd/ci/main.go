@@ -286,6 +286,7 @@ func run(c *cli.Context) error {
 			status = "failed"
 			errMsg = err.Error()
 		}
+		fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] finalizing: status=%s err=%v\n", status, err)
 		for _, e := range stepsBuilder.Finalize(status, errMsg) {
 			if eerr := stepsSink.Emit(&e); eerr != nil {
 				logger.WithError(eerr).Debug("final ci step event emit failed")
