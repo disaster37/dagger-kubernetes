@@ -193,6 +193,12 @@ supervisor:
       terminationGracePeriodSeconds: 60
 ## @param supervisor.config.raft.recoveryMode Clear stale raft state (raft.db, snapshots, node-id) on startup and bootstrap a fresh cluster. Manual quorum-loss recovery only. Default: false.
       recoveryMode: false
+## @param supervisor.config.raft.transportMaxPool Raft transport connection pool size per peer. Default: 1.
+##   In Kubernetes StatefulSet environments where pod IPs change across
+##   restarts, a small pool forces fresh DNS resolution on each connection,
+##   reducing the window where stale cached connections point to old pod IPs
+##   (Cilium eBPF DNS proxy delays, ADR-029 DNS bypass caveats).
+      transportMaxPool: 1
 ## @param supervisor.config.raft.autopilot.enabled Enable autopilot subsystem.
 ## @param supervisor.config.raft.autopilot.cleanupDeadServers Auto-remove dead servers.
 ## @param supervisor.config.raft.autopilot.deadServerLastContactThreshold Time before server considered dead.

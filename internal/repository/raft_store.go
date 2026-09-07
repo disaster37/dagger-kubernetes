@@ -106,6 +106,12 @@ type RaftStoreConfig struct {
 	// lost (e.g. all pods were deleted simultaneously and the configuration is
 	// empty). Default: false.
 	RecoveryMode bool
+
+	// TransportMaxPool controls the Raft transport connection pool size per
+	// peer (default: 1). A smaller pool forces fresh DNS resolution on each
+	// connection, reducing the window where stale cached connections point to
+	// old pod IPs after a StatefulSet rolling restart.
+	TransportMaxPool int
 }
 
 // clearStaleRaftState implements recovery mode: when RecoveryMode is set the
@@ -337,6 +343,9 @@ func withDefaults(cfg *RaftStoreConfig) {
 	if cfg.TrailingLogs == 0 {
 		cfg.TrailingLogs = 256
 	}
+	if cfg.TransportMaxPool == 0 {
+		cfg.TransportMaxPool = 1
+	}
 }
 
 // hostAddr implements net.Addr with a DNS hostname instead of a resolved IP.
@@ -402,10 +411,15 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 		if err != nil {
 			return nil, "", err
 		}
+		// Wrap with DNS-re-resolving retry layer: when a peer pod
+		// restarts and gets a new IP, eBPF DNS proxies (Cilium) may
+		// cache the old IP for up to 30 s. This layer re-resolves DNS
+		// on dial and retries on connection-refused errors.
+		stream := newRetryingStreamLayer(layer, 10*time.Second)
 		transport := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
-			Stream:  layer,
+			Stream:  stream,
 			Logger:  hclog.New(&hclog.LoggerOptions{Output: logOutput, Name: "transport"}),
-			MaxPool: 10,
+			MaxPool: cfg.TransportMaxPool,
 			Timeout: 10 * time.Second,
 		})
 		return transport, advertise.String(), nil
@@ -413,7 +427,7 @@ func newStreamTransport(cfg *RaftStoreConfig, logOutput io.Writer) (raft.Transpo
 
 	// Plaintext TCP: raft.NewTCPTransport type-asserts stream.Addr() as
 	// *net.TCPAddr, so we must pass the resolved IP (not a hostname).
-	transport, err := raft.NewTCPTransport(cfg.BindAddr, resolved, 10, 10*time.Second, logOutput)
+	transport, err := raft.NewTCPTransport(cfg.BindAddr, resolved, cfg.TransportMaxPool, 10*time.Second, logOutput)
 	if err != nil {
 		return nil, "", fmt.Errorf("create raft transport: %w", err)
 	}

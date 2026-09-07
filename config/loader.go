@@ -106,6 +106,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("raft.no_snapshot_restore_on_start", true)
 	v.SetDefault("raft.termination_grace_period", "60s")
 	v.SetDefault("raft.recovery_mode", false)
+	v.SetDefault("raft.transport_max_pool", 1)
 
 	v.SetDefault("raft.autopilot.enabled", true)
 	v.SetDefault("raft.autopilot.cleanup_dead_servers", true)

@@ -148,6 +148,7 @@ raft:
   snapshot_threshold: 1000
   snapshot_interval: "10m"
   trailing_logs: 256
+  transport_max_pool: 1   # Raft transport connection pool per peer. Smaller = fresher DNS, important when pod IPs change across restarts (StatefulSet rolling update, Cilium eBPF DNS cache).
   tls:
     enabled: false         # binary default (plaintext single-node dev/test). Helm chart sets true.
     dir: ""                # "" = <database.dir>/tls

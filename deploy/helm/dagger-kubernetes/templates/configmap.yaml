@@ -79,6 +79,7 @@ data:
       snapshot_interval: "10m"
       trailing_logs: 256
       no_snapshot_restore_on_start: {{ .Values.supervisor.config.raft.noSnapshotRestoreOnStart }}
+      transport_max_pool: {{ .Values.supervisor.config.raft.transportMaxPool }}
       tls:
         enabled: {{ .Values.supervisor.config.raft.tls.enabled }}
         dir: ""

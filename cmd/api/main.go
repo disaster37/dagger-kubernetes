@@ -520,6 +520,7 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		NoSnapshotRestoreOnStart: cfg.Raft.NoSnapshotRestoreOnStart,
 		SessionSink:              sessions,
 		RecoveryMode:             cfg.Raft.RecoveryMode,
+		TransportMaxPool:         cfg.Raft.TransportMaxPool,
 	}, logger)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open database: %w", err)

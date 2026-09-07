@@ -159,6 +159,13 @@ type RaftConfig struct {
 	// only. Default: false.
 	RecoveryMode bool `mapstructure:"recovery_mode"`
 
+	// TransportMaxPool controls the Raft transport connection pool size per
+	// peer (default: 1). In Kubernetes StatefulSet environments where pod IPs
+	// change across restarts, a smaller pool forces fresh DNS resolution on
+	// each connection, reducing the window where stale cached connections
+	// point to old pod IPs (Cilium eBPF DNS proxy delays).
+	TransportMaxPool int `mapstructure:"transport_max_pool"`
+
 	// Autopilot configuration.
 	Autopilot AutopilotConfig `mapstructure:"autopilot"`
 	// Join configuration.

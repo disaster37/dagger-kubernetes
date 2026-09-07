@@ -88,6 +88,7 @@ raft:
   no_snapshot_restore_on_start: true  # disable auto snapshot restore on start
   termination_grace_period: "60s"     # pod termination grace period
   recovery_mode: false            # clear stale raft state (raft.db, snapshots, node-id) and bootstrap fresh — manual quorum-loss recovery only
+  transport_max_pool: 1           # raft transport connection pool per peer; smaller = fresher DNS on StatefulSet pod IP changes
 
   # Autopilot — dead server detection and removal
   autopilot:
