@@ -10,7 +10,7 @@ import (
 )
 
 // Retrieve the binding value, as type Golang
-func (r *Binding) AsGolang() *Golang { // golang (../../../dagger/deps/golang/main.go:41:6)
+func (r *Binding) AsGolang() *Golang { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L41)
 	q := r.query.Select("asGolang")
 
 	return &Golang{
@@ -19,7 +19,7 @@ func (r *Binding) AsGolang() *Golang { // golang (../../../dagger/deps/golang/ma
 }
 
 // Create or update a binding of type Golang in the environment
-func (r *Env) WithGolangInput(name string, value *Golang, description string) *Env { // golang (../../../dagger/deps/golang/main.go:41:6)
+func (r *Env) WithGolangInput(name string, value *Golang, description string) *Env { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L41)
 	assertNotNil("value", value)
 	q := r.query.Select("withGolangInput")
 	q = q.Arg("name", name)
@@ -32,7 +32,7 @@ func (r *Env) WithGolangInput(name string, value *Golang, description string) *E
 }
 
 // Declare a desired Golang output to be assigned in the environment
-func (r *Env) WithGolangOutput(name string, description string) *Env { // golang (../../../dagger/deps/golang/main.go:41:6)
+func (r *Env) WithGolangOutput(name string, description string) *Env { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L41)
 	q := r.query.Select("withGolangOutput")
 	q = q.Arg("name", name)
 	q = q.Arg("description", description)
@@ -43,7 +43,7 @@ func (r *Env) WithGolangOutput(name string, description string) *Env { // golang
 }
 
 // Golang dagger module
-type Golang struct { // golang (../../../dagger/deps/golang/main.go:41:6)
+type Golang struct { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L41)
 	query *querybuilder.Selection
 
 	bench      *string
@@ -75,17 +75,17 @@ type GolangBenchOpts struct {
 	//
 	//
 	// Default: true
-	Memory bool // golang (../../../dagger/deps/golang/main.go:409:2)
+	Memory bool // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L409)
 	//
 	// the time.Duration each benchmark should run for
 	//
 	//
 	// Default: "5s"
-	Time string // golang (../../../dagger/deps/golang/main.go:413:2)
+	Time string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L413)
 }
 
 // Execute benchmarks defined within the target project, excludes all other tests
-func (r *Golang) Bench(ctx context.Context, opts ...GolangBenchOpts) (string, error) { // golang (../../../dagger/deps/golang/main.go:404:1)
+func (r *Golang) Bench(ctx context.Context, opts ...GolangBenchOpts) (string, error) { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L404)
 	if r.bench != nil {
 		return *r.bench, nil
 	}
@@ -112,31 +112,31 @@ type GolangBuildOpts struct {
 	//
 	// the path to the main.go file of the project
 	//
-	Main string // golang (../../../dagger/deps/golang/main.go:236:2)
+	Main string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L236)
 	//
 	// the name of the built binary
 	//
-	Out string // golang (../../../dagger/deps/golang/main.go:239:2)
+	Out string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L239)
 	//
 	// the target operating system
 	//
-	Os string // golang (../../../dagger/deps/golang/main.go:242:2)
+	Os string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L242)
 	//
 	// the target architecture
 	//
-	Arch string // golang (../../../dagger/deps/golang/main.go:245:2)
+	Arch string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L245)
 	//
 	// flags to configure the linking during a build, by default sets flags for
 	// generating a release binary
 	//
 	//
 	// Default: ["-s","-w"]
-	Ldflags []string // golang (../../../dagger/deps/golang/main.go:250:2)
+	Ldflags []string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L250)
 }
 
 // Build a static binary from a Go project using the provided configuration.
 // A directory is returned containing the built binary.
-func (r *Golang) Build(opts ...GolangBuildOpts) *Directory { // golang (../../../dagger/deps/golang/main.go:233:1)
+func (r *Golang) Build(opts ...GolangBuildOpts) *Directory { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L233)
 	q := r.query.Select("build")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `main` optional argument
@@ -171,27 +171,27 @@ type GolangCiOpts struct {
 	//
 	// Path to main.go
 	//
-	Main string // golang (../../../dagger/deps/golang/pipeline.go:22:2)
+	Main string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L22)
 	//
 	// Binary output name
 	//
-	Out string // golang (../../../dagger/deps/golang/pipeline.go:25:2)
+	Out string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L25)
 	//
 	// Target OS
 	//
-	Os string // golang (../../../dagger/deps/golang/pipeline.go:28:2)
+	Os string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L28)
 	//
 	// Target arch
 	//
-	Arch string // golang (../../../dagger/deps/golang/pipeline.go:31:2)
+	Arch string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L31)
 	//
 	// ldflags
 	//
-	Ldflags []string // golang (../../../dagger/deps/golang/pipeline.go:34:2)
+	Ldflags []string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L34)
 }
 
 // Ci runs lint, test, and build as a single CI entrypoint.
-func (r *Golang) Ci(opts ...GolangCiOpts) *Directory { // golang (../../../dagger/deps/golang/pipeline.go:18:1)
+func (r *Golang) Ci(opts ...GolangCiOpts) *Directory { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L18)
 	q := r.query.Select("ci")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `main` optional argument
@@ -222,7 +222,7 @@ func (r *Golang) Ci(opts ...GolangCiOpts) *Directory { // golang (../../../dagge
 }
 
 // Base is the image used by all golang dagger functions, defaults to the bookworm base image
-func (r *Golang) Container() *Container { // golang (../../../dagger/deps/golang/main.go:43:2)
+func (r *Golang) Container() *Container { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L43)
 	q := r.query.Select("container")
 
 	return &Container{
@@ -235,12 +235,12 @@ type GolangDebugTestOpts struct {
 	//
 	// run select tests only, defined using a regex
 	//
-	Run string // golang (../../../dagger/deps/golang/main.go:354:2)
+	Run string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L354)
 }
 
 // Execute tests defined within the target project, ignores benchmarks by default
 // Debug test with dlv
-func (r *Golang) DebugTest(opts ...GolangDebugTestOpts) *Service { // golang (../../../dagger/deps/golang/main.go:350:1)
+func (r *Golang) DebugTest(opts ...GolangDebugTestOpts) *Service { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L350)
 	q := r.query.Select("debugTest")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `run` optional argument
@@ -256,7 +256,7 @@ func (r *Golang) DebugTest(opts ...GolangDebugTestOpts) *Service { // golang (..
 
 // Format the source code within a target project using gofumpt. Formatted code must be
 // copied back onto the host.`
-func (r *Golang) Format() *Directory { // golang (../../../dagger/deps/golang/main.go:498:1)
+func (r *Golang) Format() *Directory { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L498)
 	q := r.query.Select("format")
 
 	return &Directory{
@@ -271,54 +271,54 @@ type GolangGenerateCiOpts struct {
 	//
 	//
 	// Default: ["main"]
-	Branches []string // golang (../../../dagger/deps/golang/pipeline.go:60:2)
+	Branches []string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L60)
 	//
 	// Dagger CLI version to use in CI (empty = engine default)
 	//
-	DaggerVersion string // golang (../../../dagger/deps/golang/pipeline.go:64:2)
+	DaggerVersion string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L64)
 	//
 	// Branch commits land here when running on a tag.
 	//
 	//
 	// Default: "main"
-	DefaultBranch string // golang (../../../dagger/deps/golang/pipeline.go:69:2)
+	DefaultBranch string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L69)
 	//
 	// Configurable dagger module reference.
 	// Defaults to this module's current version (auto-detected).
 	//
-	ModuleRef string // golang (../../../dagger/deps/golang/pipeline.go:74:2)
+	ModuleRef string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L74)
 	//
 	// GitHub: secret name for registry username (empty = github.actor).
 	//
-	RegistryUsernameKey string // golang (../../../dagger/deps/golang/pipeline.go:78:2)
+	RegistryUsernameKey string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L78)
 	//
 	// GitHub: secret name for registry password (empty = GITHUB_TOKEN).
 	//
-	RegistryPasswordKey string // golang (../../../dagger/deps/golang/pipeline.go:82:2)
+	RegistryPasswordKey string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L82)
 	//
 	// Jenkins: credential id for registry username/password.
 	//
-	RegistryCredential string // golang (../../../dagger/deps/golang/pipeline.go:86:2)
+	RegistryCredential string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L86)
 	//
 	// Jenkins: credential id for git token.
 	//
-	GitTokenCredential string // golang (../../../dagger/deps/golang/pipeline.go:90:2)
+	GitTokenCredential string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L90)
 	//
 	// GitLab: CI/CD variable name for registry username.
 	//
-	RegistryUsernameVar string // golang (../../../dagger/deps/golang/pipeline.go:94:2)
+	RegistryUsernameVar string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L94)
 	//
 	// GitLab: CI/CD variable name for registry password.
 	//
-	RegistryPasswordVar string // golang (../../../dagger/deps/golang/pipeline.go:98:2)
+	RegistryPasswordVar string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L98)
 	//
 	// GitLab: CI/CD variable name for git token.
 	//
-	GitTokenVar string // golang (../../../dagger/deps/golang/pipeline.go:102:2)
+	GitTokenVar string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L102)
 }
 
 // GenerateCi generates CI pipeline files for the given CI system.
-func (r *Golang) GenerateCi(ci Void, opts ...GolangGenerateCiOpts) *Directory { // golang (../../../dagger/deps/golang/pipeline.go:50:1)
+func (r *Golang) GenerateCi(ci string, opts ...GolangGenerateCiOpts) *Directory { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/pipeline.go#L50)
 	q := r.query.Select("generateCi")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `branches` optional argument
@@ -375,7 +375,7 @@ func (r *Golang) GenerateCi(ci Void, opts ...GolangGenerateCiOpts) *Directory { 
 
 // GoBin return the Go bin path
 // It can be usefull to add bin on this because of cache volume
-func (r *Golang) GoBin(ctx context.Context) (string, error) { // golang (../../../dagger/deps/golang/main.go:159:1)
+func (r *Golang) GoBin(ctx context.Context) (string, error) { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L159)
 	if r.goBin != nil {
 		return *r.goBin, nil
 	}
@@ -437,7 +437,7 @@ func (r *Golang) UnmarshalJSON(bs []byte) error {
 }
 
 // Lint the target project using golangci-lint
-func (r *Golang) Lint(ctx context.Context) (string, error) { // golang (../../../dagger/deps/golang/main.go:454:1)
+func (r *Golang) Lint(ctx context.Context) (string, error) { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L454)
 	if r.lint != nil {
 		return *r.lint, nil
 	}
@@ -451,7 +451,7 @@ func (r *Golang) Lint(ctx context.Context) (string, error) { // golang (../../..
 
 // Echoes the version of go defined within a projects go.mod file.
 // It expects the go.mod file to be located within the root of the project
-func (r *Golang) ModVersion(ctx context.Context) (string, error) { // golang (../../../dagger/deps/golang/main.go:153:1)
+func (r *Golang) ModVersion(ctx context.Context) (string, error) { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L153)
 	if r.modVersion != nil {
 		return *r.modVersion, nil
 	}
@@ -468,31 +468,31 @@ type GolangTestOpts struct {
 	//
 	// if only short running tests should be executed
 	//
-	Short bool // golang (../../../dagger/deps/golang/main.go:287:2)
+	Short bool // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L287)
 	//
 	// if the tests should be executed out of order
 	//
-	Shuffle bool // golang (../../../dagger/deps/golang/main.go:290:2)
+	Shuffle bool // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L290)
 	//
 	// run select tests only, defined using a regex
 	//
-	Run string // golang (../../../dagger/deps/golang/main.go:293:2)
+	Run string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L293)
 	//
 	// skip select tests, defined using a regex
 	//
-	Skip string // golang (../../../dagger/deps/golang/main.go:296:2)
+	Skip string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L296)
 	//
 	// Run test with gotestsum
 	//
-	WithGotestsum bool // golang (../../../dagger/deps/golang/main.go:299:2)
+	WithGotestsum bool // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L299)
 	//
 	// Path to test
 	//
-	Path string // golang (../../../dagger/deps/golang/main.go:302:2)
+	Path string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L302)
 }
 
 // Execute tests defined within the target project, ignores benchmarks by default
-func (r *Golang) Test(opts ...GolangTestOpts) *File { // golang (../../../dagger/deps/golang/main.go:283:1)
+func (r *Golang) Test(opts ...GolangTestOpts) *File { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L283)
 	q := r.query.Select("test")
 	for i := len(opts) - 1; i >= 0; i-- {
 		// `short` optional argument
@@ -527,7 +527,7 @@ func (r *Golang) Test(opts ...GolangTestOpts) *File { // golang (../../../dagger
 }
 
 // Scans the target project for vulnerabilities using govulncheck
-func (r *Golang) Vulncheck(ctx context.Context) (string, error) { // golang (../../../dagger/deps/golang/main.go:429:1)
+func (r *Golang) Vulncheck(ctx context.Context) (string, error) { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L429)
 	if r.vulncheck != nil {
 		return *r.vulncheck, nil
 	}
@@ -541,7 +541,7 @@ func (r *Golang) Vulncheck(ctx context.Context) (string, error) { // golang (../
 
 // Enable private Go module support by dynamically constructing a .netrc auto-login
 // configuration file. Each call will append a new auto-login configuration
-func (r *Golang) WithPrivate(machine string, username *Secret, password *Secret, modules []string) *Golang { // golang (../../../dagger/deps/golang/main.go:169:1)
+func (r *Golang) WithPrivate(machine string, username *Secret, password *Secret, modules []string) *Golang { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L169)
 	assertNotNil("username", username)
 	assertNotNil("password", password)
 	q := r.query.Select("withPrivate")
@@ -557,7 +557,7 @@ func (r *Golang) WithPrivate(machine string, username *Secret, password *Secret,
 
 // Enable private Go module support by loading an existing .netrc auto-login configuration
 // file. Each call will append a new auto-login configuration
-func (r *Golang) WithPrivateLoad(cfg *File, modules []string) *Golang { // golang (../../../dagger/deps/golang/main.go:199:1)
+func (r *Golang) WithPrivateLoad(cfg *File, modules []string) *Golang { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L199)
 	assertNotNil("cfg", cfg)
 	q := r.query.Select("withPrivateLoad")
 	q = q.Arg("cfg", cfg)
@@ -569,7 +569,7 @@ func (r *Golang) WithPrivateLoad(cfg *File, modules []string) *Golang { // golan
 }
 
 // WithSource permit to update the current source on sdk container
-func (r *Golang) WithSource(src *Directory) *Golang { // golang (../../../dagger/deps/golang/main.go:515:1)
+func (r *Golang) WithSource(src *Directory) *Golang { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L515)
 	assertNotNil("src", src)
 	q := r.query.Select("withSource")
 	q = q.Arg("src", src)
@@ -595,15 +595,15 @@ type GolangOpts struct {
 	// official Go image is pulled from DockerHub using either the bullseye (< 1.20) or
 	// bookworm (> 1.20) variants.
 	//
-	Base *Container // golang (../../../dagger/deps/golang/main.go:67:2)
+	Base *Container // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L67)
 	//
 	// The golang version to use when no go.mod
 	//
-	Version string // golang (../../../dagger/deps/golang/main.go:70:2)
+	Version string // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L70)
 }
 
 // New initializes the golang dagger module
-func (r *Query) Golang(src *Directory, opts ...GolangOpts) *Golang { // golang (../../../dagger/deps/golang/main.go:60:1)
+func (r *Query) Golang(src *Directory, opts ...GolangOpts) *Golang { // golang (https://github.com/disaster37/dagger-library-go/tree/69b57f8ff6f970a8e28480741f14c58ae4aac014/golang/main.go#L60)
 	assertNotNil("src", src)
 	q := r.query.Select("golang")
 	for i := len(opts) - 1; i >= 0; i-- {
