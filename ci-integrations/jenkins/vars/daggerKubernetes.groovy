@@ -204,8 +204,8 @@ When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger C
 
     timeout(time: timeoutMinutes, unit: 'MINUTES') {
         renderStepTree(ndjsonFile: ndjsonFile, stderrFile: stderrFile,
-                       exitFile: exitFile, pidFile: pidFile, uiUrl: uiUrl,
-                       renderDepth: stepsRenderDepth)
+                       exitFile: exitFile, pidFile: pidFile, stepsDir: stepsDir,
+                       uiUrl: uiUrl, renderDepth: stepsRenderDepth)
     }
 }
 
@@ -221,6 +221,7 @@ void renderStepTree(Map params = [:]) {
     String stderrFile = params.stderrFile
     String exitFile = params.exitFile
     String pidFile = params.pidFile
+    String stepsDir = params.stepsDir
     String uiUrl = params.uiUrl
     int renderDepth = params.renderDepth ?: 0
 
