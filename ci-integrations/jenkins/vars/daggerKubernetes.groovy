@@ -241,11 +241,11 @@ void renderStepTree(Map params = [:]) {
         // before emitting its guaranteed terminal event (crash, OOM kill,
         // hang-then-kill) and polling further would only spin "Sleeping for
         // 1 sec" until the enclosing timeout — fail fast instead.
-        boolean exited = fileExists(exitFile)
+        boolean exited = sh(script: "test -f '${exitFile}' && echo yes || echo no", returnStdout: true).trim() == 'yes'
 
         String raw = ''
         try {
-            raw = readFile(file: ndjsonFile)
+            raw = sh(script: "cat '${ndjsonFile}' 2>/dev/null || true", returnStdout: true)
         } catch (Exception ignored) {
             // The wrapper may not have created the file yet on the first
             // iterations; an empty stream is just "no events yet".
@@ -353,11 +353,11 @@ void renderStepTree(Map params = [:]) {
 
     // Wait for the wrapper to exit and read its exit code (authoritative).
     // The pid is validated as digits before it reaches the shell: the file
-    // lives in the workspace, and anything a previous build step wrote there
+    // lives in /tmp, and anything a previous build step wrote there
     // is untrusted input (CWE-78).
     String pid = ''
     try {
-        pid = readFile(file: pidFile).trim()
+        pid = sh(script: "cat '${pidFile}' 2>/dev/null || true", returnStdout: true).trim()
     } catch (Exception ignored) {
     }
     if (pid && !(pid ==~ /\d+/)) {
@@ -385,13 +385,13 @@ void renderStepTree(Map params = [:]) {
     }
     String exitCode = '1'
     try {
-        exitCode = readFile(file: exitFile).trim()
+        exitCode = sh(script: "cat '${exitFile}' 2>/dev/null || true", returnStdout: true).trim()
     } catch (Exception ignored) {
     }
     echo "[dagger-kubernetes] wrapper exit code: ${exitCode}"
     String stderr = ''
     try {
-        stderr = readFile(file: stderrFile)
+        stderr = sh(script: "cat '${stderrFile}' 2>/dev/null || true", returnStdout: true)
     } catch (Exception ignored) {
     }
     if (stderr.trim()) {
