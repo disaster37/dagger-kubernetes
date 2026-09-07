@@ -202,6 +202,9 @@ func run(c *cli.Context) error {
 
 	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
+	fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] server=%s token=%t steps=%t version=%s timeout=%s\n",
+		serverURL, token != "", steps, version, timeout.String())
+
 	if steps {
 		ctx, cancel := context.WithCancel(context.Background())
 		stepsCancel = cancel
