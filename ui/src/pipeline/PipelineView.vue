@@ -150,6 +150,7 @@
           </tr>
           <tr><td>Status</td><td><span :class="['badge', `badge-${trace.status}`]">{{ trace.status }}</span></td></tr>
           <tr><td>Duration</td><td>{{ formatDuration(liveTraceDuration()) }}</td></tr>
+          <tr><td>Started</td><td>{{ formatDate(trace.start_time) }}</td></tr>
           <tr><td>Version</td><td>{{ trace.version || '-' }}</td></tr>
           <tr><td>CI Provider</td><td>{{ ciLabel(trace.ci_provider) }}</td></tr>
           <tr><td>Repository</td><td>{{ trace.ci_repo || '-' }}</td></tr>
@@ -632,6 +633,14 @@ function formatTime(ts: string): string {
   const d = new Date(ts)
   if (Number.isNaN(d.getTime())) return ''
   return d.toISOString().slice(11, 23)
+}
+
+function formatDate(iso: string): string {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // ciLabel maps the stored ci_provider value to a human-readable label. Local

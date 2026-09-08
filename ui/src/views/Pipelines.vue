@@ -19,6 +19,7 @@
             <th>Status</th>
             <th>Version</th>
             <th>Duration</th>
+            <th>Date</th>
             <th>CI</th>
             <th>Group</th>
             <th></th>
@@ -35,6 +36,7 @@
             </td>
             <td>{{ trace.version || '-' }}</td>
             <td>{{ formatDuration(liveRowDuration(trace)) }}</td>
+            <td>{{ formatDate(trace.started_at) }}</td>
             <td>{{ ciLabel(trace.ci_provider) }}</td>
             <td>{{ trace.group_name || '-' }}</td>
             <td>
@@ -132,6 +134,14 @@ function formatDuration(ms: number): string {
   if (s < 60) return `${s.toFixed(1)}s`
   const m = Math.floor(s / 60)
   return `${m}m ${(s % 60).toFixed(0)}s`
+}
+
+function formatDate(iso: string): string {
+  if (!iso) return '-'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return '-'
+  const pad = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // Derive a short, human-friendly name from the repo/project identity:
