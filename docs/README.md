@@ -1607,7 +1607,11 @@ The wrapper rebuilds the tree from the supervisor's existing REST surface
 single source of truth the pipeline UI uses, so the CI view matches the UI. It
 emits a normalized NDJSON event stream on stdout (`node_started`,
 `node_finished`, `log_chunk`, `pipeline_done`); the shared library consumes it
-and opens/closes nested `stage()` blocks as events arrive.
+and opens/closes nested `stage()` blocks as events arrive. Dagger's internal
+transport spans (HTTP client calls such as `POST /query`) are filtered out — only
+user-facing operations (`lint`, `push`, `generateDocumentation`, …) become
+stages — and structured (JSON) engine log lines are rendered as human-readable
+`[level] message k=v …` text.
 
 ```groovy
 @Library('dagger-kubernetes') _

@@ -280,7 +280,8 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 // (always, sourced from the auth secret), then operator-supplied literal and
 // secret-sourced vars (each group sorted by name for deterministic specs).
 func (p *K8sProvider) engineEnv() []corev1.EnvVar {
-	env := []corev1.EnvVar{secretEnvVar("DAGGER_KUBERNETES_TOKEN", engineAuthSecretName, "token")}
+	env := make([]corev1.EnvVar, 0, 1+len(p.cfg.ExtraEnv)+len(p.cfg.ExtraEnvFrom))
+	env = append(env, secretEnvVar("DAGGER_KUBERNETES_TOKEN", engineAuthSecretName, "token"))
 	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
 		env = append(env, corev1.EnvVar{Name: name, Value: p.cfg.ExtraEnv[name]})
 	}

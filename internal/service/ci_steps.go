@@ -125,7 +125,7 @@ func (b *StepEventBuilder) Advance(trace *domain.TraceInfo, logs []domain.LogEnt
 	// immediately before its node_finished (and after its children close).
 	chunks := b.prepareLogChunks(logs, attribution, rootID)
 
-	b.emitTree(flat, attribution, rootID, chunks, emit)
+	b.emitTree(flat, chunks, emit)
 
 	// Advance the watermark only after the entries have been emitted, and only
 	// forward (never backwards). Besides strictly-newer records, the watermark
@@ -244,7 +244,7 @@ func trimMarkKeys(keys map[logMarkKey]struct{}) {
 // each node: node_started, then (recursively) its children, then its own
 // log_chunks, then node_finished when it reached a terminal state. This keeps
 // parent stages open while children and logs render, and closes them last.
-func (b *StepEventBuilder) emitTree(flat []flatNode, attribution map[string]string, rootID string, chunks map[string][]*domain.LogChunk, emit func(domain.CIEvent)) {
+func (b *StepEventBuilder) emitTree(flat []flatNode, chunks map[string][]*domain.LogChunk, emit func(domain.CIEvent)) {
 	// The flat list is in depth-first pre-order. Build an index mapping each
 	// node to its children (by flat-list index) and emit the subtree in
 	// depth-first order — node_started, children, own logs, node_finished — so
@@ -265,7 +265,7 @@ func (b *StepEventBuilder) emitTree(flat []flatNode, attribution map[string]stri
 	var visit func(idx int)
 	visit = func(idx int) {
 		fn := flat[idx]
-		b.emitNodeStarted(fn, attribution, rootID, emit)
+		b.emitNodeStarted(fn, emit)
 		for _, c := range children[idx] {
 			visit(c)
 		}
@@ -281,15 +281,13 @@ func (b *StepEventBuilder) emitTree(flat []flatNode, attribution map[string]stri
 
 // emitNodeStarted emits node_started for a node seen for the first time and
 // records its emitted running state (pending -> running).
-func (b *StepEventBuilder) emitNodeStarted(fn flatNode, attribution map[string]string, rootID string, emit func(domain.CIEvent)) {
+func (b *StepEventBuilder) emitNodeStarted(fn flatNode, emit func(domain.CIEvent)) {
 	node := fn.node
-	parentID := node.ParentSpanID
-	if fn.depth == 0 {
-		parentID = ""
-	} else if _, ok := attribution[parentID]; !ok {
-		// Orphan: parent absent from this snapshot -> re-parent to root.
-		parentID = rootID
-	}
+	// fn.parentID is the effective parent (nearest emitted ancestor) computed
+	// during flattening; it already accounts for folded internal/depth-clamped
+	// spans and for orphans (whose ParentSpanID may not match their position in
+	// the reconstructed tree).
+	parentID := fn.parentID
 
 	step := &domain.StepNode{
 		ID:        node.SpanID,
@@ -346,20 +344,14 @@ func (b *StepEventBuilder) emitNodeFinished(fn flatNode, emit func(domain.CIEven
 // Finalize emits the terminal events a snapshot stream can never produce on its
 // own: a node_finished for every node still running (in child-before-parent
 // order) and a single pipeline_done carrying the authoritative build status.
-// It is idempotent (returns nothing after the first call or after a
-// snapshot-derived pipeline_done) and must be called after the Dagger command
-// exits so the consumer always sees a terminal event — even when the trace
-// never indexed, the root never resolved, or the engine failed before printing
-// a trace id. errMsg is surfaced on the pipeline_done event when the pipeline
-// failed.
+// It is idempotent: running nodes are closed at most once, and pipeline_done is
+// emitted at most once. It must be called after the Dagger command exits so the
+// consumer always sees a terminal event — even when the trace never indexed,
+// the root never resolved, or the engine failed before printing a trace id.
+// errMsg is surfaced on the pipeline_done event when the pipeline failed.
 func (b *StepEventBuilder) Finalize(status, errMsg string) []domain.CIEvent {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-
-	if b.pipelineDone {
-		return nil
-	}
-	b.pipelineDone = true
 
 	if status != "failed" && status != "canceled" {
 		status = "success"
@@ -379,7 +371,11 @@ func (b *StepEventBuilder) Finalize(status, errMsg string) []domain.CIEvent {
 	}
 
 	// Close running nodes in reverse-first-emitted order so descendants close
-	// before their ancestors.
+	// before their ancestors. This must run even when a snapshot-derived
+	// pipeline_done already closed the stream: the snapshot may have emitted
+	// pipeline_done while some nodes were still running (their finish records
+	// hadn't been indexed yet), and those nodes must still receive terminal
+	// node_finished events so the consumer can close their stages.
 	terminal := domain.StepStateSucceeded
 	if status != "success" {
 		terminal = domain.StepStateFailed
@@ -394,8 +390,11 @@ func (b *StepEventBuilder) Finalize(status, errMsg string) []domain.CIEvent {
 		}
 	}
 
-	done := domain.CIEvent{Type: domain.CIEventPipelineDone, Status: status, Error: errMsg}
-	emit(done)
+	if !b.pipelineDone {
+		b.pipelineDone = true
+		done := domain.CIEvent{Type: domain.CIEventPipelineDone, Status: status, Error: errMsg}
+		emit(done)
+	}
 	return events
 }
 
@@ -432,17 +431,41 @@ func chunkBytes(c *domain.LogChunk) int {
 	return n
 }
 
-// flatNode pairs a span node with its DFS depth in the reconstructed tree.
+// flatNode pairs a span node with its DFS depth in the reconstructed tree and
+// the span id of its effective parent (the nearest emitted ancestor, or "" for
+// the root). parentID differs from node.ParentSpanID when intermediate spans
+// were folded away (internal HTTP spans or depth-clamped spans).
 type flatNode struct {
-	node  *domain.SpanNode
-	depth int
+	node     *domain.SpanNode
+	depth    int
+	parentID string
+}
+
+// internalSpanPrefixes is the set of span name prefixes that identify Dagger
+// engine internal spans (HTTP client calls, GraphQL transport, etc.). These
+// spans carry no user-facing meaning and must not surface as CI stage names.
+var internalSpanPrefixes = []string{
+	"GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ",
+}
+
+// isInternalSpanName reports whether a span name identifies a Dagger engine
+// internal span that should be hidden from CI stage output.
+func isInternalSpanName(name string) bool {
+	for _, p := range internalSpanPrefixes {
+		if strings.HasPrefix(name, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // flattenTrace walks the reconstructed span tree DFS pre-order, dedupes by
 // span id (first wins), and clamps depth at maxDepth (<= 0 = unlimited,
 // hard-capped at ciMaxAbsoluteDepth). Nodes deeper than the clamp are not
 // emitted; they are recorded in the returned attribution map so their logs
-// fold into their deepest emitted ancestor.
+// fold into their deepest emitted ancestor. Dagger engine internal spans
+// (HTTP client calls) are also folded: their children and logs are attributed
+// to the nearest non-internal ancestor.
 func flattenTrace(root *domain.SpanNode, maxDepth int) (flat []flatNode, attribution map[string]string) {
 	if root == nil || root.SpanID == "" {
 		return nil, nil
@@ -460,8 +483,6 @@ func flattenTrace(root *domain.SpanNode, maxDepth int) (flat []flatNode, attribu
 			return
 		}
 		if n.SpanID == "" {
-			// A node with no id cannot be attributed or emitted; skip it but
-			// keep walking its children at the same depth/owner.
 			for _, c := range n.Children {
 				walk(c, depth, owner)
 			}
@@ -477,7 +498,19 @@ func flattenTrace(root *domain.SpanNode, maxDepth int) (flat []flatNode, attribu
 			return
 		}
 
-		flat = append(flat, flatNode{node: n, depth: depth})
+		// Dagger engine internal spans (HTTP client calls) are folded away:
+		// their children and logs are attributed to the nearest non-internal
+		// ancestor. The root (depth 0) is never filtered so the tree always
+		// keeps a single emitted root.
+		if depth > 0 && isInternalSpanName(n.Name) {
+			attribution[n.SpanID] = owner
+			for _, c := range n.Children {
+				walk(c, depth, owner)
+			}
+			return
+		}
+
+		flat = append(flat, flatNode{node: n, depth: depth, parentID: owner})
 		attribution[n.SpanID] = n.SpanID
 		for _, c := range n.Children {
 			walk(c, depth+1, n.SpanID)

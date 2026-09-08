@@ -181,13 +181,13 @@ func run(c *cli.Context) error {
 	// stderr, and scanning for arbitrary hex strings captures Docker digests
 	// and other OCI hashes instead.
 	var (
-		stepsWG       sync.WaitGroup
-		stepsCancel   context.CancelFunc
-		stepsSrc      domain.TraceSnapshotSource
-		stepsBuilder  *service.StepEventBuilder
-		stepsSink     domain.CIEventSink
-		discoveredMu  sync.Mutex
-		discoveredID  string
+		stepsWG      sync.WaitGroup
+		stepsCancel  context.CancelFunc
+		stepsSrc     domain.TraceSnapshotSource
+		stepsBuilder *service.StepEventBuilder
+		stepsSink    domain.CIEventSink
+		discoveredMu sync.Mutex
+		discoveredID string
 	)
 
 	cmd.Stderr = io.MultiWriter(os.Stderr, &logBuf)

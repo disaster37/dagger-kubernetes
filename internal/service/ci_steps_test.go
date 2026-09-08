@@ -646,13 +646,15 @@ func TestFinalizeClosesRunningNodesAndEmitsDone(t *testing.T) {
 	}
 }
 
-func TestFinalizeNeverEmitsAfterSnapshotDone(t *testing.T) {
+func TestFinalizeIdempotentWhenAllNodesClosed(t *testing.T) {
 	b := NewStepEventBuilder(0)
 	root := span("r", "", "build", "success", nil)
 
 	if _, err := b.Advance(tr(root, "success"), nil); err != nil {
 		t.Fatalf("Advance: %v", err)
 	}
+	// Advance emitted started, finished, and pipeline_done. Finalize sees
+	// no running nodes and an already-emitted pipeline_done → empty.
 	if got := b.Finalize("failed", "boom"); len(got) != 0 {
 		t.Fatalf("Finalize after snapshot pipeline_done = %v, want empty", summarize(got))
 	}
@@ -776,6 +778,184 @@ func TestFailureReason(t *testing.T) {
 	if r := failureReason(span("r", "", "b", "failed", map[string]string{"error.message": "exploded"})); r != "exploded" {
 		t.Fatalf("failureReason = %q, want exploded", r)
 	}
+}
+
+func TestAdvanceFiltersInternalHTTPMethodSpans(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	httpSpan := span("http", "r", "POST /query", "running", nil)
+	realOp := span("lint", "r", "lint", "success", nil)
+	root := span("r", "", "dagger call", "success", nil, httpSpan, realOp)
+
+	ts := time.Unix(100, 0)
+	logs := []domain.LogEntry{
+		logEntry(ts, "http", "http-client-log"),
+		logEntry(ts.Add(time.Second), "lint", "go vet passed"),
+	}
+
+	events, err := b.Advance(tr(root, "success"), logs)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:lint:running:r:1",
+		"log:lint:[go vet passed]",
+		"finished:lint:succeeded:",
+		"log:r:[http-client-log]", // http span's log folds into root
+		"finished:r:succeeded:",
+		"done:success:",
+	})
+}
+
+func TestAdvanceFiltersInternalSpanWithChildren(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	grand := span("grand", "http", "grand-op", "success", nil)
+	httpSpan := span("http", "r", "GET /blobs", "running", nil, grand)
+	root := span("r", "", "dagger call", "success", nil, httpSpan)
+
+	events, err := b.Advance(tr(root, "success"), nil)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	// httpSpan filtered; its child grand-op surfaces at depth 1 under root.
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:grand:running:r:1",
+		"finished:grand:succeeded:",
+		"finished:r:succeeded:",
+		"done:success:",
+	})
+}
+
+func TestAdvanceFiltersAllHTTPMethodVariants(t *testing.T) {
+	for _, name := range []string{"POST /query", "GET /blobs", "PUT /upload", "DELETE /session", "PATCH /config", "HEAD /health", "OPTIONS /cors"} {
+		t.Run(name, func(t *testing.T) {
+			b := NewStepEventBuilder(0)
+			httpSpan := span("http", "r", name, "running", nil)
+			root := span("r", "", "dagger call", "success", nil, httpSpan)
+
+			events, err := b.Advance(tr(root, "success"), nil)
+			if err != nil {
+				t.Fatalf("Advance: %v", err)
+			}
+			assertEvents(t, events, []string{
+				"started:r:running::0",
+				"finished:r:succeeded:",
+				"done:success:",
+			})
+		})
+	}
+}
+
+func TestAdvanceDoesNotFilterNonHTTPNames(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	lint := span("lint", "r", "lint", "success", nil)
+	push := span("push", "r", "push", "success", nil)
+	gen := span("gen", "r", "generateDocumentation", "success", nil)
+	root := span("r", "", "dagger call", "success", nil, lint, push, gen)
+
+	events, err := b.Advance(tr(root, "success"), nil)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:lint:running:r:1",
+		"finished:lint:succeeded:",
+		"started:push:running:r:1",
+		"finished:push:succeeded:",
+		"started:gen:running:r:1",
+		"finished:gen:succeeded:",
+		"finished:r:succeeded:",
+		"done:success:",
+	})
+}
+
+func TestIsInternalSpanName(t *testing.T) {
+	tests := []struct {
+		name string
+		want bool
+	}{
+		{"POST /query", true},
+		{"GET /blobs", true},
+		{"PUT /upload", true},
+		{"DELETE /session", true},
+		{"PATCH /config", true},
+		{"HEAD /health", true},
+		{"OPTIONS /cors", true},
+		{"lint", false},
+		{"build", false},
+		{"generateDocumentation", false},
+		{"generateSchema", false},
+		{"dagger call", false},
+		{"", false},
+	}
+	for _, tt := range tests {
+		if got := isInternalSpanName(tt.name); got != tt.want {
+			t.Fatalf("isInternalSpanName(%q) = %v, want %v", tt.name, got, tt.want)
+		}
+	}
+}
+
+func TestFinalizeClosesRunningNodesAfterPipelineDone(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	child := span("c", "r", "child", "running", nil)
+	root := span("r", "", "build", "success", nil, child)
+
+	events, err := b.Advance(tr(root, "success"), nil)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	// Advance emitted pipeline_done from the snapshot, but the child span
+	// was "running" in that snapshot — its node_finished was not emitted.
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:c:running:r:1",
+		"finished:r:succeeded:",
+		"done:success:",
+	})
+
+	// Finalize must still close the running child node.
+	events = b.Finalize("success", "")
+	assertEvents(t, events, []string{"finished:c:succeeded:"})
+
+	// Idempotent after that.
+	if got := b.Finalize("success", ""); len(got) != 0 {
+		t.Fatalf("second Finalize = %v, want empty", summarize(got))
+	}
+}
+
+func TestFinalizeClosesNodesAfterSnapshotDoneWithDifferentStatus(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	child := span("c", "r", "child", "running", nil)
+	root := span("r", "", "build", "running", nil, child)
+
+	events, err := b.Advance(tr(root, "running"), nil)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:c:running:r:1",
+	})
+
+	// Snapshot emits pipeline_done from trace.Status without closing nodes
+	// (the root is still "running" in this snapshot).
+	events, err = b.Advance(tr(root, "success"), nil)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	assertEvents(t, events, []string{
+		"done:success:",
+	})
+
+	// Finalize must close the still-running child and root, but must NOT emit
+	// a second pipeline_done.
+	events = b.Finalize("failed", "wrapper died")
+	assertEvents(t, events, []string{
+		"finished:c:failed:",
+		"finished:r:failed:",
+	})
 }
 
 func TestResolveLogOwner(t *testing.T) {

@@ -421,10 +421,11 @@ String finalTraceId(String stderr) {
 }
 
 // renderNode recursively renders one step node as a nested stage: opens the
-// stage, renders its children in order, echoes its own log lines, and records
-// per-stage failure via catchError so the build can still render siblings
-// before the final result is applied. The visited set makes the recursion
-// terminate even on a forged cyclic parent chain (defense-in-depth).
+// stage, renders its children in order, echoes its own log lines (formatted
+// from JSON when possible), and records per-stage failure via catchError so
+// the build can still render siblings before the final result is applied.
+// The visited set makes the recursion terminate even on a forged cyclic
+// parent chain (defense-in-depth).
 void renderNode(def nodes, String nodeId, Set visited, int renderDepth = 0) {
     if (!visited.add(nodeId)) {
         return
@@ -446,7 +447,7 @@ void renderNode(def nodes, String nodeId, Set visited, int renderDepth = 0) {
             }
         }
         for (String l : node.logs) {
-            echo l
+            echo formatLogLine(l)
         }
         return
     }
@@ -458,7 +459,7 @@ void renderNode(def nodes, String nodeId, Set visited, int renderDepth = 0) {
                     renderNode(nodes, childId, visited, renderDepth)
                 }
                 for (String l : node.logs) {
-                    echo l
+                    echo formatLogLine(l)
                 }
                 echo "[dagger-kubernetes] stage '${name}' failed: ${node.error ?: 'unknown error'}"
             }
@@ -469,7 +470,7 @@ void renderNode(def nodes, String nodeId, Set visited, int renderDepth = 0) {
                 renderNode(nodes, childId, visited, renderDepth)
             }
             for (String l : node.logs) {
-                echo l
+                echo formatLogLine(l)
             }
         }
     }
@@ -510,6 +511,49 @@ String normalizeStageName(String name, String id) {
         clean = "step-${(id ?: '').take(8)}"
     }
     return clean
+}
+
+// formatLogLine converts a log line into a human-readable string. When the
+// line is a JSON object with a 'msg' or 'message' field (Dagger's structured
+// log format), it extracts the level and message and appends any remaining
+// key-value pairs. Plain-text lines pass through unchanged.
+String formatLogLine(String line) {
+    if (!line) {
+        return ''
+    }
+    def trimmed = line.trim()
+    if (!trimmed.startsWith('{')) {
+        return trimmed
+    }
+    try {
+        def obj = readJSON(text: trimmed)
+        String msg = obj.msg ?: obj.message ?: obj.body ?: obj.M ?: ''
+        if (!msg) {
+            return trimmed
+        }
+        String level = obj.level ?: obj.severity ?: ''
+        def extra = [:]
+        for (def e : obj.entrySet()) {
+            String k = e.key
+            if (k in ['msg', 'message', 'body', 'M', 'level', 'severity', 'time', 'timestamp', 'ts']) {
+                continue
+            }
+            extra[k] = e.value
+        }
+        StringBuilder sb = new StringBuilder()
+        if (level) {
+            sb.append('[').append(level).append(']').append(' ')
+        }
+        sb.append(msg)
+        if (extra) {
+            sb.append(' ')
+            def pairs = extra.collect { k, v -> "${k}=${v}" }
+            sb.append(pairs.join(' '))
+        }
+        return sb.toString()
+    } catch (Exception ignored) {
+        return trimmed
+    }
 }
 
 def withStages(serverUrl, token, uiUrl) {

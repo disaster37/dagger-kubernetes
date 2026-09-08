@@ -60,11 +60,22 @@ and guarantees a node's logs always precede its `node_finished`.
 always emitted when the Dagger command exits — it closes any still-running nodes
 (in child-before-parent order) and emits exactly one `pipeline_done` carrying
 the authoritative build status — even when the trace never indexed, the root
-never resolved, or the engine failed before printing a trace id.
+never resolved, or the engine failed before printing a trace id. This holds even
+when a snapshot already emitted `pipeline_done`: nodes still `running` at that
+point (their finish records not yet indexed) are closed by `Finalize`, so no
+stage is ever left without a terminal `node_finished`.
 
 All the hard edge cases (dedupe, out-of-order, orphans, depth clamp, log
 watermarking incl. equal-timestamp identity dedupe) live here, unit-tested to
 100%.
+
+**Internal-span filtering.** The Dagger engine exports internal transport spans
+(HTTP client calls such as `POST /query`, `GET /blobs`) alongside user-facing
+operation spans (`lint`, `push`, `generateDocumentation`, …). `flattenTrace`
+folds these internal spans away: they never become CI stages, and their
+children + logs are attributed to the nearest non-internal ancestor (the root
+is never filtered, preserving a single emitted root). Span names are matched by
+HTTP-method prefix (`GET `/`POST `/`PUT `/`DELETE `/`PATCH `/`HEAD `/`OPTIONS `).
 
 ### 3. Wire format: NDJSON on stdout
 
@@ -79,7 +90,10 @@ The Jenkins shared library gains a `dynamicStages` mode that consumes the NDJSON
 stream and renders **nested scripted-pipeline `stage()`** blocks with `echo`
 per-step logs and `catchError`-derived per-stage status. Live rendering is
 achieved by launching the wrapper in the background of the enclosing `node` and
-rendering stages from the event stream as it grows.
+rendering stages from the event stream as it grows. Log lines emitted by the
+engine in its structured (JSON) format are rendered as human-readable text by
+`formatLogLine`: a `{...}` line carrying `msg`/`message`/`body` is turned into
+`[level] message k=v …`; plain-text lines pass through unchanged.
 
 | Dagger / supervisor concept | Jenkins concept |
 |---|---|

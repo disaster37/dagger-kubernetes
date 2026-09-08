@@ -18,9 +18,9 @@ import (
 // cache (the old IP has been reassigned to a pod that is not listening on
 // the raft port).
 type retryingStreamLayer struct {
-	inner    *tlsStreamLayer
-	tlsCfg   *tls.Config
-	dialer   *net.Dialer
+	inner  *tlsStreamLayer
+	tlsCfg *tls.Config
+	dialer *net.Dialer
 }
 
 var _ raft.StreamLayer = (*retryingStreamLayer)(nil)

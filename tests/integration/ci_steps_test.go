@@ -68,6 +68,13 @@ func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (controlURL,
 		t.Fatalf("generate token: %v", err)
 	}
 
+	// The CI wrapper discovers the trace ID by polling the supervisor's trace
+	// list (GET /api/v1/traces), which is backed by trace_meta. Seed a row for
+	// the fixed trace so discovery succeeds in this hermetic test.
+	if err := traceMetaRepo.UpsertProvision(context.Background(), ciStepsTraceID, admin.ID, "v0.19.0"); err != nil {
+		t.Fatalf("seed trace meta: %v", err)
+	}
+
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
@@ -151,12 +158,13 @@ func buildCIWrapper(t *testing.T) string {
 }
 
 // installFakeDagger puts a fake `dagger` on PATH that prints the trace id to
-// stderr and exits 0.
+// stderr, keeps running long enough for the wrapper's trace-discovery poll
+// (1s cadence) to fire, then exits 0.
 func installFakeDagger(t *testing.T) {
 	t.Helper()
 	fakeDir := t.TempDir()
 	fake := filepath.Join(fakeDir, "dagger")
-	script := fmt.Sprintf("#!/bin/sh\necho '%s' >&2\nexit 0\n", ciStepsTraceID)
+	script := fmt.Sprintf("#!/bin/sh\necho '%s' >&2\nsleep 3\nexit 0\n", ciStepsTraceID)
 	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatalf("write fake dagger: %v", err)
 	}
