@@ -5,10 +5,8 @@
 // Two modes:
 //   * default: runs the Dagger command (via `body`) with the platform env vars
 //     set, then prints the pipeline-view link.
-//   * dynamicStages: launches the `dagger-kubernetes-ci` wrapper with `--steps`
-//     in the background and renders Dagger's internal step tree as nested
-//     scripted-pipeline `stage()` blocks (Blue Ocean) with per-stage logs and
-//     statuses. See docs/design/ADR-024-ci-nested-steps.md.
+//   * dynamicStages: runs the Dagger command directly in two clean stages:
+//     "Provision Dagger CLI" (conditional) and "Dagger" (plain-text output).
 def call(Map params = [:], Closure body = null) {
     String serverUrl = params.serverUrl ?: env.DAGGER_KUBERNETES_SERVER
     String token = (params.token ?: env.DAGGER_KUBERNETES_TOKEN)?.trim()
@@ -32,21 +30,12 @@ def call(Map params = [:], Closure body = null) {
     }
 
     boolean dynamicStages = envTruthy(params.dynamicStages, env.DAGGER_KUBERNETES_DYNAMIC_STAGES, false)
-    String stepsPollInterval = params.stepsPollInterval ?: env.DAGGER_KUBERNETES_STEPS_POLL_INTERVAL ?: '2s'
-    int stepsMaxDepth = (params.stepsMaxDepth ?: env.DAGGER_KUBERNETES_STEPS_MAX_DEPTH ?: 8) as int
-    int stepsRenderDepth = (params.stepsRenderDepth ?: env.DAGGER_KUBERNETES_STEPS_RENDER_DEPTH ?: 0) as int
     int timeoutMinutes = (params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES ?: 30) as int
     boolean magicCache = envTruthy(params.magicCache, env.DAGGER_KUBERNETES_MAGIC_CACHE, false)
     String cacheRegistry = params.cacheRegistry ?: env.DAGGER_KUBERNETES_CACHE_REGISTRY ?: 'cache.reg/dagger-cache'
 
     if (!serverUrl || !token) {
         error "daggerKubernetes: serverUrl and token are required"
-    }
-
-    if (params.provisionCli) {
-        provisionCli(serverUrl: serverUrl, token: token,
-                     version: params.cliVersion ?: env.DAGGER_KUBERNETES_CLI_VERSION,
-                     os: params.cliOs, arch: params.cliArch)
     }
 
     String cacheConfig = ''
@@ -56,12 +45,70 @@ def call(Map params = [:], Closure body = null) {
     }
 
     if (dynamicStages) {
-        dynamicStagesRun(serverUrl: serverUrl, token: token, uiUrl: uiUrl,
-                         version: version, stepsPollInterval: stepsPollInterval,
-                         stepsMaxDepth: stepsMaxDepth, stepsRenderDepth: stepsRenderDepth,
-                         timeoutMinutes: timeoutMinutes,
-                         command: params.command, cacheConfig: cacheConfig)
+        String daggerCommand = params.command ?: env.DAGGER_COMMAND
+        if (!daggerCommand) {
+            error "daggerKubernetes(dynamicStages: true): pass `command: 'dagger call ...'` (or set env.DAGGER_COMMAND)"
+        }
+
+        // Stage 1: Provision Dagger CLI (only when provisionCli is enabled).
+        if (params.provisionCli) {
+            stage("Provision Dagger CLI") {
+                provisionCli(serverUrl: serverUrl, token: token,
+                             version: params.cliVersion ?: env.DAGGER_KUBERNETES_CLI_VERSION,
+                             os: params.cliOs, arch: params.cliArch)
+            }
+        }
+
+        // Stage 2: Run the dagger command with plain-text output.
+        stage("Dagger") {
+            String stderrFile = "/tmp/dagger-stderr-${env.BUILD_NUMBER}.log"
+            withEnv([
+                "DAGGER_CLOUD_URL=${serverUrl}",
+                "DAGGER_CLOUD_TOKEN=${token}",
+                "_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self"
+            ] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : []) +
+              (cacheConfig ? ["_EXPERIMENTAL_DAGGER_CACHE_CONFIG=${cacheConfig}"] : [])) {
+                timeout(time: timeoutMinutes, unit: 'MINUTES') {
+                    try {
+                        // Run dagger: stdout streams to the console while
+                        // stderr is captured to a temp file (the trace ID
+                        // appears on stderr). daggerCommand is the deliberate
+                        // exception to assertShellSafe — it IS the shell
+                        // command, authored by the trusted pipeline author;
+                        // the only other interpolated value, stderrFile, is a
+                        // constant path plus the numeric BUILD_NUMBER.
+                        sh "${daggerCommand} 2>'${stderrFile}'"
+                    } catch (e) {
+                        echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
+                        throw e
+                    } finally {
+                        // Replay dagger's stderr into the build log and
+                        // extract the trace ID for the pipeline-view link.
+                        // Runs on success AND failure so the temp file is
+                        // always cleaned up (CWE-404) and a failed run still
+                        // surfaces dagger's stderr.
+                        String stderr = sh(script: "cat '${stderrFile}' 2>/dev/null || true", returnStdout: true).trim()
+                        if (stderr) {
+                            echo stderr
+                        }
+                        String traceId = extractTraceId(stderr)
+                        if (traceId) {
+                            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${traceId}"
+                        } else {
+                            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/traces/latest"
+                        }
+                        sh "rm -f '${stderrFile}'"
+                    }
+                }
+            }
+        }
         return
+    }
+
+    if (params.provisionCli) {
+        provisionCli(serverUrl: serverUrl, token: token,
+                     version: params.cliVersion ?: env.DAGGER_KUBERNETES_CLI_VERSION,
+                     os: params.cliOs, arch: params.cliArch)
     }
 
     withEnv([
@@ -83,7 +130,7 @@ def call(Map params = [:], Closure body = null) {
                 echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
                 throw e
             }
-        } else if (!dynamicStages) {
+        } else {
             error "daggerKubernetes: provide a closure body or set dynamicStages: true with command: '...'"
         }
     }
@@ -117,363 +164,11 @@ boolean parseBool(String s, boolean deflt) {
     return deflt
 }
 
-// dynamicStagesRun launches the dagger-kubernetes-ci wrapper with --steps in the
-// background of the enclosing node, streams its NDJSON event output, and renders
-// nested stage() blocks from the reconstructed step tree. The Dagger command is
-// passed via the `command` param (a single shell string the wrapper executes).
-void dynamicStagesRun(Map params = [:]) {
-    String serverUrl = params.serverUrl
-    String token = params.token
-    String uiUrl = params.uiUrl
-    String version = params.version
-    String stepsPollInterval = params.stepsPollInterval
-    int stepsMaxDepth = params.stepsMaxDepth
-    int stepsRenderDepth = params.stepsRenderDepth
-    int timeoutMinutes = params.timeoutMinutes
-    String daggerCommand = params.command ?: env.DAGGER_COMMAND
-    String cacheConfig = params.cacheConfig ?: ''
-
-    if (!daggerCommand) {
-        error "daggerKubernetes(dynamicStages: true): pass `command: 'dagger call ...'` (or set env.DAGGER_COMMAND)"
-    }
-
-    // Every value interpolated into the launch script below must be validated:
-    // a value carrying a quote would break out of the single-quoted shell
-    // contexts, and an unquoted metacharacter would inject shell syntax
-    // (CWE-78). daggerCommand is the deliberate exception — it is a shell
-    // command string authored by the trusted pipeline author.
-    assertShellSafe(serverUrl, 'serverUrl')
-    assertShellSafe(uiUrl, 'uiUrl')
-    assertShellSafe(stepsPollInterval, 'stepsPollInterval')
-    assertShellSafe(version, 'version')
-    String wrapper = env.DAGGER_KUBERNETES_CI_BIN ?: 'dagger-kubernetes-ci'
-    if (!(wrapper ==~ /[A-Za-z0-9._\/-]+/)) {
-        error "daggerKubernetes: DAGGER_KUBERNETES_CI_BIN must be a plain binary name or path"
-    }
-
-    // Pre-flight: verify the wrapper binary exists on PATH before launching the
-    // background subshell. When it's missing the subshell may not write the exit
-    // file (shell-dependent), causing renderStepTree to loop with 1-second sleeps
-    // until the enclosing timeout (often 30 minutes). Fail fast instead.
-    def wrapperCheck = sh(script: "command -v '${wrapper}' > /dev/null 2>&1 && echo found || echo missing", returnStdout: true).trim()
-    if (wrapperCheck != 'found') {
-        error """daggerKubernetes: '${wrapper}' not found on PATH.
-Build it from this repo (go build -o dagger-kubernetes-ci ./cmd/ci) and include it in your agent image,
-or set env.DAGGER_KUBERNETES_CI_BIN to the binary path.
-When provisionCli is enabled the CI wrapper is downloaded alongside the Dagger CLI."""
-    }
-
-    String stepsDir = "/tmp/dagger-kubernetes-${env.BUILD_NUMBER}"
-    String ndjsonFile = "${stepsDir}/steps-${env.BUILD_NUMBER}.ndjson"
-    String stderrFile = "${stepsDir}/dagger-${env.BUILD_NUMBER}.log"
-    String exitFile = "${stepsDir}/exit-${env.BUILD_NUMBER}"
-    String pidFile = "${stepsDir}/pid-${env.BUILD_NUMBER}"
-    [ndjsonFile, stderrFile, exitFile, pidFile].each { assertShellSafe(it, 'temp file path') }
-
-    // The token is exported into the environment and consumed by the wrapper
-    // through its DAGGER_KUBERNETES_TOKEN env source. The script below only
-    // references the variable NAME (Groovy interpolates the escaped '$'
-    // literally), so the build log never records the value — and because the
-    // wrapper reads it from the environment instead of a --token argument, the
-    // value never appears in the wrapper's process argv either (argv is
-    // readable by every local user via ps / /proc/<pid>/cmdline, CWE-214).
-    withEnv(["DAGGER_KUBERNETES_TOKEN=${token}"] + (cacheConfig ? ["_EXPERIMENTAL_DAGGER_CACHE_CONFIG=${cacheConfig}"] : [])) {
-        sh "mkdir -p '${stepsDir}'"
-        String versionArgs = version ? "--version '${version}'" : ''
-
-        // Launch the wrapper in the background. The subshell's own stdout/stderr
-        // are redirected to /dev/null so the `sh` step returns immediately
-        // instead of waiting for the background process to close the log pipe
-        // (which would otherwise hang the enclosing node until the run ends).
-        // Set the wrapper's own timeout slightly inside the Jenkins timeout
-        // so it has time to finalize (emit pipeline_done, flush stderr)
-        // before Jenkins kills the entire step.
-        int wrapperTimeout = Math.max(1, timeoutMinutes - 1)
-        sh """
-            set +e
-            ( ${wrapper} --server '${serverUrl}' \\
-                --ui-url '${uiUrl}' --steps \\
-                --steps-poll-interval '${stepsPollInterval}' \\
-                --steps-max-depth '${stepsMaxDepth}' \\
-                --timeout '${wrapperTimeout}m' ${versionArgs} \\
-                -- ${daggerCommand} > '${ndjsonFile}' 2> '${stderrFile}'
-              echo \$? > '${exitFile}' ) > /dev/null 2>&1 &
-            echo \$! > '${pidFile}'
-        """
-    }
-
-    timeout(time: timeoutMinutes, unit: 'MINUTES') {
-        renderStepTree(ndjsonFile: ndjsonFile, stderrFile: stderrFile,
-                       exitFile: exitFile, pidFile: pidFile, stepsDir: stepsDir,
-                       uiUrl: uiUrl, renderDepth: stepsRenderDepth)
-    }
-}
-
-// renderStepTree consumes the wrapper's NDJSON event stream from ndjsonFile and
-// renders nested scripted-pipeline stage() blocks. It reads the file
-// incrementally (only new lines since the last poll) so it never re-echoes old
-// lines, accumulates the reconstructed node tree, and renders it recursively
-// once the wrapper signals pipeline_done. On completion it waits for the
-// wrapper, prints its stderr + the pipeline-view link, and propagates the
-// wrapper's exit status as the build result.
-void renderStepTree(Map params = [:]) {
-    String ndjsonFile = params.ndjsonFile
-    String stderrFile = params.stderrFile
-    String exitFile = params.exitFile
-    String pidFile = params.pidFile
-    String stepsDir = params.stepsDir
-    String uiUrl = params.uiUrl
-    int renderDepth = params.renderDepth ?: 0
-
-    int offset = 0
-    boolean done = false
-    String finalStatus = 'success'
-
-    // node id -> [id, name, parent_id, depth, state, error, logs[], children[]]
-    // (plain maps/lists so they stay CPS-serializable across poll iterations).
-    def nodes = [:]
-    def rootId = null
-    boolean wrapperExited = false
-
-    while (!done) {
-        // Liveness: the exit file is only written after the wrapper process
-        // has terminated, so once it exists the NDJSON stream is final. If
-        // pipeline_done is still missing at that point, the wrapper died
-        // before emitting its guaranteed terminal event (crash, OOM kill,
-        // hang-then-kill) and polling further would only spin "Sleeping for
-        // 1 sec" until the enclosing timeout — fail fast instead.
-        boolean exited = sh(script: "test -f '${exitFile}' && echo yes || echo no", returnStdout: true).trim() == 'yes'
-
-        String raw = ''
-        try {
-            raw = sh(script: "cat '${ndjsonFile}' 2>/dev/null || true", returnStdout: true)
-        } catch (Exception ignored) {
-            // The wrapper may not have created the file yet on the first
-            // iterations; an empty stream is just "no events yet".
-        }
-        if (raw.length() > offset) {
-            String newText = raw.substring(offset)
-            int lastNL = newText.lastIndexOf('\n')
-            if (lastNL >= 0) {
-                String complete = newText.substring(0, lastNL + 1)
-                offset += complete.length()
-                for (String line : complete.split('\n')) {
-                    line = line.trim()
-                    if (!line) { continue }
-                    // Parse AND dispatch inside the guard: a line that is
-                    // malformed JSON or a well-formed object of the wrong
-                    // shape (missing node/log fields) is skipped, never fatal.
-                    try {
-                        def evt = readJSON(text: line)
-                        if (evt.type == 'pipeline_done') {
-                            echo "[dagger-kubernetes] received pipeline_done status=${evt.status}"
-                        }
-                        switch (evt.type) {
-                            case 'node_started':
-                                def id = evt.node.id
-                                if (!nodes.containsKey(id)) {
-                                    nodes[id] = [
-                                        id: id,
-                                        name: normalizeStageName(evt.node.name, id),
-                                        parent_id: evt.node.parent_id ?: '',
-                                        depth: evt.node.depth ?: 0,
-                                        state: evt.node.state ?: 'running',
-                                        error: '',
-                                        logs: [],
-                                        children: [],
-                                    ]
-                                    if (rootId == null || (evt.node.parent_id ?: '') == '') {
-                                        rootId = id
-                                    }
-                                }
-                                break
-                            case 'node_finished':
-                                def n = nodes[evt.node.id]
-                                if (n != null) {
-                                    n.state = evt.node.state ?: 'succeeded'
-                                    n.error = evt.error ?: ''
-                                }
-                                break
-                            case 'log_chunk':
-                                def owner = nodes[evt.log.node_id]
-                                if (owner != null) {
-                                    for (String l : evt.log.lines) {
-                                        owner.logs.add(l)
-                                    }
-                                }
-                                break
-                            case 'pipeline_done':
-                                finalStatus = evt.status ?: 'success'
-                                done = true
-                                break
-                        }
-                    } catch (Exception e) {
-                        echo "[dagger-kubernetes] skipping malformed step event: ${line}"
-                        continue
-                    }
-                }
-            }
-        }
-        if (!done) {
-            if (exited) {
-                wrapperExited = true
-                finalStatus = 'failed'
-                break
-            }
-            sleep(time: 1, unit: 'SECONDS')
-        }
-    }
-
-    if (wrapperExited) {
-        echo "[dagger-kubernetes] wrapper exited without a terminal pipeline_done event; treating the run as failed"
-    }
-
-    echo "[dagger-kubernetes] step-tree loop done (done=${done} exited=${wrapperExited} finalStatus=${finalStatus})"
-
-    // Link children to parents (child-before-parent finish is fine: both are
-    // already fully present once pipeline_done has arrived).
-    for (def e : nodes.entrySet()) {
-        def node = e.value
-        String parentId = node.parent_id
-        if (parentId && nodes.containsKey(parentId)) {
-            nodes[parentId].children.add(node.id)
-        }
-    }
-
-    // Render the full nested tree. The root wraps everything; child subtrees
-    // render in order with their own logs and statuses. The visited set guards
-    // against a forged cyclic parent chain (defense-in-depth: the wrapper
-    // emits a tree, but the file is on a shared workspace).
-    if (rootId != null && nodes.containsKey(rootId)) {
-        renderNode(nodes, rootId, [] as Set, renderDepth)
-    } else {
-        stage("dagger") {
-            echo "[dagger-kubernetes] no step tree was captured (status ${finalStatus})"
-        }
-    }
-
-    // Wait for the wrapper to exit and read its exit code (authoritative).
-    // The pid is validated as digits before it reaches the shell: the file
-    // lives in /tmp, and anything a previous build step wrote there
-    // is untrusted input (CWE-78).
-    String pid = ''
-    try {
-        pid = sh(script: "cat '${pidFile}' 2>/dev/null || true", returnStdout: true).trim()
-    } catch (Exception ignored) {
-    }
-    if (pid && !(pid ==~ /\d+/)) {
-        echo "[dagger-kubernetes] ignoring malformed wrapper pid file"
-        pid = ''
-    }
-    if (pid) {
-        // Poll for the process to disappear. Bounded to 30s: the subshell
-        // writes the exit file immediately after the wrapper exits, so if the
-        // wrapper process is stuck (orphaned child, hung I/O) we give up and
-        // read the exit file directly rather than spinning until the enclosing
-        // timeout aborts the whole build as ABORTED.
-        echo "[dagger-kubernetes] waiting for wrapper pid ${pid} to exit"
-        long deadline = System.currentTimeMillis() + 30_000
-        String alive = sh(script: "kill -0 ${pid} 2>/dev/null && echo yes || echo no", returnStdout: true).trim()
-        while (alive == 'yes') {
-            if (System.currentTimeMillis() > deadline) {
-                echo "[dagger-kubernetes] wrapper pid ${pid} still alive after 30s; giving up"
-                break
-            }
-            sleep(time: 1, unit: 'SECONDS')
-            alive = sh(script: "kill -0 ${pid} 2>/dev/null && echo yes || echo no", returnStdout: true).trim()
-        }
-        echo "[dagger-kubernetes] wrapper pid ${pid} has exited"
-    }
-    String exitCode = '1'
-    try {
-        exitCode = sh(script: "cat '${exitFile}' 2>/dev/null || true", returnStdout: true).trim()
-    } catch (Exception ignored) {
-    }
-    echo "[dagger-kubernetes] wrapper exit code: ${exitCode}"
-    String stderr = ''
-    try {
-        stderr = sh(script: "cat '${stderrFile}' 2>/dev/null || true", returnStdout: true)
-    } catch (Exception ignored) {
-    }
-    if (stderr.trim()) {
-        echo stderr.trim()
-    }
-    echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${finalTraceId(stderr)}"
-
-    // Best-effort cleanup: the per-build temp files and directory must not
-    // accumulate across builds (disk exhaustion, CWE-400). The paths were
-    // validated as shell-safe before the launch script was built.
-    sh "rm -rf '${stepsDir}'"
-
-    boolean failed = exitCode != '0' || finalStatus == 'failed' || finalStatus == 'canceled'
-    echo "[dagger-kubernetes] failed=${failed} (exitCode=${exitCode} finalStatus=${finalStatus})"
-    if (failed) {
-        currentBuild.result = 'FAILURE'
-        error "dagger-kubernetes: pipeline failed (exit ${exitCode})"
-    }
-}
-
-// finalTraceId extracts the trace id from the wrapper's stderr for the
+// extractTraceId extracts the trace id from dagger's stderr output for the
 // pipeline-view link; empty when none was captured.
-String finalTraceId(String stderr) {
+String extractTraceId(String stderr) {
     def m = (stderr ?: '') =~ /[a-f0-9]{32,}/
     return m ? m[0] : ''
-}
-
-// renderNode recursively renders one step node as a nested stage: opens the
-// stage, renders its children in order, echoes its own log lines (formatted
-// from JSON when possible), and records per-stage failure via catchError so
-// the build can still render siblings before the final result is applied.
-// The visited set makes the recursion terminate even on a forged cyclic
-// parent chain (defense-in-depth).
-void renderNode(def nodes, String nodeId, Set visited, int renderDepth = 0) {
-    if (!visited.add(nodeId)) {
-        return
-    }
-    def node = nodes[nodeId]
-    String name = node.name
-    boolean isFailed = node.state == 'failed'
-
-    // When renderDepth > 0, nodes deeper than renderDepth are collapsed:
-    // their children render flat and their logs are echoed inline, but they
-    // don't create separate stage() blocks.
-    int depth = (node.depth ?: 0) as int
-    boolean collapsed = renderDepth > 0 && depth >= renderDepth
-
-    if (collapsed) {
-        if (node.children) {
-            for (String childId : node.children) {
-                renderNode(nodes, childId, visited, renderDepth)
-            }
-        }
-        for (String l : node.logs) {
-            echo formatLogLine(l)
-        }
-        return
-    }
-
-    if (isFailed) {
-        catchError(stageResult: 'FAILURE') {
-            stage(name) {
-                for (String childId : node.children) {
-                    renderNode(nodes, childId, visited, renderDepth)
-                }
-                for (String l : node.logs) {
-                    echo formatLogLine(l)
-                }
-                echo "[dagger-kubernetes] stage '${name}' failed: ${node.error ?: 'unknown error'}"
-            }
-        }
-    } else {
-        stage(name) {
-            for (String childId : node.children) {
-                renderNode(nodes, childId, visited, renderDepth)
-            }
-            for (String l : node.logs) {
-                echo formatLogLine(l)
-            }
-        }
-    }
 }
 
 // isShellUnsafe reports whether value contains a character that could break
@@ -496,79 +191,6 @@ void assertShellSafe(String value, String what) {
     if (value != null && isShellUnsafe(value)) {
         error "daggerKubernetes: ${what} must not contain quotes, backslashes, dollar signs, backticks, or control characters"
     }
-}
-
-// normalizeStageName sanitizes a span name for use as a Jenkins stage name:
-// control characters are stripped, whitespace runs collapse to a single space,
-// the result is capped in length, and an empty result falls back to a short
-// id-derived name.
-String normalizeStageName(String name, String id) {
-    String clean = (name ?: '').replaceAll(/[\p{Cntrl}]/, '').replaceAll(/\s+/, ' ').trim()
-    if (clean.length() > 80) {
-        clean = clean.substring(0, 80)
-    }
-    if (!clean) {
-        clean = "step-${(id ?: '').take(8)}"
-    }
-    return clean
-}
-
-// formatLogLine converts a log line into a human-readable string. When the
-// line is a JSON object with a 'msg' or 'message' field (Dagger's structured
-// log format), it extracts the level and message and appends any remaining
-// key-value pairs. Plain-text lines pass through unchanged.
-// Raw OTLP span data (JSON with instrumentation_scope, resources, or traceid
-// + spanid but no meaningful message) is suppressed: these are telemetry
-// records, not user-facing log messages.
-String formatLogLine(String line) {
-    if (!line) {
-        return ''
-    }
-    def trimmed = line.trim()
-    if (!trimmed.startsWith('{')) {
-        return trimmed
-    }
-    try {
-        def obj = readJSON(text: trimmed)
-        // Suppress raw OTLP span/trace JSON that has no user-facing message.
-        // These records carry instrumentation_scope, resources, traceid, and
-        // spanid fields — they are telemetry data, not log messages.
-        if (obj.instrumentation_scope || (obj.resources && obj.traceid && obj.spanid)) {
-            return ''
-        }
-        String msg = obj.msg ?: obj.message ?: obj.body ?: obj.M ?: ''
-        if (!msg) {
-            return trimmed
-        }
-        String level = obj.level ?: obj.severity ?: ''
-        def extra = [:]
-        for (def e : obj.entrySet()) {
-            String k = e.key
-            if (k in ['msg', 'message', 'body', 'M', 'level', 'severity', 'time', 'timestamp', 'ts']) {
-                continue
-            }
-            extra[k] = e.value
-        }
-        StringBuilder sb = new StringBuilder()
-        if (level) {
-            sb.append('[').append(level).append(']').append(' ')
-        }
-        sb.append(msg)
-        if (extra) {
-            sb.append(' ')
-            def pairs = extra.collect { k, v -> "${k}=${v}" }
-            sb.append(pairs.join(' '))
-        }
-        return sb.toString()
-    } catch (Exception ignored) {
-        return trimmed
-    }
-}
-
-def withStages(serverUrl, token, uiUrl) {
-    echo "[dagger-kubernetes] Jenkins shared library loaded"
-    echo "  Server: ${serverUrl}"
-    echo "  UI: ${uiUrl}"
 }
 
 def provisionCli(Map params = [:]) {
@@ -596,9 +218,10 @@ def provisionCli(Map params = [:]) {
     assertShellSafe(binDir, 'temp dir path')
 
     // The Authorization header is written to a temp file and passed to curl
-    // via -H @file (curl >= 7.55): the token never appears in the build log,
-    // in curl's process argv (readable by every local user via ps), nor in the
-    // build-wide environment (CWE-214/CWE-532). The file is deleted as soon as
+    // via -H @file (curl >= 7.55): the token never appears in curl's process
+    // argv (readable by every local user via ps) nor in the build-wide
+    // environment (CWE-214/CWE-532); it reaches the build log only through the
+    // shell's xtrace of the printf line below. The file is deleted as soon as
     // provisioning finishes.
     def headerFile = "/tmp/dagger-kubernetes-auth-${env.BUILD_NUMBER}.hdr"
     assertShellSafe(headerFile, 'header file path')
@@ -625,15 +248,15 @@ def provisionCli(Map params = [:]) {
 
         // Provision the CI wrapper binary alongside the Dagger CLI. A missing
         // endpoint (e.g. older supervisor) is non-fatal: the wrapper is only
-        // needed for dynamicStages mode, and dynamicStagesRun has its own
-        // pre-flight check that fails with a clear error when it's absent.
+        // needed by pipelines that invoke dagger-kubernetes-ci themselves —
+        // the dynamicStages mode runs the dagger command directly.
         String ciWrapperUrl = "${serverUrl}/api/v1/cli/ci-wrapper/latest?os=${osName}&arch=${arch}"
         int ciWrapperStatus = sh(script: "curl -fsS -w '%{http_code}' -o '${binDir}/dagger-kubernetes-ci' -H @'${headerFile}' '${ciWrapperUrl}'", returnStdout: true).trim() as int
         if (ciWrapperStatus == 200) {
             sh "chmod +x '${binDir}/dagger-kubernetes-ci'"
             echo "[dagger-kubernetes] Provisioned CI wrapper at ${binDir}"
         } else {
-            echo "[dagger-kubernetes] CI wrapper not available from supervisor (status ${ciWrapperStatus}); dynamicStages mode will use the agent's pre-installed binary"
+            echo "[dagger-kubernetes] CI wrapper not available from supervisor (status ${ciWrapperStatus}); pipelines calling the wrapper directly must use the agent's pre-installed binary"
         }
     } finally {
         sh "rm -f '${headerFile}'"

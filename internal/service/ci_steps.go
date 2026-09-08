@@ -584,9 +584,7 @@ func failureReason(n *domain.SpanNode) string {
 
 // normalizeStepName sanitizes a span name for use as a CI step name: control
 // characters are stripped, whitespace runs collapse to a single space, and an
-// empty result falls back to a short, stable id-derived name. Jenkins-specific
-// sanitization (length cap + collision disambiguation) is done by the shared
-// library's normalizeStageName.
+// empty result falls back to a short, stable id-derived name.
 func normalizeStepName(name, id string) string {
 	name = strings.Join(strings.Fields(name), " ")
 	if name != "" {

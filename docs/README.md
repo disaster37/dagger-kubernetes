@@ -465,7 +465,7 @@ inline comments. The sections below summarise the most important ones.
 | `version`       | `floor`                                   | `v0.19.0`                                                | Minimum engine version.                                                                                                                       |
 |                 | `allowlist`                               | —                                                        | `major.minor` prefixes to admit.                                                                                                              |
 | `ci.github`     | `job_summary` / `check_runs`              | `true` / `true`                                          | CI niceties.                                                                                                                                  |
-| `ci.jenkins`    | `dynamic_stages`                          | `true`                                                   | Split Dagger steps into nested Jenkins stages (Blue Ocean).                                                                                      |
+| `ci.jenkins`    | `dynamic_stages`                          | `true`                                                   | Dynamic-stages mode; gates the `steps_*` validation.                                                                                             |
 |                 | `steps_poll_interval`                     | `2s`                                                     | How often the CI wrapper polls the supervisor for new steps/logs.                                                                                |
 |                 | `steps_max_depth`                         | `8`                                                      | Maximum nested step depth surfaced (0 = unlimited).                                                                                             |
 | `ci.drone`      | `config_extension`                        | `true`                                                   |                                                                                                                                               |
@@ -1560,7 +1560,9 @@ daggerKubernetes(serverUrl: 'https://supv.example.com',
 }
 ```
 
-`ci.jenkins.dynamic_stages: true` splits Dagger steps into Jenkins stages.
+`dynamicStages: true` (or `env.DAGGER_KUBERNETES_DYNAMIC_STAGES`) runs the
+Dagger command in two clean stages — Provision Dagger CLI (when
+`provisionCli: true`) and Dagger — instead of the closure body.
 `provisionCli: true` (or the standalone `provisionCli(serverUrl:…, token:…)`
 step) downloads the verified CLI tarball from the supervisor, extracts `dagger`,
 and prepends it to `PATH`. See [CLI provisioning](#cli-provisioning).
@@ -1591,27 +1593,25 @@ daggerKubernetes(serverUrl: 'https://supv.example.com',
 ```
 
 `magicCache` emits the global `:cache` ref unconditionally. When
-`dynamicStages: true`, the cache config is passed to the background wrapper
-via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`.
+`dynamicStages: true`, the cache config is passed to the `dagger` command via
+the `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` environment variable.
 
-#### Nested step view (Blue Ocean)
+#### Dynamic stages
 
-With `dynamicStages: true`, the shared library launches the
-`dagger-kubernetes-ci` wrapper with `--steps` in the background and renders
-Dagger's **internal execution tree** as **nested `stage()` blocks** in Blue
-Ocean — each Dagger operation (span) becomes a nested stage with its own
-**state** (running / success / failure) and its own **live console logs**.
+With `dynamicStages: true` the shared library ignores the closure body and runs
+the Dagger command directly in exactly two stages:
 
-The wrapper rebuilds the tree from the supervisor's existing REST surface
-(`GET /api/v1/traces/:traceID` and `GET /api/v1/traces/:traceID/logs`), the same
-single source of truth the pipeline UI uses, so the CI view matches the UI. It
-emits a normalized NDJSON event stream on stdout (`node_started`,
-`node_finished`, `log_chunk`, `pipeline_done`); the shared library consumes it
-and opens/closes nested `stage()` blocks as events arrive. Dagger's internal
-transport spans (HTTP client calls such as `POST /query`) are filtered out — only
-user-facing operations (`lint`, `push`, `generateDocumentation`, …) become
-stages — and structured (JSON) engine log lines are rendered as human-readable
-`[level] message k=v …` text.
+1. **Provision Dagger CLI** — only when `provisionCli: true`; downloads the
+   verified CLI tarball from the supervisor and prepends it to `PATH`.
+2. **Dagger** — runs the `command` (or `env.DAGGER_COMMAND`) with `sh`: stdout
+   streams to the console while stderr is captured to a temp file, replayed
+   into the build log, and scanned for the trace ID. The stage prints the
+   pipeline-view link (`/pipelines/<traceID>`, falling back to
+   `/traces/latest` when no trace ID is found) and fails — failing the build —
+   when the command exits non-zero. The temp file is removed on success and
+   failure alike.
+
+The whole run is wrapped in a configurable `timeout(...)` (default 30 minutes).
 
 ```groovy
 @Library('dagger-kubernetes') _
@@ -1620,45 +1620,31 @@ daggerKubernetes(serverUrl: 'https://supv.example.com',
             uiUrl: 'https://ui.supv.example.com',
             dynamicStages: true,
             command: 'dagger call github.com/org/ci@v1.0.0 build',
-            stepsPollInterval: '2s',   // optional; default from ci.jenkins
-            stepsMaxDepth: 8,          // optional; default from ci.jenkins
+            provisionCli: true,        // optional; adds the provisioning stage
             timeoutMinutes: 30)        // optional; default 30
 ```
 
-In `dynamicStages` mode you pass the Dagger command via the `command` parameter
-(the wrapper executes it; alternatively set `env.DAGGER_COMMAND`). The whole run
-is wrapped in a configurable `timeout(...)` (default 30 minutes). The `dagger`
-exit code is authoritative for the build result; a failing span surfaces as a
-failed stage and a final `pipeline_done(status=failed)`.
-
-**Terminal-event guarantee / liveness:** the wrapper always emits exactly one
-`pipeline_done` when the Dagger command exits — even when no trace id was ever
-captured — and recovers from panics to emit it. As a second line of defense the
-shared library does not poll blindly: once the wrapper process has exited
-(exit file present) without a terminal event, it stops polling immediately and
-fails the build with the wrapper's stderr (e.g. the underlying "engine was
-never provisioned" error) instead of looping `Sleeping for 1 sec` until
-`timeoutMinutes`.
+The Dagger command is interpolated into the `sh` step as-is: it is the
+deliberate exception to the library's shell-safety validation, because it *is*
+the shell command, authored by the trusted pipeline author. Every other
+interpolated value (`serverUrl`, `cacheRegistry`, `version`, temp paths) goes
+through `assertShellSafe`.
 
 Config keys:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `ci.jenkins.dynamic_stages` | `true` | Enable nested-step streaming + rendering. |
+| `ci.jenkins.dynamic_stages` | `true` | Selects the dynamic-stages mode. |
 | `ci.jenkins.steps_poll_interval` | `2s` | Poll cadence for the CI step stream. |
 | `ci.jenkins.steps_max_depth` | `8` | Maximum nested step depth surfaced (0 = unlimited). |
 
-**Fidelity limitation:** scripted-pipeline nested `stage()` gives nested stages
-with per-stage console logs and statuses. Because Jenkins stage blocks are
-lexically nested and execute sequentially, the full nested tree renders once the
-stream completes (the run is shown as a live `Dagger: …` stage while it runs);
-child stages open/close with their own logs and success/failure status. True
-per-step Blue Ocean *flow nodes* (each Dagger span as its own clickable step with
-its own log pane, live) would require a Jenkins **plugin** implementing a `Step`
-that spawns child `FlowNode`s via the `FlowNode`/`StepContext` API — a separate
-deliverable. The NDJSON wire protocol is designed to feed such a plugin
-unchanged. The pipeline UI (`/pipelines/<id>`) remains the full-fidelity
-reference view.
+`steps_poll_interval` and `steps_max_depth` configure the
+`dagger-kubernetes-ci` wrapper's `--steps` NDJSON mode (consumed by other
+CI integrations like GitHub Actions, GitLab CI, Drone); the Jenkins shared
+library no longer consumes that mode. See
+[ADR-024](design/ADR-024-ci-nested-steps.md) for the wire protocol.
+
+The pipeline UI (`/pipelines/<id>`) remains the full-fidelity reference view.
 
 #### Jenkins on Kubernetes (official Helm chart)
 
@@ -1692,8 +1678,10 @@ USER jenkins
 
 Build the wrapper from this repo (`go build -o dagger-kubernetes-ci ./cmd/ci`
 — see [Development](#development)). `curl` + `tar` power `provisionCli`; the
-wrapper binary is only needed for `dynamicStages` (otherwise set
-`env.DAGGER_KUBERNETES_CI_BIN` to its path).
+wrapper binary itself is optional — `dynamicStages` runs the `dagger` command
+directly, so bake it into the image only if your pipelines call
+`dagger-kubernetes-ci` themselves (or set `env.DAGGER_KUBERNETES_CI_BIN` to its
+path).
 
 **2. Shared library (JCasC).** Register the global pipeline library with
 `libraryPath` pointing at `ci-integrations/jenkins`:
