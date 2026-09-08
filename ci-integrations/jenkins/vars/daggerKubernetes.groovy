@@ -517,6 +517,9 @@ String normalizeStageName(String name, String id) {
 // line is a JSON object with a 'msg' or 'message' field (Dagger's structured
 // log format), it extracts the level and message and appends any remaining
 // key-value pairs. Plain-text lines pass through unchanged.
+// Raw OTLP span data (JSON with instrumentation_scope, resources, or traceid
+// + spanid but no meaningful message) is suppressed: these are telemetry
+// records, not user-facing log messages.
 String formatLogLine(String line) {
     if (!line) {
         return ''
@@ -527,6 +530,12 @@ String formatLogLine(String line) {
     }
     try {
         def obj = readJSON(text: trimmed)
+        // Suppress raw OTLP span/trace JSON that has no user-facing message.
+        // These records carry instrumentation_scope, resources, traceid, and
+        // spanid fields — they are telemetry data, not log messages.
+        if (obj.instrumentation_scope || (obj.resources && obj.traceid && obj.spanid)) {
+            return ''
+        }
         String msg = obj.msg ?: obj.message ?: obj.body ?: obj.M ?: ''
         if (!msg) {
             return trimmed

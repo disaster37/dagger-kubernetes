@@ -442,10 +442,21 @@ type flatNode struct {
 }
 
 // internalSpanPrefixes is the set of span name prefixes that identify Dagger
-// engine internal spans (HTTP client calls, GraphQL transport, etc.). These
-// spans carry no user-facing meaning and must not surface as CI stage names.
+// engine internal spans (HTTP client calls, BuildKit I/O, type resolution,
+// CLI parsing, etc.). These spans carry no user-facing meaning and must not
+// surface as CI stage names.
 var internalSpanPrefixes = []string{
 	"GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ",
+	"Read ", "Write ", // BuildKit file I/O
+	"Query.", "Address.", // type/address resolution
+	"parsing ", // CLI argument parsing
+}
+
+// internalSpanExact is the set of exact span names that identify Dagger engine
+// internal spans. These are common short names (e.g. "connect") that would be
+// too aggressive as prefix matches.
+var internalSpanExact = map[string]bool{
+	"connect": true,
 }
 
 // isInternalSpanName reports whether a span name identifies a Dagger engine
@@ -456,7 +467,7 @@ func isInternalSpanName(name string) bool {
 			return true
 		}
 	}
-	return false
+	return internalSpanExact[name]
 }
 
 // flattenTrace walks the reconstructed span tree DFS pre-order, dedupes by

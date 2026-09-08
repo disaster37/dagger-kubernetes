@@ -847,6 +847,70 @@ func TestAdvanceFiltersAllHTTPMethodVariants(t *testing.T) {
 	}
 }
 
+func TestAdvanceFiltersBuildKitAndEngineInternalSpans(t *testing.T) {
+	tests := []struct {
+		name string
+	}{
+		{name: "Read JSON from a file in the workspace or text"},
+		{name: "Read file"},
+		{name: "Write file"},
+		{name: "Write to cache"},
+		{name: "Query.address"},
+		{name: "Query.helm"},
+		{name: "Address.secret"},
+		{name: "Address.directory"},
+		{name: "parsing command line argument"},
+		{name: "parsing flags"},
+		{name: "connect"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := NewStepEventBuilder(0)
+			internalSpan := span("internal", "r", tt.name, "running", nil)
+			root := span("r", "", "dagger call", "success", nil, internalSpan)
+
+			events, err := b.Advance(tr(root, "success"), nil)
+			if err != nil {
+				t.Fatalf("Advance: %v", err)
+			}
+			assertEvents(t, events, []string{
+				"started:r:running::0",
+				"finished:r:succeeded:",
+				"done:success:",
+			})
+		})
+	}
+}
+
+func TestAdvanceFiltersInternalSpanWithUserChildren(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	userOp := span("gen", "internal", "GenerateSchema", "success", nil)
+	internalSpan := span("internal", "r", "Read file", "running", nil, userOp)
+	root := span("r", "", "dagger call", "success", nil, internalSpan)
+
+	ts := time.Unix(100, 0)
+	logs := []domain.LogEntry{
+		logEntry(ts, "internal", "reading schema file"),
+		logEntry(ts.Add(time.Second), "gen", "schema generated"),
+	}
+
+	events, err := b.Advance(tr(root, "success"), logs)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	// Internal span folded; its child surfaces at depth 1 under root.
+	// Internal span's logs fold into root.
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:gen:running:r:1",
+		"log:gen:[schema generated]",
+		"finished:gen:succeeded:",
+		"log:r:[reading schema file]",
+		"finished:r:succeeded:",
+		"done:success:",
+	})
+}
+
 func TestAdvanceDoesNotFilterNonHTTPNames(t *testing.T) {
 	b := NewStepEventBuilder(0)
 	lint := span("lint", "r", "lint", "success", nil)
@@ -876,6 +940,7 @@ func TestIsInternalSpanName(t *testing.T) {
 		name string
 		want bool
 	}{
+		// HTTP method prefixes.
 		{"POST /query", true},
 		{"GET /blobs", true},
 		{"PUT /upload", true},
@@ -883,11 +948,31 @@ func TestIsInternalSpanName(t *testing.T) {
 		{"PATCH /config", true},
 		{"HEAD /health", true},
 		{"OPTIONS /cors", true},
+		// BuildKit file I/O.
+		{"Read JSON from a file in the workspace or text", true},
+		{"Read file", true},
+		{"Write file", true},
+		{"Write to cache", true},
+		// Type/address resolution.
+		{"Query.address", true},
+		{"Query.helm", true},
+		{"Address.secret", true},
+		{"Address.directory", true},
+		// CLI argument parsing.
+		{"parsing command line argument", true},
+		{"parsing flags", true},
+		// Exact match.
+		{"connect", true},
+		// User function calls (must NOT be filtered).
 		{"lint", false},
 		{"build", false},
 		{"generateDocumentation", false},
 		{"generateSchema", false},
 		{"dagger call", false},
+		{"push", false},
+		{"Push", false},
+		{"ConnectDatabase", false}, // prefix "Connect" not "connect"
+		{"readConfig", false},      // "read" not "Read"
 		{"", false},
 	}
 	for _, tt := range tests {
