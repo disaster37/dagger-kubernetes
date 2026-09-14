@@ -1,5 +1,7 @@
 # ADR-012: MagicCache dashboard — cache stats, services status, GC, and purge
 
+> **Note:** the dashboard was renamed to "Sync cache" in the UI (2026-09-14).
+
 - **Status:** accepted
 - **Date:** 2026-08-14
 - **Deciders:** dagger-kubernetes maintainers

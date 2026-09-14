@@ -1,6 +1,6 @@
 <template>
   <div>
-    <h1 class="page-title">MagicCache</h1>
+    <h1 class="page-title">Sync cache</h1>
 
     <div v-if="loading" class="loading-state">
       <div class="spinner"></div>

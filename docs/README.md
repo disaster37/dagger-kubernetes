@@ -648,7 +648,7 @@ to the standard AWS environment chain when empty). With an external S3
 provider, create the `engine-s3-auth` Secret yourself (or inject the keys via
 env) and set `supervisor.config.cache.sync.s3Endpoint`.
 
-> **Note:** the MagicCache dashboard reports the S3 GC rules, the remote-cache
+> **Note:** the Sync cache dashboard reports the S3 GC rules, the remote-cache
 > hit rate (from BuildKit counters in VictoriaMetrics), and the admin purge
 > action; per-object size stats are not collected for the S3 backend (see
 > ADR-012).
@@ -683,7 +683,7 @@ for snapshots, immutable versioned keys for the CLI cache).
 
 ### Purging cache (admin)
 
-From the MagicCache page, admins can purge the remote cache with a single
+From the Sync cache page, admins can purge the remote cache with a single
 button. The underlying endpoint is `POST /api/v1/cache/purge` (admin-only); it
 deletes every object under the S3 cache prefix (capped at 1000 objects per
 call; run it repeatedly for a large cache).
@@ -1558,7 +1558,7 @@ Features:
   state). Dagger engine verbose progress payloads (base64 protobufs) are
   collapsed to a placeholder rather than rendered as base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
-- **MagicCache dashboard** (`/cache`) — cache running state, S3 remote-cache
+- **Sync cache dashboard** (`/cache`) — cache running state, S3 remote-cache
   hit rate (from VictoriaMetrics BuildKit counters), auto-clean (GC) rules
   with last/next run, and admin-only purge button
 - **History dashboard** (`/history`) — pipeline-history trace count + oldest
