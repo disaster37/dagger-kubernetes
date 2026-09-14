@@ -39,6 +39,7 @@ auth:
     allowed_groups: []                        # oidc only: groups-claim allowlist (canonical); union with allowed_orgs; empty = allow all.
     group_mappings: []                        # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
     default_group: ""                         # new OAuth users auto-join this group (must exist); empty = none.
+    admin_groups: []                          # upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, pre-mapping); empty = disabled.
     cookie_secure: false                      # force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).
     # OIDC-only fields (provider: oidc). Ignored when provider: github.
     issuer_url: ""                            # e.g. "https://dex.example.com"; loopback http allowed for dev.

@@ -70,18 +70,59 @@ the computed public URL by stripping the scheme and any port/path. */}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the public OCI cache ref used in _EXPERIMENTAL_DAGGER_CACHE_CONFIG:
-<cachePublicHost>/dagger-cache. The repo path is fixed to `dagger-cache`. */}}
+{{/* Resolve the public OCI cache ref exposed on GET /api/v1/cache:
+<cachePublicHost>/dagger-cache. The repo path is fixed to `dagger-cache`.
+Dagger 0.21.x removed the experimental cache-config env var, so this ref is
+no longer emitted to clients; warm start is the worker-snapshot sync. */}}
 {{- define "dagger-kubernetes.cacheRegistry" -}}
 {{- printf "%s/dagger-cache" (include "dagger-kubernetes.cachePublicHost" .) -}}
 {{- end -}}
 
-{{/* Resolve the internal cache backend address (host[:port], no scheme):
-the in-cluster registry Service when the registry subchart is enabled, in the
-<service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
-{{- define "dagger-kubernetes.cacheInternalAddr" -}}
-{{- if .Values.registry.enabled -}}
-{{- printf "%s-registry.%s.svc:5000" .Release.Name (include "dagger-kubernetes.namespace" .) -}}
+{{/* Resolve the S3 endpoint for the supervisor and sync containers. When the
+minio subchart is enabled, defaults to the in-cluster MinIO service. */}}
+{{- define "dagger-kubernetes.s3Endpoint" -}}
+{{- if .Values.supervisor.config.cache.sync.s3Endpoint -}}
+{{- .Values.supervisor.config.cache.sync.s3Endpoint -}}
+{{- else if .Values.minio.enabled -}}
+{{- printf "%s-minio.%s.svc:%v" .Release.Name (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the S3 bucket name. Falls back through the hierarchy:
+sync bucket -> cache s3 bucket -> MinIO default bucket. */}}
+{{- define "dagger-kubernetes.s3Bucket" -}}
+{{- $syncBucket := .Values.supervisor.config.cache.sync.s3Bucket -}}
+{{- $cacheBucket := .Values.supervisor.config.cache.s3.bucket -}}
+{{- if $syncBucket -}}
+{{- $syncBucket -}}
+{{- else if $cacheBucket -}}
+{{- $cacheBucket -}}
+{{- else if .Values.minio.enabled -}}
+{{- index (.Values.minio.buckets | default list) 0 | default dict | dig "name" "dagger-cache" -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the S3 access key. Defaults to the MinIO root user when minio is
+enabled; falls back to the engine-s3-auth secret in all cases. */}}
+{{- define "dagger-kubernetes.s3AccessKey" -}}
+{{- if .Values.minio.enabled -}}
+{{- .Values.minio.rootUser | default "minioadmin" -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the S3 secret key. Defaults to the MinIO root password when minio
+is enabled; falls back to the engine-s3-auth secret in all cases. */}}
+{{- define "dagger-kubernetes.s3SecretKey" -}}
+{{- if .Values.minio.enabled -}}
+{{- .Values.minio.rootPassword | default "minioadmin" -}}
+{{- else -}}
+{{- "" -}}
 {{- end -}}
 {{- end -}}
 

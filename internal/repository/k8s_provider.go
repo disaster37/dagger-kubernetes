@@ -27,11 +27,13 @@ const (
 	engineLabelVersion = "version"
 	enginePort         = 9999
 
-	engineConfigMapName    = "dagger-engine-config"
-	engineTOMLKey          = "engine.toml"
-	engineTOMLPath         = "/etc/dagger-config/engine.toml"
-	engineCAMountPath      = "/usr/local/share/ca-certificates" // Dagger auto-detects CAs here on startup
-	engineAuthSecretName   = "engine-registry-auth"             // holds the cache token; mounted as /etc/dagger
+	engineConfigMapName       = "dagger-engine-config"
+	engineTOMLKey             = "engine.toml"
+	engineTOMLPath            = "/etc/dagger-config/engine.toml"
+	engineCAMountPath         = "/usr/local/share/ca-certificates" // Dagger auto-detects CAs here on startup
+	engineImageAuthSecretName = "engine-image-auth"                // holds engine image-pull auth (.dockerconfigjson); mounted as /etc/dagger
+	//nolint:gosec // K8s resource name, not a credential.
+	engineS3AuthSecretName = "engine-s3-auth" // holds the S3 access/secret keys for the sync helpers
 	volumeDaggerKubernetes = "dagger-kubernetes"
 	volumeEngineConfig     = "engine-config"
 	volumeDaggerConfig     = "dagger-config"
@@ -39,7 +41,39 @@ const (
 	volumeCASecret         = "ca-secret" // K8s Secret volume (read-only); mounted only in init container
 
 	engineIdleSinceAnnotation = "dagger-kubernetes.io/idle-since"
+
+	// --- worker-cache sync (cache-restore init + cache-sync sidecar) ---
+	volumeCacheSyncTmp        = "cache-sync-tmp" // node-backed emptyDir holding the tarball between tar and upload
+	cacheSyncRestoreContainer = "cache-restore"
+	cacheSyncSidecarContainer = "cache-sync"
+	cacheSyncBaseDir          = "/var/lib/dagger" // PVC mount point == CACHE_SYNC_BASE_DIR
+	cacheSyncWorkerSubdir     = "worker"          // BuildKit's local cache under the PVC == CACHE_SYNC_WORKER_SUBDIR
+	cacheSyncTmpDir           = "/tmp"            // sidecar tarball temp == CACHE_SYNC_TMP_DIR
+	supervisorBinaryPath      = "/usr/local/bin/supervisor"
+
+	cacheSyncRoleRestore = "restore" // syncEnv role: init container (read-write PVC mount)
+	cacheSyncRoleServe   = "serve"   // syncEnv role: sidecar (read-only PVC mount + tmp emptyDir)
 )
+
+// K8sCacheSyncConfig renders the worker-cache sync helpers (see
+// domain.CacheSyncConfig). The snapshot tag is computed per version via
+// domain.WorkerSnapshotTagV2, not stored here.
+type K8sCacheSyncConfig struct {
+	Image       string // image holding the supervisor binary; "" = sync disabled
+	Interval    time.Duration
+	QuiesceWait time.Duration
+	Enabled     bool
+	OnStart     bool
+	OnStop      bool
+
+	// S3-specific. The S3 access key and secret key are NOT carried here:
+	// they are rendered as Secret references (engine-s3-auth) so credentials
+	// never appear as literal values in the pod spec.
+	S3Endpoint string
+	S3Bucket   string
+	S3Region   string
+	S3UseSSL   bool
+}
 
 type K8sProviderConfig struct {
 	Namespace           string
@@ -64,6 +98,7 @@ type K8sProviderConfig struct {
 	Debug               bool                           // engine.toml: debug = true
 	LogFormat           string                         // engine.toml: [log] format; "" omits the section
 	RegistryMirrors     map[string][]string            // engine.toml: [registry."<host>"] mirrors
+	CacheSync           K8sCacheSyncConfig             // worker-cache snapshot sync (init + sidecar); Enabled=false omits both
 }
 
 type K8sProvider struct {
@@ -212,6 +247,26 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 		},
 	}
 
+	// Worker-cache sync: the restore init container runs strictly before the
+	// engine; the sidecar runs alongside it for the pod's whole lifetime. Both
+	// are omitted (graceful degradation) when sync is disabled or the sync
+	// image is empty — they must never block the engine pod.
+	containers := []corev1.Container{container}
+	volumes := p.podVolumes(daggerTOML)
+	if p.syncSidecarEnabled() {
+		containers = append(containers, p.syncSidecarContainer(version))
+		volumes = append(volumes, corev1.Volume{
+			Name: volumeCacheSyncTmp,
+			VolumeSource: corev1.VolumeSource{
+				EmptyDir: &corev1.EmptyDirVolumeSource{},
+			},
+		})
+	}
+	initContainers := p.initContainers(image)
+	if p.syncRestoreEnabled() {
+		initContainers = append(initContainers, p.syncInitContainer(version))
+	}
+
 	vctSpec := corev1.PersistentVolumeClaimSpec{
 		AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
 		Resources: corev1.VolumeResourceRequirements{
@@ -252,9 +307,9 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 				ObjectMeta: metav1.ObjectMeta{Labels: labelMap},
 				Spec: corev1.PodSpec{
 					TerminationGracePeriodSeconds: &graceSec,
-					InitContainers:                p.initContainers(image),
-					Containers:                    []corev1.Container{container},
-					Volumes:                       p.podVolumes(daggerTOML),
+					InitContainers:                initContainers,
+					Containers:                    containers,
+					Volumes:                       volumes,
 					Tolerations:                   p.cfg.Tolerations,
 					NodeSelector:                  p.cfg.NodeSelector,
 				},
@@ -276,12 +331,11 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 	}
 }
 
-// engineEnv returns the engine container environment: the cache token
-// (always, sourced from the auth secret), then operator-supplied literal and
-// secret-sourced vars (each group sorted by name for deterministic specs).
+// engineEnv returns the engine container environment: operator-supplied
+// literal and secret-sourced vars (each group sorted by name for deterministic
+// specs).
 func (p *K8sProvider) engineEnv() []corev1.EnvVar {
-	env := make([]corev1.EnvVar, 0, 1+len(p.cfg.ExtraEnv)+len(p.cfg.ExtraEnvFrom))
-	env = append(env, secretEnvVar("DAGGER_KUBERNETES_TOKEN", engineAuthSecretName, "token"))
+	env := make([]corev1.EnvVar, 0, len(p.cfg.ExtraEnv)+len(p.cfg.ExtraEnvFrom))
 	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
 		env = append(env, corev1.EnvVar{Name: name, Value: p.cfg.ExtraEnv[name]})
 	}
@@ -308,8 +362,8 @@ func secretEnvVar(name, secretName, key string) corev1.EnvVar {
 }
 
 // engineVolumeMounts returns the engine container mounts: the data dir and
-// the registry-auth config dir, plus the CA bundle and engine.toml files when
-// enabled (an empty daggerTOML omits the latter).
+// the engine image-pull auth secret dir, plus the CA bundle and engine.toml
+// files when enabled (an empty daggerTOML omits the latter).
 func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: volumeDaggerKubernetes, MountPath: "/var/lib/dagger"},
@@ -332,15 +386,15 @@ func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount
 	return mounts
 }
 
-// podVolumes returns the pod volumes: the registry-auth secret dir, plus the
-// CA bundle and the engine.toml ConfigMap when enabled (an empty daggerTOML
-// omits the latter).
+// podVolumes returns the pod volumes: the engine image-pull auth secret dir,
+// plus the CA bundle and the engine.toml ConfigMap when enabled (an empty
+// daggerTOML omits the latter).
 func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
 	volumes := []corev1.Volume{
 		{
 			Name: volumeEngineConfig,
 			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: engineAuthSecretName},
+				Secret: &corev1.SecretVolumeSource{SecretName: engineImageAuthSecretName},
 			},
 		},
 	}
@@ -410,6 +464,98 @@ func (p *K8sProvider) initContainers(image string) []corev1.Container {
 					MountPath: "/usr/local/share/ca-certificates",
 				},
 			},
+		},
+	}
+}
+
+// --- worker-cache sync (cache-restore init + cache-sync sidecar) -----------
+
+// syncRestoreEnabled reports whether the cache-restore init container must
+// run. An empty image skips it (graceful degradation: the supervisor warns at
+// wiring time; the engine pod is never blocked by sync).
+func (p *K8sProvider) syncRestoreEnabled() bool {
+	s := p.cfg.CacheSync
+	return s.Enabled && s.OnStart && s.Image != ""
+}
+
+// syncSidecarEnabled reports whether the cache-sync sidecar must run: it needs
+// to exist only when there is something to push (on-stop and/or periodic).
+func (p *K8sProvider) syncSidecarEnabled() bool {
+	s := p.cfg.CacheSync
+	return s.Enabled && s.Image != "" && (s.OnStop || s.Interval > 0)
+}
+
+// syncEnv builds the env for a cache-sync helper container. role selects the
+// serve-only tuning (tmp dir, interval, quiesce wait); the restore init
+// container ignores it. S3 endpoint/bucket are always set; credentials come
+// from Secret references so they never appear as literal pod-spec values.
+func (p *K8sProvider) syncEnv(version, role string) []corev1.EnvVar {
+	env := []corev1.EnvVar{
+		{Name: "CACHE_SYNC_TAG", Value: domain.WorkerSnapshotTagV2(version)},
+		{Name: "CACHE_SYNC_BASE_DIR", Value: cacheSyncBaseDir},
+		{Name: "CACHE_SYNC_WORKER_SUBDIR", Value: cacheSyncWorkerSubdir},
+		{Name: "CACHE_SYNC_S3_ENDPOINT", Value: p.cfg.CacheSync.S3Endpoint},
+		{Name: "CACHE_SYNC_S3_BUCKET", Value: p.cfg.CacheSync.S3Bucket},
+		{Name: "CACHE_SYNC_S3_REGION", Value: p.cfg.CacheSync.S3Region},
+		{Name: "CACHE_SYNC_S3_USE_SSL", Value: strconv.FormatBool(p.cfg.CacheSync.S3UseSSL)},
+		// Credentials come from a Secret so they are never literal
+		// values in the pod spec.
+		secretEnvVar("CACHE_SYNC_S3_ACCESS_KEY", engineS3AuthSecretName, "accessKey"),
+		secretEnvVar("CACHE_SYNC_S3_SECRET_KEY", engineS3AuthSecretName, "secretKey"),
+	}
+	if role == cacheSyncRoleServe {
+		env = append(env,
+			corev1.EnvVar{Name: "CACHE_SYNC_TMP_DIR", Value: cacheSyncTmpDir},
+			corev1.EnvVar{Name: "CACHE_SYNC_INTERVAL", Value: p.cfg.CacheSync.Interval.String()},
+			corev1.EnvVar{Name: "CACHE_SYNC_QUIESCE_WAIT", Value: p.cfg.CacheSync.QuiesceWait.String()},
+		)
+	}
+	return env
+}
+
+// syncSecurityContext matches the engine: the PVC is root-owned by the
+// privileged engine, so the helpers run as root.
+func (p *K8sProvider) syncSecurityContext() *corev1.SecurityContext {
+	privileged := p.cfg.Privileged
+	runAsUser := int64(0)
+	return &corev1.SecurityContext{
+		Privileged: &privileged,
+		RunAsUser:  &runAsUser,
+	}
+}
+
+// syncInitContainer returns the cache-restore init container, which restores
+// the worker-dir snapshot before the engine starts (no-op when the PVC
+// already has cache content).
+func (p *K8sProvider) syncInitContainer(version string) corev1.Container {
+	return corev1.Container{
+		Name:            cacheSyncRestoreContainer,
+		Image:           p.cfg.CacheSync.Image,
+		ImagePullPolicy: p.cfg.PullPolicy,
+		Command:         []string{supervisorBinaryPath, "cache-sync", cacheSyncRoleRestore},
+		Env:             p.syncEnv(version, cacheSyncRoleRestore),
+		SecurityContext: p.syncSecurityContext(),
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: volumeDaggerKubernetes, MountPath: cacheSyncBaseDir},
+		},
+	}
+}
+
+// syncSidecarContainer returns the cache-sync sidecar, which periodically
+// pushes the worker-dir snapshot and performs the final push on SIGTERM. It
+// mounts the PVC read-only (the tarball goes to the node-backed emptyDir) and
+// has no probes: it is auxiliary to the engine's readiness.
+func (p *K8sProvider) syncSidecarContainer(version string) corev1.Container {
+	return corev1.Container{
+		Name:            cacheSyncSidecarContainer,
+		Image:           p.cfg.CacheSync.Image,
+		ImagePullPolicy: p.cfg.PullPolicy,
+		Command:         []string{supervisorBinaryPath, "cache-sync", cacheSyncRoleServe},
+		Env:             p.syncEnv(version, cacheSyncRoleServe),
+		SecurityContext: p.syncSecurityContext(),
+		VolumeMounts: []corev1.VolumeMount{
+			{Name: volumeDaggerKubernetes, MountPath: cacheSyncBaseDir, ReadOnly: true},
+			{Name: volumeCacheSyncTmp, MountPath: cacheSyncTmpDir},
 		},
 	}
 }

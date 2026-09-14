@@ -13,6 +13,10 @@ import (
 
 var groupNameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$`)
 
+// ValidateGroupName reports whether name satisfies the supervisor group-name
+// rule (^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$).
+func ValidateGroupName(name string) bool { return groupNameRe.MatchString(name) }
+
 // GroupInput is the validated payload for creating/updating a group.
 type GroupInput struct {
 	Name              string

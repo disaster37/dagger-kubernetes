@@ -1,8 +1,17 @@
 # ADR-012: MagicCache dashboard — cache stats, services status, GC, and purge
 
+> **Note:** the dashboard was renamed to "Sync cache" in the UI (2026-09-14).
+
 - **Status:** accepted
 - **Date:** 2026-08-14
 - **Deciders:** dagger-kubernetes maintainers
+
+> **Superseded (2026-09-14):** Dagger 0.21.x removed
+> `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, so the supervisor no longer emits the
+> BuildKit cache config (Connect/env, CI wrapper, shell integrations, Helm).
+> Cache warm start is now provided by the worker-snapshot sync
+> (`cache.sync.*`); the MagicCache dashboard itself is retained. The body below
+> is kept as the historical decision record.
 
 ## Context
 

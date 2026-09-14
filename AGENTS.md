@@ -46,11 +46,13 @@ Rules that keep CI green:
   what nothing references anymore. There is usually no test coverage for
   helpers, so `go test` will not catch this — only lint does.
 - **Integration tests: no hardcoded ports.** Everything in `tests/integration/`
-  starts real Hertz servers. A fixed port that collides with another test's
-  port (or a still-draining previous server) produces flaky `401`/stale-server
-  failures. New tests MUST allocate ports with `freeAddr(t)`
-  (`tests/integration/net_helpers_test.go`) and shut down with a timed context
-  in `t.Cleanup`:
+  starts real Hertz servers. Never probe-then-close a port (`freeAddr`): the
+  freed port can be claimed by an httptest server or a concurrent test binary
+  before the supervisor binds it, and Hertz panics when the control-plane bind
+  loses that race. New tests MUST bind listeners with `freeListener(t)`
+  (`tests/integration/net_helpers_test.go`) and hand them to the server via
+  `ServerConfig.ControlListener`/`DataListener`, then shut down with a timed
+  context in `t.Cleanup`:
   ```go
   t.Cleanup(func() {
       shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

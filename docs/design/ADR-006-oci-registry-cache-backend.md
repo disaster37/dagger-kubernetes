@@ -2,6 +2,12 @@
 
 **Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-kubernetes team
 
+> **Superseded (2026-09-14):** Dagger 0.21.x removed
+> `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, so the supervisor no longer emits the
+> BuildKit cache config (Connect/env, CI wrapper, shell integrations, Helm).
+> Cache warm start is now provided by the worker-snapshot sync
+> (`cache.sync.*`). The body below is kept as the historical decision record.
+
 ## Context
 
 The Dagger CLI uses BuildKit's remote cache feature to share layer blobs

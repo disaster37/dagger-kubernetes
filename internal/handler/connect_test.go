@@ -98,14 +98,6 @@ func TestConnectEnvDefaultMasked(t *testing.T) {
 	if got := snapshotEnvValue(&snap, "DAGGER_CLOUD_TOKEN"); got != "" {
 		t.Fatalf("masked token value = %q, want empty", got)
 	}
-	cache, ok := env.server.cacheBackend.(*service.Cache)
-	if !ok {
-		t.Fatal("cache backend is not *service.Cache")
-	}
-	want := cache.BuildCacheConfig("max")
-	if got := snapshotEnvValue(&snap, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got != want {
-		t.Fatalf("CACHE_CONFIG = %q, want %q", got, want)
-	}
 }
 
 func TestConnectEnvRevealed(t *testing.T) {
@@ -150,9 +142,6 @@ func TestConnectEnvWithVersion(t *testing.T) {
 	}
 	if got := snapshotEnvValue(&snap, "_EXPERIMENTAL_DAGGER_TAG"); got == "" {
 		t.Fatal("missing _EXPERIMENTAL_DAGGER_TAG")
-	}
-	if got := snapshotEnvValue(&snap, "_EXPERIMENTAL_DAGGER_CACHE_CONFIG"); got == "" {
-		t.Fatal("missing _EXPERIMENTAL_DAGGER_CACHE_CONFIG")
 	}
 }
 
@@ -253,15 +242,10 @@ func TestConnectEnvNoTokenInLogs(t *testing.T) {
 	logger.SetFormatter(&logrus.TextFormatter{})
 	env.server.logger = logger
 
-	cache, ok := env.server.cacheBackend.(*service.Cache)
-	if !ok {
-		t.Fatal("cache backend is not *service.Cache")
-	}
 	env.server.connect = service.NewConnectService(&domain.Config{
 		Server:  domain.ServerConfig{PublicURL: "https://supv.example.com", DataHost: "data.example.com"},
-		Cache:   domain.CacheConfig{Backend: "registry"},
 		Version: domain.VersionConfig{Floor: "v0.19.0"},
-	}, cache, env.server.versionResolver, env.server.tokens, logger)
+	}, env.server.versionResolver, env.server.tokens, logger)
 
 	e := newAuthEngine(env.server)
 	u, err := env.users.Create(context.Background(), "alice", "password123", domain.RoleUser)

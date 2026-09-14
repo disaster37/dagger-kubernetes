@@ -3,7 +3,6 @@ set -euo pipefail
 
 DAGGER_KUBERNETES_SERVER="${DAGGER_KUBERNETES_SERVER:-https://supv.example.com}"
 DAGGER_KUBERNETES_UI="${DAGGER_KUBERNETES_UI:-$DAGGER_KUBERNETES_SERVER}"
-CACHE_REGISTRY="${CACHE_REGISTRY:-cache.reg/dagger-cache}"
 
 if [ -z "${DAGGER_CLOUD_TOKEN:-}" ]; then
   echo "Error: DAGGER_CLOUD_TOKEN not set" >&2
@@ -33,9 +32,6 @@ fi
 if [ -n "$DAGGER_TAG" ]; then
   export _EXPERIMENTAL_DAGGER_TAG="$DAGGER_TAG"
 fi
-
-CACHE_REF="${CACHE_REGISTRY}:cache"
-export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=registry,ref=${CACHE_REF},mode=max"
 
 echo "Dagger Kubernetes: $DAGGER_KUBERNETES_SERVER (version: ${DAGGER_TAG:-auto})" >&2
 

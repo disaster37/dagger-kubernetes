@@ -1,5 +1,5 @@
 name: 'dagger-kubernetes'
-description: 'Run Dagger with remote shared cache and live pipeline view'
+description: 'Run Dagger with live pipeline view'
 inputs:
   server-url:
     description: 'Dagger Kubernetes server URL'
@@ -23,7 +23,7 @@ inputs:
 runs:
   using: 'composite'
   steps:
-    - name: Run Dagger with Cache
+    - name: Run Dagger
       shell: bash
       run: |
         "${GITHUB_ACTION_PATH}/dagger-kubernetes.sh" run "${DC_MODULE}" ${DC_ARGS}

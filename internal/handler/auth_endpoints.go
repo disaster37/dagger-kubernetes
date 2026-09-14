@@ -39,6 +39,7 @@ type authMeResponse struct {
 	Username      string         `json:"username"`
 	Role          domain.Role    `json:"role"`
 	OAuthProvider string         `json:"oauth_provider,omitempty"`
+	OAuthGroups   []string       `json:"oauth_groups,omitempty"`
 	Groups        []groupSummary `json:"groups"`
 }
 
@@ -403,6 +404,7 @@ func toAuthMeResponse(u *domain.User, groups []*domain.Group) authMeResponse {
 		Username:      u.Username,
 		Role:          u.Role,
 		OAuthProvider: u.OAuthProvider,
+		OAuthGroups:   u.OAuthGroups,
 		Groups:        toGroupSummaries(groups),
 	}
 }

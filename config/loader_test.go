@@ -13,6 +13,15 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// TestMain satisfies the always-on S3 prerequisites (cli cache +
+// worker-cache sync) so the Load tests exercise the rest of the config
+// surface. Tests asserting the raw S3 defaults override these env vars.
+func TestMain(m *testing.M) {
+	_ = os.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	_ = os.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "minio.test:9000")
+	os.Exit(m.Run())
+}
+
 func TestLoadDefaults(t *testing.T) {
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
@@ -650,6 +659,65 @@ func TestLoadRejectsInvalidGroupMappings(t *testing.T) {
 	}
 }
 
+func TestValidateOAuthAdminGroups(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *domain.Config
+		wantErr string
+	}{
+		{name: "empty list", cfg: &domain.Config{}},
+		{name: "valid entries", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AdminGroups: []string{"HM_ADM_ETL_Outils", "platform-admins"},
+		}}}},
+		{name: "empty string entry", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AdminGroups: []string{"valid", ""},
+		}}}, wantErr: "auth.oauth.admin_groups[1] must not be empty"},
+		{name: "whitespace-only entry", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AdminGroups: []string{"  "},
+		}}}, wantErr: "auth.oauth.admin_groups[0] must not be empty"},
+		{name: "duplicate entry", cfg: &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+			AdminGroups: []string{"admins", "admins"},
+		}}}, wantErr: "auth.oauth.admin_groups[1] \"admins\" duplicates an earlier entry"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateOAuthAdminGroups(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateOAuthAdminGroups = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateOAuthAdminGroups = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateOAuthAdminGroups = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadAdminGroupsDefault(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("server:\n  public_url: \"https://example.com\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	if cfg.Auth.OAuth.AdminGroups == nil {
+		t.Fatal("admin_groups default should be non-nil empty slice")
+	}
+	if len(cfg.Auth.OAuth.AdminGroups) != 0 {
+		t.Fatalf("admin_groups default should be empty, got %v", cfg.Auth.OAuth.AdminGroups)
+	}
+}
+
 func TestLoadRejectsInternalDisabledWithoutOAuth(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.app.yaml")
@@ -838,10 +906,11 @@ func TestLoadCLIEnvOverride(t *testing.T) {
 
 func TestValidateCLIConfig(t *testing.T) {
 	base := func() *domain.Config {
-		return &domain.Config{
+		cfg := &domain.Config{
 			CLI: domain.CLIConfig{
 				Enabled:         true,
 				CacheRepo:       "dagger-kubernetes/cli-cache",
+				S3Prefix:        "cli-cache",
 				ReleaseListTTL:  time.Hour,
 				DownloadTimeout: 5 * time.Minute,
 				Upstream: domain.CLIUpstreamConfig{
@@ -850,6 +919,8 @@ func TestValidateCLIConfig(t *testing.T) {
 				},
 			},
 		}
+		cfg.Cache.S3.Bucket = "shared"
+		return cfg
 	}
 
 	tests := []struct {
@@ -1443,4 +1514,216 @@ func TestDecodeSettingsRejectsNonPointer(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "pointer") {
 		t.Fatalf("decodeSettings(nil, struct) = %v, want pointer error", err)
 	}
+}
+
+func TestLoadCacheSyncS3Defaults(t *testing.T) {
+	// Disable both S3 consumers and clear the TestMain-provided prerequisites
+	// to observe the raw defaults.
+	t.Setenv("DAGGER_KUBERNETES_CLI_ENABLED", "false")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_ENABLED", "false")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load with missing file: %v", err)
+	}
+
+	if cfg.Cache.Sync.S3Endpoint != "" {
+		t.Fatalf("cache.sync.s3_endpoint default should be empty, got %q", cfg.Cache.Sync.S3Endpoint)
+	}
+	if cfg.Cache.Sync.S3Bucket != "" {
+		t.Fatalf("cache.sync.s3_bucket default should be empty, got %q", cfg.Cache.Sync.S3Bucket)
+	}
+	if cfg.Cache.Sync.S3Region != "us-east-1" {
+		t.Fatalf("cache.sync.s3_region default = %q, want us-east-1", cfg.Cache.Sync.S3Region)
+	}
+	if !cfg.Cache.Sync.S3UseSSL {
+		t.Fatal("cache.sync.s3_use_ssl default should be true")
+	}
+	if cfg.Cache.Sync.S3AccessKey != "" || cfg.Cache.Sync.S3SecretKey != "" {
+		t.Fatal("cache.sync.s3_access_key/s3_secret_key defaults should be empty")
+	}
+	if cfg.CLI.S3Bucket != "" {
+		t.Fatalf("cli.s3_bucket default should be empty, got %q", cfg.CLI.S3Bucket)
+	}
+	if cfg.CLI.S3Prefix != "cli-cache" {
+		t.Fatalf("cli.s3_prefix default = %q, want cli-cache", cfg.CLI.S3Prefix)
+	}
+}
+
+func TestLoadCacheSyncS3EnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "minio.example.com:9000")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_BUCKET", "snapshots")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_REGION", "eu-west-1")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_USE_SSL", "false")
+	t.Setenv("DAGGER_KUBERNETES_CLI_S3_PREFIX", "mirror/cli")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Cache.Sync.S3Endpoint != "minio.example.com:9000" {
+		t.Fatalf("cache.sync.s3_endpoint = %q", cfg.Cache.Sync.S3Endpoint)
+	}
+	if cfg.Cache.Sync.S3Bucket != "snapshots" {
+		t.Fatalf("cache.sync.s3_bucket = %q", cfg.Cache.Sync.S3Bucket)
+	}
+	if cfg.Cache.Sync.S3Region != "eu-west-1" {
+		t.Fatalf("cache.sync.s3_region = %q", cfg.Cache.Sync.S3Region)
+	}
+	if cfg.Cache.Sync.S3UseSSL {
+		t.Fatal("cache.sync.s3_use_ssl = true, want false")
+	}
+	if cfg.CLI.S3Prefix != "mirror/cli" {
+		t.Fatalf("cli.s3_prefix = %q", cfg.CLI.S3Prefix)
+	}
+}
+
+func TestValidateS3Prerequisites(t *testing.T) {
+	// baseConfig returns a config whose S3 prerequisites are satisfied, so
+	// each case only mutates what it tests.
+	baseConfig := func() *domain.Config {
+		cfg := &domain.Config{
+			CLI: domain.CLIConfig{Enabled: true, S3Prefix: "cli-cache"},
+		}
+		cfg.Cache.S3.Bucket = "shared"
+		cfg.Cache.Sync.Enabled = true
+		cfg.Cache.Sync.S3Endpoint = "minio:9000"
+		cfg.CLI.Upstream.ReleasesURL = "https://api.github.com/repos/dagger/dagger/releases"
+		cfg.CLI.Upstream.DownloadBase = "https://github.com/dagger/dagger/releases/download"
+		cfg.CLI.CacheRepo = "dagger-kubernetes/cli-cache"
+		cfg.CLI.ReleaseListTTL = time.Hour
+		cfg.CLI.DownloadTimeout = 5 * time.Minute
+		return cfg
+	}
+
+	t.Run("cache sync", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			mut     func(*domain.Config)
+			wantErr string
+		}{
+			{
+				name: "prerequisites satisfied",
+				mut:  func(c *domain.Config) {},
+			},
+			{
+				name: "missing endpoint",
+				mut: func(c *domain.Config) {
+					c.Cache.Sync.S3Endpoint = ""
+				},
+				wantErr: "cache.sync.s3_endpoint is required",
+			},
+			{
+				name: "missing bucket",
+				mut: func(c *domain.Config) {
+					c.Cache.S3.Bucket = ""
+				},
+				wantErr: "cache.sync.s3_bucket (or cache.s3.bucket) is required",
+			},
+			{
+				name: "sync bucket overrides shared bucket",
+				mut: func(c *domain.Config) {
+					c.Cache.S3.Bucket = ""
+					c.Cache.Sync.S3Bucket = "sync-only"
+				},
+			},
+			{
+				name: "sync disabled skips prerequisite checks",
+				mut: func(c *domain.Config) {
+					c.Cache.Sync.Enabled = false
+					c.Cache.Sync.S3Endpoint = ""
+					c.Cache.S3.Bucket = ""
+				},
+			},
+			{
+				name: "negative interval rejected",
+				mut: func(c *domain.Config) {
+					c.Cache.Sync.Interval = -time.Second
+				},
+				wantErr: "cache.sync.interval must be >= 0",
+			},
+			{
+				name: "negative quiesce wait rejected",
+				mut: func(c *domain.Config) {
+					c.Cache.Sync.QuiesceWait = -time.Second
+				},
+				wantErr: "cache.sync.quiesce_wait must be >= 0",
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cfg := baseConfig()
+				tt.mut(cfg)
+				err := validateCacheSyncConfig(cfg)
+				if tt.wantErr == "" {
+					if err != nil {
+						t.Fatalf("validateCacheSyncConfig err = %v, want nil", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateCacheSyncConfig err = %v, want %q", err, tt.wantErr)
+				}
+			})
+		}
+	})
+
+	t.Run("cli cache", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			mut     func(*domain.Config)
+			wantErr string
+		}{
+			{
+				name: "bucket from cache.s3.bucket",
+				mut:  func(c *domain.Config) {},
+			},
+			{
+				name: "own cli bucket",
+				mut: func(c *domain.Config) {
+					c.Cache.S3.Bucket = ""
+					c.CLI.S3Bucket = "cli-only"
+				},
+			},
+			{
+				name: "missing bucket",
+				mut: func(c *domain.Config) {
+					c.Cache.S3.Bucket = ""
+				},
+				wantErr: "cli.s3_bucket (or cache.s3.bucket) is required when cli.enabled",
+			},
+			{
+				name: "empty prefix",
+				mut: func(c *domain.Config) {
+					c.CLI.S3Prefix = ""
+				},
+				wantErr: "cli.s3_prefix must not be empty when cli.enabled",
+			},
+			{
+				name: "cli disabled skips bucket check",
+				mut: func(c *domain.Config) {
+					c.CLI.Enabled = false
+					c.Cache.S3.Bucket = ""
+				},
+			},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				cfg := baseConfig()
+				tt.mut(cfg)
+				err := validateCLIConfig(cfg)
+				if tt.wantErr == "" {
+					if err != nil {
+						t.Fatalf("validateCLIConfig err = %v, want nil", err)
+					}
+					return
+				}
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("validateCLIConfig err = %v, want %q", err, tt.wantErr)
+				}
+			})
+		}
+	})
 }

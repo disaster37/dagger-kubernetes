@@ -44,6 +44,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.allowed_teams", []string{})
 	v.SetDefault("auth.oauth.allowed_groups", []string{})
 	v.SetDefault("auth.oauth.group_mappings", []domain.GroupMappingRule{})
+	v.SetDefault("auth.oauth.admin_groups", []string{})
 	v.SetDefault("auth.oauth.default_group", "")
 	v.SetDefault("auth.oauth.cookie_secure", false)
 	v.SetDefault("auth.oauth.issuer_url", "")
@@ -132,7 +133,6 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("telemetry.loki_url", "http://loki:3100")
 	v.SetDefault("telemetry.victoria_url", "http://victoria:8428")
 
-	v.SetDefault("cache.backend", "registry")
 	v.SetDefault("cache.registry", "cache.reg/dagger-cache")
 	v.SetDefault("cache.public_host", "")
 	v.SetDefault("cache.internal_addr", "")
@@ -144,6 +144,22 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cache.gc.enabled", false)
 	v.SetDefault("cache.gc.max_age", "168h") // 7d
 	v.SetDefault("cache.gc.schedule", "1h")
+
+	// BuildKit local worker-cache snapshot sync (warm start). The snapshot
+	// repo/tag are domain constants, not config keys. The s3_* keys configure
+	// the S3 backend (cache.backend: "s3") and the S3 client shared with the
+	// CLI cache and the cache GC.
+	v.SetDefault("cache.sync.enabled", true)
+	v.SetDefault("cache.sync.on_start", true)
+	v.SetDefault("cache.sync.on_stop", true)
+	v.SetDefault("cache.sync.interval", 10*time.Minute)
+	v.SetDefault("cache.sync.quiesce_wait", 10*time.Second)
+	v.SetDefault("cache.sync.s3_endpoint", "")
+	v.SetDefault("cache.sync.s3_bucket", "")
+	v.SetDefault("cache.sync.s3_region", "us-east-1")
+	v.SetDefault("cache.sync.s3_use_ssl", true)
+	v.SetDefault("cache.sync.s3_access_key", "")
+	v.SetDefault("cache.sync.s3_secret_key", "")
 
 	v.SetDefault("history.gc.enabled", false)
 	v.SetDefault("history.gc.max_age", "720h") // 30d
@@ -180,6 +196,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("fleet.engine_log_format", "json")
 	v.SetDefault("fleet.engine_registry_mirrors", map[string][]string{})
 	v.SetDefault("fleet.engine_extra_env_from", map[string]domain.EnvVarSource{})
+	v.SetDefault("fleet.engine_cache_sync_image", "")
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
@@ -205,6 +222,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cli.cache_repo", "dagger-kubernetes/cli-cache")
 	v.SetDefault("cli.release_list_ttl", time.Hour)
 	v.SetDefault("cli.download_timeout", 5*time.Minute)
+	v.SetDefault("cli.s3_bucket", "")
+	v.SetDefault("cli.s3_prefix", "cli-cache")
 	v.SetDefault("cli.upstream.releases_url", "https://api.github.com/repos/dagger/dagger/releases")
 	v.SetDefault("cli.upstream.download_base", "https://github.com/dagger/dagger/releases/download")
 	v.SetDefault("cli.upstream.github_token", "")
@@ -241,6 +260,10 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("validate group mappings: %w", err)
 	}
 
+	if err := validateOAuthAdminGroups(&cfg); err != nil {
+		return nil, fmt.Errorf("validate oauth admin_groups: %w", err)
+	}
+
 	if err := validateServerConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate server config: %w", err)
 	}
@@ -255,6 +278,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateCIConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate ci config: %w", err)
+	}
+
+	if err := validateCacheSyncConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate cache sync config: %w", err)
 	}
 
 	return &cfg, nil
@@ -603,6 +630,24 @@ func validateGroupMappings(cfg *domain.Config) error {
 	return nil
 }
 
+// validateOAuthAdminGroups rejects empty/whitespace-only entries and
+// duplicates. Entries are exact string equality (case-sensitive, matching the
+// exact-match semantics). Entries are NOT checked against the supervisor
+// group-name regex because they are upstream IdP names, not supervisor groups.
+func validateOAuthAdminGroups(cfg *domain.Config) error {
+	seen := make(map[string]bool, len(cfg.Auth.OAuth.AdminGroups))
+	for i, g := range cfg.Auth.OAuth.AdminGroups {
+		if strings.TrimSpace(g) == "" {
+			return fmt.Errorf("auth.oauth.admin_groups[%d] must not be empty", i)
+		}
+		if seen[g] {
+			return fmt.Errorf("auth.oauth.admin_groups[%d] %q duplicates an earlier entry", i, g)
+		}
+		seen[g] = true
+	}
+	return nil
+}
+
 // validateOAuthRevalidation enforces constraints on the IdP revalidation config.
 // Only validated when auth.oauth.enabled is true.
 func validateOAuthRevalidation(cfg *domain.Config) error {
@@ -690,6 +735,15 @@ func validateCLIConfig(cfg *domain.Config) error {
 		return fmt.Errorf("cli.cache_repo %q is not a valid OCI repository name", cfg.CLI.CacheRepo)
 	}
 
+	// When the cache backend is s3, the CLI cache lives in an S3 bucket that
+	// shares the worker-snapshot S3 client; validate its prerequisites.
+	if s3BucketWithFallback(cfg.CLI.S3Bucket, cfg.Cache.S3.Bucket) == "" {
+		return fmt.Errorf("cli.s3_bucket (or cache.s3.bucket) is required when cli.enabled")
+	}
+	if cfg.CLI.S3Prefix == "" {
+		return fmt.Errorf("cli.s3_prefix must not be empty when cli.enabled")
+	}
+
 	return nil
 }
 
@@ -705,6 +759,40 @@ func validateCIConfig(cfg *domain.Config) error {
 	}
 	if cfg.CI.Jenkins.StepsMaxDepth < 0 {
 		return fmt.Errorf("ci.jenkins.steps_max_depth must be >= 0")
+	}
+	return nil
+}
+
+// s3BucketWithFallback returns the effective bucket for an S3-backed
+// subsystem: its own bucket wins, falling back to the shared cache.s3.bucket.
+func s3BucketWithFallback(own, shared string) string {
+	if own != "" {
+		return own
+	}
+	return shared
+}
+
+// validateCacheSyncConfig guards the worker-cache sync timings. Negative
+// durations are unit mistakes (0 is the documented "disabled" value). When
+// the S3 backend is selected, its prerequisites are validated here; the
+// remaining prerequisites (registry backend, sync image) are enforced at
+// wiring time with a WARN + graceful disable — sync must never block the
+// engine pod.
+func validateCacheSyncConfig(cfg *domain.Config) error {
+	if !cfg.Cache.Sync.Enabled {
+		return nil
+	}
+	if cfg.Cache.Sync.Interval < 0 {
+		return fmt.Errorf("cache.sync.interval must be >= 0 (0 disables periodic sync)")
+	}
+	if cfg.Cache.Sync.QuiesceWait < 0 {
+		return fmt.Errorf("cache.sync.quiesce_wait must be >= 0")
+	}
+	if cfg.Cache.Sync.S3Endpoint == "" {
+		return fmt.Errorf("cache.sync.s3_endpoint is required")
+	}
+	if s3BucketWithFallback(cfg.Cache.Sync.S3Bucket, cfg.Cache.S3.Bucket) == "" {
+		return fmt.Errorf("cache.sync.s3_bucket (or cache.s3.bucket) is required")
 	}
 	return nil
 }

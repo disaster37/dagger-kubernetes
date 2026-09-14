@@ -57,6 +57,7 @@ type OIDCOAuthService struct {
 	groupsClaim   string
 	allowedOrgs   []string
 	allowedGroups []string
+	adminGroups   []string
 	defaultGroup  string
 	users         *UserService
 	groups        domain.GroupRepository
@@ -138,6 +139,7 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *Us
 		groupsClaim:     groupsClaim,
 		allowedOrgs:     cfg.AllowedOrgs,
 		allowedGroups:   cfg.AllowedGroups,
+		adminGroups:     cfg.AdminGroups,
 		defaultGroup:    cfg.DefaultGroup,
 		users:           users,
 		groups:          groups,
@@ -301,7 +303,7 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 		RefreshToken: tok.RefreshToken,
 		ExpiresAt:    tok.Expiry,
 	}
-	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "oidc", sub, username, s.defaultGroup, mappedGroups, cred)
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "oidc", sub, username, s.defaultGroup, s.adminGroups, groups, mappedGroups, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("oidc oauth: %w", err)
 	}

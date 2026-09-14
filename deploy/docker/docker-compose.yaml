@@ -17,8 +17,15 @@ services:
       - DAGGER_KUBERNETES_TELEMETRY_TEMPO_URL=http://tempo:3200
       - DAGGER_KUBERNETES_TELEMETRY_LOKI_URL=http://loki:3100
       - DAGGER_KUBERNETES_TELEMETRY_VICTORIA_URL=http://victoria:8428
-      - DAGGER_KUBERNETES_CACHE_BACKEND=registry
-      - DAGGER_KUBERNETES_CACHE_REGISTRY=localhost:5000/dagger-cache
+      - DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT=minio:9000
+      - DAGGER_KUBERNETES_CACHE_SYNC_S3_BUCKET=dagger-cache
+      - DAGGER_KUBERNETES_CACHE_SYNC_S3_REGION=us-east-1
+      - DAGGER_KUBERNETES_CACHE_SYNC_S3_USE_SSL=false
+      - DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY=minioadmin
+      - DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY=minioadmin
+      - DAGGER_KUBERNETES_CLI_S3_BUCKET=dagger-cache
+      - DAGGER_KUBERNETES_CACHE_S3_BUCKET=dagger-cache
+      - DAGGER_KUBERNETES_CACHE_S3_REGION=us-east-1
       - DAGGER_KUBERNETES_TLS_CA_PATH=/tmp/dagger-kubernetes/ca
       - DAGGER_KUBERNETES_LOG_LEVEL=debug
       - DAGGER_KUBERNETES_DATABASE_DIR=/var/lib/dagger-kubernetes
@@ -37,7 +44,7 @@ services:
       # Raft data directory (raft.db, snapshots/, node-id). Fresh-start store.
       - ./data:/var/lib/dagger-kubernetes
     depends_on:
-      - cache-registry
+      - minio
     networks:
       - dagger-kubernetes
 
@@ -88,42 +95,37 @@ services:
     networks:
       - dagger-kubernetes
 
-  cache-registry:
-    image: registry:2
+  minio:
+    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    command: server /data --console-address ":9001"
     ports:
-      - "5000:5000"
+      - "9000:9000"
+      - "9001:9001"
     environment:
-      - REGISTRY_STORAGE_DELETE_ENABLED=true
+      - MINIO_ROOT_USER=minioadmin
+      - MINIO_ROOT_PASSWORD=minioadmin
     volumes:
-      - registry-data:/var/lib/registry
+      - minio-data:/data
     networks:
       - dagger-kubernetes
 
-  cache-registry-gc:
-    image: registry:2
+  minio-init:
+    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    depends_on:
+      - minio
     entrypoint:
       - /bin/sh
       - -c
       - |
-        echo "Registry GC starting (running every 24h)"
-        while true; do
-          sleep 86400
-          echo "Running registry garbage-collect --delete-untagged..."
-          /bin/registry garbage-collect --delete-untagged /etc/docker/registry/config.yml || true
-          echo "GC finished."
-        done
-    environment:
-      - REGISTRY_STORAGE_DELETE_ENABLED=true
-    volumes:
-      - registry-data:/var/lib/registry
+        until mc alias set local http://minio:9000 minioadmin minioadmin; do sleep 1; done
+        mc mb --ignore-existing local/dagger-cache
+        echo "bucket ready"
     networks:
       - dagger-kubernetes
-    depends_on:
-      - cache-registry
 
 networks:
   dagger-kubernetes:
 
 volumes:
-  registry-data:
+  minio-data:
   victoria-data:

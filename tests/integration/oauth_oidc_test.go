@@ -117,7 +117,8 @@ func (f *oidcIssuer) mintIDToken() string {
 // `/auth/login?error=group_required`.
 func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	const clientID = "integration-client"
-	controlAddr, dataAddr := freeAddr(t), freeAddr(t)
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
 	issuer := newOIDCIssuer(t, clientID, []any{"devs"})
 
 	logger := observ.NewTestLogger()
@@ -167,9 +168,11 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	logsClient := repository.NewLogsClient("")
 
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: controlAddr,
-		DataAddr:    dataAddr,
-		DataHost:    "localhost",
+		ControlAddr:     controlAddr,
+		DataAddr:        dataAddr,
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,

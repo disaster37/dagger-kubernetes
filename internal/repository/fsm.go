@@ -96,6 +96,8 @@ type (
 		OAuthID              string      `json:"oauth_id"`
 		OAuthTokenCiphertext string      `json:"oauth_token_ciphertext"`
 		OAuthGroupIDs        []string    `json:"oauth_group_ids,omitempty"`
+		OAuthGroups          []string    `json:"oauth_groups,omitempty"`
+		OAuthAdmin           bool        `json:"oauth_admin,omitempty"`
 		DeactivatedAt        *time.Time  `json:"deactivated_at,omitempty"`
 		CreatedAt            time.Time   `json:"created_at"`
 		UpdatedAt            time.Time   `json:"updated_at"`
@@ -210,6 +212,8 @@ func (c *cmdUser) toDomain() *domain.User {
 		OAuthID:              c.OAuthID,
 		OAuthTokenCiphertext: c.OAuthTokenCiphertext,
 		OAuthGroupIDs:        c.OAuthGroupIDs,
+		OAuthGroups:          c.OAuthGroups,
+		OAuthAdmin:           c.OAuthAdmin,
 		DeactivatedAt:        c.DeactivatedAt,
 		CreatedAt:            c.CreatedAt,
 		UpdatedAt:            c.UpdatedAt,
@@ -228,6 +232,8 @@ func cmdUserFrom(u *domain.User) *cmdUser {
 		OAuthID:              u.OAuthID,
 		OAuthTokenCiphertext: u.OAuthTokenCiphertext,
 		OAuthGroupIDs:        u.OAuthGroupIDs,
+		OAuthGroups:          u.OAuthGroups,
+		OAuthAdmin:           u.OAuthAdmin,
 		DeactivatedAt:        u.DeactivatedAt,
 		CreatedAt:            u.CreatedAt,
 		UpdatedAt:            u.UpdatedAt,

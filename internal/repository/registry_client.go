@@ -28,6 +28,10 @@ var (
 	ErrRegistryUnreachable     = errors.New("registry unreachable")
 	ErrRegistryCatalogDisabled = domain.ErrRegistryCatalogDisabled
 	ErrManifestNotFound        = domain.ErrManifestNotFound
+
+	// errUploadDigestMismatch is returned when the registry reports a
+	// different digest than the one announced for the uploaded blob.
+	errUploadDigestMismatch = errors.New("upload digest mismatch")
 )
 
 var _ domain.CLIRegistryClient = (*RegistryStatsClient)(nil)
@@ -97,6 +101,16 @@ func NewRegistryStatsClientWithAuth(host, username, password string) *RegistrySt
 	c := NewRegistryStatsClient(host)
 	c.username = username
 	c.password = password
+	return c
+}
+
+// WithTimeout returns the client with the given total per-request timeout,
+// overriding the 10s default. http.Client.Timeout covers connection,
+// redirects, and reading the response body, so the default truncates
+// multi-GB transfers (worker-snapshot push/pull); such callers raise it to
+// their operation budget.
+func (c *RegistryStatsClient) WithTimeout(d time.Duration) *RegistryStatsClient {
+	c.httpClient.Timeout = d
 	return c
 }
 
@@ -413,8 +427,8 @@ func (c *RegistryStatsClient) ManifestCreated(ctx context.Context, repo, tag str
 }
 
 // UploadBlob performs a monolithic blob upload to repo, returning the digest
-// and byte count. Uses the OCI Distribution v2 blob upload flow:
-// POST /v2/<repo>/blobs/uploads/ → PUT <location>?digest=sha256:<hex>.
+// and byte count. Buffers the body to compute the sha256 digest, then
+// delegates to UploadBlobStream.
 func (c *RegistryStatsClient) UploadBlob(ctx context.Context, repo string, body io.Reader) (digest string, size int64, err error) {
 	// Read the entire body into memory so we can compute sha256 and send it
 	// as a monolithic upload (single PUT with digest query param).
@@ -426,53 +440,79 @@ func (c *RegistryStatsClient) UploadBlob(ctx context.Context, repo string, body 
 	sum := sha256.Sum256(buf.Bytes())
 	digest = fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
 
-	// Initiate a monolithic blob upload.
-	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/v2/%s/blobs/uploads/", c.baseURL(), url.PathEscape(repo)), "")
-	if err != nil {
+	if err := c.UploadBlobStream(ctx, repo, digest, size, bytes.NewReader(buf.Bytes())); err != nil {
 		return "", 0, err
 	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
+	return digest, size, nil
+}
 
-	if resp.StatusCode != http.StatusAccepted {
-		return "", 0, fmt.Errorf("%w: initiate upload status %d", ErrRegistryUnreachable, resp.StatusCode)
+// UploadBlobStream uploads a blob whose sha256 digest and byte size are known
+// up front, streaming body in a single monolithic PUT (no in-memory
+// buffering). Follows OCI Distribution v2: POST /v2/<repo>/blobs/uploads/ ->
+// PUT <location>?digest=sha256:<hex>.
+func (c *RegistryStatsClient) UploadBlobStream(ctx context.Context, repo, digest string, size int64, body io.Reader) error {
+	if !validDigest(digest) {
+		return fmt.Errorf("invalid digest: must be sha256:<hex>")
 	}
 
-	location := resp.Header.Get("Location")
-	if location == "" {
-		return "", 0, fmt.Errorf("upload init missing Location header")
-	}
-
-	// PUT the blob with the digest.
-	sep := "?"
-	if strings.Contains(location, "?") {
-		sep = "&"
-	}
-	putURL := fmt.Sprintf("%s%sdigest=%s", location, sep, digest)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, buf)
+	// Initiate a monolithic blob upload.
+	initResp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/v2/%s/blobs/uploads/", c.baseURL(), url.PathEscape(repo)), "")
 	if err != nil {
-		return "", 0, fmt.Errorf("build put request: %w", err)
+		return err
+	}
+	defer func() { _ = initResp.Body.Close() }()
+	discard(initResp)
+
+	if initResp.StatusCode != http.StatusAccepted {
+		return fmt.Errorf("%w: initiate upload status %d", ErrRegistryUnreachable, initResp.StatusCode)
+	}
+
+	location := initResp.Header.Get("Location")
+	if location == "" {
+		return fmt.Errorf("upload init missing Location header")
+	}
+	// OCI allows a relative Location; resolve it against the registry base.
+	if !strings.Contains(location, "://") {
+		location = c.baseURL() + location
+	}
+
+	// PUT the blob with the digest. Use url.Parse to safely compose the
+	// digest query parameter onto the registry-returned Location header.
+	u, err := url.Parse(location)
+	if err != nil {
+		return fmt.Errorf("parse upload location: %w", err)
+	}
+	q := u.Query()
+	q.Set("digest", digest)
+	u.RawQuery = q.Encode()
+	putURL := u.String()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, body)
+	if err != nil {
+		return fmt.Errorf("build put request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/octet-stream")
+	req.ContentLength = size
 	if c.username != "" || c.password != "" {
 		req.SetBasicAuth(c.username, c.password)
 	}
-	resp, err = c.httpClient.Do(req)
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return "", 0, fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
+		return fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	discard(resp)
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("%w: upload status %d", ErrRegistryUnreachable, resp.StatusCode)
+		return fmt.Errorf("%w: upload status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 
-	// Verify the returned digest matches what we computed.
-	if dgst := resp.Header.Get("Docker-Content-Digest"); dgst != "" && validDigest(dgst) {
-		digest = dgst
+	// Verify the returned digest matches what we announced when the registry
+	// reports it (the PUT's digest= param already guarantees it; this is
+	// defense-in-depth against a misbehaving registry).
+	if dgst := resp.Header.Get("Docker-Content-Digest"); dgst != "" && validDigest(dgst) && dgst != digest {
+		return fmt.Errorf("%w: uploaded %s, registry reported %s", errUploadDigestMismatch, digest, dgst)
 	}
-	return digest, size, nil
+	return nil
 }
 
 // PutManifest pushes an OCI manifest to repo:tag.

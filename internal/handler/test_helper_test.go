@@ -99,9 +99,8 @@ func newTestEnv(t *testing.T) *testEnv {
 
 	connectSvc := service.NewConnectService(&domain.Config{
 		Server:  domain.ServerConfig{PublicURL: "https://supv.example.com", DataHost: "data.example.com"},
-		Cache:   domain.CacheConfig{Backend: "registry"},
 		Version: domain.VersionConfig{Floor: "v0.19.0"},
-	}, cacheBackend, versionResolver, tokensSvc, logger)
+	}, versionResolver, tokensSvc, logger)
 
 	srv := NewServer(&ServerConfig{
 		ControlAddr: ":0",

@@ -243,17 +243,25 @@ type Deps struct {
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
 type ServerConfig struct {
-	ControlAddr  string
-	DataAddr     string
-	DataHost     string
-	CacheHost    string // dedicated cache vhost (Host header to match)
-	CacheScheme  string // scheme for rewritten upload Locations; "" or invalid ⇒ "https"
-	CacheToken   string // engine→proxy bearer; "" = proxy auth disabled
-	CollectorURL string
-	VictoriaURL  string
-	CertPath     string
-	KeyPath      string
-	PipelineURL  string // base for pipeline-view links (= server.public_url, absolute http(s))
+	ControlAddr string
+	DataAddr    string
+	// ControlListener and DataListener optionally supply pre-bound listeners.
+	// When set they take precedence over ControlAddr/DataAddr, which removes
+	// the probe-then-bind race that made integration tests flaky (a port freed
+	// by a freeAddr-style helper can be claimed by another listener before the
+	// server binds it; Hertz panics on a lost control-plane race). Production
+	// leaves both nil and binds the addresses above as before.
+	ControlListener net.Listener
+	DataListener    net.Listener
+	DataHost        string
+	CacheHost       string // dedicated cache vhost (Host header to match)
+	CacheScheme     string // scheme for rewritten upload Locations; "" or invalid ⇒ "https"
+	CacheToken      string // engine→proxy bearer; "" = proxy auth disabled
+	CollectorURL    string
+	VictoriaURL     string
+	CertPath        string
+	KeyPath         string
+	PipelineURL     string // base for pipeline-view links (= server.public_url, absolute http(s))
 }
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
@@ -405,9 +413,12 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 		MinVersion:   tls.VersionTLS12,
 	}
 
-	tlsLn, err := net.Listen("tcp", s.cfg.DataAddr)
-	if err != nil {
-		return fmt.Errorf("tcp listen: %w", err)
+	tlsLn := s.cfg.DataListener
+	if tlsLn == nil {
+		tlsLn, err = net.Listen("tcp", s.cfg.DataAddr)
+		if err != nil {
+			return fmt.Errorf("tcp listen: %w", err)
+		}
 	}
 
 	s.tlsListener = tlsLn
@@ -590,8 +601,13 @@ func tlsVersionName(v uint16) string {
 func (s *Server) configure() (*server.Hertz, error) {
 	s.buildProxies()
 
-	opts := []config.Option{
-		server.WithHostPorts(s.cfg.ControlAddr),
+	var opts []config.Option
+	if s.cfg.ControlListener != nil {
+		opts = append(opts, server.WithListener(s.cfg.ControlListener))
+	} else {
+		opts = append(opts, server.WithHostPorts(s.cfg.ControlAddr))
+	}
+	opts = append(opts,
 		// Read timeout disabled: cache-proxy blob uploads are unbounded (multi-GB).
 		// Control-API request bodies are capped per-handler (handleEngines 1 MiB),
 		// so disabling the global read timeout only relaxes the cache vhost.
@@ -601,7 +617,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 		// cache proxy. Small control-API bodies are still read eagerly by their
 		// handlers and capped per-handler.
 		server.WithStreamBody(true),
-	}
+	)
 	if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
 		cert, err := tls.LoadX509KeyPair(s.cfg.CertPath, s.cfg.KeyPath)
 		if err != nil {

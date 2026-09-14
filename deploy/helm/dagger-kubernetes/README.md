@@ -1,7 +1,8 @@
 # dagger-kubernetes Helm Chart
 
-Self-hosted, Dagger-Cloud-compatible platform: remote shared cache, auto-scaling
-engine fleets, live pipeline UI, and drop-in CI integration.
+Self-hosted, Dagger-Cloud-compatible platform: S3-backed cache with
+worker-snapshot warm start, auto-scaling engine fleets, live pipeline UI, and
+drop-in CI integration.
 <!-- version-marker -->
 [^1]: Latest released version: `0.1.0`
 
@@ -97,7 +98,7 @@ configurable (`service.control.port`, `service.data.port`).
 | Dependency | Chart | Default | Purpose |
 |---|---|---|---|
 | OpenTelemetry Collector | `opentelemetry-collector` ([repo](https://open-telemetry.github.io/opentelemetry-helm-charts)) | enabled | OTLP ingest from Dagger CLI & supervisor; fans out to Tempo / Loki / VictoriaMetrics |
-| OCI Registry | `docker-registry` ([twuni](https://twuni.github.io/docker-registry.helm), aliased `registry`) | enabled | Backs the remote shared cache (BuildKit cache blobs); ships the registry v3 image and its garbage-collect CronJob |
+| MinIO | `minio` ([charts.min.io](https://charts.min.io/)) | enabled | S3-compatible object store backing BuildKit cache blobs (swept by the cache GC), worker snapshots, and the CLI cache; creates the `dagger-cache` bucket on install |
 | Grafana Tempo | `tempo` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Distributed tracing backend, stores OTLP traces |
 | Grafana Loki | `loki` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Log aggregation backend, stores OTLP logs |
 | VictoriaMetrics | `victoria-metrics-single` ([victoriametrics](https://victoriametrics.github.io/helm-charts/)) | enabled | PromQL-compatible metrics backend |
@@ -109,7 +110,7 @@ flag:
 ```yaml
 opentelemetry-collector:
   enabled: false
-registry:
+minio:
   enabled: false
 tempo:
   enabled: false
@@ -128,9 +129,8 @@ supervisor:
       lokiUrl: "http://my-loki.telemetry.svc:3100"
       victoriaUrl: "http://my-victoria.telemetry.svc:8428"
     cache:
-      registries:
-        - id: my-registry
-          internalAddr: "my-registry.cache.svc:5000"
+      sync:
+        s3Endpoint: "my-minio.cache.svc:9000"
 ```
 
 In-cluster endpoints must use the `<service>.<namespace>.svc` form (never bare
@@ -279,7 +279,7 @@ supervisor:
 > **Note**: Supervisor persistence uses `storageClass` (rendered as Kubernetes
 > `storageClassName`) under `supervisor.persistence`. Subchart persistence keys
 > match each subchart's native API: `storageClassName` for Tempo and
-> VictoriaMetrics; `storageClass` for docker-registry and Loki. All accept an
+> VictoriaMetrics; `storageClass` for MinIO and Loki. All accept an
 > empty string for the cluster default.
 
 ### Resource sizing
@@ -436,7 +436,7 @@ Each dependency is toggled with its own `enabled` flag:
 | Key | Default | Description |
 |---|---|---|
 | `opentelemetry-collector.enabled` | `true` | OTel Collector for OTLP ingest |
-| `registry.enabled` | `true` | OCI registry for cache storage |
+| `minio.enabled` | `true` | MinIO S3-compatible cache storage |
 | `tempo.enabled` | `true` | Grafana Tempo for traces |
 | `loki.enabled` | `true` | Grafana Loki for logs |
 | `victoria.enabled` | `true` | VictoriaMetrics for metrics |
@@ -456,8 +456,9 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 | `server.public_url` | `dagger-kubernetes.publicUrl` | computed from ingress / service exposition |
 | `server.data_hostname` | `dagger-kubernetes.dataHostname` | computed from dataIngress / service exposition |
 | `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<control-plane host>` |
-| `cache.internal_addr` | `dagger-kubernetes.cacheInternalAddr` | `<release>-registry.<namespace>.svc:5000` (when `registry.enabled`) |
-| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (public ref emitted to clients) |
+| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (ref exposed on `GET /api/v1/cache`) |
+| `cache.sync.s3_endpoint` | `dagger-kubernetes.s3Endpoint` | `<release>-minio.<namespace>.svc:9000` (when `minio.enabled`) |
+| `cache.s3.bucket` / `cache.sync.s3_bucket` | `dagger-kubernetes.s3Bucket` | `cache.sync.s3Bucket`, else `cache.s3.bucket`, else first `minio.buckets[].name`, else `dagger-cache` |
 
 All auto-wired endpoints use the `<service>.<namespace>.svc` form — never bare
 service names or `.svc.<cluster-domain>` FQDNs — so a single `.svc` entry in
@@ -545,16 +546,16 @@ rolling-restart, then delete the removed pod.
 > intentionally not carried over. The bootstrap-admin flow provisions a fresh
 > admin when the user count is 0.
 
-### Cache proxy (engine → Supervisor → registry)
+### Cache proxy (engine → Supervisor → S3)
 
 The Supervisor acts as an OCI Distribution v2 reverse proxy in front of the
-cache registry(ies). Configure it under `supervisor.config.cache`:
+S3-backed cache. Configure it under `supervisor.config.cache`:
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.config.cache.backend` | `registry` | `registry` (OCI) or `s3`. |
-| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The emitted public ref is always `<publicHost>/dagger-cache`, tagged per engine version (`:V<maj>-<min>-<patch>`). |
-| `supervisor.config.cache.registries` | `[]` | Multi-backend list of `{id, internalAddr, username, password, passwordSecret}`. The proxy load-balances least-charged first (registry cache size). Empty ⇒ single-backend mode (the bundled registry at `<release>-registry.<namespace>.svc:5000`). |
+| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The ref exposed on `GET /api/v1/cache` is `<publicHost>/dagger-cache`; it is no longer emitted to clients (Dagger 0.21.x removed the experimental cache-config env var). |
+| `supervisor.config.cache.s3.bucket` | `""` | S3 bucket holding BuildKit cache blobs (prefix `cache/`, swept by the cache GC); also the default bucket for worker snapshots and the CLI cache. Empty ⇒ the auto-created MinIO bucket (`dagger-cache`). |
+| `supervisor.config.cache.s3.region` | `"us-east-1"` | S3 region. |
 
 When `ingress.enabled`, the chart adds a second Ingress host rule for the cache
 vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts`
@@ -562,6 +563,39 @@ vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts
 `supervisor.config.cache.publicHost` (empty = derived `cache.<control-plane
 host>`; any format works, e.g. `dagger-cache.company.com`). The control-plane
 TLS certificate must include the cache vhost as a SAN.
+
+#### S3 backend
+
+The BuildKit cache blobs live in `supervisor.config.cache.s3.bucket`, and the
+worker-snapshot sync, the CLI cache, and the cache GC sweeper use the same
+bucket:
+
+| Value | Default | Description |
+|---|---|---|
+| `supervisor.config.cache.s3.bucket` | `""` | BuildKit cache-blob bucket (prefix `cache/`); also the default bucket for worker snapshots and the CLI cache. |
+| `supervisor.config.cache.s3.region` | `""` | S3 region. |
+| `supervisor.config.cache.sync.s3Endpoint` | `""` | S3-compatible endpoint (e.g. `minio.dagger-kubernetes.svc:9000`; auto-wired to the MinIO subchart Service when `minio.enabled`); also configures the supervisor's shared S3 client (CLI cache + GC). |
+| `supervisor.config.cache.sync.s3Bucket` | `""` | Worker-snapshot bucket (empty = `cache.s3.bucket`). |
+| `supervisor.config.cache.sync.s3Region` | `us-east-1` | S3 region. |
+| `supervisor.config.cache.sync.s3UseSSL` | `true` | Use HTTPS for the S3 endpoint. |
+| `supervisor.config.cli.s3Bucket` / `supervisor.config.cli.s3Prefix` | `""` / `cli-cache` | CLI-tarball bucket + key prefix. |
+
+**Credentials:** the chart does NOT render S3 secrets into the ConfigMap.
+Create the `engine-s3-auth` Secret in the release namespace (keys `accessKey`
+and `secretKey`) — the engine-pod sync containers receive it as Secret
+references — and the supervisor pods read the same keys from it via optional
+env injection (`DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY` /
+`DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY`; when the Secret is absent the
+S3 client falls back to the AWS env credential chain):
+
+```bash
+kubectl -n <namespace> create secret generic engine-s3-auth \
+  --from-literal=accessKey=... --from-literal=secretKey=...
+```
+
+**Cleanup:** the cache GC sweeps objects under the `cache/` prefix by
+`LastModified`; worker snapshots self-clean on engine start. Configure a bucket
+lifecycle policy as defense-in-depth (see docs/README.md, "Cache auto-clean").
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
@@ -634,14 +668,10 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled). |
 | `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled). |
 | `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled). |
-| `supervisor.config.cache.backend` | string | `"registry"` | Cache backend type: registry (OCI) or s3. |
 | `supervisor.config.cache.publicHost` | string | `""` | Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`). Must differ from the control-plane host. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled. |
-| `supervisor.config.cache.authToken` | string | `""` | Engine→proxy bearer for the cache. Rendered into the engine-registry-auth Secret (key `token`); the supervisor reads it from there. Empty = "placeholder". |
-| `supervisor.config.cache.registries` | array | `[]` | Multi-backend list of {id, internalAddr, username, password, passwordSecret}. Empty = single-backend mode (the bundled registry). |
-| `supervisor.config.cache.registries[].passwordSecret.name` | string | — | K8s Secret name holding the backend password (rendered as a reference, never the secret itself). |
-| `supervisor.config.cache.registries[].passwordSecret.key` | string | `"password"` | Key inside the Secret holding the password (empty = "password"). |
-| `supervisor.config.cache.s3.bucket` | string | `""` | S3 bucket name (when backend=s3). |
-| `supervisor.config.cache.s3.region` | string | `""` | S3 region (when backend=s3). |
+| `supervisor.config.cache.authToken` | string | `""` | Engine→proxy bearer for the cache. Empty = "placeholder". |
+| `supervisor.config.cache.s3.bucket` | string | `""` | S3 bucket name (empty = auto-created MinIO bucket, `dagger-cache`). |
+| `supervisor.config.cache.s3.region` | string | `"us-east-1"` | S3 region (ignored by MinIO). |
 | `supervisor.config.history.gc.enabled` | bool | `false` | Master switch for the history auto-purge sweeper. |
 | `supervisor.config.history.gc.maxAge` | string | `"720h"` | Purge traces older than this (30d default). Duration strings accept Go units plus `d` (day) and `w` (week), e.g. `7d`, `1w`. |
 | `supervisor.config.history.gc.schedule` | string | `"1h"` | History sweeper ticker interval. |
@@ -667,7 +697,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.fleet.engineExtraEnvFrom` | object | `{}` | Extra env vars sourced from Secret keys on engine pods: map of env name -> {secretName, key}. |
 | `supervisor.config.fleet.engineCaSecret` | string | `""` | Secret with custom CA PEM bundle for engines (empty = disabled). |
 | `supervisor.config.fleet.engineCaSecretKey` | string | `"ca.crt"` | Key inside engineCaSecret containing the CA cert. |
-| `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the engine-registry-auth Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
+| `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the `engine-image-auth` Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
 | `supervisor.config.fleet.engineDebug` | bool | `false` | Enable engine.toml [debug]. |
 | `supervisor.config.fleet.engineLogFormat` | string | `"json"` | Engine log format (json, text; empty omits). |
 | `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). Dotted keys such as `docker.io`, `ghcr.io`, `public.ecr.aws` are preserved verbatim. |
@@ -709,6 +739,7 @@ Configure it under `supervisor.config.history`:
 | `auth.oauth.allowedGroups` | array | `[]` | (oidc) Allowed provider group names (groups-claim allowlist; union with allowedOrgs). |
 | `auth.oauth.groupMappings` | array | `[]` | Regex group mapping: list of {pattern, replacement} mapping provider groups to supervisor group names (first-match-wins; no match drops the group). |
 | `auth.oauth.defaultGroup` | string | `""` | Default group for OAuth users. |
+| `auth.oauth.adminGroups` | array | `[]` | Upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, checked pre-mapping); empty = disabled. |
 | `auth.oauth.cookieSecure` | bool | `false` | Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor). |
 | `auth.oauth.issuerUrl` | string | `""` | (oidc) OIDC issuer URL (e.g. https://dex.example.com). |
 | `auth.oauth.scopes` | array | `["openid", "profile", "email"]` | (oidc) OIDC scopes; "openid" is always appended. |
@@ -791,7 +822,10 @@ Configure it under `supervisor.config.history`:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `opentelemetry-collector.enabled` | bool | `true` | Install OpenTelemetry Collector subchart. |
-| `registry.enabled` | bool | `true` | Install Docker Registry subchart (cache backend). |
+| `minio.enabled` | bool | `true` | Install MinIO subchart (S3-compatible object store for worker snapshots, CLI cache, and BuildKit cache GC). |
+| `minio.rootUser` / `minio.rootPassword` | string | `"minioadmin"` | MinIO root credentials (dev defaults; change in production). Rendered into the `engine-s3-auth` Secret. |
+| `minio.users` | array | `[]` | Extra MinIO users to create; empty (default) disables the subchart's built-in `console` user. |
+| `minio.buckets` | array | `[{name: dagger-cache}]` | Buckets created on install by the MinIO chart's post-install hook. |
 | `tempo.enabled` | bool | `true` | Install Grafana Tempo subchart (traces). |
 | `tempo.tempo.retention` | string | `720h` | Trace retention duration. Set to match (or exceed) `supervisor.config.history.gc.maxAge`. |
 | `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |

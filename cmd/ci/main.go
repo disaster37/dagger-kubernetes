@@ -77,14 +77,14 @@ func ciFlags() []cli.Flag {
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN"}, Usage: "Dagger Cloud token (required; prefer the DAGGER_KUBERNETES_TOKEN env var to keep it out of process argv)"},
 		&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
 		&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
-		&cli.StringFlag{Name: "cache-registry", Value: "cache.reg/dagger-cache", Usage: "Cache registry host/repo"},
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
 		&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
 		&cli.BoolFlag{Name: "cli", Usage: "Provision the Dagger CLI binary on the fly from the supervisor"},
 		&cli.StringFlag{Name: "cli-version", Usage: "Dagger CLI version to provision (empty = latest allowed)"},
 		&cli.StringFlag{Name: "cli-os", Value: "linux", Usage: "CLI target OS (linux, darwin)"},
 		&cli.StringFlag{Name: "cli-arch", Value: "amd64", Usage: "CLI target architecture (amd64, arm64, armv7)"},
-		&cli.BoolFlag{Name: "steps", Usage: "stream nested Dagger steps as NDJSON events on stdout"},
+		&cli.BoolFlag{Name: "steps", Usage: "stream nested Dagger steps on stdout (format controlled by --steps-format)"},
+		&cli.StringFlag{Name: "steps-format", Value: "ndjson", Usage: "output format for --steps: ndjson (default) or plain"},
 		&cli.DurationFlag{Name: "steps-poll-interval", Usage: "poll cadence for the CI step stream (default from ci.jenkins.steps_poll_interval)"},
 		&cli.IntFlag{Name: "steps-max-depth", Usage: "maximum nested step depth surfaced (0 = unlimited; default from ci.jenkins.steps_max_depth)"},
 		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "maximum time the dagger command is allowed to run"},
@@ -118,7 +118,6 @@ func run(c *cli.Context) error {
 
 	uiURL := resolveUIBase(c.String("ui-url"), c.String("server"), configPublicURL)
 
-	cacheRegistry := c.String("cache-registry")
 	version := c.String("version")
 	ciMode := c.String("ci")
 
@@ -144,10 +143,6 @@ func run(c *cli.Context) error {
 
 	if version != "" {
 		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", version)
-	}
-	if c.IsSet("cache-registry") {
-		cacheRef := fmt.Sprintf("%s:%s", cacheRegistry, "cache")
-		_ = os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
 	}
 
 	timeout := c.Duration("timeout")
@@ -176,10 +171,12 @@ func run(c *cli.Context) error {
 
 	var logBuf strings.Builder
 
-	// Steps-mode plumbing. The trace ID is discovered by polling the
-	// supervisor's trace list — the dagger CLI never outputs its trace ID to
-	// stderr, and scanning for arbitrary hex strings captures Docker digests
-	// and other OCI hashes instead.
+	// The trace ID is discovered by polling the supervisor's trace list — the
+	// dagger CLI never outputs its trace ID to stderr, and scanning for
+	// arbitrary hex strings captures Docker digests and other OCI hashes.
+	// Trace discovery always runs so the pipeline-view link carries the
+	// correct trace ID; the step-event builder and NDJSON sink are only
+	// created when --steps is enabled.
 	var (
 		stepsWG      sync.WaitGroup
 		stepsCancel  context.CancelFunc
@@ -197,12 +194,13 @@ func run(c *cli.Context) error {
 	fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] server=%s token=%t steps=%t version=%s timeout=%s\n",
 		serverURL, token != "", steps, version, timeout.String())
 
+	ctx, cancel := context.WithCancel(context.Background())
+	stepsCancel = cancel
+	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout)
+
 	if steps {
-		ctx, cancel := context.WithCancel(context.Background())
-		stepsCancel = cancel
-		stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout)
 		stepsBuilder = service.NewStepEventBuilder(maxDepth)
-		stepsSink = service.NewNDJSONEventSink(os.Stdout)
+		stepsSink = newCIEventSink(os.Stdout, c.String("steps-format"))
 
 		// A panic anywhere below must not strand the consumer without a
 		// terminal event: the Jenkins shared library polls the NDJSON stream
@@ -226,35 +224,37 @@ func run(c *cli.Context) error {
 				panic(r)
 			}
 		}()
+	}
 
-		stepsWG.Add(1)
-		go func() {
-			defer stepsWG.Done()
-			ticker := time.NewTicker(traceDiscoveryInterval)
-			defer ticker.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-ticker.C:
-					traces, err := stepsSrc.ListTraces(1)
-					if err != nil {
-						logger.WithError(err).Debug("trace discovery poll failed")
-						continue
-					}
-					if len(traces) > 0 && traces[0].TraceID != "" {
-						id := traces[0].TraceID
-						discoveredMu.Lock()
-						discoveredID = id
-						discoveredMu.Unlock()
-						fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] discovered trace %s from supervisor\n", id)
+	stepsWG.Add(1)
+	go func() {
+		defer stepsWG.Done()
+		ticker := time.NewTicker(traceDiscoveryInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				traces, err := stepsSrc.ListTraces(1)
+				if err != nil {
+					logger.WithError(err).Debug("trace discovery poll failed")
+					continue
+				}
+				if len(traces) > 0 && traces[0].TraceID != "" {
+					id := traces[0].TraceID
+					discoveredMu.Lock()
+					discoveredID = id
+					discoveredMu.Unlock()
+					fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] discovered trace %s from supervisor\n", id)
+					if steps {
 						streamSteps(ctx, stepsSrc, stepsBuilder, stepsSink, id, pollInterval, logger)
-						return
 					}
+					return
 				}
 			}
-		}()
-	}
+		}
+	}()
 
 	err = cmd.Run()
 
@@ -296,9 +296,17 @@ func run(c *cli.Context) error {
 		}
 	}
 
-	logOutput := logBuf.String()
-
-	traceID := extractTraceID(logOutput)
+	// Prefer the supervisor-discovered trace ID for the pipeline-view URL.
+	// The discovered ID is authoritative because it comes from the
+	// supervisor's trace-meta table (the source of truth). Fall back to the
+	// regex extraction from stderr only when discovery failed (e.g. the
+	// supervisor was unreachable).
+	discoveredMu.Lock()
+	traceID := discoveredID
+	discoveredMu.Unlock()
+	if traceID == "" {
+		traceID = extractTraceID(logBuf.String())
+	}
 
 	if traceID != "" {
 		traceURL, err := domain.PipelineViewURL(uiURL, traceID)
@@ -433,6 +441,16 @@ func resolveSteps(c *cli.Context, cfg *domain.Config) (steps bool, pollInterval 
 
 func extractTraceID(output string) string {
 	return traceIDRe.FindString(output)
+}
+
+// newCIEventSink creates the output sink for --steps mode. ndjson (default)
+// emits one JSON object per line; plain emits human-readable lines suitable
+// for streaming in Jenkins console output without requiring external tools.
+func newCIEventSink(w io.Writer, format string) domain.CIEventSink {
+	if format == "plain" {
+		return service.NewPlaintextEventSink(w)
+	}
+	return service.NewNDJSONEventSink(w)
 }
 
 func emitGHAAnnotations(traceURL, traceID string) {

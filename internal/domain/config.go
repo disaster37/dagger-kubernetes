@@ -92,6 +92,10 @@ type OAuthConfig struct {
 	AllowedGroups []string           `mapstructure:"allowed_groups"` // oidc only: groups-claim allowlist (canonical)
 	GroupMappings []GroupMappingRule `mapstructure:"group_mappings"` // provider group -> supervisor group regex mapping
 	DefaultGroup  string             `mapstructure:"default_group"`  // auto-membership for new OAuth users; empty = none
+	// AdminGroups, when non-empty, promotes OAuth users to RoleAdmin when any of
+	// their RAW upstream provider groups (pre-mapping) exactly matches an entry.
+	// Case-sensitive. Empty = feature disabled (no OAuth user is auto-promoted).
+	AdminGroups []string `mapstructure:"admin_groups"`
 	// CookieSecure forces the Secure flag on the oauth_state cookie; set true
 	// when TLS terminates at an ingress/proxy in front of the supervisor.
 	CookieSecure bool `mapstructure:"cookie_secure"`
@@ -260,7 +264,6 @@ type SecretRef struct {
 }
 
 type CacheConfig struct {
-	Backend      string            `mapstructure:"backend"`       // "registry" | "s3"
 	Registry     string            `mapstructure:"registry"`      // legacy single ref "host/repo"
 	PublicHost   string            `mapstructure:"public_host"`   // dedicated cache vhost
 	InternalAddr string            `mapstructure:"internal_addr"` // legacy single backend addr
@@ -268,6 +271,29 @@ type CacheConfig struct {
 	Registries   []RegistryBackend `mapstructure:"registries"`    // multi-backend list
 	S3           S3Config          `mapstructure:"s3"`
 	GC           GCConfig          `mapstructure:"gc"`
+	Sync         CacheSyncConfig   `mapstructure:"sync"`
+}
+
+// CacheSyncConfig governs the BuildKit local worker-cache snapshot sync: the
+// engine pod's /var/lib/dagger/worker dir is pushed to the shared backend
+// (OCI registry when cache.backend is "registry", S3 prefix when "s3") and
+// restored by fresh pods (warm start). The sync is best-effort and additive —
+// the remote BuildKit cache remains the source of truth for content.
+type CacheSyncConfig struct {
+	Enabled     bool          `mapstructure:"enabled"`      // master switch
+	OnStart     bool          `mapstructure:"on_start"`     // restore snapshot on start (init container)
+	OnStop      bool          `mapstructure:"on_stop"`      // final push on stop (sidecar SIGTERM handler)
+	Interval    time.Duration `mapstructure:"interval"`     // periodic push; 0 = disabled
+	QuiesceWait time.Duration `mapstructure:"quiesce_wait"` // grace before final on-stop push
+
+	// S3-specific settings (only used when cache.backend is "s3"). They also
+	// configure the S3 client shared with the CLI cache and the cache GC.
+	S3Endpoint  string `mapstructure:"s3_endpoint"`   // S3-compatible endpoint, e.g. "minio.example.com:9000"
+	S3Bucket    string `mapstructure:"s3_bucket"`     // snapshot bucket; empty = cache.s3.bucket
+	S3Region    string `mapstructure:"s3_region"`     // region (required by AWS S3; ignored by MinIO)
+	S3UseSSL    bool   `mapstructure:"s3_use_ssl"`    // use HTTPS for the S3 endpoint
+	S3AccessKey string `mapstructure:"s3_access_key"` // set via env/secret in production
+	S3SecretKey string `mapstructure:"s3_secret_key"` // set via env/secret in production
 }
 
 type S3Config struct {
@@ -347,6 +373,11 @@ type FleetConfig struct {
 	EngineDebug            bool                    `mapstructure:"engine_debug"`
 	EngineLogFormat        string                  `mapstructure:"engine_log_format"`
 	EngineRegistryMirrors  map[string][]string     `mapstructure:"engine_registry_mirrors"`
+	// EngineCacheSyncImage is the image holding the supervisor binary, run as
+	// the engine pod's cache-restore init container and cache-sync sidecar.
+	// "" = worker-cache sync disabled (the Helm chart renders the supervisor
+	// image; non-Helm users must set it explicitly).
+	EngineCacheSyncImage string `mapstructure:"engine_cache_sync_image"`
 }
 
 type CAConfig struct {
@@ -397,11 +428,17 @@ type OTelConfig struct {
 // CLIConfig configures the on-the-fly Dagger CLI provisioning addon.
 type CLIConfig struct {
 	Enabled         bool              `mapstructure:"enabled"`
-	CacheRepo       string            `mapstructure:"cache_repo"` // OCI repo for CLI tarballs, default "dagger-kubernetes/cli-cache"
+	CacheRepo       string            `mapstructure:"cache_repo"` // OCI repo for CLI tarballs, default "dagger-kubernetes/cli-cache" (registry backend)
 	ReleaseListTTL  time.Duration     `mapstructure:"release_list_ttl"`
 	DownloadTimeout time.Duration     `mapstructure:"download_timeout"`
 	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`
 	CIWrapperPath   string            `mapstructure:"ci_wrapper_path"` // path to pre-built dagger-kubernetes-ci binary
+
+	// S3-specific settings (only used when cache.backend is "s3"). The rest
+	// of the S3 client (endpoint, region, SSL, credentials) is shared with
+	// the worker snapshot store, configured once via cache.sync.s3_*.
+	S3Bucket string `mapstructure:"s3_bucket"` // CLI-cache bucket; empty = cache.s3.bucket
+	S3Prefix string `mapstructure:"s3_prefix"` // S3 key prefix for CLI tarballs, default "cli-cache"
 }
 
 // CLIUpstreamConfig points at the Dagger release source (mirror-able for

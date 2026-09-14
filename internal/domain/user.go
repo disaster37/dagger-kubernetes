@@ -48,6 +48,19 @@ type User struct {
 	// memberships within this set; admin-managed memberships are never touched.
 	OAuthGroupIDs []string `json:"oauth_group_ids,omitempty"`
 
+	// OAuthGroups are the raw upstream provider group names captured at the last
+	// successful OAuth login or revalidation (OIDC `groups` claim values; GitHub
+	// org logins plus "org/team" team slugs). Informational only — surfaced in the
+	// UI. Never used for authorization or membership reconciliation (that uses
+	// OAuthGroupIDs).
+	OAuthGroups []string `json:"oauth_groups,omitempty"`
+
+	// OAuthAdmin records that the user's admin role was granted by the
+	// auth.oauth.admin_groups allowlist (not manual promotion). Revalidation uses
+	// it to demote OAuth-granted admins whose upstream groups no longer match,
+	// while never auto-demoting a manually-promoted admin (OAuthAdmin=false).
+	OAuthAdmin bool `json:"oauth_admin,omitempty"`
+
 	// DeactivatedAt is set when IdP revalidation revokes access; identity
 	// resolution and refresh reject deactivated users cluster-wide.
 	DeactivatedAt *time.Time `json:"deactivated_at,omitempty"`

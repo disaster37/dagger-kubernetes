@@ -227,22 +227,16 @@ supervisor:
       tempoUrl: ""
       lokiUrl: ""
       victoriaUrl: ""
-## @param supervisor.config.cache.backend Cache backend type: registry (OCI) or s3.
 ## @param supervisor.config.cache.publicHost Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`, itself computed from the ingress/service exposition). Must differ from the control-plane host. Free-form: set a one-level name (e.g. `dagger-cache.company.com`) when your wildcard certificate does not cover the derived sub-subdomain. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled.
-## @param supervisor.config.cache.authToken Engine→proxy bearer for the cache. Rendered into the engine-registry-auth Secret (key `token`); the supervisor reads it from there. Empty = "placeholder".
-## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password, passwordSecret}. Empty = single-backend mode (the bundled registry). The proxy load-balances across backends least-charged first (registry cache size). password must stay empty in Helm; use passwordSecret to reference a K8s Secret.
-## @param supervisor.config.cache.registries[].passwordSecret.name K8s Secret name holding the backend password (rendered as a reference, never the secret itself).
-## @param supervisor.config.cache.registries[].passwordSecret.key Key inside the Secret holding the password (empty = "password").
-## @param supervisor.config.cache.s3.bucket S3 bucket name (when backend=s3).
-## @param supervisor.config.cache.s3.region S3 region (when backend=s3).
+## @param supervisor.config.cache.authToken Engine→proxy bearer for the cache. Empty = "placeholder".
+## @param supervisor.config.cache.s3.bucket S3 bucket name. Defaults to the auto-created minio bucket when the minio subchart is enabled.
+## @param supervisor.config.cache.s3.region S3 region (ignored by MinIO).
     cache:
-      backend: "registry"
       publicHost: ""
       authToken: ""
-      registries: []
       s3:
         bucket: ""
-        region: ""
+        region: "us-east-1"
 ## @param supervisor.config.cache.gc.enabled Enable the cache auto-purge sweeper. When enabled, orphaned cache refs older than maxAge are purged on each tick. Disabled by default.
 ## @param supervisor.config.cache.gc.maxAge Purge cache refs older than this (7d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.cache.gc.schedule Cache sweeper ticker interval.
@@ -250,6 +244,35 @@ supervisor:
         enabled: false
         maxAge: "168h"
         schedule: "1h"
+## @param supervisor.config.cache.sync.enabled Master switch for the BuildKit local worker-cache snapshot sync (warm start) against the S3 backend (v3 snapshot format); the sync containers are skipped (with a WARN) when the prerequisites are missing — sync never blocks the engine pod.
+## @param supervisor.config.cache.sync.onStart Restore the snapshot before the engine starts (init container). Skipped when the PVC already has cache content (retained across scale-down).
+## @param supervisor.config.cache.sync.onStop Final push after the engine stops (sidecar SIGTERM handler, after quiesceWait).
+## @param supervisor.config.cache.sync.interval Periodic push cadence (best-effort: the engine keeps running, so the snapshot may be slightly dirty); "0" disables periodic pushes.
+## @param supervisor.config.cache.sync.quiesceWait Grace after SIGTERM before the final on-stop push, so the engine can flush+exit. The final push must fit in fleet.engineTerminationGraceSeconds minus this — raise the latter for very large caches.
+## @param supervisor.config.cache.sync.s3Endpoint S3-compatible endpoint for the worker-snapshot backend (e.g. "minio.dagger-kubernetes.svc:9000"). Also configures the S3 client shared with the CLI cache and the cache GC.
+## @param supervisor.config.cache.sync.s3Bucket S3 bucket for worker snapshots (empty = cache.s3.bucket).
+## @param supervisor.config.cache.sync.s3Region S3 region (required by AWS S3; ignored by MinIO).
+## @param supervisor.config.cache.sync.s3UseSSL Use HTTPS for the S3 endpoint.
+##   The sync helper containers read their S3 credentials from the
+##   `engine-s3-auth` Secret (keys `accessKey` and `secretKey`). When
+##   minio.enabled the chart renders it from the MinIO root credentials;
+##   with an external S3 provider create it before enabling the backend:
+##     kubectl -n <namespace> create secret generic engine-s3-auth \
+##       --from-literal=accessKey=... --from-literal=secretKey=...
+##   The supervisor's own S3 client (CLI cache + cache GC) reads the same keys
+##   from the config env DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY /
+##   DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY (inject them from the same
+##   secret via env or a secretRef; empty keys fall back to the AWS env chain).
+      sync:
+        enabled: true
+        onStart: true
+        onStop: true
+        interval: "10m"
+        quiesceWait: "10s"
+        s3Endpoint: ""
+        s3Bucket: ""
+        s3Region: "us-east-1"
+        s3UseSSL: false
 ## @param supervisor.config.history.gc.enabled Master switch for the history auto-purge sweeper.
 ## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.history.gc.schedule History sweeper ticker interval.
@@ -286,7 +309,7 @@ supervisor:
 ## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
 ## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json
 ##   (auths for private registries) used by engine image pulls. Stored verbatim
-##   in the `engine-registry-auth` Secret `data` key `.dockerconfigjson`
+##   in the `engine-image-auth` Secret `data` key `.dockerconfigjson`
 ##   (already base64 — do NOT pre-decode): Kubernetes base64-decodes it exactly
 ##   once on mount, so engine pods read raw JSON at
 ##   `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (base64 of `{}`). This is
@@ -296,6 +319,7 @@ supervisor:
 ## @param supervisor.config.fleet.engineDebug Enable engine.toml [debug].
 ## @param supervisor.config.fleet.engineLogFormat Engine log format (json, text; empty omits).
 ## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}).
+## @param supervisor.config.fleet.engineCacheSyncImage Image holding the supervisor binary, run as the engine pod's cache-restore init + cache-sync sidecar containers (see supervisor.config.cache.sync). Empty = the supervisor image (default).
     fleet:
       maxReplicasPerVersion: 3
       maxSessionsPerReplica: 8
@@ -344,6 +368,7 @@ supervisor:
       # engineRegistryMirrors:
       #   "docker.io": ["mirror.gcr.io", "my-mirror.corp.example"]
       engineRegistryMirrors: {}
+      engineCacheSyncImage: ""
 ## @param supervisor.config.leaseTtl Engine session lease TTL.
     leaseTtl: "2m"
 ## @param supervisor.config.version.floor Minimum supported Dagger engine version.
@@ -354,6 +379,8 @@ supervisor:
 ## @param supervisor.config.cli.enabled Enable on-the-fly Dagger CLI provisioning addon.
 ## @param supervisor.config.cli.releaseListTtl Upstream release-list cache TTL.
 ## @param supervisor.config.cli.downloadTimeout Outbound upstream fetch timeout.
+## @param supervisor.config.cli.s3Bucket S3 bucket for CLI tarballs (empty = cache.s3.bucket).
+## @param supervisor.config.cli.s3Prefix S3 key prefix for CLI tarballs.
 ## @param supervisor.config.cli.upstream.releasesUrl Release discovery URL (mirror-able).
 ## @param supervisor.config.cli.upstream.downloadBase Tarball + checksums.txt base URL (mirror-able).
 ## @param supervisor.config.cli.upstream.githubToken Optional GitHub token for the releases API.
@@ -361,6 +388,8 @@ supervisor:
       enabled: true
       releaseListTtl: "1h"
       downloadTimeout: "5m"
+      s3Bucket: ""
+      s3Prefix: "cli-cache"
       upstream:
         releasesUrl: "https://api.github.com/repos/dagger/dagger/releases"
         downloadBase: "https://github.com/dagger/dagger/releases/download"
@@ -445,6 +474,10 @@ auth:
     #   - pattern: '^ldap/(.+)$'
     #     replacement: '$1'
     defaultGroup: ""
+    ## @param auth.oauth.adminGroups Upstream IdP group names that grant RoleAdmin on login/revalidation (exact, case-sensitive). Empty = disabled.
+    adminGroups: []
+    # adminGroups example (OIDC groups that auto-promote to admin):
+    # adminGroups: ["HM_ADM_ETL_Outils", "platform-admins"]
     cookieSecure: false
     issuerUrl: ""
     scopes: ["openid", "profile", "email"]
@@ -666,37 +699,78 @@ opentelemetry-collector:
           processors: [batch]
           exporters: [prometheusremotewrite]
 
-## @skip registry
-## @param registry.enabled Install Docker Registry subchart (cache backend). Uses the twuni docker-registry chart (https://helm.twun.io), packaging the registry v3 image.
-registry:
+## @skip minio
+## @param minio.enabled Install MinIO subchart (S3-compatible object store). Default S3 store for worker snapshots, CLI cache, and BuildKit cache GC.
+minio:
   enabled: true
-  replicaCount: 1
+  mode: standalone
+  ## @param minio.replicas Number of MinIO replicas (standalone mode = 1).
+  replicas: 1
+  ## @param minio.image.repository MinIO container image repository.
+  ## @param minio.image.tag MinIO container image tag.
   image:
-    tag: "3.1.1"
-  persistence:
-    enabled: true
-    deleteEnabled: true
-    size: 50Gi
-    storageClass: ""
-  storage: filesystem
+    repository: quay.io/minio/minio
+    tag: RELEASE.2024-12-18T13-15-44Z
+  ## @param minio.resources.requests.cpu MinIO CPU request.
+  ## @param minio.resources.requests.memory MinIO memory request.
+  ## @param minio.resources.limits.cpu MinIO CPU limit.
+  ## @param minio.resources.limits.memory MinIO memory limit.
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
+      cpu: 250m
+      memory: 256Mi
     limits:
-      cpu: 500m
-      memory: 512Mi
-  extraEnvVars:
-    ## registry v3 initializes OpenTelemetry unconditionally and OTel autoexport
-    ## defaults to an OTLP exporter on localhost:4318; with no collector there it
-    ## spams "traces export: connection refused" errors. "none" disables the exporter.
-    - name: OTEL_TRACES_EXPORTER
-      value: "none"
-  garbageCollect:
-    ## @param registry.garbageCollect.enabled Enable the registry garbage-collect CronJob shipped by the docker-registry subchart. GC runs daily at 3 AM to reclaim space from untagged manifests.
+      cpu: 1000m
+      memory: 1Gi
+  ## @param minio.persistence.enabled Enable PVC for MinIO data.
+  ## @param minio.persistence.storageClass StorageClass for the MinIO PVC (empty = cluster default).
+  ## @param minio.persistence.size PVC size for MinIO object storage.
+  persistence:
     enabled: true
-    ## @param registry.garbageCollect.schedule Cron schedule for the GC job. Default: "0 3 * * *" (daily at 3 AM UTC).
-    schedule: "0 3 * * *"
+    storageClass: ""
+    size: 50Gi
+  ## @param minio.rootUser MinIO root access key. Dev default; MUST be changed in production.
+  rootUser: "minioadmin"
+  ## @param minio.rootPassword MinIO root secret key. Dev default; MUST be changed in production.
+  rootPassword: "minioadmin"
+  ## @param minio.users [array] Extra MinIO users to create (default empty: the built-in console user is disabled).
+  users: []
+  ## @param minio.buckets [array] Buckets to create on startup. The default "dagger-cache" bucket is always created.
+  buckets:
+    - name: dagger-cache
+      policy: none
+      purge: false
+  ## @param minio.service.type MinIO service type.
+  ## @param minio.service.port MinIO API port.
+  service:
+    type: ClusterIP
+    port: 9000
+  ## @param minio.consoleService.type MinIO Console service type.
+  ## @param minio.consoleService.port MinIO Console port.
+  consoleService:
+    type: ClusterIP
+    port: 9001
+  ## @param minio.podAnnotations [object] Annotations added to the MinIO pod.
+  podAnnotations: {}
+  ## @param minio.nodeSelector [object] Node selector for MinIO pod scheduling.
+  nodeSelector: {}
+  ## @param minio.tolerations [array] Tolerations for MinIO pod scheduling.
+  tolerations: []
+  ## @param minio.affinity [object] Affinity rules for MinIO pod scheduling.
+  affinity: {}
+  ## @param minio.podSecurityContext.runAsUser User ID for the MinIO container.
+  ## @param minio.podSecurityContext.runAsGroup Group ID for the MinIO container.
+  ## @param minio.podSecurityContext.fsGroup Filesystem group for mounted volumes.
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  ## @param minio.containerSecurityContext.allowPrivilegeEscalation Allow privilege escalation.
+  ## @param minio.containerSecurityContext.capabilities.drop [array] Linux capabilities to drop.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 ## @skip tempo
 ## @param tempo.enabled Install Grafana Tempo subchart (traces).

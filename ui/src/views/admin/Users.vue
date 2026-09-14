@@ -20,7 +20,7 @@
       <table>
         <thead>
           <tr>
-            <th>Username</th><th>Role</th><th>Groups</th><th>Token</th><th>Created</th><th>Actions</th>
+            <th>Username</th><th>Role</th><th>Groups</th><th>OAuth groups</th><th>Token</th><th>Created</th><th>Actions</th>
           </tr>
         </thead>
         <tbody>
@@ -35,6 +35,10 @@
             <td>
               <span v-for="g in u.groups" :key="g.id" class="badge" style="margin-right: 4px;">{{ g.name }}</span>
               <span v-if="!u.groups.length">—</span>
+            </td>
+            <td>
+              <span v-for="og in u.oauth_groups" :key="og" class="badge badge-muted" style="margin-right: 4px;">{{ og }}</span>
+              <span v-if="!u.oauth_groups?.length">—</span>
             </td>
             <td><code v-if="u.token">{{ u.token.prefix }}…</code><span v-else>—</span></td>
             <td>{{ u.created_at }}</td>
@@ -158,4 +162,5 @@ async function saveGroups() {
 }
 .modal { max-width: 400px; width: 90%; }
 .btn-danger { background: #da3633; color: #fff; }
+.badge-muted { background: #161b22; color: #8b949e; }
 </style>

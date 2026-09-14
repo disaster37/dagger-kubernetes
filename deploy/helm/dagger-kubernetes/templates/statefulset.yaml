@@ -101,6 +101,22 @@ spec:
                   name: {{ .Values.auth.oauth.clientSecretRef.name | default (printf "%s-oauth" (include "dagger-kubernetes.fullname" .)) }}
                   key: {{ .Values.auth.oauth.clientSecretRef.key | default "client_secret" }}
             {{- end }}
+            # S3 credentials for the supervisor's own S3 client (CLI cache +
+            # cache GC; the engine-pod sync helpers read the same secret via
+            # engine-s3-auth). Optional: without the secret the client falls
+            # back to the AWS env credential chain.
+            - name: DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: engine-s3-auth
+                  key: accessKey
+                  optional: true
+            - name: DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: engine-s3-auth
+                  key: secretKey
+                  optional: true
             {{- with .Values.supervisor.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}

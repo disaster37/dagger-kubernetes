@@ -8,6 +8,7 @@ export interface AuthUser {
   role: Role
   groups: GroupSummary[]
   oauth_provider?: string
+  oauth_groups?: string[]
 }
 
 export interface Group extends GroupSummary {
@@ -32,6 +33,7 @@ export interface UserRow {
   username: string
   role: Role
   oauth_provider?: string
+  oauth_groups?: string[]
   groups: GroupSummary[]
   created_at: string
   token?: TokenMeta | null

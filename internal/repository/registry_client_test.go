@@ -1,13 +1,16 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -402,5 +405,171 @@ func TestCatalogRejectsOversizedBody(t *testing.T) {
 	})
 	if _, err := c.Catalog(context.Background()); err == nil {
 		t.Fatal("expected error for oversized catalog body")
+	}
+}
+
+func TestUploadBlobStream(t *testing.T) {
+	payload := []byte("streamed-blob-bytes-0123456789")
+	wantDigest := "sha256:" + sha256HexBytes(payload)
+
+	tests := []struct {
+		name       string
+		digest     string
+		size       int64
+		wantErr    error
+		wantPut    bool
+		respDigest string
+		putStatus  int
+		initStatus int
+	}{
+		{
+			name:      "ok",
+			digest:    wantDigest,
+			size:      int64(len(payload)),
+			wantPut:   true,
+			putStatus: http.StatusCreated,
+		},
+		{
+			name:      "ok-200",
+			digest:    wantDigest,
+			size:      int64(len(payload)),
+			wantPut:   true,
+			putStatus: http.StatusOK,
+		},
+		{
+			name:       "digest-mismatch-header",
+			digest:     wantDigest,
+			size:       int64(len(payload)),
+			wantPut:    true,
+			putStatus:  http.StatusCreated,
+			respDigest: "sha256:" + strings.Repeat("f", 64),
+			wantErr:    errUploadDigestMismatch,
+		},
+		{
+			name:       "initiate-500",
+			digest:     wantDigest,
+			size:       int64(len(payload)),
+			initStatus: http.StatusInternalServerError,
+			wantErr:    ErrRegistryUnreachable,
+		},
+		{
+			name:      "put-500",
+			digest:    wantDigest,
+			size:      int64(len(payload)),
+			wantPut:   true,
+			putStatus: http.StatusInternalServerError,
+			wantErr:   ErrRegistryUnreachable,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var gotBody []byte
+			var gotLength int64
+			var gotPutDigest string
+			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+				switch r.Method {
+				case http.MethodPost:
+					if r.URL.Path != "/v2/dagger-cache/blobs/uploads/" {
+						t.Errorf("post path = %q", r.URL.Path)
+					}
+					if tc.initStatus != 0 {
+						w.WriteHeader(tc.initStatus)
+						return
+					}
+					w.Header().Set("Location", "http://"+r.Host+"/v2/dagger-cache/blobs/uploads/1")
+					w.WriteHeader(http.StatusAccepted)
+				case http.MethodPut:
+					gotLength = r.ContentLength
+					gotPutDigest = r.URL.Query().Get("digest")
+					if tc.respDigest != "" {
+						w.Header().Set("Docker-Content-Digest", tc.respDigest)
+					}
+					b, _ := io.ReadAll(r.Body)
+					gotBody = b
+					w.WriteHeader(tc.putStatus)
+				default:
+					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
+				}
+			})
+
+			err := c.UploadBlobStream(context.Background(), "dagger-cache", tc.digest, tc.size, bytes.NewReader(payload))
+			if !errors.Is(err, tc.wantErr) {
+				t.Fatalf("err = %v, want %v", err, tc.wantErr)
+			}
+			if !tc.wantPut {
+				return
+			}
+			if !bytes.Equal(gotBody, payload) {
+				t.Fatalf("uploaded body = %q, want %q", gotBody, payload)
+			}
+			if gotLength != tc.size {
+				t.Fatalf("Content-Length = %d, want %d", gotLength, tc.size)
+			}
+			if gotPutDigest != tc.digest {
+				t.Fatalf("digest param = %q, want %q", gotPutDigest, tc.digest)
+			}
+		})
+	}
+}
+
+func TestUploadBlobStreamInvalidDigest(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request to %q", r.URL.Path)
+	})
+	if err := c.UploadBlobStream(context.Background(), "dagger-cache", "sha256:not-hex", 1, strings.NewReader("x")); err == nil {
+		t.Fatal("expected error for invalid digest")
+	}
+}
+
+func TestUploadBlobStreamMissingLocation(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted) // no Location header
+	})
+	if err := c.UploadBlobStream(context.Background(), "dagger-cache", digestRepeat("a"), 1, strings.NewReader("x")); err == nil {
+		t.Fatal("expected error for missing Location header")
+	}
+}
+
+func TestUploadBlobDelegatesToStream(t *testing.T) {
+	// UploadBlob must keep working (CLI cache path) and return the computed
+	// digest of the buffered body.
+	var gotBody []byte
+	var gotDigestParam string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodPost:
+			w.Header().Set("Location", "http://"+r.Host+"/v2/dagger-cache/blobs/uploads/1")
+			w.WriteHeader(http.StatusAccepted)
+		case http.MethodPut:
+			gotDigestParam = r.URL.Query().Get("digest")
+			b, _ := io.ReadAll(r.Body)
+			gotBody = b
+			w.Header().Set("Docker-Content-Digest", gotDigestParam)
+			w.WriteHeader(http.StatusCreated)
+		}
+	})
+
+	body := []byte("buffered-then-streamed")
+	digest, size, err := c.UploadBlob(context.Background(), "dagger-cache", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("UploadBlob: %v", err)
+	}
+	if size != int64(len(body)) {
+		t.Fatalf("size = %d, want %d", size, len(body))
+	}
+	if digest != "sha256:"+sha256HexBytes(body) {
+		t.Fatalf("digest = %s, want sha256 of the body", digest)
+	}
+	if !bytes.Equal(gotBody, body) || gotDigestParam != digest {
+		t.Fatalf("uploaded = %q (digest %q), want %q (digest %s)", gotBody, gotDigestParam, body, digest)
+	}
+}
+
+func TestRegistryStatsClientWithTimeout(t *testing.T) {
+	// The 10s default truncates multi-GB transfers (worker snapshots); the
+	// builder must raise the total per-request timeout.
+	c := NewRegistryStatsClient("reg:5000").WithTimeout(5 * time.Minute)
+	if c.httpClient.Timeout != 5*time.Minute {
+		t.Fatalf("timeout = %v, want 5m", c.httpClient.Timeout)
 	}
 }

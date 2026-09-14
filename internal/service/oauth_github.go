@@ -23,6 +23,7 @@ type GitHubOAuthService struct {
 	redirectURL  string
 	allowedOrgs  []string
 	allowedTeams []string
+	adminGroups  []string
 	defaultGroup string
 	tokenURL     string
 	apiBaseURL   string
@@ -44,6 +45,7 @@ func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *
 		redirectURL:  cfg.RedirectURL,
 		allowedOrgs:  cfg.AllowedOrgs,
 		allowedTeams: cfg.AllowedTeams,
+		adminGroups:  cfg.AdminGroups,
 		defaultGroup: cfg.DefaultGroup,
 		tokenURL:     "https://github.com/login/oauth/access_token",
 		apiBaseURL:   "https://api.github.com",
@@ -115,7 +117,7 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 	mappedGroups := s.mapper.mapIfActive(providerGroups)
 
 	cred := &oauthCredential{Provider: "github", AccessToken: accessToken}
-	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, mappedGroups, cred)
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, s.adminGroups, providerGroups, mappedGroups, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("github oauth: %w", err)
 	}

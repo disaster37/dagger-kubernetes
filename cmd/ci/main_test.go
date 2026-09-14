@@ -156,6 +156,10 @@ func TestResolveUIBase(t *testing.T) {
 func TestRunPrintsPipelineView(t *testing.T) {
 	stubDaggerOnPath(t, testTraceID)
 	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
+	// config.Load validates the always-on S3 prerequisites (cli cache +
+	// worker-cache sync); satisfy them for these config-load smoke tests.
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "localhost:9000")
 	ctx := newTestCLIContext(t,
 		"--server", "https://supv.example.com",
 		"--token", "tok",
@@ -179,6 +183,8 @@ func TestRunPrintsPipelineView(t *testing.T) {
 func TestRunNoTraceID(t *testing.T) {
 	stubDaggerOnPath(t, "no trace id here")
 	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "localhost:9000")
 	ctx := newTestCLIContext(t,
 		"--server", "https://supv.example.com",
 		"--token", "tok",
@@ -204,6 +210,8 @@ func TestRunNoTraceID(t *testing.T) {
 func TestRunTokenFromEnv(t *testing.T) {
 	stubDaggerOnPath(t, testTraceID)
 	t.Setenv("DAGGER_KUBERNETES_TOKEN", "env-token")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "localhost:9000")
 	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
 	ctx := newTestCLIContext(t,
 		"--server", "https://supv.example.com",
