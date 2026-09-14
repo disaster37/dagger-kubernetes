@@ -152,6 +152,7 @@ func newStatsService(t *testing.T, reg *fakeRegistry, metricsURL string, gc doma
 		router,
 		mc,
 		gc,
+		domain.WorkerSnapshotsRepo,
 		observ.NewTestLogger(),
 		observ.NewMetrics(nil),
 	), ts
@@ -303,7 +304,7 @@ func TestCacheStatsCatalogDisabled(t *testing.T) {
 func TestCacheStatsS3Unsupported(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "s3", Registry: "my-bucket", S3: domain.S3Ref{Bucket: "my-bucket"}},
-		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
@@ -585,7 +586,7 @@ func TestStartGCSweeperEnabled(t *testing.T) {
 func TestCacheStatsRegistryNil(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	stats, err := svc.Stats(context.Background())
 	if err != nil {
@@ -625,7 +626,7 @@ func TestCacheStatsSkipsMissingManifestAndBadTags(t *testing.T) {
 func TestPurgeRegistryNil(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	_, err := svc.Purge(context.Background())
 	if err == nil {
@@ -651,7 +652,7 @@ func TestPurgeAllCatalogDisabled(t *testing.T) {
 func TestRunGCRegistryNil(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
-		nil, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 	summary, err := svc.RunGC(context.Background())
 	if err == nil || summary == nil {
@@ -719,7 +720,7 @@ func TestStatsPurgeNoDeadlock(t *testing.T) {
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache"},
 		router,
-		nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
 	// Purge acquires purgeMu then blocks inside ManifestSize.
@@ -795,7 +796,7 @@ func TestCacheStatsMultiBackend(t *testing.T) {
 	)
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
-		router, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		router, nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
 	stats, err := svc.Stats(context.Background())
@@ -846,7 +847,7 @@ func TestCacheStatsMarkDownFailingBackend(t *testing.T) {
 	)
 	svc := NewCacheStatsService(
 		&Cache{Type: "registry", Registry: "cache.reg/dagger-cache", PublicHost: "cache.supv.example.com"},
-		router, nil, defaultGC(), observ.NewTestLogger(), observ.NewMetrics(nil),
+		router, nil, defaultGC(), "", observ.NewTestLogger(), observ.NewMetrics(nil),
 	)
 
 	stats, err := svc.Stats(context.Background())
@@ -866,5 +867,56 @@ func TestCacheStatsMarkDownFailingBackend(t *testing.T) {
 	}
 	if !up {
 		t.Fatal("healthy backend should not be marked down")
+	}
+}
+
+// TestCacheStatsSkipsSnapshotRepo proves the worker-snapshot repo is excluded
+// from stats, purge, and GC: its (large) manifests must not inflate
+// total_size/object_count, and its tags must survive both sweeps. Both
+// manifests carry an old created-annotation, so the GC would purge the
+// snapshot too if the skip were broken.
+func TestCacheStatsSkipsSnapshotRepo(t *testing.T) {
+	reg := newFakeRegistry()
+	reg.repos = []string{"dagger-cache", domain.WorkerSnapshotsRepo}
+	reg.tags["dagger-cache"] = []string{"cache"}
+	reg.tags[domain.WorkerSnapshotsRepo] = []string{domain.WorkerSnapshotTag("v0.20.0")}
+	reg.manifestBody["dagger-cache:cache"] = manifestJSON("sha256:a", 10, 1, "2020-01-01T00:00:00Z")
+	reg.manifestDigest["dagger-cache:cache"] = digestStr("a")
+	reg.manifestBody[domain.WorkerSnapshotsRepo+":"+domain.WorkerSnapshotTag("v0.20.0")] = manifestJSON("sha256:s", 5000, 1, "2020-01-01T00:00:00Z")
+	reg.manifestDigest[domain.WorkerSnapshotsRepo+":"+domain.WorkerSnapshotTag("v0.20.0")] = digestStr("s")
+
+	svc, _ := newStatsService(t, reg, "", domain.GCConfig{Enabled: true, MaxAge: time.Hour, Schedule: time.Hour})
+
+	// --- stats: only the cache repo counts ---
+	stats, err := svc.Stats(context.Background())
+	if err != nil {
+		t.Fatalf("Stats: %v", err)
+	}
+	if stats.TotalSize != 10 || stats.ObjectCount != 1 {
+		t.Fatalf("total_size=%d object_count=%d, want 10/1 (snapshot repo excluded)", stats.TotalSize, stats.ObjectCount)
+	}
+
+	// --- purge: the snapshot tag survives ---
+	result, err := svc.Purge(context.Background())
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	if result.Purged != 1 {
+		t.Fatalf("purged = %d, want 1 (snapshot tag untouched)", result.Purged)
+	}
+	if len(reg.deleted) != 1 || !strings.Contains(reg.deleted[0], "dagger-cache/manifests/") || strings.Contains(reg.deleted[0], domain.WorkerSnapshotsRepo) {
+		t.Fatalf("deleted = %v, want only the dagger-cache manifest", reg.deleted)
+	}
+
+	// --- GC: the 5000-byte snapshot is never collected (freed = 10, not 5010) ---
+	summary, err := svc.RunGC(context.Background())
+	if err != nil {
+		t.Fatalf("RunGC: %v", err)
+	}
+	if summary.PurgedTags != 1 || summary.FreedBytes != 10 {
+		t.Fatalf("purgedTags=%d freedBytes=%d, want 1/10 (snapshot tag skipped)", summary.PurgedTags, summary.FreedBytes)
+	}
+	if !svc.skipRepo(domain.WorkerSnapshotsRepo) || svc.skipRepo("dagger-cache") {
+		t.Fatal("skipRepo = unexpected results")
 	}
 }

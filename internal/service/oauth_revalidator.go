@@ -57,14 +57,15 @@ type revalidationEntry struct {
 // single-flight cache. It is wired into AuthService at startup when OAuth is
 // enabled.
 type OAuthRevalidator struct {
-	provider OAuthProvider
-	mapper   *GroupMapper
-	users    *UserService
-	groups   domain.GroupRepository
-	tokens   *TokenService
-	logger   *logrus.Logger
-	cfg      OAuthRevalidatorConfig
-	clock    func() time.Time
+	provider    OAuthProvider
+	mapper      *GroupMapper
+	adminGroups []string
+	users       *UserService
+	groups      domain.GroupRepository
+	tokens      *TokenService
+	logger      *logrus.Logger
+	cfg         OAuthRevalidatorConfig
+	clock       func() time.Time
 
 	mu    sync.Mutex
 	cache map[string]*revalidationEntry
@@ -75,6 +76,7 @@ type OAuthRevalidator struct {
 func NewOAuthRevalidator(
 	provider OAuthProvider,
 	mapper *GroupMapper,
+	adminGroups []string,
 	users *UserService,
 	groups domain.GroupRepository,
 	tokens *TokenService,
@@ -82,7 +84,8 @@ func NewOAuthRevalidator(
 	cfg OAuthRevalidatorConfig,
 ) *OAuthRevalidator {
 	r := &OAuthRevalidator{
-		provider: provider, mapper: mapper, users: users, groups: groups,
+		provider: provider, mapper: mapper, adminGroups: adminGroups,
+		users: users, groups: groups,
 		tokens: tokens, logger: logger, cfg: cfg,
 		clock: func() time.Time { return time.Now().UTC() },
 		cache: make(map[string]*revalidationEntry),
@@ -270,6 +273,15 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: membership reconciliation failed during revalidation")
 	} else {
 		u.OAuthGroupIDs = gids
+	}
+	u.OAuthGroups = normalizeGroupList(groups)
+	if roleChanged := applyOAuthAdminRole(u, r.adminGroups, groups); roleChanged {
+		r.logger.WithFields(logrus.Fields{
+			"user_id":        u.ID,
+			"oauth_provider": u.OAuthProvider,
+			"role":           u.Role,
+			"oauth_admin":    u.OAuthAdmin,
+		}).Info("oauth: admin role changed via admin_groups (revalidation)")
 	}
 	if err := r.users.Update(ctx, u); err != nil {
 		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: persist revalidated user failed")

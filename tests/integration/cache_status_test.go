@@ -201,7 +201,7 @@ func newCacheStatusTestEnv(t *testing.T, raftCleanState domain.RaftCleanState) *
 	)
 	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, nil, domain.GCConfig{
 		Enabled: false, MaxAge: 168 * time.Hour, Schedule: time.Hour,
-	}, logger, observ.NewMetrics(nil))
+	}, domain.WorkerSnapshotsRepo, logger, observ.NewMetrics(nil))
 	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger, raftCleanState)
 
 	controlAddr := freeAddr(t)

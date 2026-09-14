@@ -37,6 +37,56 @@ func orgsIntersect(allowed, have []string) bool {
 	return false
 }
 
+// normalizeGroupList de-duplicates (preserving first occurrence, dropping
+// empty strings) and sorts a group-name list for stable storage and display.
+// Empty input yields nil so the omitempty JSON tag keeps the field absent.
+func normalizeGroupList(names []string) []string {
+	seen := make(map[string]struct{}, len(names))
+	out := make([]string, 0, len(names))
+	for _, n := range names {
+		if n == "" {
+			continue
+		}
+		if _, dup := seen[n]; dup {
+			continue
+		}
+		seen[n] = struct{}{}
+		out = append(out, n)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
+// applyOAuthAdminRole promotes/demotes u's role based on whether any RAW
+// upstream group matches adminGroups (exact, case-sensitive via orgsIntersect).
+//   - match + u is not admin      -> promote to RoleAdmin, OAuthAdmin=true.
+//   - no match + OAuthAdmin       -> demote to RoleUser, OAuthAdmin=false.
+//   - match + already admin        -> leave unchanged (do NOT take ownership of
+//     a manually-promoted admin).
+//   - no match + not OAuthAdmin    -> leave unchanged (manual admin or user).
+//
+// Returns true when the role changed (caller logs it).
+func applyOAuthAdminRole(u *domain.User, adminGroups, upstreamGroups []string) bool {
+	if len(adminGroups) == 0 {
+		return false
+	}
+	match := orgsIntersect(adminGroups, upstreamGroups)
+	if match && u.Role != domain.RoleAdmin {
+		u.Role = domain.RoleAdmin
+		u.OAuthAdmin = true
+		return true
+	}
+	if !match && u.OAuthAdmin {
+		u.Role = domain.RoleUser
+		u.OAuthAdmin = false
+		return true
+	}
+	return false
+}
+
 // joinGroupByName best-effort adds userID to the named group. Missing groups
 // and membership errors are logged (never fatal). It serves both the mapped
 // (group_mappings) and default_group auto-join paths, so the log message is
@@ -65,6 +115,8 @@ func completeOAuthLogin(
 	logger *logrus.Logger,
 	encKey []byte,
 	provider, oauthID, username, defaultGroup string,
+	adminGroups []string,
+	upstreamGroups []string,
 	mappedGroups []string,
 	credential *oauthCredential,
 ) (access, refresh string, u *domain.User, err error) {
@@ -99,6 +151,27 @@ func completeOAuthLogin(
 		joinGroupByName(ctx, groups, fallbackGroup, u.ID, logger)
 		memberGroups, _ = groups.GroupsForUser(ctx, u.ID)
 	}
+
+	// Persist upstream OAuth groups for display.
+	u.OAuthGroups = normalizeGroupList(upstreamGroups)
+
+	// Apply admin_groups role promotion/demotion.
+	if roleChanged := applyOAuthAdminRole(u, adminGroups, upstreamGroups); roleChanged {
+		logger.WithFields(logrus.Fields{
+			"user_id":        u.ID,
+			"oauth_provider": provider,
+			"role":           u.Role,
+			"oauth_admin":    u.OAuthAdmin,
+		}).Info("oauth: admin role changed via admin_groups")
+	}
+
+	logger.WithFields(logrus.Fields{
+		"user_id":         u.ID,
+		"oauth_provider":  provider,
+		"upstream_groups": upstreamGroups,
+		"mapped_groups":   mappedGroups,
+		"oauth_group_ids": u.OAuthGroupIDs,
+	}).Info("oauth: group mapping applied")
 
 	// Persist the encrypted credential.
 	ct, err := encryptOAuthCredential(encKey, credential)

@@ -15,6 +15,15 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// emptyJSONBlob is the canonical empty-JSON OCI config blob: sha256("{}") =
+// 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a, 2 bytes.
+// The registry requires every blob referenced by a manifest to exist before
+// accepting the manifest, so it is uploaded alongside the layer.
+const (
+	emptyJSONDigest = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+	emptyJSONSize   = 2 // "{}" = 2 bytes
+)
+
 // RegistryCLICache stores verified CLI tarballs as full OCI artifacts on the
 // shared Dagger registry so every supervisor pod in a multi-node Raft cluster
 // can serve cached binaries without re-downloading from GitHub.
@@ -127,12 +136,8 @@ func (c *RegistryCLICache) Put(ctx context.Context, version, osName, arch string
 
 	// Build manifest with annotations.
 	// The config descriptor must reference an actual empty JSON blob.
-	// sha256("{}") = 44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a
 	// Using the blob digest here would reference a non-existent config blob
 	// and cause registry/tooling rejections (manifest integrity check).
-	const emptyJSONDigest = "sha256:44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
-	const emptyJSONSize = 2 // "{}" = 2 bytes
-
 	filename := domain.AssetFilename(version, osName, arch)
 	manifest := &domain.CLIManifest{
 		SchemaVersion: 2,

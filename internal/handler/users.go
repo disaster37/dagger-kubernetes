@@ -14,6 +14,7 @@ type userRow struct {
 	Username      string         `json:"username"`
 	Role          domain.Role    `json:"role"`
 	OAuthProvider string         `json:"oauth_provider,omitempty"`
+	OAuthGroups   []string       `json:"oauth_groups,omitempty"`
 	Groups        []groupSummary `json:"groups"`
 	CreatedAt     string         `json:"created_at"`
 	Token         *tokenMeta     `json:"token,omitempty"`
@@ -178,6 +179,7 @@ func (s *Server) toUserRow(ctx context.Context, u *domain.User) userRow {
 		Username:      u.Username,
 		Role:          u.Role,
 		OAuthProvider: u.OAuthProvider,
+		OAuthGroups:   u.OAuthGroups,
 		CreatedAt:     formatTime(u.CreatedAt),
 		Groups:        toGroupSummaries(gs),
 	}

@@ -22,7 +22,6 @@ func newConnectFixture(t *testing.T, cache *Cache, key []byte) *connectFixture {
 	t.Helper()
 	cfg := &domain.Config{
 		Server:  domain.ServerConfig{PublicURL: "https://supv.example.com", DataHost: "data.example.com"},
-		Cache:   domain.CacheConfig{Backend: cache.Type},
 		Version: domain.VersionConfig{Floor: "v0.19.0"},
 	}
 	vr, err := NewResolver("v0.19.0", nil, nil)
@@ -80,7 +79,7 @@ func TestConnectEnvNoVersionMasked(t *testing.T) {
 	if snap.DataHostname != "data.example.com" {
 		t.Fatalf("DataHostname = %q", snap.DataHostname)
 	}
-	if snap.CacheBackend != "registry" {
+	if snap.CacheBackend != "s3" {
 		t.Fatalf("CacheBackend = %q", snap.CacheBackend)
 	}
 	if snap.VersionFloor != "v0.19.0" {
@@ -360,7 +359,6 @@ func TestConnectEnvTokenMetaError(t *testing.T) {
 	cache := registryCache()
 	cfg := &domain.Config{
 		Server:  domain.ServerConfig{PublicURL: "https://supv.example.com", DataHost: "data.example.com"},
-		Cache:   domain.CacheConfig{Backend: "registry"},
 		Version: domain.VersionConfig{Floor: "v0.19.0"},
 	}
 	vr, err := NewResolver("v0.19.0", nil, nil)

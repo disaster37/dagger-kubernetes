@@ -20,11 +20,11 @@ dependencies:
     version: "0.108.0"
     repository: https://open-telemetry.github.io/opentelemetry-helm-charts
     condition: opentelemetry-collector.enabled
-  - name: docker-registry
-    alias: registry
-    version: "3.0.0"
-    repository: https://twuni.github.io/docker-registry.helm
-    condition: registry.enabled
+  - name: minio
+    alias: minio
+    version: "5.4.0"
+    repository: https://charts.min.io/
+    condition: minio.enabled
   - name: tempo
     version: "1.24.4"
     repository: https://grafana.github.io/helm-charts

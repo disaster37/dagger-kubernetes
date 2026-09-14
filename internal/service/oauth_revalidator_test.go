@@ -39,7 +39,7 @@ func newTestRevalidator(t *testing.T, provider *fakeRevalidateProvider, cfg OAut
 	r := newServiceDB(t)
 	logger := testLogger()
 	usersSvc := NewUserService(r.users, r.groups, logger)
-	revalidator := NewOAuthRevalidator(provider, nil, usersSvc, r.groups, nil, logger, cfg)
+	revalidator := NewOAuthRevalidator(provider, nil, nil, usersSvc, r.groups, nil, logger, cfg)
 	// Override clock for deterministic testing.
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	revalidator.clock = func() time.Time { return now }
@@ -66,7 +66,7 @@ func TestRevalidatorCacheHit(t *testing.T) {
 	r.groups.SetMembers(context.Background(), g.ID, []string{"u1"})
 	usersSvc := NewUserService(r.users, r.groups, testLogger())
 
-	rv := NewOAuthRevalidator(provider, nil, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, nil, usersSvc, r.groups, nil, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	gids, err := rv.Check(context.Background(), u)
@@ -145,7 +145,7 @@ func TestRevalidatorReLoginAfterRevocation(t *testing.T) {
 		t.Fatalf("set members: %v", err)
 	}
 	usersSvc := NewUserService(r.users, r.groups, testLogger())
-	rv := NewOAuthRevalidator(provider, nil, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, nil, usersSvc, r.groups, nil, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	// Revoke: the IdP now denies.
@@ -208,7 +208,7 @@ func TestRevalidatorReconcileAddRemove(t *testing.T) {
 
 	provider := &fakeRevalidateProvider{groups: []string{"newteam"}}
 	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
-	rv := NewOAuthRevalidator(provider, mapper, usersSvc, r.groups, nil, logger, cfg)
+	rv := NewOAuthRevalidator(provider, mapper, nil, usersSvc, r.groups, nil, logger, cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	_, err = rv.Check(context.Background(), u)
@@ -376,5 +376,248 @@ func TestRevalidatorDeactivatedSkipsIDP(t *testing.T) {
 	}
 	if provider.callCount != 0 {
 		t.Fatalf("expected 0 provider calls (deactivated skips IDP), got %d", provider.callCount)
+	}
+}
+
+func TestNormalizeGroupList(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []string
+		want  []string
+	}{
+		{name: "nil", input: nil, want: nil},
+		{name: "empty", input: []string{}, want: nil},
+		{name: "single", input: []string{"a"}, want: []string{"a"}},
+		{name: "duplicates", input: []string{"b", "a", "b"}, want: []string{"a", "b"}},
+		{name: "empty strings dropped", input: []string{"", "a", ""}, want: []string{"a"}},
+		{name: "sort", input: []string{"c", "a", "b"}, want: []string{"a", "b", "c"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeGroupList(tt.input)
+			if len(got) == 0 && len(tt.want) == 0 {
+				return
+			}
+			if len(got) != len(tt.want) {
+				t.Fatalf("normalizeGroupList = %v, want %v", got, tt.want)
+			}
+			for i := range got {
+				if got[i] != tt.want[i] {
+					t.Fatalf("normalizeGroupList = %v, want %v", got, tt.want)
+				}
+			}
+		})
+	}
+}
+
+func TestApplyOAuthAdminRole(t *testing.T) {
+	tests := []struct {
+		name           string
+		initialRole    domain.Role
+		initialOAAdmin bool
+		adminGroups    []string
+		upstreamGroups []string
+		wantRole       domain.Role
+		wantOAAdmin    bool
+		wantChanged    bool
+	}{
+		{
+			name:        "promote user on match",
+			initialRole: domain.RoleUser, initialOAAdmin: false,
+			adminGroups: []string{"platform-admins"}, upstreamGroups: []string{"platform-admins"},
+			wantRole: domain.RoleAdmin, wantOAAdmin: true, wantChanged: true,
+		},
+		{
+			name:        "demote OAuth admin on non-match",
+			initialRole: domain.RoleAdmin, initialOAAdmin: true,
+			adminGroups: []string{"platform-admins"}, upstreamGroups: []string{"other"},
+			wantRole: domain.RoleUser, wantOAAdmin: false, wantChanged: true,
+		},
+		{
+			name:        "preserve manual admin on non-match",
+			initialRole: domain.RoleAdmin, initialOAAdmin: false,
+			adminGroups: []string{"platform-admins"}, upstreamGroups: []string{"other"},
+			wantRole: domain.RoleAdmin, wantOAAdmin: false, wantChanged: false,
+		},
+		{
+			name:        "leave unchanged when already admin + match",
+			initialRole: domain.RoleAdmin, initialOAAdmin: false,
+			adminGroups: []string{"platform-admins"}, upstreamGroups: []string{"platform-admins"},
+			wantRole: domain.RoleAdmin, wantOAAdmin: false, wantChanged: false,
+		},
+		{
+			name:        "no change when empty admin_groups",
+			initialRole: domain.RoleUser, initialOAAdmin: false,
+			adminGroups: []string{}, upstreamGroups: []string{"platform-admins"},
+			wantRole: domain.RoleUser, wantOAAdmin: false, wantChanged: false,
+		},
+		{
+			name:        "no change when nil admin_groups",
+			initialRole: domain.RoleUser, initialOAAdmin: false,
+			adminGroups: nil, upstreamGroups: []string{"platform-admins"},
+			wantRole: domain.RoleUser, wantOAAdmin: false, wantChanged: false,
+		},
+		{
+			name:        "no change when empty upstream groups",
+			initialRole: domain.RoleUser, initialOAAdmin: false,
+			adminGroups: []string{"platform-admins"}, upstreamGroups: nil,
+			wantRole: domain.RoleUser, wantOAAdmin: false, wantChanged: false,
+		},
+		{
+			name:        "case sensitive match fails",
+			initialRole: domain.RoleUser, initialOAAdmin: false,
+			adminGroups: []string{"Platform-Admins"}, upstreamGroups: []string{"platform-admins"},
+			wantRole: domain.RoleUser, wantOAAdmin: false, wantChanged: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := &domain.User{Role: tt.initialRole, OAuthAdmin: tt.initialOAAdmin}
+			changed := applyOAuthAdminRole(u, tt.adminGroups, tt.upstreamGroups)
+			if changed != tt.wantChanged {
+				t.Fatalf("applyOAuthAdminRole changed = %v, want %v", changed, tt.wantChanged)
+			}
+			if u.Role != tt.wantRole {
+				t.Fatalf("role = %v, want %v", u.Role, tt.wantRole)
+			}
+			if u.OAuthAdmin != tt.wantOAAdmin {
+				t.Fatalf("OAuthAdmin = %v, want %v", u.OAuthAdmin, tt.wantOAAdmin)
+			}
+		})
+	}
+}
+
+func TestRevalidatorAdminGroupPromotion(t *testing.T) {
+	provider := &fakeRevalidateProvider{groups: []string{"platform-admins"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+
+	r := newServiceDB(t)
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, OAuthProvider: "oidc"}
+	if err := r.users.Create(context.Background(), u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	usersSvc := NewUserService(r.users, r.groups, testLogger())
+
+	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+	_, err := rv.Check(context.Background(), u)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	got, _ := r.users.Get(context.Background(), u.ID)
+	if got.Role != domain.RoleAdmin {
+		t.Fatalf("role = %v, want admin", got.Role)
+	}
+	if !got.OAuthAdmin {
+		t.Fatal("expected OAuthAdmin = true")
+	}
+}
+
+func TestRevalidatorAdminGroupDemotion(t *testing.T) {
+	r := newServiceDB(t)
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleAdmin, OAuthProvider: "oidc", OAuthAdmin: true}
+	if err := r.users.Create(context.Background(), u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	usersSvc := NewUserService(r.users, r.groups, testLogger())
+
+	provider := &fakeRevalidateProvider{groups: []string{"other-group"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+	_, err := rv.Check(context.Background(), u)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	got, _ := r.users.Get(context.Background(), u.ID)
+	if got.Role != domain.RoleUser {
+		t.Fatalf("role = %v, want user", got.Role)
+	}
+	if got.OAuthAdmin {
+		t.Fatal("expected OAuthAdmin = false")
+	}
+}
+
+func TestRevalidatorManualAdminNotDemoted(t *testing.T) {
+	r := newServiceDB(t)
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleAdmin, OAuthProvider: "oidc", OAuthAdmin: false}
+	if err := r.users.Create(context.Background(), u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	usersSvc := NewUserService(r.users, r.groups, testLogger())
+
+	provider := &fakeRevalidateProvider{groups: []string{"other-group"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+	_, err := rv.Check(context.Background(), u)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	got, _ := r.users.Get(context.Background(), u.ID)
+	if got.Role != domain.RoleAdmin {
+		t.Fatalf("role = %v, want admin (manual admin not demoted)", got.Role)
+	}
+	if got.OAuthAdmin {
+		t.Fatal("expected OAuthAdmin = false (manual promotion not taken over)")
+	}
+}
+
+func TestRevalidatorOAuthGroupsPersisted(t *testing.T) {
+	provider := &fakeRevalidateProvider{groups: []string{"g1", "g2"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+
+	r := newServiceDB(t)
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, OAuthProvider: "oidc"}
+	if err := r.users.Create(context.Background(), u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	usersSvc := NewUserService(r.users, r.groups, testLogger())
+
+	rv := NewOAuthRevalidator(provider, nil, nil, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
+
+	_, err := rv.Check(context.Background(), u)
+	if err != nil {
+		t.Fatalf("check: %v", err)
+	}
+
+	got, _ := r.users.Get(context.Background(), u.ID)
+	if len(got.OAuthGroups) != 2 {
+		t.Fatalf("OAuthGroups = %v, want [\"g1\", \"g2\"]", got.OAuthGroups)
+	}
+	if got.OAuthGroups[0] != "g1" || got.OAuthGroups[1] != "g2" {
+		t.Fatalf("OAuthGroups = %v, want [\"g1\", \"g2\"]", got.OAuthGroups)
+	}
+}
+
+func TestValidateGroupName(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  bool
+	}{
+		{name: "valid simple", input: "admin", want: true},
+		{name: "valid with dash", input: "acme-eng", want: true},
+		{name: "valid with dot", input: "acme.eng", want: true},
+		{name: "starts with number ok", input: "9bad", want: true},
+		{name: "with space", input: "with space", want: false},
+		{name: "empty", input: "", want: false},
+		{name: "65 chars too long", input: "a1234567890123456789012345678901234567890123456789012345678901234", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ValidateGroupName(tt.input)
+			if got != tt.want {
+				t.Fatalf("ValidateGroupName(%q) = %v, want %v", tt.input, got, tt.want)
+			}
+		})
 	}
 }

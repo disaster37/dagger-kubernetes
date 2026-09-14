@@ -259,7 +259,6 @@ func TestConnectEnvNoTokenInLogs(t *testing.T) {
 	}
 	env.server.connect = service.NewConnectService(&domain.Config{
 		Server:  domain.ServerConfig{PublicURL: "https://supv.example.com", DataHost: "data.example.com"},
-		Cache:   domain.CacheConfig{Backend: "registry"},
 		Version: domain.VersionConfig{Floor: "v0.19.0"},
 	}, cache, env.server.versionResolver, env.server.tokens, logger)
 

@@ -785,6 +785,77 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+// TestUserOAuthFieldsRoundTrip verifies that the new OAuth user fields
+// (OAuthGroups, OAuthAdmin) survive the cmdUser conversion (both directions)
+// and a full upsert → snapshot → restore cycle (plan §7, FSM persistence of the
+// admin_groups feature).
+func TestUserOAuthFieldsRoundTrip(t *testing.T) {
+	f := newTestFSM(t)
+
+	now := time.Now().UTC()
+	u := &domain.User{
+		ID:            "u1",
+		Username:      "alice",
+		Role:          domain.RoleAdmin,
+		OAuthProvider: "oidc",
+		OAuthID:       "alice-sub",
+		OAuthGroups:   []string{"HM_ADM_Outils", "devs"},
+		OAuthAdmin:    true,
+		CreatedAt:     now,
+		UpdatedAt:     now,
+	}
+
+	// Conversion round-trip: domain -> cmdUser -> domain.
+	cu := cmdUserFrom(u)
+	back := cu.toDomain()
+	if len(back.OAuthGroups) != 2 || back.OAuthGroups[0] != "HM_ADM_Outils" || back.OAuthGroups[1] != "devs" {
+		t.Fatalf("cmdUserFrom->toDomain lost OAuthGroups: %v", back.OAuthGroups)
+	}
+	if !back.OAuthAdmin {
+		t.Fatal("cmdUserFrom->toDomain lost OAuthAdmin")
+	}
+
+	// FSM persistence: upsert -> read. cmdUserFrom never sets Create, so it
+	// must be flipped for the insert.
+	cu.Create = true
+	if err := applyCmd(t, f, kindUpsertUser, cu); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := f.readUserByID("u1")
+	if err != nil {
+		t.Fatalf("readUserByID: %v", err)
+	}
+	if len(got.OAuthGroups) != 2 || !got.OAuthAdmin {
+		t.Fatalf("stored user lost OAuth fields: groups=%v admin=%v", got.OAuthGroups, got.OAuthAdmin)
+	}
+
+	// Snapshot/restore round-trip.
+	snap, err := f.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	sink := &memSink{}
+	if err := snap.Persist(sink); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	snap.Release()
+
+	restored := NewFSM()
+	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	rp, err := restored.readUserByID("u1")
+	if err != nil {
+		t.Fatalf("readUserByID after restore: %v", err)
+	}
+	if len(rp.OAuthGroups) != 2 || rp.OAuthGroups[0] != "HM_ADM_Outils" || rp.OAuthGroups[1] != "devs" {
+		t.Fatalf("OAuthGroups lost in snapshot/restore: %v", rp.OAuthGroups)
+	}
+	if !rp.OAuthAdmin {
+		t.Fatal("OAuthAdmin lost in snapshot/restore")
+	}
+}
+
 // TestFSMRestoreConcurrentReads guards against regressions where Restore swaps
 // the fsmState pointer, racing with lock-free read-helper dereferences. Run
 // under -race in CI.

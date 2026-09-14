@@ -28,12 +28,13 @@ const (
 // counters, and assembles the rich cache payload, and it owns the
 // manual purge + background GC sweeper.
 type CacheStatsService struct {
-	cache      *Cache
-	router     *RegistryRouter           // may be nil (s3 backend)
-	metrics    domain.CacheMetricsClient // may be nil
-	gcCfg      domain.GCConfig
-	logger     *logrus.Logger
-	metricsObs *observ.Metrics // may be nil
+	cache        *Cache
+	router       *RegistryRouter           // may be nil (s3 backend)
+	metrics      domain.CacheMetricsClient // may be nil
+	gcCfg        domain.GCConfig
+	snapshotRepo string // OCI repo holding worker snapshots; excluded from stats/GC/purge
+	logger       *logrus.Logger
+	metricsObs   *observ.Metrics // may be nil
 
 	mu       sync.Mutex
 	cached   *domain.CacheStats
@@ -51,16 +52,18 @@ func NewCacheStatsService(
 	router *RegistryRouter,
 	metricsClient domain.CacheMetricsClient,
 	gcCfg domain.GCConfig,
+	snapshotRepo string,
 	logger *logrus.Logger,
 	obs *observ.Metrics,
 ) *CacheStatsService {
 	return &CacheStatsService{
-		cache:      cache,
-		router:     router,
-		metrics:    metricsClient,
-		gcCfg:      gcCfg,
-		logger:     logger,
-		metricsObs: obs,
+		cache:        cache,
+		router:       router,
+		metrics:      metricsClient,
+		gcCfg:        gcCfg,
+		snapshotRepo: snapshotRepo,
+		logger:       logger,
+		metricsObs:   obs,
 	}
 }
 
@@ -254,11 +257,22 @@ func (s *CacheStatsService) lastUsedAt(ctx context.Context, e *cacheEntry) time.
 	return time.Time{}
 }
 
+// skipRepo reports whether a catalog repo holds worker snapshots rather than
+// BuildKit cache refs. Multi-GB snapshots must not inflate the MagicCache
+// total_size/object_count, and they are not swept as cache refs (stale
+// versions are reclaimed by the registry's own garbage collection).
+func (s *CacheStatsService) skipRepo(repo string) bool {
+	return repo == s.snapshotRepo
+}
+
 // collectEntries walks every repo's tags and collects manifest metadata.
 // Returns entries plus a timedOut flag for partial (context-cancelled) walks.
 func (s *CacheStatsService) collectEntries(ctx context.Context, client domain.RegistryClient, repos []string) ([]cacheEntry, bool) {
 	var out []cacheEntry
 	for _, repo := range repos {
+		if s.skipRepo(repo) {
+			continue
+		}
 		if ctx.Err() != nil {
 			return out, true
 		}
@@ -397,6 +411,9 @@ func (s *CacheStatsService) Purge(ctx context.Context) (*domain.PurgeResult, err
 // truncated=true when the global maxPurgeAllTags cap was reached.
 func (s *CacheStatsService) purgeBackend(ctx context.Context, client domain.RegistryClient, repos []string, result *domain.PurgeResult) (bool, error) {
 	for _, repo := range repos {
+		if s.skipRepo(repo) {
+			continue
+		}
 		tags, err := client.Tags(ctx, repo)
 		if err != nil {
 			return false, fmt.Errorf("tags: %w", err)

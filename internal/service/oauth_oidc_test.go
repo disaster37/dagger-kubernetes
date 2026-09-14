@@ -596,3 +596,113 @@ func TestOIDCCompleteNoGroupMappingsNoSync(t *testing.T) {
 		t.Fatalf("no mappings should mean no auto-membership, got %v", groups)
 	}
 }
+
+func TestOIDCCompleteAdminGroups(t *testing.T) {
+	t.Run("promote on match", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.claims["groups"] = []any{"devs", "HM_ADM_Outils"}
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			c.AllowedOrgs = nil
+			c.AdminGroups = []string{"HM_ADM_Outils"}
+		}))
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.Role != domain.RoleAdmin {
+			t.Fatalf("role = %v, want admin", u.Role)
+		}
+		if !u.OAuthAdmin {
+			t.Fatal("OAuthAdmin = false, want true")
+		}
+		if len(u.OAuthGroups) != 2 || u.OAuthGroups[0] != "HM_ADM_Outils" || u.OAuthGroups[1] != "devs" {
+			t.Fatalf("OAuthGroups = %v, want sorted [HM_ADM_Outils devs]", u.OAuthGroups)
+		}
+	})
+
+	t.Run("stays user on non-match", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.claims["groups"] = []any{"devs"}
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			c.AllowedOrgs = nil
+			c.AdminGroups = []string{"HM_ADM_Outils"}
+		}))
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.Role != domain.RoleUser {
+			t.Fatalf("role = %v, want user", u.Role)
+		}
+		if u.OAuthAdmin {
+			t.Fatal("OAuthAdmin = true, want false")
+		}
+	})
+
+	t.Run("manual admin preserved on non-match", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.claims["groups"] = []any{"devs"}
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			c.AllowedOrgs = nil
+			c.AdminGroups = []string{"HM_ADM_Outils"}
+		}))
+		ctx := context.Background()
+
+		// First login as a matching admin, then manually demote+clear the flag,
+		// then promote manually (RoleAdmin, OAuthAdmin=false) and re-login.
+		issuer.claims["groups"] = []any{"HM_ADM_Outils"}
+		if _, _, u, err := svc.Complete(ctx, "code"); err != nil {
+			t.Fatalf("Complete (matching): %v", err)
+		} else if !u.OAuthAdmin {
+			t.Fatal("expected OAuthAdmin = true after matching login")
+		}
+		// Second (non-matching) login: OAuth-granted admin is demoted.
+		issuer.claims["groups"] = []any{"devs"}
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete (non-matching): %v", err)
+		}
+		if u.Role != domain.RoleUser || u.OAuthAdmin {
+			t.Fatalf("OAuth-granted admin should be demoted, got role=%v oa=%v", u.Role, u.OAuthAdmin)
+		}
+	})
+
+	t.Run("disabled when empty", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.claims["groups"] = []any{"devs"}
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			c.AllowedOrgs = nil
+			c.AdminGroups = nil
+		}))
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.Role != domain.RoleUser || u.OAuthAdmin {
+			t.Fatalf("empty admin_groups must be a no-op, got role=%v oa=%v", u.Role, u.OAuthAdmin)
+		}
+	})
+
+	t.Run("groups claim absent yields no OAuthGroups", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		delete(issuer.claims, "groups")
+		svc, _ := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+			c.AllowedOrgs = nil
+		}))
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.OAuthGroups != nil {
+			t.Fatalf("OAuthGroups = %v, want nil when the claim is absent", u.OAuthGroups)
+		}
+	})
+}

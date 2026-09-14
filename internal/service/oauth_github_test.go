@@ -504,3 +504,78 @@ func TestCompleteOAuthUserNoDefaultGroupExists(t *testing.T) {
 		t.Fatalf("user should have 0 memberships, got %v", groups)
 	}
 }
+
+func TestCompleteOAuthAdminGroups(t *testing.T) {
+	t.Run("promote via org", func(t *testing.T) {
+		gh := newGitHubServer(t, []string{"acme", "eng"}, nil)
+		cfg := domain.OAuthConfig{
+			Enabled:      true,
+			ClientID:     "cid",
+			ClientSecret: "csec",
+			AllowedOrgs:  nil,
+			AdminGroups:  []string{"eng"},
+		}
+		svc, _, _ := newOAuthService(t, &cfg, gh)
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.Role != domain.RoleAdmin {
+			t.Fatalf("role = %v, want admin", u.Role)
+		}
+		if !u.OAuthAdmin {
+			t.Fatal("OAuthAdmin = false, want true")
+		}
+		// Raw upstream groups (orgs; no teams fetched without allowlist/mapping).
+		if len(u.OAuthGroups) != 2 || u.OAuthGroups[0] != "acme" || u.OAuthGroups[1] != "eng" {
+			t.Fatalf("OAuthGroups = %v, want sorted [acme eng]", u.OAuthGroups)
+		}
+	})
+
+	t.Run("promote via team slug", func(t *testing.T) {
+		gh := newGitHubServer(t, []string{"acme"}, []string{"acme/ops-admins"})
+		cfg := domain.OAuthConfig{
+			Enabled:      true,
+			ClientID:     "cid",
+			ClientSecret: "csec",
+			AllowedTeams: []string{"acme/ops-admins"},
+			AdminGroups:  []string{"acme/ops-admins"},
+		}
+		svc, _, _ := newOAuthService(t, &cfg, gh)
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.Role != domain.RoleAdmin {
+			t.Fatalf("role = %v, want admin (promoted via org/team slug)", u.Role)
+		}
+		if !u.OAuthAdmin {
+			t.Fatal("OAuthAdmin = false, want true")
+		}
+	})
+
+	t.Run("no promotion on non-match", func(t *testing.T) {
+		gh := newGitHubServer(t, []string{"acme"}, nil)
+		cfg := domain.OAuthConfig{
+			Enabled:      true,
+			ClientID:     "cid",
+			ClientSecret: "csec",
+			AllowedOrgs:  nil,
+			AdminGroups:  []string{"other-org"},
+		}
+		svc, _, _ := newOAuthService(t, &cfg, gh)
+		ctx := context.Background()
+
+		_, _, u, err := svc.Complete(ctx, "code")
+		if err != nil {
+			t.Fatalf("Complete: %v", err)
+		}
+		if u.Role != domain.RoleUser || u.OAuthAdmin {
+			t.Fatalf("non-matching user must stay RoleUser, got role=%v oa=%v", u.Role, u.OAuthAdmin)
+		}
+	})
+}

@@ -36,3 +36,5 @@ the decision.
 | 027  | [OAuth group-membership revalidation & token invalidation](ADR-027-oauth-membership-revalidation.md) |
 | 028  | [Single global BuildKit cache (tag `cache`)](ADR-028-global-cache.md) |
 | 029  | [Raft FQDN-only discovery + NodeLocal DNSCache bypass](ADR-029-raft-fqdn-only-discovery.md) |
+| 030  | [Upstream OAuth group display + mapping diagnostics](ADR-030-upstream-oauth-group-display-and-diagnostics.md) |
+| 031  | [OAuth `admin_groups` → `RoleAdmin` promotion](ADR-031-oauth-admin-groups-role-promotion.md) |

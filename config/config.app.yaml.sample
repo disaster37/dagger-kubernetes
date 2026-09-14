@@ -21,7 +21,7 @@
 # config file is rendered from deploy/helm/dagger-kubernetes/values.yaml and
 # auto-wires telemetry/cache URLs to the in-cluster dependency Services.
 # The Helm chart also manages the telemetry stack (OTel Collector, Tempo,
-# Loki, VictoriaMetrics, Grafana) and the OCI cache registry as subchart
+# Loki, VictoriaMetrics, Grafana) and the MinIO S3 store as subchart
 # dependencies, each toggleable independently. See deploy/helm/dagger-kubernetes/README.md.
 # ===========================================================================
 
@@ -75,7 +75,14 @@ auth:
     group_mappings: []                 # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
       # - pattern: '^github\.com/acme-(.*)$'   # Go regexp vs incoming provider group name (case-sensitive; (?i) for insensitive).
       #   replacement: 'acme-$1'               # target supervisor group name; $1/${name} capture substitution, $$ = literal $.
+    # NOTE: group_mappings assigns GROUP MEMBERSHIP only, never the admin ROLE.
+    # Mapped target groups must already exist in the supervisor (only "default"
+    # is bootstrapped); missing groups are skipped with a Warn. allowed_groups /
+    # allowed_orgs are checked against the RAW upstream groups BEFORE mapping.
+    # Use admin_groups to grant the admin role.
     default_group: ""                  # new OAuth users auto-join this group (must exist); empty = none.
+    admin_groups: []                   # upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, pre-mapping); empty = disabled.
+      # - 'HM_ADM_ETL_Outils'           # a Dex/OIDC groups-claim value; GitHub: an org login or "org/team" slug.
     cookie_secure: false               # force the Secure flag on the oauth_state cookie; set true when TLS terminates at an ingress/proxy in front of the supervisor.
     # OIDC-only fields (provider: oidc). Ignored when provider: github.
     issuer_url: ""                     # e.g. "https://dex.example.com" or "http://localhost:5556" (loopback http allowed for dev).
@@ -180,13 +187,12 @@ telemetry:
 
 # --- Remote shared cache -----------------------------------------------------
 cache:
-  backend: "registry"               # "registry" (OCI) or "s3".
   registry: "cache.reg/dagger-cache" # single-registry ref emitted to clients (host/repo); the emitted ref is always tagged per engine version (:V<major>-<minor>-<patch>).
   public_host: ""                   # dedicated cache vhost engines push/pull through (Supervisor proxy).
                                     # Defaults to cache.<server.public_url host>. Must differ from the control-plane host.
   internal_addr: ""                 # single backend address (host[:port], no scheme) used when registries: [] is empty.
-  auth_token: ""                    # bearer the Supervisor accepts from engines on the cache proxy.
-                                    # Empty = read from the engine-registry-auth K8s secret (key "token"). Never set here in production. Never logged.
+  auth_token: ""                    # bearer the Supervisor accepts from engines on the legacy cache proxy.
+                                    # Empty = cache-proxy auth disabled (the S3 cache needs no bearer). Never set here in production. Never logged.
   registries: []                    # multi-backend list for load balancing (least-charged first, by registry cache size). Empty = single-backend mode.
     # - id: "reg-1"
     #   internal_addr: "registry-1.dagger-kubernetes.svc:5000"   # in-cluster backends must use the <service>.<namespace>.svc form (see CONTRIBUTING.md).
@@ -202,13 +208,35 @@ cache:
     #   password_secret:
     #     name: "cache-registry-2-auth"
     #     key: "password"
-  s3:                                # used only when backend == "s3".
+  s3:                                # used only when backend == "s3": the BuildKit remote-cache bucket. Also the default bucket for worker snapshots (cache.sync.s3_bucket) and the CLI cache (cli.s3_bucket); the cache GC sweeper sweeps the BuildKit cache objects in it (prefix "cache/").
     bucket: ""
     region: ""
   gc:                                # auto-clean (GC) sweeper for cache blobs (see ADR-012).
     enabled: false                   # master switch; disabled by default.
     max_age: "168h"                  # purge tags whose manifest is older than this (7d).
     schedule: "1h"                   # background sweeper ticker interval.
+  sync:                              # BuildKit local worker-cache snapshot sync (warm start; see docs/README.md).
+    enabled: true                    # master switch. Requires cache.backend "registry" or "s3" and fleet.engine_cache_sync_image; otherwise the supervisor logs a WARN and skips the sync containers (never blocks the engine pod).
+    on_start: true                   # restore the snapshot before the engine starts (init container). Skipped when the PVC already has cache content (retained across scale-down).
+    on_stop: true                    # final push after the engine stops (sidecar SIGTERM handler, after quiesce_wait).
+    interval: "10m"                  # periodic push cadence (best-effort, the engine keeps running); 0 disables periodic pushes.
+    quiesce_wait: "10s"              # grace after SIGTERM before the final on-stop push, so the engine can flush+exit. The final push must fit in fleet.engine_termination_grace_seconds minus this.
+    # --- S3 backend (only used when cache.backend is "s3") ------------------
+    # Worker snapshots go to s3://<bucket>/worker-snapshots/<version-slug>/
+    # (meta.tar.gz + blobs/sha256/...). These keys also configure the S3
+    # client shared with the CLI cache (cli.s3_*) and the cache GC sweeper.
+    # Credentials: s3_access_key/s3_secret_key are injected as env vars on the
+    # sync containers from the `engine-s3-auth` Secret (keys accessKey /
+    # secretKey) — never put them in a committed file. The supervisor's own
+    # client reads them from DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY /
+    # DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY; when both are empty the
+    # standard AWS env credential chain applies.
+    s3_endpoint: ""                  # S3-compatible endpoint, e.g. "minio.example.com:9000" (required when backend is s3).
+    s3_bucket: ""                    # snapshot bucket; empty = cache.s3.bucket.
+    s3_region: "us-east-1"           # S3 region (required by AWS S3; ignored by MinIO).
+    s3_use_ssl: true                 # use HTTPS for the S3 endpoint.
+    s3_access_key: ""                # set via env/Secret in production; empty = AWS env credential chain.
+    s3_secret_key: ""                # set via env/Secret in production; never logged.
 
 # --- Pipeline history retention ------------------------------------------------
 # Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics
@@ -266,6 +294,7 @@ fleet:
   engine_debug: false                             # engine.toml: debug = true (verbose engine logging).
   engine_log_format: "json"                       # engine.toml: [log] format; "" omits the section.
   engine_registry_mirrors: {}                     # engine.toml registry mirrors, e.g. {"docker.io": ["mirror.gcr.io"]}.
+  engine_cache_sync_image: ""                     # image holding the supervisor binary, run as the engine pod's cache-restore init + cache-sync sidecar containers (cache.sync.*). Empty = sync disabled. The Helm chart renders the supervisor image; non-Helm users must set it, e.g. "docker.io/disaster/dagger-kubernetes:dev".
 
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:
@@ -323,9 +352,15 @@ ci:
 # --- On-the-fly Dagger CLI provisioning ------------------------------------
 cli:
   enabled: true                       # serve verified Dagger CLI tarballs + latest-version resolution.
-  cache_repo: "dagger-kubernetes/cli-cache"  # OCI repository for CLI tarball artifacts (shared across all pods).
+  cache_repo: "dagger-kubernetes/cli-cache"  # OCI repository for CLI tarball artifacts (registry backend; shared across all pods).
   release_list_ttl: "1h"              # how long to cache the upstream release list in memory.
   download_timeout: "5m"              # outbound fetch timeout for the tarball/checksums.
+  # S3 backend (only used when cache.backend is "s3"): tarballs are stored at
+  # s3://<bucket>/<s3_prefix>/<version>/<os>/<arch>/<filename>. The rest of
+  # the S3 client (endpoint, region, SSL, credentials) is shared with the
+  # worker snapshot store, configured once via cache.sync.s3_*.
+  s3_bucket: ""                       # CLI-cache bucket; empty = cache.s3.bucket.
+  s3_prefix: "cli-cache"              # S3 key prefix for CLI tarballs.
   upstream:
     releases_url: "https://api.github.com/repos/dagger/dagger/releases"   # release discovery (mirror-able).
     download_base: "https://github.com/dagger/dagger/releases/download"   # tarball + checksums.txt base (mirror-able).

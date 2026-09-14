@@ -12,6 +12,10 @@ const (
 	MediaTypeOCIImageManifest = "application/vnd.oci.image.manifest.v1+json"
 	MediaTypeOCILayerGzip     = "application/vnd.oci.image.layer.v1.tar+gzip"
 	MediaTypeOCIEmptyJSON     = "application/vnd.oci.empty.v1+json"
+	// MediaTypeOCIRawBlob is the media type for raw, content-addressed blobs
+	// (BuildKit content-store files) stored as individual layers. Unlike
+	// MediaTypeOCILayerGzip, these are NOT gzip-compressed tarballs.
+	MediaTypeOCIRawBlob = "application/octet-stream"
 )
 
 // Sentinel errors surfaced by the CLI addon. Live in domain so the handler can

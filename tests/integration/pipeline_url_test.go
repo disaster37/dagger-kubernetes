@@ -141,6 +141,10 @@ func TestPipelineViewURLEndpoint(t *testing.T) {
 // pipeline-view link using the /pipelines/<id> path.
 func TestCIWrapperPrintsSelfHostedURL(t *testing.T) {
 	serverURL, adminToken := startPipelineURLServer(t, freeAddr(t), freeAddr(t))
+	// The wrapper loads the config (missing file -> defaults); satisfy the
+	// always-on S3 prerequisites so validation passes.
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "localhost:9000")
 
 	binDir := t.TempDir()
 	bin := filepath.Join(binDir, "dagger-kubernetes-ci")

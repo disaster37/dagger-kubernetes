@@ -200,6 +200,10 @@ func TestCIWrapperStreamsNestedSteps(t *testing.T) {
 	serverURL, adminToken := startCIStepsServer(t, freeAddr(t), freeAddr(t))
 	bin := buildCIWrapper(t)
 	installFakeDagger(t)
+	// The wrapper loads the config (missing file -> defaults); satisfy the
+	// always-on S3 prerequisites so validation passes.
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "localhost:9000")
 
 	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
 
