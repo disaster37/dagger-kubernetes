@@ -185,9 +185,9 @@ telemetry:
   loki_url: "http://loki:3100"                  # Loki logs API.
   victoria_url: "http://victoria:8428"           # VictoriaMetrics API (PromQL-compatible).
 
-# --- Remote shared cache -----------------------------------------------------
+# --- Cache store & worker-snapshot warm start ---------------------------------
 cache:
-  registry: "cache.reg/dagger-cache" # single-registry ref emitted to clients (host/repo); the emitted ref is always tagged per engine version (:V<major>-<minor>-<patch>).
+  registry: "cache.reg/dagger-cache" # cache registry host/repo exposed on GET /api/v1/cache. Dagger 0.21.x removed the experimental cache-config env var, so this ref is no longer emitted to clients; warm start is cache.sync.* below.
   public_host: ""                   # dedicated cache vhost engines push/pull through (Supervisor proxy).
                                     # Defaults to cache.<server.public_url host>. Must differ from the control-plane host.
   internal_addr: ""                 # single backend address (host[:port], no scheme) used when registries: [] is empty.
@@ -208,7 +208,7 @@ cache:
     #   password_secret:
     #     name: "cache-registry-2-auth"
     #     key: "password"
-  s3:                                # used only when backend == "s3": the BuildKit remote-cache bucket. Also the default bucket for worker snapshots (cache.sync.s3_bucket) and the CLI cache (cli.s3_bucket); the cache GC sweeper sweeps the BuildKit cache objects in it (prefix "cache/").
+  s3:                                # S3 bucket holding BuildKit cache blobs (prefix "cache/", swept by the cache GC). Also the default bucket for worker snapshots (cache.sync.s3_bucket) and the CLI cache (cli.s3_bucket).
     bucket: ""
     region: ""
   gc:                                # auto-clean (GC) sweeper for cache blobs (see ADR-012).

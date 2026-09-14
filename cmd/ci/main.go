@@ -77,7 +77,6 @@ func ciFlags() []cli.Flag {
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN"}, Usage: "Dagger Cloud token (required; prefer the DAGGER_KUBERNETES_TOKEN env var to keep it out of process argv)"},
 		&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
 		&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
-		&cli.StringFlag{Name: "cache-registry", Value: "cache.reg/dagger-cache", Usage: "Cache registry host/repo"},
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
 		&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
 		&cli.BoolFlag{Name: "cli", Usage: "Provision the Dagger CLI binary on the fly from the supervisor"},
@@ -119,7 +118,6 @@ func run(c *cli.Context) error {
 
 	uiURL := resolveUIBase(c.String("ui-url"), c.String("server"), configPublicURL)
 
-	cacheRegistry := c.String("cache-registry")
 	version := c.String("version")
 	ciMode := c.String("ci")
 
@@ -145,10 +143,6 @@ func run(c *cli.Context) error {
 
 	if version != "" {
 		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", version)
-	}
-	if c.IsSet("cache-registry") {
-		cacheRef := fmt.Sprintf("%s:%s", cacheRegistry, "cache")
-		_ = os.Setenv("_EXPERIMENTAL_DAGGER_CACHE_CONFIG", fmt.Sprintf("type=registry,ref=%s,mode=max", cacheRef))
 	}
 
 	timeout := c.Duration("timeout")

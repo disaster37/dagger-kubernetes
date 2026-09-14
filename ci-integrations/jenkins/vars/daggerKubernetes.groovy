@@ -31,17 +31,9 @@ def call(Map params = [:], Closure body = null) {
 
     boolean dynamicStages = envTruthy(params.dynamicStages, env.DAGGER_KUBERNETES_DYNAMIC_STAGES, false)
     int timeoutMinutes = (params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES ?: 30) as int
-    boolean magicCache = envTruthy(params.magicCache, env.DAGGER_KUBERNETES_MAGIC_CACHE, false)
-    String cacheRegistry = params.cacheRegistry ?: env.DAGGER_KUBERNETES_CACHE_REGISTRY ?: 'cache.reg/dagger-cache'
 
     if (!serverUrl || !token) {
         error "daggerKubernetes: serverUrl and token are required"
-    }
-
-    String cacheConfig = ''
-    if (magicCache) {
-        assertShellSafe(cacheRegistry, 'cacheRegistry')
-        cacheConfig = "type=registry,ref=${cacheRegistry}:cache,mode=max"
     }
 
 	if (dynamicStages) {
@@ -67,8 +59,7 @@ def call(Map params = [:], Closure body = null) {
 				"DAGGER_CLOUD_TOKEN=${token}",
 				"DAGGER_KUBERNETES_TOKEN=${token}",
 				"_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self"
-			] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : []) +
-			  (cacheConfig ? ["_EXPERIMENTAL_DAGGER_CACHE_CONFIG=${cacheConfig}"] : [])) {
+			] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : [])) {
 				timeout(time: timeoutMinutes, unit: 'MINUTES') {
 					try {
 						// Prefer dagger-kubernetes-ci for correct trace
@@ -132,9 +123,6 @@ def call(Map params = [:], Closure body = null) {
     ]) {
         if (version) {
             env._EXPERIMENTAL_DAGGER_TAG = version
-        }
-        if (cacheConfig) {
-            env._EXPERIMENTAL_DAGGER_CACHE_CONFIG = cacheConfig
         }
 
         if (body) {

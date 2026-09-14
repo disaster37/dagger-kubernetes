@@ -700,7 +700,7 @@ opentelemetry-collector:
           exporters: [prometheusremotewrite]
 
 ## @skip minio
-## @param minio.enabled Install MinIO subchart (S3-compatible cache backend). Default S3 store for worker snapshots, CLI cache, and BuildKit remote cache.
+## @param minio.enabled Install MinIO subchart (S3-compatible object store). Default S3 store for worker snapshots, CLI cache, and BuildKit cache GC.
 minio:
   enabled: true
   mode: standalone

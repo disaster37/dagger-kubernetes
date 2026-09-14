@@ -13,7 +13,6 @@ import (
 // ConnectService assembles the Dagger CLI connection environment snapshot.
 type ConnectService struct {
 	cfg             *domain.Config
-	cache           *Cache
 	versionResolver domain.VersionResolver
 	tokens          *TokenService
 	logger          *logrus.Logger
@@ -22,12 +21,11 @@ type ConnectService struct {
 // NewConnectService returns a ConnectService.
 func NewConnectService(
 	cfg *domain.Config,
-	cache *Cache,
 	vr domain.VersionResolver,
 	tokens *TokenService,
 	logger *logrus.Logger,
 ) *ConnectService {
-	return &ConnectService{cfg: cfg, cache: cache, versionResolver: vr, tokens: tokens, logger: logger}
+	return &ConnectService{cfg: cfg, versionResolver: vr, tokens: tokens, logger: logger}
 }
 
 // ConnectEnv builds the snapshot. When reveal=true and the token is
@@ -70,13 +68,6 @@ func (s *ConnectService) ConnectEnv(ctx context.Context, userID, version string,
 		envs = append(envs, domain.ConnectEnvVar{
 			Name: "_EXPERIMENTAL_DAGGER_TAG", Value: v.String(), Required: false,
 			Description: "Pins the engine version (recommended for cache locality).",
-		})
-	}
-
-	if cc := s.cache.BuildCacheConfig("max"); cc != "" {
-		envs = append(envs, domain.ConnectEnvVar{
-			Name: "_EXPERIMENTAL_DAGGER_CACHE_CONFIG", Value: cc, Required: false,
-			Description: "Remote shared cache (MagicCache) ref — one global cache shared across all engine versions.",
 		})
 	}
 

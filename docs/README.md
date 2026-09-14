@@ -1,8 +1,9 @@
 # Dagger Kubernetes
 
-A self-hosted, **Dagger-Cloud-compatible** platform that gives you remote
-shared cache, auto-scaling engine fleets, a live pipeline UI, and drop-in CI
-integration — without sending your builds or telemetry to a third party.
+A self-hosted, **Dagger-Cloud-compatible** platform that gives you an
+S3-backed cache with worker-snapshot warm start, auto-scaling engine fleets, a
+live pipeline UI, and drop-in CI integration — without sending your builds or
+telemetry to a third party.
 
 The Supervisor (`cmd/api`) provides three functions:
 
@@ -14,8 +15,10 @@ The Supervisor (`cmd/api`) provides three functions:
    (Tempo / Loki / VictoriaMetrics) and powers the pipeline UI.
 
 The Dagger CLI talks to the Supervisor exactly as it would talk to Dagger
-Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars, same
-`dagger-cloud://self` runner host, same cache-config env var.
+Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars and the same
+`dagger-cloud://self` runner host. Cache warm start is handled server-side by
+the worker-snapshot sync (`cache.sync.*`); Dagger 0.21.x removed the
+experimental cache-config env var, so none is emitted.
 
 ---
 
@@ -193,13 +196,14 @@ export _EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self
 # Optional: pin an engine version (recommended for cache locality).
 export _EXPERIMENTAL_DAGGER_TAG=v0.21.4
 
-# Remote shared cache (S3). The bucket/region come from the deployment's
-# cache.s3 config; BuildKit content-addressing keeps the cache shared safely
-# across all engine versions.
-export _EXPERIMENTAL_DAGGER_CACHE_CONFIG="type=s3,bucket=dagger-cache,region=us-east-1,mode=max"
-
 dagger call github.com/your-org/ci@v1.0.0 build
 ```
+
+Cache **warm start** is automatic: each engine pod restores its BuildKit
+worker cache from the shared snapshot on start (see
+[Worker-cache sync](#worker-cache-sync-warm-start)). Dagger 0.21.x removed the
+experimental BuildKit cache-config environment variable, so no client-side
+cache setup is needed.
 
 Or skip the env-var juggling and use the wrapper:
 
@@ -212,10 +216,12 @@ Or skip the env-var juggling and use the wrapper:
 Instead of hand-assembling the variables above, use the **Connect** page in
 the web UI (log in, then click **Connect** in the nav):
 
-The Connect page **always** includes the remote shared cache ("MagicCache")
-env var `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, pointing at the deployment's S3
-bucket (`type=s3,bucket=...,region=...`). `_EXPERIMENTAL_DAGGER_TAG` is only
-added when you explicitly pin a version.
+The Connect page lists every required client variable — `DAGGER_CLOUD_URL`,
+`DAGGER_CLOUD_TOKEN`, `_EXPERIMENTAL_DAGGER_RUNNER_HOST` — plus
+`_EXPERIMENTAL_DAGGER_TAG` only when you explicitly pin a version. Dagger
+0.21.x removed the experimental cache-config variable this platform used to
+emit, so cache warm start is handled automatically by the worker-snapshot sync
+(see [Worker-cache sync](#worker-cache-sync-warm-start)).
 
 1. Pick an engine version from the dropdown (optional — leave "No pin" to use
    the CLI default).
@@ -245,7 +251,6 @@ regenerate them on the **Settings** page to enable full-snippet copy.
                 ┌──────────────── DAGGER CLI ────────────────┐
                 │  DAGGER_CLOUD_URL  DAGGER_CLOUD_TOKEN       │
                 │  _EXPERIMENTAL_DAGGER_RUNNER_HOST=cloud://self
-                │  _EXPERIMENTAL_DAGGER_CACHE_CONFIG=...      │
                 └───────────────────┬───────────────────────┘
                                     │
             control API (HTTPS)     │     data plane (mTLS L4)
@@ -265,9 +270,9 @@ regenerate them on the **Settings** page to enable full-snippet copy.
                   ▼                                    ▼                        ▼
    ┌─────────────────────────────┐      ┌──────────────────────────────┐  ┌───────────┐
    │  Engine fleet (K8s)         │      │  MinIO / S3-compatible store  │  │  Grafana   │
-   │  per-version StatefulSet    │      │  BuildKit remote cache        │  │ dashboards │
-   │  dagger-engine-v0-21-4      │      │  worker snapshots             │  └───────────┘
-   │  autoscaled 0..N            │      │  CLI cache                    │
+   │  per-version StatefulSet    │      │  worker snapshots (warm start)│  │ dashboards │
+   │  dagger-engine-v0-21-4      │      │  CLI cache                    │  └───────────┘
+   │  autoscaled 0..N            │      │  BuildKit cache GC targets    │
    └─────────────────────────────┘      └──────────────────────────────┘
 ```
 
@@ -419,7 +424,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `tls.client_auth`                         | `true`                                                   | mTLS: require + verify peer client certs.                                                                                                     |
 | `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP. Helm auto-wires `<release>-opentelemetry-collector.<ns>.svc:4318`.                                                                 |
 |                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm to `<release>-<svc>.<ns>.svc:<port>`).                                                                  |
-| `cache`         | `s3.bucket`                               | `""`                                                     | S3 bucket holding the BuildKit remote cache (prefix `cache/`); also the default bucket for worker snapshots and the CLI cache.                |
+| `cache`         | `s3.bucket`                               | `""`                                                     | S3 bucket holding BuildKit cache blobs (prefix `cache/`, swept by the cache GC); also the default bucket for worker snapshots and the CLI cache. |
 |                 | `s3.region`                               | `""`                                                     | S3 region (required by AWS S3; ignored by MinIO).                                                                                             |
 |                 | `gc.enabled`                              | `false`                                                  | Master switch for the S3 cache auto-clean sweeper.                                                                                            |
 |                 | `gc.max_age`                              | `168h`                                                   | Delete cache objects whose `LastModified` is older than this (7d).                                                                            |
@@ -600,25 +605,26 @@ bucket holds three kinds of objects:
 
 | Prefix | Contents | Written by |
 |---|---|---|
-| `cache/` | BuildKit remote-cache blobs (content-addressed) | Engine pods (`type=s3` cache config) |
+| `cache/` | BuildKit remote-cache blobs (content-addressed, optional) | Engine pods when a client configures its own S3 cache backend |
 | `worker-snapshots/<version-slug>/` | BuildKit local worker-cache snapshots (`meta.tar.gz` + `blobs/sha256/...`) | `cache-restore` init container / `cache-sync` sidecar |
 | `cli-cache/<version>/<os>/<arch>/<filename>` | Verified Dagger CLI tarballs | Supervisor CLI addon |
 
-Engines push/pull the BuildKit cache directly against the store; the client
-selects it via `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`:
+Dagger 0.21.x removed the experimental BuildKit cache-config environment
+variable, so the platform **no longer emits or auto-configures a remote
+BuildKit cache**. Cache **warm start** is instead provided by the
+worker-snapshot sync (`cache.sync.*`, below): each engine pod restores its
+local worker cache from the shared snapshot on start and pushes it on stop.
 
-```
-type=s3,bucket=dagger-cache,region=us-east-1,mode=max
-```
-
-The bucket and region come from `cache.s3.bucket` / `cache.s3.region`. The S3
+The S3 bucket, GC sweeper, and CLI cache documented below still apply: cache
+blobs a client writes to the `cache/` prefix through its own explicit
+configuration are found and swept by the GC. The S3
 client shared by the worker-snapshot sync, the CLI cache, and the cache GC is
 configured once under `cache.sync.s3_*` (endpoint, region, SSL, credentials):
 
 ```yaml
 cache:
   s3:
-    bucket: "dagger-cache"          # BuildKit remote cache (prefix cache/)
+    bucket: "dagger-cache"          # BuildKit cache blobs (prefix cache/)
     region: "us-east-1"
   sync:
     s3_endpoint: "minio.dagger-kubernetes.svc:9000"  # <service>.<namespace>.svc form (see CONTRIBUTING.md)
@@ -632,11 +638,11 @@ cli:
   s3_prefix: "cli-cache"
 ```
 
-BuildKit cache is content-addressed, so the shared remote cache is safe across
-engine versions. Credentials are never rendered into the config file: in the
-Helm chart the `engine-s3-auth` Secret (keys `accessKey`/`secretKey`) holds the
-MinIO root credentials and is read by the sync helpers, while the supervisor's
-S3 client reads the same keys from
+BuildKit cache is content-addressed, so pushes from sibling pods of the same
+engine version are safe. Credentials are never rendered into the config file:
+in the Helm chart the `engine-s3-auth` Secret (keys `accessKey`/`secretKey`)
+holds the MinIO root credentials and is read by the sync helpers, while the
+supervisor's S3 client reads the same keys from
 `DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY` / `..._SECRET_KEY` (falling back
 to the standard AWS environment chain when empty). With an external S3
 provider, create the `engine-s3-auth` Secret yourself (or inject the keys via
@@ -649,8 +655,8 @@ env) and set `supervisor.config.cache.sync.s3Endpoint`.
 
 ### Cache auto-clean (GC)
 
-A background sweeper can clean the BuildKit remote cache. It lists the objects
-under the remote-cache prefix (`s3://<cache.s3.bucket>/cache/`), checks each
+A background sweeper can clean the BuildKit cache blobs. It lists the objects
+under the cache prefix (`s3://<cache.s3.bucket>/cache/`), checks each
 object's own `LastModified` timestamp, and deletes objects older than
 `cache.gc.max_age`. It is **disabled by default**:
 
@@ -1563,9 +1569,8 @@ Features:
   `ok`/`degraded`/`down`/`unknown` state and a rolled-up overall state
 - **Connect page** (`/connect`) — ready-to-copy Dagger CLI environment:
   every required env var (`DAGGER_CLOUD_URL`, `DAGGER_CLOUD_TOKEN`,
-  `_EXPERIMENTAL_DAGGER_RUNNER_HOST`, and the always-present
-  `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` pointing at the S3 bucket, plus
-  `_EXPERIMENTAL_DAGGER_TAG` only when you pin a version) with one-click copy of bash/zsh exports,
+  `_EXPERIMENTAL_DAGGER_RUNNER_HOST`, plus `_EXPERIMENTAL_DAGGER_TAG` only
+  when you pin a version) with one-click copy of bash/zsh exports,
   a `.bashrc` snippet, GitHub Actions `env:`, GitLab CI `variables:`, and a
   "Copy token value" button. The token is masked by default; checking "Show
   token plaintext" reveals it on demand (including in the CI snippets, which
@@ -1626,25 +1631,13 @@ derive a pipeline-view URL). See
 Feature flags `ci.github.job_summary` and `ci.github.check_runs` add a
 step summary with the trace link and Check Runs annotated with cache stats.
 
-#### Magic cache (GitHub Actions)
+#### Cache warm start (GitHub Actions)
 
-The GHA integration always emits `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, so every
-pipeline shares the platform's S3 remote cache. No `version` is required for
-cache:
-
-```yaml
-- uses: ./ci-integrations/gha
-  with:
-    server-url: https://supv.example.com
-    token: ${{ secrets.DAGGER_CLOUD_TOKEN }}
-    module: github.com/org/ci@v1.0.0
-    args: build
-```
-
-The cache env points at the deployment's S3 bucket
-(`type=s3,bucket=dagger-cache,region=us-east-1,mode=max` for the default Helm
-values). Override `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` in the job environment
-if your bucket/region differ.
+The GHA integration emits no cache environment variable: Dagger 0.21.x removed
+the experimental BuildKit cache-config variable, so warm start comes from the
+platform's worker-snapshot sync (`cache.sync.*`) and needs no client-side
+configuration. See
+[Worker-cache sync](#worker-cache-sync-warm-start).
 
 ### Jenkins
 
@@ -1670,23 +1663,13 @@ Dagger command in two clean stages — Provision Dagger CLI (when
 step) downloads the verified CLI tarball from the supervisor, extracts `dagger`,
 and prepends it to `PATH`. See [CLI provisioning](#cli-provisioning).
 
-#### Magic cache (Jenkins)
+#### Cache warm start (Jenkins)
 
-Enable with `magicCache: true` (no `version` required):
-
-```groovy
-daggerKubernetes(serverUrl: 'https://supv.example.com',
-            token: env.DAGGER_CLOUD_TOKEN,
-            magicCache: true) {
-  sh 'dagger call github.com/org/ci@v1.0.0 build'
-}
-```
-
-`magicCache` sets `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` to the platform's
-S3-backed remote cache (`type=s3,bucket=dagger-cache,region=us-east-1,mode=max`
-for the default Helm values). When `dynamicStages: true`, the cache config is
-passed to the `dagger` command via the `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`
-environment variable.
+The shared library emits no cache environment variable: Dagger 0.21.x removed
+the experimental BuildKit cache-config variable, so warm start comes from the
+platform's worker-snapshot sync (`cache.sync.*`) and needs no client-side
+configuration. See
+[Worker-cache sync](#worker-cache-sync-warm-start).
 
 #### Dynamic stages
 
@@ -1866,33 +1849,13 @@ appends a summary step with the trace link. The plugin also provisions the
 Dagger CLI on the fly (needs `curl` + `tar`; disable with `cli: false` or
 pin with `cli_version: v0.21.4`). See [CLI provisioning](#cli-provisioning).
 
-#### Magic cache (Drone)
+#### Cache warm start (Drone)
 
-The plugin passes `DAGGER_TAG` through to the engine but does not set
-`_EXPERIMENTAL_DAGGER_CACHE_CONFIG` automatically. Enable it by adding an env
-line to the step that runs `dagger`:
-
-```yaml
-steps:
-  - name: dagger-kubernetes
-    image: dagger-kubernetes/drone-config-extension
-    settings:
-      server_url: https://supv.example.com
-      token:
-        from_secret: dagger_kubernetes_token
-      version: v0.21.4
-  - name: dagger
-    image: alpine:3
-    environment:
-      DAGGER_CLOUD_TOKEN:
-        from_secret: dagger_kubernetes_token
-      _EXPERIMENTAL_DAGGER_CACHE_CONFIG: type=s3,bucket=dagger-cache,region=us-east-1,mode=max
-    commands:
-      - dagger call github.com/org/ci@v1.0.0 build
-```
-
-The cache config targets the deployment's S3 bucket and is shared across all
-engine versions via content addressing.
+The plugin passes `DAGGER_TAG` through to the engine but emits no cache
+environment variable: Dagger 0.21.x removed the experimental BuildKit
+cache-config variable, so warm start comes from the platform's worker-snapshot
+sync (`cache.sync.*`) and needs no client-side configuration. See
+[Worker-cache sync](#worker-cache-sync-warm-start).
 
 ### CLI provisioning
 
@@ -1952,8 +1915,7 @@ export DAGGER_TAG=v0.21.4          # optional
 ./scripts/dagger-kubernetes.sh call github.com/your-org/ci@v1.0.0 build
 ```
 
-It always emits `_EXPERIMENTAL_DAGGER_CACHE_CONFIG` for the platform's
-S3-backed remote cache, runs `dagger "$@"`, then greps the run
+It sets the standard client env vars, runs `dagger "$@"`, then greps the run
 log for the trace ID and prints a boxed link to
 `$DAGGER_KUBERNETES_UI/traces/<id>`. The GHA, Jenkins, and Drone integrations
 all delegate to (or mirror) this script.
@@ -2015,8 +1977,10 @@ the Dagger source tree for breaking changes:
 - `core/schema` — `EngineSpec` format returned by
   `POST /v1/engines`.
 - `engine/telemetry/cloud.go` — OTLP export configuration.
-- `engine/client/client.go` — cache env var handling
-  (`_EXPERIMENTAL_DAGGER_CACHE_CONFIG`) and runner-host negotiation.
+- `engine/client/client.go` — runner-host negotiation. The experimental
+  BuildKit cache-config variable this platform used (`cache` handling in older
+  Dagger releases) was removed upstream in 0.21.x; the supervisor no longer
+  emits it (warm start is the worker-snapshot sync).
 
 When any of these change shape, update
 [`internal/handler`](../internal/handler) (control handlers and L4 data-plane proxy) and the

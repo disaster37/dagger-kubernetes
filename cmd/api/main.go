@@ -315,7 +315,7 @@ func run(c *cli.Context) error {
 
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
 	statusSvc := service.NewStatusService(cfg, cacheBackend, nil, fleetManager, logger, raftStore)
-	connectSvc := service.NewConnectService(cfg, cacheBackend, versionResolver, tokensSvc, logger)
+	connectSvc := service.NewConnectService(cfg, versionResolver, tokensSvc, logger)
 
 	// --- On-the-fly Dagger CLI provisioning wiring ---
 	var cliSvc *service.CLIService

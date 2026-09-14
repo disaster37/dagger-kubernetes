@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v2"
+	"go.etcd.io/bbolt"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
@@ -245,8 +246,9 @@ func TestCacheSyncConfig(t *testing.T) {
 // body: nil means no snapshot exists (every object operation 404s with a
 // NoSuchKey error body). PUTs always succeed and bucket listing returns an
 // empty ListBucketResult.
-func fakeS3Server(t *testing.T, bucket string, meta []byte) *httptest.Server {
+func fakeS3Server(t *testing.T, meta []byte) *httptest.Server {
 	t.Helper()
+	const bucket = "snapshots"
 	metaKey := fmt.Sprintf("/%s/%s%s", bucket,
 		domain.WorkerSnapshotS3Prefix(domain.WorkerSnapshotVersionSlug("worker-v2-v0-20-0")),
 		domain.MetaTarballName)
@@ -262,6 +264,8 @@ func fakeS3Server(t *testing.T, bucket string, meta []byte) *httptest.Server {
 			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 			w.WriteHeader(http.StatusOK)
 		case meta != nil && r.URL.Path == metaKey && r.Method == http.MethodGet:
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(meta)))
+			w.Header().Set("Last-Modified", time.Now().UTC().Format(http.TimeFormat))
 			_, _ = w.Write(meta)
 		default:
 			w.Header().Set("Content-Type", "application/xml")
@@ -274,10 +278,10 @@ func fakeS3Server(t *testing.T, bucket string, meta []byte) *httptest.Server {
 }
 
 // setCacheSyncS3Env points the helper at an httptest S3 endpoint.
-func setCacheSyncS3Env(t *testing.T, ts *httptest.Server, bucket, baseDir string) {
+func setCacheSyncS3Env(t *testing.T, ts *httptest.Server, baseDir string) {
 	t.Helper()
 	t.Setenv("CACHE_SYNC_S3_ENDPOINT", strings.TrimPrefix(ts.URL, "http://"))
-	t.Setenv("CACHE_SYNC_S3_BUCKET", bucket)
+	t.Setenv("CACHE_SYNC_S3_BUCKET", "snapshots")
 	t.Setenv("CACHE_SYNC_S3_REGION", "us-east-1")
 	t.Setenv("CACHE_SYNC_S3_USE_SSL", "false")
 	t.Setenv("CACHE_SYNC_S3_ACCESS_KEY", "ak")
@@ -307,12 +311,12 @@ func TestRunCacheSyncRestoreSkipsExistingCache(t *testing.T) {
 }
 
 func TestRunCacheSyncRestoreMissingSnapshot(t *testing.T) {
-	ts := fakeS3Server(t, "snapshots", nil)
+	ts := fakeS3Server(t, nil)
 	base := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(base, "worker"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	setCacheSyncS3Env(t, ts, "snapshots", base)
+	setCacheSyncS3Env(t, ts, base)
 	t.Setenv("CACHE_SYNC_TMP_DIR", t.TempDir())
 
 	// Best-effort: a 404 snapshot must not fail the pod start.
@@ -341,12 +345,12 @@ func TestRunCacheSyncRestoreDiscardsPartialExtraction(t *testing.T) {
 	}
 	truncated := buf.Bytes()[:buf.Len()/2]
 
-	ts := fakeS3Server(t, "snapshots", truncated)
+	ts := fakeS3Server(t, truncated)
 	base := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(base, "worker"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	setCacheSyncS3Env(t, ts, "snapshots", base)
+	setCacheSyncS3Env(t, ts, base)
 	t.Setenv("CACHE_SYNC_TMP_DIR", t.TempDir())
 
 	if err := runCacheSyncRestore(cliTestContext()); err != nil {
@@ -357,13 +361,103 @@ func TestRunCacheSyncRestoreDiscardsPartialExtraction(t *testing.T) {
 	}
 }
 
+// tarballWorkerDir gzips+tars src's "worker" subdirectory, matching the
+// snapshot meta.tar.gz layout (entries prefixed with "worker/").
+func tarballWorkerDir(t *testing.T, src string) []byte {
+	t.Helper()
+	var buf bytes.Buffer
+	if _, _, err := repository.TarGzipDir(context.Background(), src, "worker", &buf); err != nil {
+		t.Fatalf("TarGzipDir: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// boltSnapshotTarball builds a snapshot meta tarball whose worker dir holds a
+// valid (openable) BoltDB file under dbName, mirroring what a real engine
+// snapshot ships.
+func boltSnapshotTarball(t *testing.T, dbName string) []byte {
+	t.Helper()
+	src := t.TempDir()
+	worker := filepath.Join(src, "worker")
+	if err := os.MkdirAll(worker, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	db, err := bbolt.Open(filepath.Join(worker, dbName), 0o600, nil)
+	if err != nil {
+		t.Fatalf("open bolt db: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close bolt db: %v", err)
+	}
+	return tarballWorkerDir(t, src)
+}
+
+// TestRunCacheSyncRestoreMetadataV2PassesIntegrity proves a modern-engine
+// snapshot (worker/metadata_v2.db) survives the integrity check: the worker
+// dir is kept instead of being discarded as a torn restore.
+func TestRunCacheSyncRestoreMetadataV2PassesIntegrity(t *testing.T) {
+	ts := fakeS3Server(t, boltSnapshotTarball(t, "metadata_v2.db"))
+	base := t.TempDir()
+	setCacheSyncS3Env(t, ts, base)
+	t.Setenv("CACHE_SYNC_TMP_DIR", t.TempDir())
+
+	if err := runCacheSyncRestore(cliTestContext()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "worker", "metadata_v2.db")); err != nil {
+		t.Fatalf("metadata_v2.db missing after restore: %v", err)
+	}
+}
+
+// TestRunCacheSyncRestoreMetadataV1PassesIntegrity proves the legacy
+// metadata.db snapshots still pass the integrity check.
+func TestRunCacheSyncRestoreMetadataV1PassesIntegrity(t *testing.T) {
+	ts := fakeS3Server(t, boltSnapshotTarball(t, "metadata.db"))
+	base := t.TempDir()
+	setCacheSyncS3Env(t, ts, base)
+	t.Setenv("CACHE_SYNC_TMP_DIR", t.TempDir())
+
+	if err := runCacheSyncRestore(cliTestContext()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "worker", "metadata.db")); err != nil {
+		t.Fatalf("metadata.db missing after restore: %v", err)
+	}
+}
+
+// TestRunCacheSyncRestoreMissingMetadataDiscarded proves a snapshot without
+// either metadata DB name is treated like a corrupt DB: the partial restore is
+// discarded so the next start retries.
+func TestRunCacheSyncRestoreMissingMetadataDiscarded(t *testing.T) {
+	src := t.TempDir()
+	worker := filepath.Join(src, "worker")
+	if err := os.MkdirAll(worker, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(worker, "containerdmeta.db"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	ts := fakeS3Server(t, tarballWorkerDir(t, src))
+	base := t.TempDir()
+	setCacheSyncS3Env(t, ts, base)
+	t.Setenv("CACHE_SYNC_TMP_DIR", t.TempDir())
+
+	if err := runCacheSyncRestore(cliTestContext()); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(base, "worker")); !os.IsNotExist(err) {
+		t.Fatalf("metadata-less restore not discarded: stat = %v", err)
+	}
+}
+
 func TestRunCacheSyncServeFinalPushOnSIGTERM(t *testing.T) {
-	ts := fakeS3Server(t, "snapshots", nil)
+	ts := fakeS3Server(t, nil)
 	base := t.TempDir()
 	if err := os.MkdirAll(filepath.Join(base, "worker"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	setCacheSyncS3Env(t, ts, "snapshots", base)
+	setCacheSyncS3Env(t, ts, base)
 	t.Setenv("CACHE_SYNC_TMP_DIR", t.TempDir())
 	t.Setenv("CACHE_SYNC_INTERVAL", "0") // no periodic pushes
 	t.Setenv("CACHE_SYNC_QUIESCE_WAIT", "1ms")

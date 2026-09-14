@@ -229,7 +229,7 @@ func runCacheSyncRestore(c *cli.Context) error {
 
 // discardPartialRestore removes the worker directory after a failed snapshot
 // restore so the next start sees an empty dir and retries a clean restore
-// instead of freezing a torn cache (possibly a truncated metadata.db).
+// instead of freezing a torn cache (a truncated or missing metadata DB).
 // The worker dir is a subdirectory of baseDir: both the registry and S3
 // backends untar into baseDir with the workerSubdir prefix, so removing
 // workerDir (= baseDir/workerSubdir) discards the partial extraction.
@@ -241,7 +241,8 @@ func discardPartialRestore(env *cacheSyncEnv, logger *logrus.Logger) {
 
 // restoreWorkerSnapshotS3 restores the worker-dir snapshot from the S3
 // backend, mirroring the registry path's best-effort semantics. After a
-// successful pull the metadata DB is verified (BoltDB open): a corrupt DB
+// successful pull the worker's metadata DB is verified (BoltDB open): a
+// missing DB (neither metadata_v2.db nor metadata.db) or a corrupt DB
 // discards the whole worker dir so the next start retries a clean restore
 // instead of freezing a torn cache.
 func restoreWorkerSnapshotS3(ctx context.Context, env *cacheSyncEnv, store *repository.S3SnapshotStore, logger *logrus.Logger) {
@@ -256,14 +257,34 @@ func restoreWorkerSnapshotS3(ctx context.Context, env *cacheSyncEnv, store *repo
 		return
 	}
 
-	if err := verifyMetadataDB(filepath.Join(env.workerDir(), "metadata.db")); err != nil {
+	dbPath, found := metadataDBPath(env.workerDir())
+	if !found {
+		logger.Warn("restored snapshot has no metadata DB (metadata_v2.db or metadata.db); discarding the worker cache")
+		discardPartialRestore(env, logger)
+		return
+	}
+	if err := verifyMetadataDB(dbPath); err != nil {
 		logger.WithError(err).Warn("restored metadata DB failed the integrity check; discarding the worker cache")
 		discardPartialRestore(env, logger)
 	}
 }
 
+// metadataDBPath returns the restored worker's metadata DB path, preferring the
+// metadata_v2.db shipped by modern engines over the legacy metadata.db. found
+// is false when neither exists, meaning the snapshot is not a usable worker
+// cache.
+func metadataDBPath(workerDir string) (path string, found bool) {
+	for _, name := range []string{"metadata_v2.db", "metadata.db"} {
+		candidate := filepath.Join(workerDir, name)
+		if _, err := os.Stat(candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
 // verifyMetadataDB opens the restored BoltDB file to verify integrity (a
-// corrupt metadata.db would prevent the engine from starting).
+// corrupt metadata DB would prevent the engine from starting).
 func verifyMetadataDB(path string) error {
 	if _, err := os.Stat(path); err != nil {
 		return fmt.Errorf("stat %s: %w", path, err)

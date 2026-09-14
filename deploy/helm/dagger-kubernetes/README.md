@@ -1,7 +1,8 @@
 # dagger-kubernetes Helm Chart
 
-Self-hosted, Dagger-Cloud-compatible platform: remote shared cache, auto-scaling
-engine fleets, live pipeline UI, and drop-in CI integration.
+Self-hosted, Dagger-Cloud-compatible platform: S3-backed cache with
+worker-snapshot warm start, auto-scaling engine fleets, live pipeline UI, and
+drop-in CI integration.
 <!-- version-marker -->
 [^1]: Latest released version: `0.1.0`
 
@@ -97,7 +98,7 @@ configurable (`service.control.port`, `service.data.port`).
 | Dependency | Chart | Default | Purpose |
 |---|---|---|---|
 | OpenTelemetry Collector | `opentelemetry-collector` ([repo](https://open-telemetry.github.io/opentelemetry-helm-charts)) | enabled | OTLP ingest from Dagger CLI & supervisor; fans out to Tempo / Loki / VictoriaMetrics |
-| MinIO | `minio` ([charts.min.io](https://charts.min.io/)) | enabled | S3-compatible object store backing the remote shared cache (BuildKit blobs), worker snapshots, and the CLI cache; creates the `dagger-cache` bucket on install |
+| MinIO | `minio` ([charts.min.io](https://charts.min.io/)) | enabled | S3-compatible object store backing BuildKit cache blobs (swept by the cache GC), worker snapshots, and the CLI cache; creates the `dagger-cache` bucket on install |
 | Grafana Tempo | `tempo` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Distributed tracing backend, stores OTLP traces |
 | Grafana Loki | `loki` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Log aggregation backend, stores OTLP logs |
 | VictoriaMetrics | `victoria-metrics-single` ([victoriametrics](https://victoriametrics.github.io/helm-charts/)) | enabled | PromQL-compatible metrics backend |
@@ -455,7 +456,7 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 | `server.public_url` | `dagger-kubernetes.publicUrl` | computed from ingress / service exposition |
 | `server.data_hostname` | `dagger-kubernetes.dataHostname` | computed from dataIngress / service exposition |
 | `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<control-plane host>` |
-| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (public ref emitted to clients) |
+| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (ref exposed on `GET /api/v1/cache`) |
 | `cache.sync.s3_endpoint` | `dagger-kubernetes.s3Endpoint` | `<release>-minio.<namespace>.svc:9000` (when `minio.enabled`) |
 | `cache.s3.bucket` / `cache.sync.s3_bucket` | `dagger-kubernetes.s3Bucket` | `cache.sync.s3Bucket`, else `cache.s3.bucket`, else first `minio.buckets[].name`, else `dagger-cache` |
 
@@ -552,8 +553,8 @@ S3-backed cache. Configure it under `supervisor.config.cache`:
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The emitted public ref is always `<publicHost>/dagger-cache`, tagged per engine version (`:V<maj>-<min>-<patch>`). |
-| `supervisor.config.cache.s3.bucket` | `""` | S3 bucket holding the remote BuildKit cache; also the default bucket for worker snapshots and the CLI cache. Empty ⇒ the auto-created MinIO bucket (`dagger-cache`). |
+| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The ref exposed on `GET /api/v1/cache` is `<publicHost>/dagger-cache`; it is no longer emitted to clients (Dagger 0.21.x removed the experimental cache-config env var). |
+| `supervisor.config.cache.s3.bucket` | `""` | S3 bucket holding BuildKit cache blobs (prefix `cache/`, swept by the cache GC); also the default bucket for worker snapshots and the CLI cache. Empty ⇒ the auto-created MinIO bucket (`dagger-cache`). |
 | `supervisor.config.cache.s3.region` | `"us-east-1"` | S3 region. |
 
 When `ingress.enabled`, the chart adds a second Ingress host rule for the cache
@@ -565,13 +566,13 @@ TLS certificate must include the cache vhost as a SAN.
 
 #### S3 backend
 
-The remote BuildKit cache lives in `supervisor.config.cache.s3.bucket`, and the
+The BuildKit cache blobs live in `supervisor.config.cache.s3.bucket`, and the
 worker-snapshot sync, the CLI cache, and the cache GC sweeper use the same
 bucket:
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.config.cache.s3.bucket` | `""` | Remote BuildKit cache bucket; also the default bucket for worker snapshots and the CLI cache. |
+| `supervisor.config.cache.s3.bucket` | `""` | BuildKit cache-blob bucket (prefix `cache/`); also the default bucket for worker snapshots and the CLI cache. |
 | `supervisor.config.cache.s3.region` | `""` | S3 region. |
 | `supervisor.config.cache.sync.s3Endpoint` | `""` | S3-compatible endpoint (e.g. `minio.dagger-kubernetes.svc:9000`; auto-wired to the MinIO subchart Service when `minio.enabled`); also configures the supervisor's shared S3 client (CLI cache + GC). |
 | `supervisor.config.cache.sync.s3Bucket` | `""` | Worker-snapshot bucket (empty = `cache.s3.bucket`). |
@@ -821,7 +822,7 @@ Configure it under `supervisor.config.history`:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `opentelemetry-collector.enabled` | bool | `true` | Install OpenTelemetry Collector subchart. |
-| `minio.enabled` | bool | `true` | Install MinIO subchart (S3-compatible object store for the remote cache). |
+| `minio.enabled` | bool | `true` | Install MinIO subchart (S3-compatible object store for worker snapshots, CLI cache, and BuildKit cache GC). |
 | `minio.rootUser` / `minio.rootPassword` | string | `"minioadmin"` | MinIO root credentials (dev defaults; change in production). Rendered into the `engine-s3-auth` Secret. |
 | `minio.users` | array | `[]` | Extra MinIO users to create; empty (default) disables the subchart's built-in `console` user. |
 | `minio.buckets` | array | `[{name: dagger-cache}]` | Buckets created on install by the MinIO chart's post-install hook. |

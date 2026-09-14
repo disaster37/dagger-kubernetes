@@ -70,8 +70,10 @@ the computed public URL by stripping the scheme and any port/path. */}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the public OCI cache ref used in _EXPERIMENTAL_DAGGER_CACHE_CONFIG:
-<cachePublicHost>/dagger-cache. The repo path is fixed to `dagger-cache`. */}}
+{{/* Resolve the public OCI cache ref exposed on GET /api/v1/cache:
+<cachePublicHost>/dagger-cache. The repo path is fixed to `dagger-cache`.
+Dagger 0.21.x removed the experimental cache-config env var, so this ref is
+no longer emitted to clients; warm start is the worker-snapshot sync. */}}
 {{- define "dagger-kubernetes.cacheRegistry" -}}
 {{- printf "%s/dagger-cache" (include "dagger-kubernetes.cachePublicHost" .) -}}
 {{- end -}}
