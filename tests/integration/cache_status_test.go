@@ -204,11 +204,14 @@ func newCacheStatusTestEnv(t *testing.T, raftCleanState domain.RaftCleanState) *
 	}, domain.WorkerSnapshotsRepo, logger, observ.NewMetrics(nil))
 	statusSvc := service.NewStatusService(&domain.Config{}, cacheBackend, router, fleetManager, logger, raftCleanState)
 
-	controlAddr := freeAddr(t)
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr := listenerAddr(controlLn)
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: controlAddr,
-		DataAddr:    freeAddr(t),
-		DataHost:    "localhost",
+		ControlAddr:     controlAddr,
+		DataAddr:        listenerAddr(dataLn),
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
