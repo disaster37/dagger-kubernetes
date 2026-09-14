@@ -68,8 +68,8 @@ func s3RequireCount(t *testing.T, store *s3FakeStore, prefix string, n int) {
 // TestWorkerSnapshotS3SyncIntegration drives the full S3 worker-snapshot flow
 // through a real S3 wire protocol (minio-go against an in-process fake):
 // pod 1 pushes, pod 2 restores, a prune propagates via the metadata tarball,
-// concurrent pushes leave idempotent blobs, and a restart self-cleans the
-// version prefix.
+// concurrent pushes leave idempotent blobs, and a restart never wipes the
+// shared prefix (orphaned blobs wait for the bucket lifecycle policy).
 func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 	client, store := newS3TestEnv(t, "dagger-snapshots")
 	logger := observ.NewTestLogger()
@@ -80,21 +80,22 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 		return repository.NewS3SnapshotStore(client, "dagger-snapshots", version, "worker", logger)
 	}
 
-	// --- pod 1: build a worker dir, push it ---
+	// --- pod 1: build a worker dir (real flat content store), push it ---
 	src := t.TempDir()
 	writeSyncTestFile(t, filepath.Join(src, "worker", "metadata.db"), "bolt-metadata")
-	writeSyncTestFile(t, filepath.Join(src, "worker", "content", "blobs", "sha256", "aa", strings.Repeat("a", 64)), "blob-aa")
-	writeSyncTestFile(t, filepath.Join(src, "worker", "content", "blobs", "sha256", "bb", strings.Repeat("b", 64)), "blob-bb")
+	writeSyncTestFile(t, filepath.Join(src, "worker", "content", "blobs", "sha256", strings.Repeat("a", 64)), "blob-aa")
+	writeSyncTestFile(t, filepath.Join(src, "worker", "content", "blobs", "sha256", strings.Repeat("b", 64)), "blob-bb")
 	if err := newStore().Push(ctx, filepath.Join(src, "worker"), t.TempDir()); err != nil {
 		t.Fatalf("pod1 push: %v", err)
 	}
 
-	// Storage layout: meta.tar.gz + one object per blob under blobs/sha256/.
+	// Storage layout: meta.tar.gz + one flat object per blob, mirroring the
+	// Dagger v0.19+ on-disk content store (blobs/sha256/<64-hex>).
 	prefix := domain.WorkerSnapshotS3Prefix(version)
 	s3RequireObjects(t, store, []string{
 		prefix + domain.MetaTarballName,
-		prefix + domain.BlobsPrefix + "aa/" + strings.Repeat("a", 64),
-		prefix + domain.BlobsPrefix + "bb/" + strings.Repeat("b", 64),
+		prefix + domain.BlobsPrefix + strings.Repeat("a", 64),
+		prefix + domain.BlobsPrefix + strings.Repeat("b", 64),
 	})
 
 	// --- pod 2: fresh PVC pulls everything back ---
@@ -108,7 +109,7 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 		want string
 	}{
 		{"worker/metadata.db", "bolt-metadata"},
-		{"worker/content/blobs/sha256/aa/" + strings.Repeat("a", 64), "blob-aa"},
+		{"worker/content/blobs/sha256/" + strings.Repeat("a", 64), "blob-aa"},
 	} {
 		got, err := os.ReadFile(filepath.Join(dst, tc.rel))
 		if err != nil {
@@ -120,8 +121,9 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 	}
 
 	// --- pod 1 prunes a local blob and re-pushes: the metadata tarball
-	// (and later the self-cleanup) propagate the pruned state ---
-	if err := os.Remove(filepath.Join(src, "worker", "content", "blobs", "sha256", "bb", strings.Repeat("b", 64))); err != nil {
+	// overwrite propagates the pruned state; the orphaned blob is left for
+	// the bucket lifecycle policy ---
+	if err := os.Remove(filepath.Join(src, "worker", "content", "blobs", "sha256", strings.Repeat("b", 64))); err != nil {
 		t.Fatalf("prune: %v", err)
 	}
 	if err := newStore().Push(ctx, filepath.Join(src, "worker"), t.TempDir()); err != nil {
@@ -132,14 +134,13 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 		t.Fatalf("pod2 re-pull = %v/%v", ok, err)
 	}
 
-	// --- pod 1 restarts: CleanupSelf wipes the version prefix, then re-pushes ---
-	if err := newStore().CleanupSelf(ctx); err != nil {
-		t.Fatalf("CleanupSelf: %v", err)
-	}
-	s3RequireCount(t, store, prefix, 0)
+	// --- pod 1 restarts: no startup wipe. The pruned blob b stays as an
+	// orphan (harmless; reclaimed by the bucket lifecycle policy), and the
+	// re-push only overwrites meta.tar.gz in place ---
 	if err := newStore().Push(ctx, filepath.Join(src, "worker"), t.TempDir()); err != nil {
 		t.Fatalf("pod1 push after restart: %v", err)
 	}
+	s3RequireObjects(t, store, []string{prefix + domain.BlobsPrefix + strings.Repeat("b", 64)})
 
 	// --- concurrent pushes: blobs are idempotent, meta last-writer-wins ---
 	const pods = 4
@@ -147,11 +148,12 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 	for i := range dirs {
 		dirs[i] = t.TempDir()
 		writeSyncTestFile(t, filepath.Join(dirs[i], "worker", "metadata.db"), "bolt-metadata")
-		// All pods share the same content blob (same digest, same shard) and
-		// each has one unique blob (distinct digest-shaped filename).
-		writeSyncTestFile(t, filepath.Join(dirs[i], "worker", "content", "blobs", "sha256", "aa", strings.Repeat("a", 64)), "shared-blob")
+		// All pods share the same content blob (same digest) and each has one
+		// unique blob (distinct digest-shaped filename); both use the flat
+		// layout.
+		writeSyncTestFile(t, filepath.Join(dirs[i], "worker", "content", "blobs", "sha256", strings.Repeat("a", 64)), "shared-blob")
 		unique := fmt.Sprintf("%064x", i)
-		writeSyncTestFile(t, filepath.Join(dirs[i], "worker", "content", "blobs", "sha256", unique[:2], unique), fmt.Sprintf("pod-%d", i))
+		writeSyncTestFile(t, filepath.Join(dirs[i], "worker", "content", "blobs", "sha256", unique), fmt.Sprintf("pod-%d", i))
 	}
 	var wg sync.WaitGroup
 	errCh := make(chan error, pods)
@@ -170,8 +172,9 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 		t.Fatalf("concurrent push: %v", err)
 	}
 
-	// Shared blob stored once; one unique per pod; meta.tar.gz present.
-	s3RequireCount(t, store, prefix+domain.BlobsPrefix, pods+1)
+	// Shared blob stored once, one unique per pod, plus the orphaned blob
+	// from before the restart: 2 + pods. meta.tar.gz present.
+	s3RequireCount(t, store, prefix+domain.BlobsPrefix, pods+2)
 	s3RequireObjects(t, store, []string{prefix + domain.MetaTarballName})
 
 	// The surviving metadata is intact and every listed blob restores.
@@ -182,6 +185,46 @@ func TestWorkerSnapshotS3SyncIntegration(t *testing.T) {
 	got, err := os.ReadFile(filepath.Join(final, "worker", "metadata.db"))
 	if err != nil || string(got) != "bolt-metadata" {
 		t.Fatalf("final metadata.db = %q/%v", got, err)
+	}
+}
+
+// TestWorkerSnapshotS3ShardedLayoutIntegration proves the S3 snapshot sync is
+// layout-independent: a worker dir using the legacy sharded content store
+// (content/blobs/sha256/<2>/<hex>) pushes and pulls intact, with S3 keys
+// mirroring the on-disk layout.
+func TestWorkerSnapshotS3ShardedLayoutIntegration(t *testing.T) {
+	client, store := newS3TestEnv(t, "dagger-snapshots-sharded")
+	logger := observ.NewTestLogger()
+	ctx := context.Background()
+	version := "v0.20.0"
+	newStore := func() *repository.S3SnapshotStore {
+		return repository.NewS3SnapshotStore(client, "dagger-snapshots-sharded", version, "worker", logger)
+	}
+
+	hexStr := strings.Repeat("d", 64)
+	src := t.TempDir()
+	writeSyncTestFile(t, filepath.Join(src, "worker", "metadata.db"), "bolt-metadata")
+	writeSyncTestFile(t, filepath.Join(src, "worker", "content", "blobs", "sha256", hexStr[:2], hexStr), "sharded-blob")
+	if err := newStore().Push(ctx, filepath.Join(src, "worker"), t.TempDir()); err != nil {
+		t.Fatalf("push: %v", err)
+	}
+
+	prefix := domain.WorkerSnapshotS3Prefix(version)
+	s3RequireObjects(t, store, []string{
+		prefix + domain.MetaTarballName,
+		prefix + domain.BlobsPrefix + hexStr[:2] + "/" + hexStr,
+	})
+
+	dst := t.TempDir()
+	if ok, err := newStore().Pull(ctx, dst); err != nil || !ok {
+		t.Fatalf("pull = %v/%v, want true/nil", ok, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "worker", "content", "blobs", "sha256", hexStr[:2], hexStr))
+	if err != nil {
+		t.Fatalf("read restored sharded blob: %v", err)
+	}
+	if string(got) != "sharded-blob" {
+		t.Fatalf("restored sharded blob = %q, want %q", got, "sharded-blob")
 	}
 }
 

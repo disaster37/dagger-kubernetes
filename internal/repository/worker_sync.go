@@ -16,9 +16,10 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// contentBlobsDir is the content-store location under the BuildKit worker
-// dir. Its sharded layout (sha256/<first-two-hex>/<full-hex>) mirrors the S3
-// blob key layout, so the pull path needs no mapping.
+// contentBlobsDir is the content-store root under the BuildKit worker dir.
+// The on-disk layout is engine-version-dependent: flat
+// (content/blobs/sha256/<full-hex>, Dagger v0.19+) or sharded
+// (content/blobs/sha256/<first-two-hex>/<full-hex>). The walk handles both.
 const contentBlobsDir = "content/blobs/sha256"
 
 // contentBlobsExclude is the exclude prefix for the metadata tarball: the
@@ -29,21 +30,29 @@ const contentBlobsExclude = "content/blobs"
 // PushIncremental when the helper does not override it.
 const defaultSnapshotConcurrency = 8
 
-// walkContentStore returns the sorted sha256 digests ("sha256:<hex>") of the
-// content-store blobs under the worker dir. A blob is any regular file whose
-// base name is a 64-char lowercase hex digest, at any depth under
-// content/blobs/sha256/. The walk is directory traversal only (no file reads),
-// so it stays fast for very large blob counts.
-func walkContentStore(workerDir string) ([]string, error) {
+// contentBlob is one content-store blob: its digest and its path relative to
+// the worker dir. The on-disk layout is engine-version-dependent: flat
+// (content/blobs/sha256/<hex>) or sharded (content/blobs/sha256/<2>/<hex>).
+type contentBlob struct {
+	Digest  string // "sha256:<64 hex>"
+	RelPath string // path relative to the worker dir
+}
+
+// walkContentStore returns the sorted blobs of the content store under the
+// worker dir. A blob is any regular file whose base name is a 64-char
+// lowercase hex digest, at any depth under content/blobs/sha256/ (flat or
+// sharded). The walk is directory traversal only (no file reads), so it stays
+// fast for very large blob counts.
+func walkContentStore(workerDir string) ([]contentBlob, error) {
 	storeDir := filepath.Join(workerDir, contentBlobsDir)
 	if _, err := os.Stat(storeDir); err != nil {
 		if os.IsNotExist(err) {
-			return []string{}, nil // fresh engine: no content store yet
+			return []contentBlob{}, nil // fresh engine: no content store yet
 		}
 		return nil, fmt.Errorf("stat %s: %w", storeDir, err)
 	}
 
-	var digests []string
+	var blobs []contentBlob
 	walkErr := filepath.WalkDir(storeDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -55,14 +64,21 @@ func walkContentStore(workerDir string) ([]string, error) {
 		if !validContentHex(name) {
 			return nil // not a content-addressed blob (stray temp file, etc.)
 		}
-		digests = append(digests, fmt.Sprintf("sha256:%s", name))
+		rel, err := filepath.Rel(workerDir, path)
+		if err != nil {
+			return fmt.Errorf("rel path %s: %w", path, err)
+		}
+		blobs = append(blobs, contentBlob{
+			Digest:  fmt.Sprintf("sha256:%s", name),
+			RelPath: rel,
+		})
 		return nil
 	})
 	if walkErr != nil {
 		return nil, fmt.Errorf("walk %s: %w", storeDir, walkErr)
 	}
-	sort.Strings(digests)
-	return digests, nil
+	sort.Slice(blobs, func(i, j int) bool { return blobs[i].Digest < blobs[j].Digest })
+	return blobs, nil
 }
 
 // validContentHex reports whether name is a 64-char lowercase hex sha256.
@@ -78,30 +94,18 @@ func validContentHex(name string) bool {
 	return true
 }
 
-// blobRelPath returns the content-store path of a blob relative to the worker
-// dir: content/blobs/sha256/<first-two-hex>/<full-hex>. The digest must be
-// validated ("sha256:<64 hex>") before it can reach a filesystem or object
-// path (CWE-22 defense-in-depth).
-func blobRelPath(digest string) (string, error) {
-	hex, ok := strings.CutPrefix(digest, "sha256:")
-	if !ok || !validContentHex(hex) {
-		return "", fmt.Errorf("invalid digest %q: must be sha256:<64 hex>", digest)
-	}
-	return filepath.Join(contentBlobsDir, hex[:2], hex), nil
-}
-
-// probeAndUploadMissing probes every digest and uploads the blobs missing
-// from the registry, using a worker pool of concurrency goroutines (the
-// bottleneck is the per-blob HEAD round-trip). Returns the manifest layers of
-// the blobs that are present after the pass, sorted by digest for a
-// deterministic manifest.
+// probeAndUploadMissing probes every blob and uploads the ones missing from
+// the registry, using a worker pool of concurrency goroutines (the bottleneck
+// is the per-blob HEAD round-trip). Returns the manifest layers of the blobs
+// that are present after the pass, sorted by digest for a deterministic
+// manifest.
 //
 // Error semantics (best-effort push):
 //   - ProbeBlob error (registry unreachable): fails the whole push.
 //   - Local blob vanished (BuildKit GC): DEBUG skip, excluded from the manifest.
 //   - UploadBlobStream error: WARN skip, excluded from the manifest (the next
 //     periodic push retries).
-func probeAndUploadMissing(ctx context.Context, client domain.CacheSnapshotClient, repo, workerDir string, digests []string, concurrency int, logger *logrus.Logger) ([]domain.CLIManifestLayer, error) {
+func probeAndUploadMissing(ctx context.Context, client domain.CacheSnapshotClient, repo, workerDir string, blobs []contentBlob, concurrency int, logger *logrus.Logger) ([]domain.CLIManifestLayer, error) {
 	if concurrency < 1 {
 		concurrency = defaultSnapshotConcurrency
 	}
@@ -111,12 +115,12 @@ func probeAndUploadMissing(ctx context.Context, client domain.CacheSnapshotClien
 		firstErr error
 		layers   []domain.CLIManifestLayer
 		wg       sync.WaitGroup
-		jobs     = make(chan string)
+		jobs     = make(chan contentBlob)
 	)
 	worker := func() {
 		defer wg.Done()
-		for digest := range jobs {
-			layer, skip, err := probeAndUploadOne(ctx, client, repo, workerDir, digest, logger)
+		for blob := range jobs {
+			layer, skip, err := probeAndUploadOne(ctx, client, repo, workerDir, blob, logger)
 			mu.Lock()
 			if err != nil && firstErr == nil {
 				firstErr = err
@@ -131,8 +135,8 @@ func probeAndUploadMissing(ctx context.Context, client domain.CacheSnapshotClien
 		wg.Add(1)
 		go worker()
 	}
-	for _, digest := range digests {
-		jobs <- digest
+	for _, blob := range blobs {
+		jobs <- blob
 	}
 	close(jobs)
 	wg.Wait()
@@ -147,7 +151,8 @@ func probeAndUploadMissing(ctx context.Context, client domain.CacheSnapshotClien
 // probeAndUploadOne probes one digest and uploads the blob when missing.
 // skip=true means the blob is intentionally excluded from the manifest
 // (already handled, vanished, or failed best-effort upload).
-func probeAndUploadOne(ctx context.Context, client domain.CacheSnapshotClient, repo, workerDir, digest string, logger *logrus.Logger) (layer domain.CLIManifestLayer, skip bool, err error) {
+func probeAndUploadOne(ctx context.Context, client domain.CacheSnapshotClient, repo, workerDir string, blob contentBlob, logger *logrus.Logger) (layer domain.CLIManifestLayer, skip bool, err error) {
+	digest := blob.Digest
 	if err := ctx.Err(); err != nil {
 		return domain.CLIManifestLayer{}, false, err
 	}
@@ -156,11 +161,7 @@ func probeAndUploadOne(ctx context.Context, client domain.CacheSnapshotClient, r
 		return domain.CLIManifestLayer{}, false, fmt.Errorf("probe blob %s: %w", digest, err)
 	}
 
-	rel, err := blobRelPath(digest)
-	if err != nil {
-		return domain.CLIManifestLayer{}, false, err
-	}
-	path := filepath.Join(workerDir, rel)
+	path := filepath.Join(workerDir, blob.RelPath)
 
 	if exists {
 		info, err := os.Stat(path)
@@ -181,7 +182,7 @@ func probeAndUploadOne(ctx context.Context, client domain.CacheSnapshotClient, r
 		}, false, nil
 	}
 
-	f, err := os.Open(path) // #nosec G304 -- path is derived from the validated digest.
+	f, err := os.Open(path) // #nosec G304 -- path is a blob path recorded by walkContentStore under the worker dir.
 	if os.IsNotExist(err) {
 		logger.WithField("digest", digest).Debug("content blob vanished before upload (BuildKit GC); skipping")
 		return domain.CLIManifestLayer{}, true, nil
@@ -212,12 +213,12 @@ func probeAndUploadOne(ctx context.Context, client domain.CacheSnapshotClient, r
 // locally. Blobs missing from the backend (e.g. reclaimed by a lifecycle
 // policy) are skipped with a DEBUG log — the engine re-downloads them from
 // the remote cache on next use.
-func downloadMissingBlobs(ctx context.Context, client domain.CacheSnapshotClient, repo, dstDir string, digests []string, logger *logrus.Logger) error {
-	for _, digest := range digests {
+func downloadMissingBlobs(ctx context.Context, client domain.CacheSnapshotClient, repo, dstDir string, blobs []contentBlob, logger *logrus.Logger) error {
+	for _, blob := range blobs {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		if err := downloadMissingBlob(ctx, client, repo, dstDir, digest, logger); err != nil {
+		if err := downloadMissingBlob(ctx, client, repo, dstDir, blob, logger); err != nil {
 			return err
 		}
 	}
@@ -226,14 +227,17 @@ func downloadMissingBlobs(ctx context.Context, client domain.CacheSnapshotClient
 
 // downloadMissingBlob restores one content blob unless it already exists
 // locally (existence is trusted by path — re-hashing large blobs would be
-// too expensive for a restore).
-func downloadMissingBlob(ctx context.Context, client domain.CacheSnapshotClient, repo, dstDir, digest string, logger *logrus.Logger) error {
-	rel, err := blobRelPath(digest)
-	if err != nil {
-		logger.WithError(err).Warn("snapshot references an invalid blob digest; skipping")
+// too expensive for a restore). The registry backend stores no on-disk
+// layout, so the blob is restored to the flat content-store path
+// (content/blobs/sha256/<full-hex>, the Dagger v0.19+ layout).
+func downloadMissingBlob(ctx context.Context, client domain.CacheSnapshotClient, repo, dstDir string, blob contentBlob, logger *logrus.Logger) error {
+	digest := blob.Digest
+	hex, ok := strings.CutPrefix(digest, "sha256:")
+	if !ok || !validContentHex(hex) {
+		logger.WithField("digest", digest).Warn("snapshot references an invalid blob digest; skipping")
 		return nil
 	}
-	path := filepath.Join(dstDir, rel)
+	path := filepath.Join(dstDir, contentBlobsDir, hex)
 	if _, err := os.Stat(path); err == nil {
 		return nil // already present (e.g. a retained PVC kept a newer copy)
 	}

@@ -169,6 +169,14 @@ from a Kubernetes secret (not literal values in the pod spec).
 
 ### D5 — Cleanup: S3 lifecycle policies + self-cleanup on startup
 
+> **Superseded (2026-09-14):** startup self-cleanup was removed. It deleted the
+> entire version prefix, so concurrent pods of the same version wiped each
+> other's snapshots and a pod killed before its next push lost the shared
+> snapshot. Blobs are content-addressed (idempotent) and `meta.tar.gz` is
+> overwritten atomically, so orphaned blobs are harmless; a bucket lifecycle
+> policy reclaims them instead. The text below is the historical decision
+> record.
+
 **Choice: Rely on S3 bucket lifecycle policies for old snapshots. The
 sidecar also cleans up its own old blobs on startup (delete previous blobs
 under the version prefix before pushing new ones).**

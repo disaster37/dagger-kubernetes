@@ -16,55 +16,63 @@ import (
 
 func TestWalkContentStore(t *testing.T) {
 	worker := t.TempDir()
-	// Sharded content-store tree plus a stray non-blob file.
-	writeTestFile(t, filepath.Join(worker, "content", "blobs", "sha256", "aa", strings.Repeat("a", 64)), 0o644, "aa")
-	writeTestFile(t, filepath.Join(worker, "content", "blobs", "sha256", "0f", strings.Repeat("0", 63)+"f"), 0o644, "0f")
+	// Both engine layouts are walked: the flat content store
+	// (content/blobs/sha256/<hex>, Dagger v0.19+) and the legacy sharded one
+	// (content/blobs/sha256/<2>/<hex>), plus a stray non-blob file.
+	flatHex := strings.Repeat("a", 64)
+	shardedHex := strings.Repeat("0", 63) + "f"
+	writeTestFile(t, filepath.Join(worker, "content", "blobs", "sha256", flatHex), 0o644, "flat")
+	writeTestFile(t, filepath.Join(worker, "content", "blobs", "sha256", shardedHex[:2], shardedHex), 0o644, "sharded")
 	writeTestFile(t, filepath.Join(worker, "content", "blobs", "sha256", "aa", "temp-file"), 0o644, "stray")
 	writeTestFile(t, filepath.Join(worker, "metadata.db"), 0o600, "bolt")
 
-	digests, err := walkContentStore(worker)
+	blobs, err := walkContentStore(worker)
 	if err != nil {
 		t.Fatalf("walkContentStore: %v", err)
 	}
-	want := []string{"sha256:" + strings.Repeat("0", 63) + "f", "sha256:" + strings.Repeat("a", 64)}
-	if len(digests) != len(want) {
-		t.Fatalf("digests = %v, want %v", digests, want)
+	want := []contentBlob{
+		{Digest: "sha256:" + shardedHex, RelPath: filepath.Join("content", "blobs", "sha256", shardedHex[:2], shardedHex)},
+		{Digest: "sha256:" + flatHex, RelPath: filepath.Join("content", "blobs", "sha256", flatHex)},
+	}
+	if len(blobs) != len(want) {
+		t.Fatalf("blobs = %+v, want %+v", blobs, want)
 	}
 	for i := range want {
-		if digests[i] != want[i] {
-			t.Fatalf("digests[%d] = %q, want %q (sorted)", i, digests[i], want[i])
+		if blobs[i] != want[i] {
+			t.Fatalf("blobs[%d] = %+v, want %+v (sorted by digest)", i, blobs[i], want[i])
 		}
 	}
 }
 
 func TestWalkContentStoreEmpty(t *testing.T) {
 	worker := t.TempDir()
-	digests, err := walkContentStore(worker)
+	blobs, err := walkContentStore(worker)
 	if err != nil {
 		t.Fatalf("walkContentStore (missing store): %v", err)
 	}
-	if len(digests) != 0 {
-		t.Fatalf("digests = %v, want empty", digests)
+	if len(blobs) != 0 {
+		t.Fatalf("blobs = %+v, want empty", blobs)
 	}
 	if err := os.MkdirAll(filepath.Join(worker, "content", "blobs", "sha256"), 0o750); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	digests, err = walkContentStore(worker)
+	blobs, err = walkContentStore(worker)
 	if err != nil {
 		t.Fatalf("walkContentStore (empty store): %v", err)
 	}
-	if len(digests) != 0 {
-		t.Fatalf("digests = %v, want empty", digests)
+	if len(blobs) != 0 {
+		t.Fatalf("blobs = %+v, want empty", blobs)
 	}
 }
 
 // blobContentFile creates a content-addressed blob under the worker dir's
-// content store (filename = sha256 of content) and returns its digest.
+// content store in the real flat layout (Dagger v0.19+:
+// content/blobs/sha256/<hex>) and returns its digest.
 func blobContentFile(t *testing.T, worker, content string) string {
 	t.Helper()
 	sum := sha256.Sum256([]byte(content))
 	hexStr := hex.EncodeToString(sum[:])
-	path := filepath.Join(worker, "content", "blobs", "sha256", hexStr[:2], hexStr)
+	path := filepath.Join(worker, "content", "blobs", "sha256", hexStr)
 	writeTestFile(t, path, 0o644, content)
 	return "sha256:" + hexStr
 }
@@ -75,8 +83,12 @@ func TestProbeAndUploadMissing(t *testing.T) {
 	missing := blobContentFile(t, worker, "new-blob")
 	existing := blobContentFile(t, worker, "already-there")
 	stub.blobs[existing] = []byte("already-there")
+	blobs, err := walkContentStore(worker)
+	if err != nil {
+		t.Fatalf("walkContentStore: %v", err)
+	}
 
-	layers, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, []string{missing, existing}, 2, observ.NewTestLogger())
+	layers, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, blobs, 2, observ.NewTestLogger())
 	if err != nil {
 		t.Fatalf("probeAndUploadMissing: %v", err)
 	}
@@ -98,11 +110,12 @@ func TestProbeAndUploadMissingFileVanished(t *testing.T) {
 	worker := t.TempDir()
 	gone := blobContentFile(t, worker, "soon-gone")
 	hexGone := strings.TrimPrefix(gone, "sha256:")
-	if err := os.Remove(filepath.Join(worker, "content", "blobs", "sha256", hexGone[:2], hexGone)); err != nil {
+	relGone := filepath.Join("content", "blobs", "sha256", hexGone)
+	if err := os.Remove(filepath.Join(worker, relGone)); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 
-	layers, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, []string{gone}, 1, observ.NewTestLogger())
+	layers, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, []contentBlob{{Digest: gone, RelPath: relGone}}, 1, observ.NewTestLogger())
 	if err != nil {
 		t.Fatalf("probeAndUploadMissing: %v (GC'd blob must be skipped silently)", err)
 	}
@@ -116,8 +129,9 @@ func TestProbeAndUploadMissingProbeError(t *testing.T) {
 	stub.err = errors.New("registry down")
 	worker := t.TempDir()
 	digest := blobContentFile(t, worker, "x1")
+	blobs := []contentBlob{{Digest: digest, RelPath: filepath.Join("content", "blobs", "sha256", strings.TrimPrefix(digest, "sha256:"))}}
 
-	if _, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, []string{digest}, 1, observ.NewTestLogger()); err == nil {
+	if _, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, blobs, 1, observ.NewTestLogger()); err == nil {
 		t.Fatal("probe error must fail the whole push")
 	}
 }
@@ -127,8 +141,9 @@ func TestProbeAndUploadMissingUploadError(t *testing.T) {
 	stub.uploadStreamErr = errors.New("upload failed")
 	worker := t.TempDir()
 	digest := blobContentFile(t, worker, "x2")
+	blobs := []contentBlob{{Digest: digest, RelPath: filepath.Join("content", "blobs", "sha256", strings.TrimPrefix(digest, "sha256:"))}}
 
-	layers, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, []string{digest}, 1, observ.NewTestLogger())
+	layers, err := probeAndUploadMissing(context.Background(), stub, "repo", worker, blobs, 1, observ.NewTestLogger())
 	if err != nil {
 		t.Fatalf("probeAndUploadMissing: %v (upload errors are best-effort skips)", err)
 	}
@@ -145,19 +160,20 @@ func TestDownloadMissingBlobs(t *testing.T) {
 	absentDigest := "sha256:" + strings.Repeat("b", 64)
 	stub.blobs[absentDigest] = []byte("from-registry")
 	missingDigest := "sha256:" + strings.Repeat("c", 64) // not in the registry at all
+	blobs := []contentBlob{{Digest: present}, {Digest: absentDigest}, {Digest: missingDigest}}
 
-	if err := downloadMissingBlobs(context.Background(), stub, "repo", dst, []string{present, absentDigest, missingDigest}, observ.NewTestLogger()); err != nil {
+	if err := downloadMissingBlobs(context.Background(), stub, "repo", dst, blobs, observ.NewTestLogger()); err != nil {
 		t.Fatalf("downloadMissingBlobs: %v", err)
 	}
 
-	got, err := os.ReadFile(filepath.Join(dst, "content", "blobs", "sha256", strings.TrimPrefix(present, "sha256:")[:2], strings.TrimPrefix(present, "sha256:")))
+	got, err := os.ReadFile(filepath.Join(dst, "content", "blobs", "sha256", strings.TrimPrefix(present, "sha256:")))
 	if err != nil {
 		t.Fatalf("read pre-existing blob: %v", err)
 	}
 	if string(got) != "already-local" {
 		t.Fatalf("pre-existing blob overwritten: %q", got)
 	}
-	got, err = os.ReadFile(filepath.Join(dst, "content", "blobs", "sha256", "bb", strings.Repeat("b", 64)))
+	got, err = os.ReadFile(filepath.Join(dst, "content", "blobs", "sha256", strings.Repeat("b", 64)))
 	if err != nil {
 		t.Fatalf("read downloaded blob: %v", err)
 	}
@@ -168,7 +184,8 @@ func TestDownloadMissingBlobs(t *testing.T) {
 
 func TestDownloadMissingBlobsInvalidDigest(t *testing.T) {
 	stub := &stubSnapshotClient{stubCLIRegistryClient: *newStubCLIRegistryClient()}
-	if err := downloadMissingBlobs(context.Background(), stub, "repo", t.TempDir(), []string{"not-a-digest"}, observ.NewTestLogger()); err != nil {
+	blobs := []contentBlob{{Digest: "not-a-digest"}}
+	if err := downloadMissingBlobs(context.Background(), stub, "repo", t.TempDir(), blobs, observ.NewTestLogger()); err != nil {
 		t.Fatalf("invalid digest must be skipped, got error: %v", err)
 	}
 }
@@ -225,7 +242,7 @@ func TestPushIncrementalPullIncrementalRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("PullIncremental ok=false, want true")
 	}
-	assertTreeEqual(t, src, dst, "worker")
+	assertTreeEqual(t, src, dst)
 
 	// A second push uploads nothing new (all blobs probed as present).
 	before := len(stub.blobs)

@@ -606,7 +606,7 @@ bucket holds three kinds of objects:
 | Prefix | Contents | Written by |
 |---|---|---|
 | `cache/` | BuildKit remote-cache blobs (content-addressed, optional) | Engine pods when a client configures its own S3 cache backend |
-| `worker-snapshots/<version-slug>/` | BuildKit local worker-cache snapshots (`meta.tar.gz` + `blobs/sha256/...`) | `cache-restore` init container / `cache-sync` sidecar |
+| `worker-snapshots/<version-slug>/` | BuildKit local worker-cache snapshots (`meta.tar.gz` + one object per content blob under `blobs/sha256/`) | `cache-restore` init container / `cache-sync` sidecar |
 | `cli-cache/<version>/<os>/<arch>/<filename>` | Verified Dagger CLI tarballs | Supervisor CLI addon |
 
 Dagger 0.21.x removed the experimental BuildKit cache-config environment
@@ -672,8 +672,10 @@ cache:
 ```
 
 The worker-snapshot (`worker-snapshots/`) and CLI-cache (`cli-cache/`) prefixes
-are never swept — they have their own cleanup mechanisms (startup self-cleanup
-for snapshots, immutable versioned keys for the CLI cache).
+are never swept — snapshots are overwritten in place (`meta.tar.gz`) with
+content-addressed, idempotent blobs, and the CLI cache uses immutable versioned
+keys. Orphaned snapshot blobs are reclaimed by a **bucket lifecycle policy**
+(recommended, see "Worker-cache sync").
 
 > **Defense-in-depth:** configure an S3 bucket **lifecycle policy** to delete
 > objects older than N days regardless of the sweeper. It covers objects the
@@ -716,16 +718,26 @@ the supervisor image automatically); any missing prerequisite logs a WARN and
 skips the containers — sync never blocks the engine pod.
 
 **Snapshot format (v3).** Snapshots live under
-`s3://<bucket>/worker-snapshots/<version-slug>/` with
-`meta.tar.gz` (the metadata tarball) and
-`blobs/sha256/<first-two-hex>/<full-hex>` (one object per content blob). A push
-walks the content store and uploads only blobs missing from the bucket (HEAD
-probe per blob), so there is no manifest size ceiling. All pods of the same
-StatefulSet (same engine version) share one snapshot prefix: concurrent pushes
-are safe (content-addressed object keys, last-writer-wins `meta.tar.gz`). On
-startup the sidecar runs `CleanupSelf` — it deletes the version prefix's
-previous objects before the first push, so old blobs do not accumulate across
-restarts. Credentials come from the `engine-s3-auth` Secret (keys
+`s3://<bucket>/worker-snapshots/<version-slug>/` with `meta.tar.gz` (the
+metadata tarball) and one object per content blob whose S3 key mirrors the
+engine's **on-disk content store** under `blobs/sha256/`: the flat layout used
+by Dagger v0.19+ (`blobs/sha256/<full-hex>`) or the sharded layout of engines
+that shard (`blobs/sha256/<first-two-hex>/<full-hex>`). Because the key mirrors
+the path, the same code syncs both layouts with no mapping table. A push tars
+the metadata first, walks the content store, and uploads only blobs missing
+from the bucket (HEAD probe per blob), so there is no manifest size ceiling.
+**The metadata tarball is only published when every walked blob was uploaded
+successfully** (or was already present): a failed upload or a blob collected by
+BuildKit GC aborts the push with a warning and leaves the previous consistent
+snapshot — metadata and blobs — in place, so a restore can never resolve to
+metadata whose blobs are absent. All pods of the same StatefulSet (same engine
+version) share one snapshot prefix: concurrent pushes are safe
+(content-addressed object keys, last-writer-wins `meta.tar.gz`). The snapshot is
+updated in place — `meta.tar.gz` is atomically overwritten on each push and
+content-addressed blob uploads are idempotent. The sidecar never deletes from
+the shared prefix (a startup wipe would destroy snapshots that concurrent pods
+are still using); orphaned blobs are harmless and are reclaimed by an S3 bucket
+lifecycle policy. Credentials come from the `engine-s3-auth` Secret (keys
 `accessKey`/`secretKey`), rendered as Secret references on the sync containers.
 
 Semantics and caveats:
@@ -746,16 +758,17 @@ Semantics and caveats:
 - **Termination-grace budget.** The final push must finish within
   `fleet.engine_termination_grace_seconds` (default 120s) minus
   `cache.sync.quiesce_wait`. A truncated push cannot corrupt the previous
-  snapshot (the metadata object/manifest is only updated after a successful
-  upload), but operators with very large caches should raise the grace period.
+  snapshot (the metadata object is only updated after every referenced blob
+  was uploaded), but operators with very large caches should raise the grace
+  period.
 - **Temp disk.** Only the metadata tarball needs the sidecar's node-backed
   emptyDir (`cache-sync-tmp`) — a few MB, not the size of the worker dir
   (content blobs stream straight through).
 - **Stats/GC.** The snapshot storage is excluded from the cache GC/purge
   sweeps (`worker-snapshots/` lies outside the S3 cache prefix). Stale
-  snapshot cleanup relies on the startup self-cleanup plus a **bucket
-  lifecycle policy** — recommended, e.g. "delete objects under
-  `worker-snapshots/` older than 7 days".
+  snapshot cleanup relies on a **bucket lifecycle policy** — recommended,
+  e.g. "delete objects under `worker-snapshots/` older than 7 days". That
+  policy is the only reclaimer of orphaned blobs.
 
 ```yaml
 cache:

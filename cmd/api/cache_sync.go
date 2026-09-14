@@ -317,13 +317,6 @@ func runCacheSyncServe(c *cli.Context) error {
 	if err != nil {
 		return err
 	}
-	// Self-cleanup on startup (D5): delete this version's previous
-	// snapshot objects before the first push so old blobs do not
-	// accumulate across restarts. Best-effort: on failure the bucket's
-	// lifecycle policy is the fallback.
-	if err := s3Store.CleanupSelf(ctx); err != nil {
-		logger.WithError(err).Warn("worker snapshot startup cleanup failed; relying on the bucket lifecycle policy")
-	}
 
 	// Serialize pushes so the final on-stop push never overlaps a periodic
 	// one that SIGTERM interrupted mid-flight.

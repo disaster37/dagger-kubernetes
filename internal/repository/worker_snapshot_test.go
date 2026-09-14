@@ -78,9 +78,11 @@ func pushTestSnapshot(t *testing.T, store *WorkerSnapshotStore, src, tag string)
 	}
 }
 
-// assertTreeEqual compares every file (path → content) under both dirs.
-func assertTreeEqual(t *testing.T, want, got, subDir string) {
+// assertTreeEqual compares every file (path → content) under the "worker"
+// subdir of both dirs.
+func assertTreeEqual(t *testing.T, want, got string) {
 	t.Helper()
+	const subDir = "worker"
 	wantFiles := map[string]string{}
 	if err := filepath.WalkDir(filepath.Join(want, subDir), func(path string, d os.DirEntry, err error) error {
 		if err != nil || !d.Type().IsRegular() {
@@ -148,7 +150,7 @@ func TestWorkerSnapshotPushPullRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Pull returned ok=false, want true")
 	}
-	assertTreeEqual(t, src, dst, "worker")
+	assertTreeEqual(t, src, dst)
 
 	// Manifest shape mirrors the CLI cache: empty-JSON config + one gzip layer.
 	m, okM := stub.manifests[tag]
@@ -302,10 +304,11 @@ func TestPullIncrementalSkipsExistingBlobs(t *testing.T) {
 		t.Fatalf("PushIncremental: %v", err)
 	}
 
-	// Pre-create one blob in the destination: it must not be re-downloaded.
+	// Pre-create one blob in the destination (flat layout): it must not be
+	// re-downloaded.
 	dst := t.TempDir()
 	hexA := strings.TrimPrefix(digestA, "sha256:")
-	preCreated := filepath.Join(dst, "worker", "content", "blobs", "sha256", hexA[:2], hexA)
+	preCreated := filepath.Join(dst, "worker", "content", "blobs", "sha256", hexA)
 	writeTestFile(t, preCreated, 0o600, "locally-newer-content")
 
 	// Remove the other blob from the registry too: the pull must still
@@ -334,7 +337,7 @@ func TestPullIncrementalSkipsExistingBlobs(t *testing.T) {
 		t.Fatalf("metadata = %q", restored)
 	}
 	hexB := strings.TrimPrefix(digestB, "sha256:")
-	if _, err := os.Stat(filepath.Join(dst, "worker", "content", "blobs", "sha256", hexB[:2], hexB)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dst, "worker", "content", "blobs", "sha256", hexB)); !os.IsNotExist(err) {
 		t.Fatalf("missing blob should be skipped, not created: %v", err)
 	}
 }

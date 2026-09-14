@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -23,7 +24,6 @@ type s3ObjectAPI interface {
 	PutObject(ctx context.Context, bucketName, objectName string, reader io.Reader, objectSize int64, opts minio.PutObjectOptions) (minio.UploadInfo, error)
 	GetObject(ctx context.Context, bucketName, objectName string, opts minio.GetObjectOptions) (io.ReadCloser, error)
 	StatObject(ctx context.Context, bucketName, objectName string, opts minio.StatObjectOptions) (minio.ObjectInfo, error)
-	RemoveObject(ctx context.Context, bucketName, objectName string, opts minio.RemoveObjectOptions) error
 	ListObjects(ctx context.Context, bucketName string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo
 }
 
@@ -41,10 +41,6 @@ func (m minioS3API) GetObject(ctx context.Context, bucketName, objectName string
 
 func (m minioS3API) StatObject(ctx context.Context, bucketName, objectName string, opts minio.StatObjectOptions) (minio.ObjectInfo, error) { //nolint:gocritic // hugeParam: signature must match the minio-go API
 	return m.client.StatObject(ctx, bucketName, objectName, opts)
-}
-
-func (m minioS3API) RemoveObject(ctx context.Context, bucketName, objectName string, opts minio.RemoveObjectOptions) error { //nolint:gocritic // hugeParam: signature must match the minio-go API
-	return m.client.RemoveObject(ctx, bucketName, objectName, opts)
 }
 
 func (m minioS3API) ListObjects(ctx context.Context, bucketName string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo { //nolint:gocritic // hugeParam: signature must match the minio-go API
@@ -77,16 +73,33 @@ func isNoSuchKey(err error) bool {
 	return resp.Code == "NoSuchKey"
 }
 
+// errBlobVanished marks a content blob that the walk saw but that BuildKit GC
+// deleted before its upload. Push treats it like a failed upload: the
+// metadata tarball is not published, so the previous consistent snapshot is
+// kept.
+var errBlobVanished = errors.New("content blob vanished before upload")
+
+// s3BlobsDir is the S3 key prefix under each version prefix that holds the
+// content blobs. It is deliberately broader than domain.BlobsPrefix
+// ("blobs/sha256/") so the listing covers both engine layouts: flat
+// (blobs/sha256/<64-hex>) and sharded (blobs/sha256/<2-hex>/<64-hex>).
+const s3BlobsDir = "blobs/"
+
 // S3SnapshotStore pushes/pulls BuildKit worker-dir snapshots to/from an
 // S3-compatible object store. All pods in the same StatefulSet (same engine
 // version) share one snapshot prefix; concurrent pushes are safe because blob
 // uploads are idempotent (content-addressed keys) and the metadata tarball is
-// an atomic last-writer-wins object overwrite.
+// an atomic last-writer-wins object overwrite. The store never deletes from
+// the shared prefix: orphaned blobs (no longer referenced by the current
+// metadata) are harmless and are reclaimed by a bucket lifecycle policy.
 //
 // Storage layout (see domain.WorkerSnapshotS3Prefix):
 //
-//	<bucket>/<prefix>/meta.tar.gz                       metadata tarball
-//	<bucket>/<prefix>/blobs/sha256/<2-hex>/<64-hex>     content blobs
+//	<bucket>/<prefix>/meta.tar.gz      metadata tarball
+//	<bucket>/<prefix>/blobs/sha256/... content blobs, mirroring the engine's
+//	                                   on-disk content store (flat
+//	                                   <64-hex> files, or <2-hex>/<64-hex>
+//	                                   shards on engines that shard)
 type S3SnapshotStore struct {
 	client s3ObjectAPI
 	bucket string
@@ -115,41 +128,23 @@ func (s *S3SnapshotStore) metaKey() string {
 	return s.prefix + domain.MetaTarballName
 }
 
-// blobKey returns the S3 key of a content blob ("sha256:<hex>" digest):
-// <prefix>/blobs/sha256/<first-two-hex>/<full-hex>, mirroring the on-disk
-// content-store layout without the "content/" component.
-func (s *S3SnapshotStore) blobKey(digest string) (string, error) {
-	hex, ok := strings.CutPrefix(digest, "sha256:")
-	if !ok || !validContentHex(hex) {
-		return "", fmt.Errorf("invalid digest %q: must be sha256:<64 hex>", digest)
-	}
-	return s.prefix + domain.BlobsPrefix + hex[:2] + "/" + hex, nil
-}
-
-// Push walks the content store, uploads missing blobs to S3, creates the
-// metadata tarball (everything in the worker dir except content/blobs/), and
-// uploads it as meta.tar.gz. Blob-level failures are non-fatal (WARN + skip;
-// the next periodic push retries) — only a metadata-tarball failure fails the
-// push, leaving the previous meta.tar.gz intact (S3 overwrite is atomic).
+// Push syncs the worker dir to S3: it tars the metadata first, walks the
+// content store, uploads missing blobs, and uploads meta.tar.gz. The metadata
+// is only published when every walked blob could be uploaded (or was already
+// present): a failed or vanished blob aborts the push with an error, leaving
+// the previous consistent snapshot in place (S3 overwrite is atomic). Blob
+// keys mirror the engine's on-disk content-store layout, so both the flat and
+// the sharded layouts work without a mapping table.
 func (s *S3SnapshotStore) Push(ctx context.Context, workerDir, tmpDir string) error {
 	if _, err := os.Stat(workerDir); err != nil {
 		return fmt.Errorf("stat %s: %w", workerDir, err)
 	}
 
-	digests, err := walkContentStore(workerDir)
-	if err != nil {
-		return err
-	}
-	uploaded, skipped := 0, 0
-	for _, digest := range digests {
-		if err := s.uploadBlob(ctx, workerDir, digest); err != nil {
-			s.logger.WithError(err).WithField("digest", digest).Warn("worker snapshot: blob upload failed; skipping")
-			skipped++
-			continue
-		}
-		uploaded++
-	}
-
+	// Tar the metadata FIRST: the captured metadata can only reference blobs
+	// that already exist, so the walk below is guaranteed to see every blob
+	// the metadata references. Tarring after the walk would let the engine
+	// create a referenced blob mid-push that the walk never uploaded, which
+	// would poison the next restore.
 	if err := os.MkdirAll(tmpDir, 0o750); err != nil {
 		return fmt.Errorf("prepare tmp dir: %w", err)
 	}
@@ -164,6 +159,39 @@ func (s *S3SnapshotStore) Push(ctx context.Context, workerDir, tmpDir string) er
 	if err != nil {
 		return fmt.Errorf("tar %s: %w", workerDir, err)
 	}
+
+	blobs, err := walkContentStore(workerDir)
+	if err != nil {
+		return err
+	}
+
+	uploaded, skipped, failed := 0, 0, 0
+	for _, blob := range blobs {
+		up, err := s.uploadBlob(ctx, workerDir, blob)
+		if err != nil {
+			s.logger.WithError(err).WithField("digest", blob.Digest).Warn("worker snapshot: blob upload failed; not publishing metadata")
+			failed++
+			continue
+		}
+		if up {
+			uploaded++
+		} else {
+			skipped++
+		}
+	}
+
+	// Safety property: never publish a metadata tarball whose blobs are not
+	// all in S3. A failed/vanished blob keeps the previous snapshot (and its
+	// blobs) consistent; the next periodic push retries.
+	if failed > 0 {
+		s.logger.WithFields(logrus.Fields{
+			"bucket": s.bucket, "prefix": s.prefix,
+			"blobs_total": len(blobs), "blobs_uploaded": uploaded,
+			"blobs_skipped": skipped, "blobs_failed": failed,
+		}).Warn("worker snapshot: metadata not published; previous snapshot kept")
+		return fmt.Errorf("worker snapshot: %d of %d content blobs unavailable; metadata not pushed", failed, len(blobs))
+	}
+
 	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
 		return fmt.Errorf("rewind temp: %w", err)
 	}
@@ -175,48 +203,46 @@ func (s *S3SnapshotStore) Push(ctx context.Context, workerDir, tmpDir string) er
 
 	s.logger.WithFields(logrus.Fields{
 		"bucket": s.bucket, "prefix": s.prefix, "meta_digest": metaDigest,
-		"blobs_uploaded": uploaded, "blobs_skipped": skipped, "meta_size": metaSize,
+		"blobs_uploaded": uploaded, "blobs_skipped": skipped, "blobs_failed": failed,
+		"meta_size": metaSize,
 	}).Info("worker snapshot pushed to s3")
 	return nil
 }
 
 // uploadBlob uploads one content blob unless the object already exists
 // (content-addressed keys make uploads idempotent). A blob deleted by BuildKit
-// GC between the walk and the upload is skipped silently (DEBUG).
-func (s *S3SnapshotStore) uploadBlob(ctx context.Context, workerDir, digest string) error {
-	key, err := s.blobKey(digest)
-	if err != nil {
-		return err
-	}
+// GC between the walk and the upload returns errBlobVanished so Push refuses
+// to publish metadata that references it.
+func (s *S3SnapshotStore) uploadBlob(ctx context.Context, workerDir string, blob contentBlob) (uploaded bool, err error) {
+	// Mirror the on-disk layout under the prefix, minus the "content/"
+	// component: blobs/sha256/<hex> (flat) or blobs/sha256/<2>/<hex>
+	// (sharded).
+	key := s.prefix + strings.TrimPrefix(blob.RelPath, "content/")
 	if _, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{}); err == nil {
-		return nil // already present
+		return false, nil // already present
 	} else if !isNoSuchKey(err) {
-		return fmt.Errorf("stat %s: %w", key, err)
+		return false, fmt.Errorf("stat %s: %w", key, err)
 	}
 
-	rel, err := blobRelPath(digest)
-	if err != nil {
-		return err
-	}
-	path := filepath.Join(workerDir, rel)
-	f, err := os.Open(path) // #nosec G304 -- path is derived from the validated digest.
+	blobPath := filepath.Join(workerDir, blob.RelPath)
+	f, err := os.Open(blobPath) // #nosec G304 -- path is a blob path recorded by walkContentStore under the worker dir.
 	if os.IsNotExist(err) {
-		s.logger.WithField("digest", digest).Debug("worker snapshot: blob vanished before upload (BuildKit GC); skipping")
-		return nil
+		s.logger.WithField("digest", blob.Digest).Debug("worker snapshot: blob vanished before upload (BuildKit GC)")
+		return false, fmt.Errorf("%w: %s", errBlobVanished, blob.Digest)
 	}
 	if err != nil {
-		return fmt.Errorf("open %s: %w", path, err)
+		return false, fmt.Errorf("open %s: %w", blobPath, err)
 	}
 	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
-		return fmt.Errorf("stat %s: %w", path, err)
+		return false, fmt.Errorf("stat %s: %w", blobPath, err)
 	}
 	if _, err := s.client.PutObject(ctx, s.bucket, key, f, info.Size(), minio.PutObjectOptions{}); err != nil {
-		return fmt.Errorf("put %s: %w", key, err)
+		return false, fmt.Errorf("put %s: %w", key, err)
 	}
-	return nil
+	return true, nil
 }
 
 // Pull downloads the metadata tarball and the missing content blobs from the
@@ -256,12 +282,14 @@ func (s *S3SnapshotStore) Pull(ctx context.Context, dstDir string) (bool, error)
 
 // downloadMissingBlobs lists the version prefix's content blobs and downloads
 // those not already present locally. workerDir is the absolute worker dir the
-// content store lives under. Objects missing from S3 (reclaimed by a
-// lifecycle policy) are skipped with a DEBUG log — the engine re-downloads
-// them from the remote cache on next use.
+// content store lives under. The listing prefix is "blobs/" so both the flat
+// and sharded layouts are covered: every object key maps 1:1 to the local
+// path it mirrors under content/. A blob that was listed but is gone by the
+// time it is fetched fails the pull, so the caller discards the torn restore
+// instead of restoring metadata that references a missing blob.
 func (s *S3SnapshotStore) downloadMissingBlobs(ctx context.Context, workerDir string) error {
 	for info := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
-		Prefix:    s.prefix + domain.BlobsPrefix,
+		Prefix:    s.prefix + s3BlobsDir,
 		Recursive: true,
 	}) {
 		if info.Err != nil {
@@ -278,74 +306,39 @@ func (s *S3SnapshotStore) downloadMissingBlobs(ctx context.Context, workerDir st
 }
 
 // downloadBlob restores one content blob object unless a file already exists
-// at the expected local path (existence is trusted by path — re-hashing large
-// blobs would be too expensive for a restore). Blob keys have the shape
-// <prefix>/blobs/sha256/<first-two-hex>/<full-hex>.
+// at its mirrored local path (existence is trusted by path — re-hashing large
+// blobs would be too expensive for a restore). The S3 key mirrors the
+// on-disk content store under a "blobs/" listing prefix, so the local path is
+// workerDir/content/<key minus the version prefix> for both layouts.
 func (s *S3SnapshotStore) downloadBlob(ctx context.Context, key, workerDir string) error {
-	relKey, ok := strings.CutPrefix(key, s.prefix+domain.BlobsPrefix)
+	relKey, ok := strings.CutPrefix(key, s.prefix)
 	if !ok {
 		s.logger.WithField("key", key).Debug("worker snapshot: unexpected blob key; skipping")
 		return nil
 	}
-	shard, hex, ok := strings.Cut(relKey, "/")
-	if !ok || !validContentHex(hex) || shard != hex[:2] {
+	if !validContentHex(path.Base(relKey)) {
 		s.logger.WithField("key", key).Debug("worker snapshot: unexpected blob key; skipping")
 		return nil
 	}
-	digest := fmt.Sprintf("sha256:%s", hex)
-	rel, err := blobRelPath(digest)
-	if err != nil {
-		s.logger.WithField("key", key).Debug("worker snapshot: unexpected blob key; skipping")
-		return nil
-	}
-	path := filepath.Join(workerDir, rel)
-	if _, err := os.Stat(path); err == nil {
+	localPath := filepath.Join(workerDir, "content", filepath.FromSlash(relKey))
+	if _, err := os.Stat(localPath); err == nil {
 		return nil
 	}
 
 	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		if isNoSuchKey(err) {
-			s.logger.WithField("digest", digest).Debug("worker snapshot: blob missing from s3; skipping")
-			return nil
+			return fmt.Errorf("blob %s vanished from s3 after listing: %w", key, err)
 		}
 		return fmt.Errorf("get %s: %w", key, err)
 	}
 	defer func() { _ = obj.Close() }()
 
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return fmt.Errorf("mkdir %s: %w", filepath.Dir(path), err)
+	if err := os.MkdirAll(filepath.Dir(localPath), 0o750); err != nil {
+		return fmt.Errorf("mkdir %s: %w", filepath.Dir(localPath), err)
 	}
-	if err := writeTarFile(path, 0o600, obj); err != nil {
+	if err := writeTarFile(localPath, 0o600, obj); err != nil {
 		return err
-	}
-	return nil
-}
-
-// CleanupSelf deletes all objects under this version's prefix. Called on
-// sidecar startup before the first push so old blobs from previous pushes do
-// not accumulate across restarts (D5).
-func (s *S3SnapshotStore) CleanupSelf(ctx context.Context) error {
-	removed := 0
-	for info := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{
-		Prefix:    s.prefix,
-		Recursive: true,
-	}) {
-		if info.Err != nil {
-			return fmt.Errorf("list %s: %w", s.prefix, info.Err)
-		}
-		if err := ctx.Err(); err != nil {
-			return err
-		}
-		if err := s.client.RemoveObject(ctx, s.bucket, info.Key, minio.RemoveObjectOptions{}); err != nil {
-			return fmt.Errorf("remove %s: %w", info.Key, err)
-		}
-		removed++
-	}
-	if removed > 0 {
-		s.logger.WithFields(logrus.Fields{
-			"bucket": s.bucket, "prefix": s.prefix, "removed": removed,
-		}).Info("worker snapshot: startup self-cleanup removed stale objects")
 	}
 	return nil
 }

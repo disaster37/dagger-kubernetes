@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/minio/minio-go/v7"
 
@@ -33,20 +34,26 @@ func TestS3PushPullRoundTrip(t *testing.T) {
 	store := newTestS3SnapshotStore(mock, "v0.20.0")
 
 	src := t.TempDir()
-	writeTestFile(t, filepath.Join(src, "worker", "metadata.db"), 0o600, "bolt-metadata")
-	writeTestFile(t, filepath.Join(src, "worker", "snapshots", "1"), 0o755, "snapshot")
-	blobContentFile(t, filepath.Join(src, "worker"), "blob-aa")
-	blobContentFile(t, filepath.Join(src, "worker"), "blob-bb")
+	worker := filepath.Join(src, "worker")
+	writeTestFile(t, filepath.Join(worker, "metadata.db"), 0o600, "bolt-metadata")
+	writeTestFile(t, filepath.Join(worker, "snapshots", "1"), 0o755, "snapshot")
+	digestAA := blobContentFile(t, worker, "blob-aa")
+	digestBB := blobContentFile(t, worker, "blob-bb")
 
 	ctx := context.Background()
-	if err := store.Push(ctx, filepath.Join(src, "worker"), t.TempDir()); err != nil {
+	if err := store.Push(ctx, worker, t.TempDir()); err != nil {
 		t.Fatalf("Push: %v", err)
 	}
 
-	// Storage layout: meta.tar.gz + one object per blob under blobs/sha256/.
+	// Storage layout: meta.tar.gz + one flat object per blob
+	// (blobs/sha256/<64-hex>) mirroring the real Dagger v0.19+ content store.
 	keys := mock.keys()
 	prefix := domain.WorkerSnapshotS3Prefix("v0.20.0")
 	metaKey := prefix + domain.MetaTarballName
+	wantBlobKeys := []string{
+		prefix + domain.BlobsPrefix + strings.TrimPrefix(digestAA, "sha256:"),
+		prefix + domain.BlobsPrefix + strings.TrimPrefix(digestBB, "sha256:"),
+	}
 	foundMeta, foundBlobs := false, 0
 	for _, k := range keys {
 		switch {
@@ -61,6 +68,7 @@ func TestS3PushPullRoundTrip(t *testing.T) {
 	if !foundMeta || foundBlobs != 2 {
 		t.Fatalf("layout: meta=%v blobs=%d (keys %v)", foundMeta, foundBlobs, keys)
 	}
+	s3RequireMockObjects(t, mock, wantBlobKeys)
 
 	dst := t.TempDir()
 	ok, err := store.Pull(ctx, dst)
@@ -70,7 +78,7 @@ func TestS3PushPullRoundTrip(t *testing.T) {
 	if !ok {
 		t.Fatal("Pull ok=false, want true")
 	}
-	assertTreeEqual(t, src, dst, "worker")
+	assertTreeEqual(t, src, dst)
 }
 
 func TestS3PullNoSnapshots(t *testing.T) {
@@ -85,49 +93,54 @@ func TestS3PullNoSnapshots(t *testing.T) {
 	}
 }
 
-func TestS3CleanupSelf(t *testing.T) {
+func TestS3PushVanishedBlobAbortsMeta(t *testing.T) {
 	mock := newMockS3ObjectStore()
 	store := newTestS3SnapshotStore(mock, "v0.20.0")
 
-	src := t.TempDir()
-	writeTestFile(t, filepath.Join(src, "worker", "metadata.db"), 0o600, "bolt")
-	blobContentFile(t, filepath.Join(src, "worker"), "blob-aa")
-	if err := store.Push(context.Background(), filepath.Join(src, "worker"), t.TempDir()); err != nil {
-		t.Fatalf("Push: %v", err)
-	}
-	if len(mock.keys()) == 0 {
-		t.Fatal("push stored nothing")
-	}
+	// A previous consistent snapshot is already published.
+	metaKey := domain.WorkerSnapshotS3Prefix("v0.20.0") + domain.MetaTarballName
+	mock.setObject(metaKey, []byte("previous-meta"), time.Now())
 
-	if err := store.CleanupSelf(context.Background()); err != nil {
-		t.Fatalf("CleanupSelf: %v", err)
+	src := t.TempDir()
+	worker := filepath.Join(src, "worker")
+	writeTestFile(t, filepath.Join(worker, "metadata.db"), 0o600, "bolt")
+	digest := blobContentFile(t, worker, "soon-gone")
+	hex := strings.TrimPrefix(digest, "sha256:")
+	blobPath := filepath.Join(worker, "content", "blobs", "sha256", hex)
+	key := domain.WorkerSnapshotS3Prefix("v0.20.0") + domain.BlobsPrefix + hex
+	// BuildKit GC collects the blob after the walk saw it: the injected
+	// client removes the local file when uploadBlob stats the object.
+	store.client = &vanishOnStatS3{mockS3ObjectStore: mock, vanishKey: key, vanishPath: blobPath}
+
+	// A blob the walk saw but BuildKit GC deleted must abort the metadata
+	// push: the previous snapshot stays intact instead of a metadata-only
+	// poisoning snapshot being published.
+	if err := store.Push(context.Background(), worker, t.TempDir()); err == nil {
+		t.Fatal("Push = nil, want error (vanished blob must abort the metadata push)")
 	}
-	if got := mock.keys(); len(got) != 0 {
-		t.Fatalf("prefix not empty after CleanupSelf: %v", got)
+	got, ok := mock.objects[metaKey]
+	if !ok {
+		t.Fatal("previous meta.tar.gz disappeared")
+	}
+	if string(got.data) != "previous-meta" {
+		t.Fatalf("meta.tar.gz = %q, want the previous snapshot untouched", got.data)
 	}
 }
 
-func TestS3PushSkipsGCdBlob(t *testing.T) {
-	mock := newMockS3ObjectStore()
-	store := newTestS3SnapshotStore(mock, "v0.20.0")
+// vanishOnStatS3 simulates BuildKit GC racing the push: when uploadBlob
+// stats the configured blob key, the local file is deleted before os.Open.
+type vanishOnStatS3 struct {
+	*mockS3ObjectStore
+	vanishKey  string
+	vanishPath string
+}
 
-	src := t.TempDir()
-	writeTestFile(t, filepath.Join(src, "worker", "metadata.db"), 0o600, "bolt")
-	worker := filepath.Join(src, "worker")
-	digest := blobContentFile(t, worker, "soon-gone")
-	hex := strings.TrimPrefix(digest, "sha256:")
-	if err := os.Remove(filepath.Join(worker, "content", "blobs", "sha256", hex[:2], hex)); err != nil {
-		t.Fatalf("remove: %v", err)
+func (v *vanishOnStatS3) StatObject(ctx context.Context, bucket, objectName string, opts minio.StatObjectOptions) (minio.ObjectInfo, error) { //nolint:gocritic // hugeParam: signature must match the minio-go API
+	info, err := v.mockS3ObjectStore.StatObject(ctx, bucket, objectName, opts)
+	if objectName == v.vanishKey {
+		_ = os.Remove(v.vanishPath)
 	}
-
-	// The vanished blob must not fail the push: meta.tar.gz still lands.
-	if err := store.Push(context.Background(), worker, t.TempDir()); err != nil {
-		t.Fatalf("Push: %v (GC'd blob must be skipped silently)", err)
-	}
-	metaKey := domain.WorkerSnapshotS3Prefix("v0.20.0") + domain.MetaTarballName
-	if _, ok := mock.objects[metaKey]; !ok {
-		t.Fatal("meta.tar.gz not pushed")
-	}
+	return info, err
 }
 
 func TestS3PullSkipsMissingBlob(t *testing.T) {
@@ -146,7 +159,7 @@ func TestS3PullSkipsMissingBlob(t *testing.T) {
 
 	// The lifecycle policy reclaimed the blob; pull must skip it.
 	hex := strings.TrimPrefix(digest, "sha256:")
-	delete(mock.objects, domain.WorkerSnapshotS3Prefix("v0.20.0")+domain.BlobsPrefix+hex[:2]+"/"+hex)
+	delete(mock.objects, domain.WorkerSnapshotS3Prefix("v0.20.0")+domain.BlobsPrefix+hex)
 
 	dst := t.TempDir()
 	ok, err := store.Pull(ctx, dst)
@@ -160,7 +173,7 @@ func TestS3PullSkipsMissingBlob(t *testing.T) {
 	if err != nil || string(got) != "bolt" {
 		t.Fatalf("metadata.db = %q/%v", got, err)
 	}
-	if _, err := os.Stat(filepath.Join(dst, "worker", "content", "blobs", "sha256", hex[:2], hex)); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(dst, "worker", "content", "blobs", "sha256", hex)); !os.IsNotExist(err) {
 		t.Fatalf("missing blob must not be created: %v", err)
 	}
 }
@@ -179,7 +192,7 @@ func TestS3PullSkipsExistingBlob(t *testing.T) {
 
 	dst := t.TempDir()
 	hex := strings.TrimPrefix(digest, "sha256:")
-	preCreated := filepath.Join(dst, "worker", "content", "blobs", "sha256", hex[:2], hex)
+	preCreated := filepath.Join(dst, "worker", "content", "blobs", "sha256", hex)
 	writeTestFile(t, preCreated, 0o600, "locally-newer-content")
 
 	if ok, err := store.Pull(context.Background(), dst); err != nil || !ok {
@@ -273,25 +286,122 @@ func countFiles(dir string) (int, error) {
 	return count, err
 }
 
-func TestS3PushBlobUploadErrorStillPushesMeta(t *testing.T) {
+func TestS3PushBlobUploadErrorKeepsPreviousMeta(t *testing.T) {
 	mock := newMockS3ObjectStore()
 	store := newTestS3SnapshotStore(mock, "v0.20.0")
+
+	// A previous consistent snapshot is already published.
+	metaKey := domain.WorkerSnapshotS3Prefix("v0.20.0") + domain.MetaTarballName
+	mock.setObject(metaKey, []byte("previous-meta"), time.Now())
 
 	src := t.TempDir()
 	worker := filepath.Join(src, "worker")
 	writeTestFile(t, filepath.Join(worker, "metadata.db"), 0o600, "bolt")
 	blobContentFile(t, worker, "blob-aa")
 
-	// Simulate a transient S3 failure for blob uploads only (the meta PUT
-	// happens after the blob loop, so it succeeds).
+	// Simulate a transient S3 failure for blob uploads: the metadata must
+	// NOT be published (a metadata-only snapshot would poison restores).
 	store.client = &failingPutS3{mockS3ObjectStore: mock, failFirst: 1}
 
-	if err := store.Push(context.Background(), worker, t.TempDir()); err != nil {
-		t.Fatalf("Push: %v (blob upload failures must not fail the push)", err)
+	if err := store.Push(context.Background(), worker, t.TempDir()); err == nil {
+		t.Fatal("Push = nil, want error (failed blob upload must abort the metadata push)")
 	}
-	metaKey := domain.WorkerSnapshotS3Prefix("v0.20.0") + domain.MetaTarballName
-	if _, ok := mock.objects[metaKey]; !ok {
-		t.Fatal("meta.tar.gz not pushed despite the blob upload failure")
+	got, ok := mock.objects[metaKey]
+	if !ok {
+		t.Fatal("previous meta.tar.gz disappeared")
+	}
+	if string(got.data) != "previous-meta" {
+		t.Fatalf("meta.tar.gz = %q, want the previous snapshot untouched", got.data)
+	}
+}
+
+// TestS3PushShardedLayoutRoundTrip proves the store is layout-independent:
+// a worker dir using the legacy sharded content store
+// (content/blobs/sha256/<2>/<hex>) pushes and pulls intact, with S3 keys
+// mirroring the on-disk layout.
+func TestS3PushShardedLayoutRoundTrip(t *testing.T) {
+	mock := newMockS3ObjectStore()
+	store := newTestS3SnapshotStore(mock, "v0.20.0")
+
+	src := t.TempDir()
+	worker := filepath.Join(src, "worker")
+	writeTestFile(t, filepath.Join(worker, "metadata.db"), 0o600, "bolt")
+	hexStr := strings.Repeat("c", 64)
+	writeTestFile(t, filepath.Join(worker, "content", "blobs", "sha256", hexStr[:2], hexStr), 0o644, "sharded-blob")
+
+	ctx := context.Background()
+	if err := store.Push(ctx, worker, t.TempDir()); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+	prefix := domain.WorkerSnapshotS3Prefix("v0.20.0")
+	s3RequireMockObjects(t, mock, []string{prefix + domain.BlobsPrefix + hexStr[:2] + "/" + hexStr})
+
+	dst := t.TempDir()
+	ok, err := store.Pull(ctx, dst)
+	if err != nil {
+		t.Fatalf("Pull: %v", err)
+	}
+	if !ok {
+		t.Fatal("Pull ok=false, want true")
+	}
+	assertTreeEqual(t, src, dst)
+}
+
+// staleListS3 lists one key that the underlying mock no longer holds,
+// simulating a blob reclaimed between the S3 listing and the GetObject.
+type staleListS3 struct {
+	*mockS3ObjectStore
+	staleKey string
+}
+
+func (s *staleListS3) ListObjects(ctx context.Context, bucket string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo { //nolint:gocritic // hugeParam: signature must match the minio-go API
+	ch := make(chan minio.ObjectInfo)
+	go func() {
+		defer close(ch)
+		if strings.HasPrefix(s.staleKey, opts.Prefix) {
+			ch <- minio.ObjectInfo{Key: s.staleKey}
+		}
+		for info := range s.mockS3ObjectStore.ListObjects(ctx, bucket, opts) {
+			ch <- info
+		}
+	}()
+	return ch
+}
+
+// TestS3PullListedBlobVanishedFails proves a blob listed but deleted before
+// its download fails the pull, so the caller discards the torn restore
+// instead of restoring metadata that references a missing blob.
+func TestS3PullListedBlobVanishedFails(t *testing.T) {
+	mock := newMockS3ObjectStore()
+	store := newTestS3SnapshotStore(mock, "v0.20.0")
+
+	src := t.TempDir()
+	worker := filepath.Join(src, "worker")
+	writeTestFile(t, filepath.Join(worker, "metadata.db"), 0o600, "bolt")
+	digest := blobContentFile(t, worker, "blob-aa")
+
+	ctx := context.Background()
+	if err := store.Push(ctx, worker, t.TempDir()); err != nil {
+		t.Fatalf("Push: %v", err)
+	}
+
+	key := domain.WorkerSnapshotS3Prefix("v0.20.0") + domain.BlobsPrefix + strings.TrimPrefix(digest, "sha256:")
+	delete(mock.objects, key)
+	store.client = &staleListS3{mockS3ObjectStore: mock, staleKey: key}
+
+	ok, err := store.Pull(ctx, t.TempDir())
+	if err == nil || ok {
+		t.Fatalf("Pull = %v/%v, want false/error for a listed-then-deleted blob", ok, err)
+	}
+}
+
+// s3RequireMockObjects fails the test when any key is missing from the mock.
+func s3RequireMockObjects(t *testing.T, mock *mockS3ObjectStore, keys []string) {
+	t.Helper()
+	for _, key := range keys {
+		if _, ok := mock.objects[key]; !ok {
+			t.Fatalf("expected object %s missing (have %v)", key, mock.keys())
+		}
 	}
 }
 

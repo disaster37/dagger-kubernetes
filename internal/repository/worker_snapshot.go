@@ -148,12 +148,12 @@ func (s *WorkerSnapshotStore) Pull(ctx context.Context, tag, dstDir string) (boo
 // manifest (layer 0 = metadata tarball, layers 1..N = raw content blobs).
 // workerDir is the absolute worker directory (e.g. /var/lib/dagger/worker).
 func (s *WorkerSnapshotStore) PushIncremental(ctx context.Context, tag, workerDir, tmpDir string) error {
-	digests, err := walkContentStore(workerDir)
+	blobs, err := walkContentStore(workerDir)
 	if err != nil {
 		return err
 	}
 
-	blobLayers, err := probeAndUploadMissing(ctx, s.client, s.repo, workerDir, digests, s.concurrency, s.logger)
+	blobLayers, err := probeAndUploadMissing(ctx, s.client, s.repo, workerDir, blobs, s.concurrency, s.logger)
 	if err != nil {
 		return err
 	}
@@ -226,17 +226,17 @@ func (s *WorkerSnapshotStore) PullIncremental(ctx context.Context, tag, dstDir, 
 		return false, fmt.Errorf("untar snapshot: %w", err)
 	}
 
-	digests := make([]string, 0, len(manifest.Layers)-1)
+	blobs := make([]contentBlob, 0, len(manifest.Layers)-1)
 	for _, layer := range manifest.Layers[1:] {
-		digests = append(digests, layer.Digest)
+		blobs = append(blobs, contentBlob{Digest: layer.Digest})
 	}
 	blobBase := filepath.Join(dstDir, workerSubdir)
-	if err := downloadMissingBlobs(ctx, s.client, s.repo, blobBase, digests, s.logger); err != nil {
+	if err := downloadMissingBlobs(ctx, s.client, s.repo, blobBase, blobs, s.logger); err != nil {
 		return false, err
 	}
 
 	s.logger.WithFields(logrus.Fields{
-		"repo": s.repo, "tag": tag, "blobs": len(digests), "dst": dstDir,
+		"repo": s.repo, "tag": tag, "blobs": len(blobs), "dst": dstDir,
 	}).Info("worker snapshot restored (incremental)")
 	return true, nil
 }

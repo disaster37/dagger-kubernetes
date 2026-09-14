@@ -20,8 +20,7 @@ type mockS3ObjectStore struct {
 	objects map[string]mockS3Object
 	nowFunc func() time.Time
 
-	putErr    error // injected PutObject failure
-	removeErr error // injected RemoveObject failure
+	putErr error // injected PutObject failure
 }
 
 type mockS3Object struct {
@@ -71,16 +70,6 @@ func (m *mockS3ObjectStore) StatObject(_ context.Context, _, objectName string, 
 		return minio.ObjectInfo{}, errMockNoSuchKey(objectName)
 	}
 	return minio.ObjectInfo{Key: objectName, Size: int64(len(obj.data)), LastModified: obj.lastModified}, nil
-}
-
-func (m *mockS3ObjectStore) RemoveObject(_ context.Context, _, objectName string, _ minio.RemoveObjectOptions) error { //nolint:gocritic // hugeParam: signature must match the minio-go API
-	if m.removeErr != nil {
-		return m.removeErr
-	}
-	m.mu.Lock()
-	delete(m.objects, objectName)
-	m.mu.Unlock()
-	return nil
 }
 
 func (m *mockS3ObjectStore) ListObjects(_ context.Context, _ string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo { //nolint:gocritic // hugeParam: signature must match the minio-go API

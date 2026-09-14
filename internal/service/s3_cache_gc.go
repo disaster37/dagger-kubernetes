@@ -37,8 +37,9 @@ func (m minioSweeperAPI) ListObjects(ctx context.Context, bucketName string, opt
 // remote-cache prefix, checks each object's own LastModified timestamp (no
 // VictoriaMetrics hit counters needed), and deletes the objects older than
 // MaxAge. The worker-snapshot and CLI-cache prefixes live outside the cache
-// prefix and are never touched — they have their own cleanup mechanisms
-// (startup self-cleanup + bucket lifecycle policies).
+// prefix and are never touched: the snapshot store overwrites in place and
+// relies on bucket lifecycle policies, and the CLI cache uses immutable
+// versioned keys.
 type S3CacheGC struct {
 	client     s3SweeperAPI
 	bucket     string
