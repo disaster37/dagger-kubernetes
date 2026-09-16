@@ -401,6 +401,7 @@ inline comments. The sections below summarise the most important ones.
 | `auth.cookie`   | `access_name` / `refresh_name`            | `dagger_kubernetes_access` / `dagger_kubernetes_refresh` | httpOnly session-cookie names (SPA auth).                                                                                                     |
 |                 | `secure`                                  | `false`                                                  | Force the `Secure` flag on session cookies (TLS-terminating proxy).                                                                           |
 | `auth.cors`     | `allowed_origins`                         | `[]` (same-origin)                                       | Exact-match `Origin` allowlist; empty = no `Access-Control-Allow-Origin`.                                                                     |
+| `attribution`   | `project_mappings`                        | `[]`                                                     | Ordered `{pattern, group}` rules mapping a project name (CI repo slug) to an existing supervisor group at OTLP ingest (first-match-wins; empty = disabled). |
 | `database`      | `dir`                                     | `/var/lib/dagger-kubernetes`                             | Raft data dir: `raft.db`, `snapshots/`, `node-id`. Fresh-start store (no migration).                                                          |
 | `raft`          | `node_id`                                 | `""` (auto-generated)                                    | Stable Raft node ID (persisted at `<dir>/node-id`).                                                                                           |
 |                 | `bind_addr`                               | `:8081`                                                  | Dedicated Raft transport port.                                                                                                                |
@@ -1161,12 +1162,44 @@ be able to provision engines until manually assigned to a group.
   `group_mappings` carry the configured default
   `auth.oauth.mapped_group_max_runner_sessions` (0 = unlimited).
 - **Projects** (CI pipelines identified by repo slug) are assigned to groups
-  manually (admin UI), pre-created, or auto-matched by the first group (by id
-  order) whose `auto_assign_pattern` matches the project name.
+  with this precedence (highest first): (1) an explicit assignment (admin UI /
+  API) is never touched; (2) a matching `attribution.project_mappings` rule is
+  authoritative; (3) otherwise the first group (by id order) whose
+  `auto_assign_pattern` matches the project name. Assignment is set-once: once a
+  project has a group, later ingests do not re-evaluate it.
 - **Quota**: a group's active sessions = active leases of all its members. A
   multi-group user's session counts against EACH of their groups. Admission to
   `POST /v1/engines` requires ≥1 group with `agent_available=true` and
   remaining capacity; admins bypass. Users with no groups get 403.
+
+### Config-driven project → group mapping
+
+`attribution.project_mappings` is a Helm-settable, ordered list of
+`{pattern, group}` rules that maps a project name (CI repo slug) to a
+supervisor group at OTLP ingest. It is the declarative counterpart to a
+group's per-group `auto_assign_pattern` (admin API/UI only).
+
+```yaml
+attribution:
+  project_mappings:
+    - pattern: '^github\.com/acme/.*'   # Go regexp vs project name (case-sensitive; (?i) opts in)
+      group: 'acme'                      # literal target supervisor group name (must exist)
+```
+
+- **First-match-wins**: rules are applied in config order; the first matching
+  rule wins. Multiple matches are not ambiguous.
+- **Unanchored, case-sensitive**: Go `regexp` `MatchString` semantics. Always
+  anchor (`^...$`) or a pattern also matches longer names; use `(?i)` for
+  case-insensitive matching.
+- **Authoritative when matched**: if a rule matches but its target group does
+  not exist, the project is skipped with a WARN — it does **not** fall through
+  to `auto_assign_pattern`. Target groups are never auto-created; create them in
+  the same Helm change.
+- **Complement, not replace**: config mappings run before `auto_assign_pattern`;
+  an empty list (the default) leaves existing behavior unchanged.
+- **Ingest-only, not retroactive**: mapping applies only to projects whose
+  `group_id` is empty at OTLP ingest. Already-assigned projects are never
+  re-mapped; existing unassigned projects are re-evaluated on their next ingest.
 
 ### Trace visibility
 

@@ -64,6 +64,9 @@ data:
       cors:
         allowed_origins:
 {{ toYaml .Values.auth.cors.allowedOrigins | indent 10 }}
+    attribution:
+      project_mappings:
+{{ toYaml .Values.supervisor.config.attribution.projectMappings | indent 8 }}
     database:
       dir: "/var/lib/dagger-kubernetes"
     raft:

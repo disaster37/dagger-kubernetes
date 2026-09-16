@@ -15,15 +15,23 @@ import (
 // OTLP ingest. All operations are best-effort: errors are logged and never
 // returned, so ingest never breaks telemetry forwarding.
 type AttributionService struct {
-	projects  *ProjectService
-	groups    domain.GroupRepository
-	traceMeta domain.TraceMetaRepository
-	logger    *logrus.Logger
+	projects      *ProjectService
+	groups        domain.GroupRepository
+	traceMeta     domain.TraceMetaRepository
+	logger        *logrus.Logger
+	projectMapper *ProjectMapper
 }
 
 // NewAttributionService returns an AttributionService.
 func NewAttributionService(projects *ProjectService, groups domain.GroupRepository, traceMeta domain.TraceMetaRepository, logger *logrus.Logger) *AttributionService {
 	return &AttributionService{projects: projects, groups: groups, traceMeta: traceMeta, logger: logger}
+}
+
+// SetProjectMapper wires the optional config-driven project→group mapper. A nil
+// or inactive mapper disables the feature (backward compatible). Mirrors the
+// AuthService.SetOAuthRevalidator optional-dependency pattern.
+func (a *AttributionService) SetProjectMapper(m *ProjectMapper) {
+	a.projectMapper = m
 }
 
 // Provision records trace_id -> user_id (plus the engine version) at engine
@@ -79,7 +87,7 @@ func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo
 		} else {
 			groupID = proj.GroupID
 			if groupID == "" {
-				groupID = a.autoAssign(ctx, proj)
+				groupID = a.resolveGroup(ctx, proj)
 			}
 		}
 	}
@@ -118,6 +126,49 @@ func (a *AttributionService) MarkFailed(ctx context.Context, traceID, reason str
 		return false
 	}
 	return transitioned
+}
+
+// resolveGroup assigns proj to a group via, in order: config project_mappings
+// (first-match-wins, authoritative when matched), then per-group
+// AutoAssignPattern. Returns the group id, or "" when nothing matches.
+func (a *AttributionService) resolveGroup(ctx context.Context, proj *domain.Project) string {
+	if a.projectMapper.Active() {
+		if groupID, matched := a.mappingAssign(ctx, proj); matched {
+			return groupID
+		}
+	}
+	return a.autoAssign(ctx, proj)
+}
+
+// mappingAssign resolves proj.Name against projectMapper. Returns (groupID,
+// matched). matched=false only when no rule matched (caller falls through to
+// autoAssign). matched=true with empty groupID means a rule matched but the
+// target group is missing (skipped; caller must NOT fall through).
+func (a *AttributionService) mappingAssign(ctx context.Context, proj *domain.Project) (string, bool) {
+	name, matched := a.projectMapper.Map(proj.Name)
+	if !matched {
+		return "", false
+	}
+	g, err := a.groups.GetByName(ctx, name)
+	if err != nil {
+		a.logger.WithError(err).WithFields(logrus.Fields{
+			"project_id": proj.ID,
+			"project":    proj.Name,
+			"group":      name,
+		}).Warn("attribution: project_mappings target group not found, skipping")
+		return "", true
+	}
+	if _, err := a.projects.Assign(ctx, proj.ID, g.ID); err != nil {
+		// The trace is still attributed; only the persistence failed.
+		a.logger.WithError(err).WithField("project_id", proj.ID).Warn("attribution: project_mappings persist failed")
+	}
+	a.logger.WithFields(logrus.Fields{
+		"project_id": proj.ID,
+		"project":    proj.Name,
+		"group":      name,
+		"group_id":   g.ID,
+	}).Info("attribution: project_mappings assigned")
+	return g.ID, true
 }
 
 // autoAssign finds the first group (by id order) whose AutoAssignPattern

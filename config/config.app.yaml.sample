@@ -344,6 +344,26 @@ cli:
     github_token: ""                  # optional; set via DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN (raises rate limit).
   ci_wrapper_path: "/usr/local/bin/dagger-kubernetes-ci"  # path to the pre-built CI wrapper binary served at /api/v1/cli/ci-wrapper/latest.
 
+# --- Project → group attribution ---------------------------------------------
+# Config-driven mapping of a project name (CI repo slug, e.g.
+# "github.com/acme/api") to a supervisor group name, applied at OTLP ingest.
+# This is the declarative counterpart to a group's per-group
+# auto_assign_pattern (set via the admin API/UI). Precedence, highest first:
+#   1. explicit project assignment (project.group_id already set) — never touched;
+#   2. attribution.project_mappings — when a rule matches it is authoritative:
+#      if its target group is missing the project is skipped (no fallthrough);
+#   3. per-group auto_assign_pattern — runs only when no config rule matches.
+# Rules are ordered and first-match-wins. Patterns are Go regexps matched
+# against the project name, case-sensitive ((?i) opts in); always anchor
+# (^...$) or a pattern also matches longer names. The target group is a literal
+# name (no capture substitution) and must already exist — missing targets are
+# skipped with a WARN, never auto-created. An empty list (the default) disables
+# the feature and leaves auto_assign_pattern behavior unchanged.
+attribution:
+  project_mappings: []               # ordered list of {pattern, group}; empty = disabled.
+    # - pattern: '^github\.com/acme/.*'   # Go regexp vs project name (case-sensitive; (?i) opt-in).
+    #   group: 'acme'                      # literal target supervisor group name (must exist).
+
 # --- Logging -----------------------------------------------------------------
 log_level: "info"    # debug | info | warn | error
 log_format: "json"   # json | text — the supervisor's own log format.

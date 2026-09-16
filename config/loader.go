@@ -58,6 +58,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.revalidate_fail_open", false)
 	v.SetDefault("auth.oauth.session_max_age", 0)
 
+	v.SetDefault("attribution.project_mappings", []domain.ProjectMappingRule{})
+
 	v.SetDefault("auth.jwt.secret", "")
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)
 	v.SetDefault("auth.jwt.refresh_ttl", 168*time.Hour) // 7d
@@ -246,6 +248,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateGroupMappings(&cfg); err != nil {
 		return nil, fmt.Errorf("validate group mappings: %w", err)
+	}
+
+	if err := validateProjectMappings(&cfg); err != nil {
+		return nil, fmt.Errorf("validate project mappings: %w", err)
 	}
 
 	if err := validateOAuthGroupMappingDefaultLimit(&cfg); err != nil {
@@ -619,6 +625,27 @@ func validateGroupMappings(cfg *domain.Config) error {
 		}
 	}
 
+	return nil
+}
+
+// validateProjectMappings fails fast on invalid config-driven project → group
+// mapping rules: each rule needs a non-empty pattern that compiles as a Go
+// regexp, and a non-empty target group. Errors name the offending config path
+// and regex. Group-name charset/length is deliberately NOT validated here (the
+// config package does not import service); cmd/api warns about invalid names at
+// startup and a runtime lookup of an invalid name simply misses.
+func validateProjectMappings(cfg *domain.Config) error {
+	for i, rule := range cfg.Attribution.ProjectMappings {
+		if rule.Pattern == "" {
+			return fmt.Errorf("attribution.project_mappings[%d].pattern must not be empty", i)
+		}
+		if _, err := regexp.Compile(rule.Pattern); err != nil {
+			return fmt.Errorf("attribution.project_mappings[%d].pattern %q: %w", i, rule.Pattern, err)
+		}
+		if rule.Group == "" {
+			return fmt.Errorf("attribution.project_mappings[%d].group must not be empty", i)
+		}
+	}
 	return nil
 }
 

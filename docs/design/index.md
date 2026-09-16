@@ -42,3 +42,4 @@ the decision.
 | 033  | [Local image cache (Zot on-demand mirror)](ADR-033-local-image-mirror.md) |
 | 034  | [Admin image-cache management (list / prune / prune-all)](ADR-034-admin-image-cache-management.md) |
 | 035  | [OAuth group-mapping auto-creates missing groups with a default engine limit](ADR-035-oauth-group-mapping-auto-create.md) |
+| 036  | [Config-driven project → group mapping](ADR-036-config-project-group-mapping.md) |

@@ -685,6 +685,7 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.cli.upstream.releasesUrl` | string | `"https://api.github.com/repos/dagger/dagger/releases"` | Release discovery URL (mirror-able). |
 | `supervisor.config.cli.upstream.downloadBase` | string | `"https://github.com/dagger/dagger/releases/download"` | Tarball + checksums.txt base URL (mirror-able). |
 | `supervisor.config.cli.upstream.githubToken` | string | `""` | Optional GitHub token for the releases API (set via `DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN` or `supervisor.extraEnv`). |
+| `supervisor.config.attribution.projectMappings` | array | `[]` | Ordered list of `{pattern, group}` mapping a project name (CI repo slug; Go regexp, case-sensitive) to a supervisor group name. First-match-wins; no match falls through to per-group `auto_assign_pattern`; empty = disabled. Target groups must already exist. |
 | `supervisor.config.logLevel` | string | `"info"` | Supervisor log level. |
 | `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
 | `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |
