@@ -48,8 +48,11 @@ pre-upgrade users until their next login.
 - Every successful login/revalidation logs
   `oauth: group mapping applied` (INFO) with `user_id`, `oauth_provider`,
   `upstream_groups`, `mapped_groups`, `oauth_group_ids` — the full
-  arrived → mapped → joined chain in one line. The existing per-group Warn
-  (`oauth: group not found, skipping`) remains the missing-group signal.
+  arrived → mapped → joined chain in one line. A mapped target that did not
+  exist is auto-created (ADR-035) and logged separately as
+  `oauth: auto-created mapped group` (INFO) with the group name and quota; the
+  per-group Warn (`oauth: group not found, skipping`) now only signals a missing
+  `default_group` fallback.
 - Startup (cmd/api) warns for each `group_mappings` rule whose replacement has
   no `$` capture reference **and** is not a valid supervisor group name (via
   the exported `service.ValidateGroupName`): such a replacement can never

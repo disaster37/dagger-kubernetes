@@ -583,6 +583,8 @@ auth:
     #   - pattern: '^ldap/(.+)$'
     #     replacement: '$1'
     defaultGroup: ""
+    ## @param auth.oauth.mappedGroupMaxRunnerSessions Default max_runner_sessions (concurrent engine sessions; 0 = unlimited) applied to supervisor groups auto-created by groupMappings. Applied only at creation time; never overwrites an existing group's quota.
+    mappedGroupMaxRunnerSessions: 0
     ## @param auth.oauth.adminGroups Upstream IdP group names that grant RoleAdmin on login/revalidation (exact, case-sensitive). Empty = disabled.
     adminGroups: []
     # adminGroups example (OIDC groups that auto-promote to admin):
@@ -612,6 +614,7 @@ auth:
 #     groupMappings:
 #       - pattern: '^acme$'
 #         replacement: 'acme-all'
+#     mappedGroupMaxRunnerSessions: 4   # optional: cap auto-created mapped groups
 #
 # ---- Generic OIDC example (Dex) ---------------------------------------
 # auth:
@@ -631,6 +634,7 @@ auth:
 #     groupMappings:
 #       - pattern: '^dex:dev-(.*)$'
 #         replacement: 'dev-$1'
+#     mappedGroupMaxRunnerSessions: 4   # optional: cap auto-created mapped groups
 
 ## @section TLS and certificates
 

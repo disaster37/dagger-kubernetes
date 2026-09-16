@@ -37,7 +37,8 @@ auth:
     allowed_orgs: []                          # github: org membership allowlist; oidc: deprecated alias for allowed_groups; empty = allow all.
     allowed_teams: []                         # github only: "org/team" slug allowlist; empty = allow all. AND-ed with allowed_orgs when both set.
     allowed_groups: []                        # oidc only: groups-claim allowlist (canonical); union with allowed_orgs; empty = allow all.
-    group_mappings: []                        # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
+    group_mappings: []                        # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping). Targets are auto-created when missing.
+    mapped_group_max_runner_sessions: 0       # default max_runner_sessions (concurrent engine sessions) for groups AUTO-CREATED by group_mappings; 0 = unlimited. Applied only at creation time; never overwrites an existing group's quota.
     default_group: ""                         # new OAuth users auto-join this group (must exist); empty = none.
     admin_groups: []                          # upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, pre-mapping); empty = disabled.
     cookie_secure: false                      # force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).

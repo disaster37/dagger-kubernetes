@@ -389,6 +389,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `allowed_teams`                           | `[]`                                                     | GitHub only: `"org/team"` slug allowlist (empty = allow all). AND-ed with `allowed_orgs` when both set.                                       |
 |                 | `allowed_groups`                          | `[]`                                                     | OIDC only: groups-claim allowlist (canonical). Union with `allowed_orgs`; empty = allow all.                                                  |
 |                 | `group_mappings`                          | `[]`                                                     | Regex provider-group → supervisor-group mapping: list of `{pattern, replacement}` (first-match-wins; no match drops the group; empty = no mapping). |
+|                 | `mapped_group_max_runner_sessions`        | `0`                                                      | Default `max_runner_sessions` (0 = unlimited) for supervisor groups auto-created by `group_mappings`; applied only at creation time.          |
 |                 | `default_group`                           | `""`                                                     | Auto-join group for new OAuth users (must exist); empty = none.                                                                               |
 |                 | `admin_groups`                            | `[]`                                                     | Upstream IdP group names granting the **admin role** on login/revalidation (exact, case-sensitive, checked pre-mapping); empty = disabled.     |
 |                 | `issuer_url`                              | `""`                                                     | OIDC issuer; required for `provider: oidc`.                                                                                                   |
@@ -942,11 +943,17 @@ list of `{pattern, replacement}` rules applied to the upstream provider groups
 (GitHub orgs + `"org/team"` teams; OIDC `groups_claim`). The first matching
 rule produces the supervisor group name (`$1`/`${name}` capture substitution,
 `$$` = literal `$`); a provider group matching no rule is dropped. Mapped names
-are looked up by group name and the user is **added** to those that exist
-(missing groups are skipped with a warning, never auto-created). Membership is
-applied on every login and existing memberships are never removed. An empty
-`group_mappings` list means no mapping and no membership sync — only
-`default_group` auto-join applies.
+are resolved by group name and the user is **added** to them; a mapped target
+group that does not exist is **auto-created** (idempotently, race-safe) with
+`agent_available=true` and `max_runner_sessions` set to
+`auth.oauth.mapped_group_max_runner_sessions` (0 = unlimited). A group that
+already exists is left unchanged — its quota is never overwritten. Membership is
+applied on every login and IdP revalidation; admin-managed memberships are never
+removed, while memberships this feature previously added are reconciled (a
+membership is removed once its mapped group no longer resolves). An empty
+`group_mappings` list means no mapping: no membership is added, and any
+membership this feature previously added is removed (only `default_group`
+auto-join applies).
 
 Important notes:
 
@@ -955,8 +962,11 @@ Important notes:
   literally match gets `group_required`).
 - Mapping assigns **group membership only, never the admin role** — use
   `admin_groups` (below) for role promotion.
-- Mapped target groups must already exist in the supervisor (only `default` is
-  bootstrapped); missing groups are skipped with a warning.
+- Mapped target groups are **auto-created** when missing, with
+  `agent_available=true` and the configured
+  `mapped_group_max_runner_sessions` (0 = unlimited); an existing group is left
+  unchanged. `default_group` is the only group that must pre-exist (it is
+  bootstrapped as `default`).
 - Always anchor mapping patterns (`^...$`): an unanchored pattern also matches
   longer names (prefix match).
 
@@ -996,14 +1006,18 @@ Semantics (ADR-031):
   ignored.
 - `allowed_groups`/`allowed_orgs` run on **raw upstream** names, before
   mapping (see above).
-- Mapped target groups must **already exist** in the supervisor (only
-  `default` is bootstrapped); missing groups are skipped with a Warn log.
+- Mapped target groups are **auto-created** when missing (idempotent, race-safe)
+  with `agent_available=true` and `mapped_group_max_runner_sessions`; an existing
+  group is never modified. A mapped name that is not a valid supervisor group
+  name (e.g. contains a space or exceeds 64 chars) is skipped with a Warn log and
+  is never stored.
 - Mapping grants membership, not the admin role — set `admin_groups` for role
   promotion.
 - Each successful login/revalidation logs
   `oauth: group mapping applied` (INFO) with `upstream_groups` →
   `mapped_groups` → resulting `oauth_group_ids`, which shows exactly what
-  mapped, what joined, and what was skipped.
+  mapped, what joined, and what was skipped. Auto-creation logs
+  `oauth: auto-created mapped group` (INFO) with the group name and quota.
 
 The upstream (provider) group names captured at the last successful
 login/revalidation are persisted on the user and surfaced as `oauth_groups` in
@@ -1143,7 +1157,9 @@ be able to provision engines until manually assigned to a group.
 
 - **Groups** carry `max_runner_sessions` (0 = unlimited),
   `agent_available` (whether engines can be provisioned for the group), and
-  an optional `auto_assign_pattern` regex.
+  an optional `auto_assign_pattern` regex. Groups auto-created by OAuth
+  `group_mappings` carry the configured default
+  `auth.oauth.mapped_group_max_runner_sessions` (0 = unlimited).
 - **Projects** (CI pipelines identified by repo slug) are assigned to groups
   manually (admin UI), pre-created, or auto-matched by the first group (by id
   order) whose `auto_assign_pattern` matches the project name.

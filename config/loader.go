@@ -44,6 +44,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.allowed_teams", []string{})
 	v.SetDefault("auth.oauth.allowed_groups", []string{})
 	v.SetDefault("auth.oauth.group_mappings", []domain.GroupMappingRule{})
+	v.SetDefault("auth.oauth.mapped_group_max_runner_sessions", 0)
 	v.SetDefault("auth.oauth.admin_groups", []string{})
 	v.SetDefault("auth.oauth.default_group", "")
 	v.SetDefault("auth.oauth.cookie_secure", false)
@@ -245,6 +246,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateGroupMappings(&cfg); err != nil {
 		return nil, fmt.Errorf("validate group mappings: %w", err)
+	}
+
+	if err := validateOAuthGroupMappingDefaultLimit(&cfg); err != nil {
+		return nil, fmt.Errorf("validate group mapping default limit: %w", err)
 	}
 
 	if err := validateOAuthAdminGroups(&cfg); err != nil {
@@ -614,6 +619,16 @@ func validateGroupMappings(cfg *domain.Config) error {
 		}
 	}
 
+	return nil
+}
+
+// validateOAuthGroupMappingDefaultLimit rejects a negative default engine
+// limit for auto-created mapped groups. 0 (unlimited) is valid and is the
+// default.
+func validateOAuthGroupMappingDefaultLimit(cfg *domain.Config) error {
+	if cfg.Auth.OAuth.MappedGroupMaxRunnerSessions < 0 {
+		return fmt.Errorf("auth.oauth.mapped_group_max_runner_sessions must be >= 0 (0 = unlimited)")
+	}
 	return nil
 }
 

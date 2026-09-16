@@ -625,6 +625,64 @@ func TestValidateGroupMappings(t *testing.T) {
 	}
 }
 
+func TestValidateOAuthGroupMappingDefaultLimit(t *testing.T) {
+	tests := []struct {
+		name    string
+		limit   int
+		wantErr string
+	}{
+		{name: "zero unlimited", limit: 0},
+		{name: "positive", limit: 3},
+		{name: "negative rejected", limit: -1, wantErr: "auth.oauth.mapped_group_max_runner_sessions must be >= 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &domain.Config{Auth: domain.AuthConfig{OAuth: domain.OAuthConfig{
+				MappedGroupMaxRunnerSessions: tt.limit,
+			}}}
+			err := validateOAuthGroupMappingDefaultLimit(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateOAuthGroupMappingDefaultLimit = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateOAuthGroupMappingDefaultLimit = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateOAuthGroupMappingDefaultLimit = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadMappedGroupMaxRunnerSessions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("server:\n  public_url: \"https://example.com\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	if cfg.Auth.OAuth.MappedGroupMaxRunnerSessions != 0 {
+		t.Fatalf("default mapped_group_max_runner_sessions = %d, want 0", cfg.Auth.OAuth.MappedGroupMaxRunnerSessions)
+	}
+
+	t.Setenv("DAGGER_KUBERNETES_AUTH_OAUTH_MAPPED_GROUP_MAX_RUNNER_SESSIONS", "5")
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load with env = %v, want nil", err)
+	}
+	if cfg.Auth.OAuth.MappedGroupMaxRunnerSessions != 5 {
+		t.Fatalf("env mapped_group_max_runner_sessions = %d, want 5", cfg.Auth.OAuth.MappedGroupMaxRunnerSessions)
+	}
+}
+
 func TestLoadRejectsInvalidGroupMappings(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.app.yaml")
