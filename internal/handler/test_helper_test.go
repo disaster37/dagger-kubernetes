@@ -93,7 +93,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		MaxSessionsPerReplica: 8,
 		ReplicaIdleTTL:        5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
@@ -114,7 +113,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		FleetManager:        fleetManager,
 		Sessions:            sessions,
 		SessionRegistry:     repository.NewSessionRepo(store),
-		CacheBackend:        cacheBackend,
 		VersionResolver:     versionResolver,
 		Auth:                authSvc,
 		InternalAuthEnabled: true,
@@ -133,10 +131,6 @@ func newTestEnv(t *testing.T) *testEnv {
 		Logs:          logsClient,
 		JWT:           jwtSvc,
 		OAuthProvider: "",
-		CacheStatsProvider: &stubCacheStatsProvider{
-			stats: &domain.CacheStats{Backend: "registry", Registry: "cache.reg/dagger-cache", Running: true, Reachable: true},
-		},
-		CachePurger: &stubCachePurger{result: &domain.PurgeResult{}},
 		HistoryStatsProvider: &stubHistoryStatsProvider{
 			stats: &domain.HistoryStats{TraceCount: 0, GC: domain.HistoryGCRules{}},
 		},
@@ -191,26 +185,7 @@ func testTokenEncKey() []byte {
 	return []byte("0123456789abcdef0123456789abcdef")
 }
 
-// --- stub collaborators for cache stats / purge / status handlers ---
-
-type stubCacheStatsProvider struct {
-	stats *domain.CacheStats
-	err   error
-}
-
-func (s *stubCacheStatsProvider) Stats(context.Context) (*domain.CacheStats, error) {
-	return s.stats, s.err
-}
-func (s *stubCacheStatsProvider) GCRules() domain.GCRules { return domain.GCRules{} }
-
-type stubCachePurger struct {
-	result *domain.PurgeResult
-	err    error
-}
-
-func (p *stubCachePurger) Purge(context.Context) (*domain.PurgeResult, error) {
-	return p.result, p.err
-}
+// --- stub collaborators for history/status handlers ---
 
 type stubStatusProvider struct {
 	status *domain.PlatformStatus

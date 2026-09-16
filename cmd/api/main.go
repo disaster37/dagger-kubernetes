@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -72,7 +71,6 @@ func main() {
 				},
 				Action: runMigrateTokens,
 			},
-			cacheSyncCommand(),
 		},
 		Action: run,
 	}
@@ -98,21 +96,6 @@ func run(c *cli.Context) error {
 
 	// The pipeline-view base URL is server.public_url. config.Load already
 	// validated it as an absolute http(s) URL.
-	cacheHost, err := validateCacheConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("validate cache config: %w", err)
-	}
-	// Always resolve the public cache vhost so the emitted cache ref points
-	// at the Supervisor proxy, never the raw S3 store.
-	cfg.Cache.PublicHost = cacheHost
-
-	// The cache vhost is served on the same listener as the control plane, so
-	// its rewritten upload Locations must use the same scheme as server.public_url.
-	// Empty (parse failure / no scheme) means the handler falls back to https.
-	cacheScheme := ""
-	if u, err := url.Parse(cfg.Server.PublicURL); err == nil {
-		cacheScheme = u.Scheme
-	}
 
 	// The k8s clientset is needed early: it selects the TLS provider
 	// (Secret-backed minting CA) and is reused for raft TLS auto-mode and the
@@ -151,13 +134,6 @@ func run(c *cli.Context) error {
 	}
 
 	sessions := service.NewStore(cfg.LeaseTTL)
-
-	cacheBackend := &service.Cache{
-		Type:       "s3",
-		Registry:   cfg.Cache.Registry,
-		PublicHost: cacheHost,
-		S3:         domain.S3Ref{Bucket: cfg.Cache.S3.Bucket, Region: cfg.Cache.S3.Region},
-	}
 
 	metrics := observ.NewMetrics(prometheus.DefaultRegisterer)
 
@@ -281,48 +257,54 @@ func run(c *cli.Context) error {
 		VersionRetention:      cfg.Fleet.VersionRetention,
 	}, logger, metrics)
 
+	// Per-version local-cache purge: prune every running engine pod in-process
+	// (engine dagql API over plaintext TCP). Requires only a clientset + fleet
+	// provider; no CLI subsystem or S3 config.
+	var engineCachePurger domain.EngineCachePurger
+	if clientset != nil && provider != nil {
+		pruner := repository.NewSessionEnginePruner()
+		engineCachePurger = service.NewEngineCachePurgeService(provider, pruner, logger)
+	}
+
 	traces := repository.NewSpanTreeReconstructor(cfg.Telemetry.TempoURL)
 	logsClient := repository.NewLogsClient(cfg.Telemetry.LokiURL)
 
-	// --- Cache stats / status / GC wiring ---
+	// --- History / status wiring ---
 	metricsClient := repository.NewMetricsClient(cfg.Telemetry.VictoriaURL)
 
-	// Shared S3 client for the three S3-backed subsystems (worker-snapshot
-	// store is built per-pod by the sync helper; this client serves the CLI
-	// cache and the cache GC).
+	// Shared S3 client for the S3-backed CLI cache.
 	var s3Client *minio.Client
-	if cfg.Cache.Sync.S3Endpoint == "" {
-		logger.Warn("cache.sync.s3_endpoint is empty; s3-backed CLI cache and cache GC disabled")
+	if cfg.Cache.S3.Endpoint == "" {
+		logger.Warn("cache.s3.endpoint is empty; s3-backed CLI cache disabled")
 	} else {
-		client, err := repository.NewS3Client(cfg.Cache.Sync.S3Endpoint, cfg.Cache.Sync.S3Region, cfg.Cache.Sync.S3AccessKey, cfg.Cache.Sync.S3SecretKey, cfg.Cache.Sync.S3UseSSL)
+		client, err := repository.NewS3Client(cfg.Cache.S3.Endpoint, cfg.Cache.S3.Region, cfg.Cache.S3.AccessKey, cfg.Cache.S3.SecretKey, cfg.Cache.S3.UseSSL)
 		if err != nil {
 			return fmt.Errorf("create s3 client: %w", err)
 		}
 		s3Client = client
 	}
 
-	cacheToken := cfg.Cache.AuthToken
-
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, nil, metricsClient, cfg.Cache.GC, domain.WorkerSnapshotsRepo, logger, metrics)
-
-	// S3CacheGC replaces the registry-based service for purge + GC sweeps.
-	var cachePurger domain.CachePurger = cacheStatsSvc
-	var s3CacheGC *service.S3CacheGC
-	if s3Client != nil {
-		s3CacheGC = service.NewS3CacheGC(s3Client, cfg.Cache.S3.Bucket, domain.S3CachePrefix, cfg.Cache.GC, logger, metrics)
-		cachePurger = s3CacheGC
-	}
-
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
-	statusSvc := service.NewStatusService(cfg, cacheBackend, nil, fleetManager, logger, raftStore)
+	statusSvc := service.NewStatusService(cfg, fleetManager, logger, raftStore)
 	connectSvc := service.NewConnectService(cfg, versionResolver, tokensSvc, logger)
+
+	// Local image cache: admin list/prune of the configured Zot mirrors over
+	// their OCI Distribution v2 API (chart-rendered image_cache.mirrors). Only
+	// built when at least one mirror is configured; no mirrors means the
+	// endpoints report an empty set.
+	var imageCacheSvc domain.ImageCacheService
+	if len(cfg.ImageCache.Mirrors) > 0 {
+		imageCacheSvc = service.NewImageCacheService(cfg.ImageCache.Mirrors, func(addr string) domain.DistributionClient {
+			return repository.NewDistributionClient(addr)
+		}, logger)
+	}
 
 	// --- On-the-fly Dagger CLI provisioning wiring ---
 	var cliSvc *service.CLIService
 	if cfg.CLI.Enabled {
 		// S3 backend: store tarballs in the shared S3 bucket.
 		if s3Client == nil {
-			return fmt.Errorf("cli.enabled requires cache.sync.s3_endpoint")
+			return fmt.Errorf("cli.enabled requires cache.s3.endpoint")
 		}
 		bucket := cfg.CLI.S3Bucket
 		if bucket == "" {
@@ -342,9 +324,6 @@ func run(c *cli.Context) error {
 		ControlAddr:  cfg.Server.ControlAddr,
 		DataAddr:     cfg.Server.DataAddr,
 		DataHost:     cfg.Server.DataHost,
-		CacheHost:    cacheHost,
-		CacheScheme:  cacheScheme,
-		CacheToken:   cacheToken,
 		CollectorURL: cfg.Telemetry.CollectorURL,
 		VictoriaURL:  cfg.Telemetry.VictoriaURL,
 		CertPath:     controlTLSCertPath,
@@ -357,7 +336,6 @@ func run(c *cli.Context) error {
 		FleetManager:         fleetManager,
 		Sessions:             sessions,
 		SessionRegistry:      repository.NewSessionRepo(raftStore),
-		CacheBackend:         cacheBackend,
 		VersionResolver:      versionResolver,
 		Auth:                 authSvc,
 		InternalAuthEnabled:  cfg.Auth.Internal.Enabled,
@@ -376,18 +354,17 @@ func run(c *cli.Context) error {
 		OAuth:                oauthSvc,
 		OAuthProvider:        oauthProvider,
 		JWT:                  jwtSvc,
-		CacheStatsProvider:   cacheStatsSvc,
-		CachePurger:          cachePurger,
+		EngineCachePurger:    engineCachePurger,
 		HistoryStatsProvider: historyPurgeSvc,
 		HistoryPurger:        historyPurgeSvc,
 		StatusProvider:       statusSvc,
 		StartupProvider:      raftStore,
 		Connect:              connectSvc,
-		Router:               nil,
 		LiveHub:              liveHub,
 		Lifecycle:            pipelineLifecycle,
 		CLI:                  cliSvc,
 		CIWrapperPath:        cfg.CLI.CIWrapperPath,
+		ImageCache:           imageCacheSvc,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
@@ -396,16 +373,6 @@ func run(c *cli.Context) error {
 
 	stopStaleSweep := pipelineLifecycle.StartStaleSweep(ctx)
 	defer stopStaleSweep()
-
-	// GC sweeper: the S3-backed GC for the s3 backend (no registry catalog
-	// involved), the registry-based one otherwise. Both no-op when gc is
-	// disabled.
-	var gcSvc interface{ StartGCSweeper(context.Context) func() } = cacheStatsSvc
-	if s3CacheGC != nil {
-		gcSvc = s3CacheGC
-	}
-	stopGC := gcSvc.StartGCSweeper(ctx)
-	defer stopGC()
 
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
@@ -1200,47 +1167,10 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 		Debug:               cfg.Fleet.EngineDebug,
 		LogFormat:           cfg.Fleet.EngineLogFormat,
 		RegistryMirrors:     cfg.Fleet.EngineRegistryMirrors,
-		CacheSync:           cacheSyncConfig(cfg, logger),
+		MirrorHTTP:          cfg.Fleet.EngineRegistryMirrorsHTTP,
 	}
 
 	return repository.NewK8sProvider(clientset, k8sCfg), nil
-}
-
-// cacheSyncConfig resolves the worker-cache-sync settings for the engine
-// fleet from cache.sync.* + the S3 backend + the sync image. Sync is
-// best-effort: it is disabled (with a WARN) whenever a prerequisite is
-// missing, because it must never block the engine pod.
-func cacheSyncConfig(cfg *domain.Config, logger *logrus.Logger) repository.K8sCacheSyncConfig {
-	sync := cfg.Cache.Sync
-	if !sync.Enabled {
-		return repository.K8sCacheSyncConfig{}
-	}
-
-	out := repository.K8sCacheSyncConfig{
-		Image:       cfg.Fleet.EngineCacheSyncImage,
-		Interval:    sync.Interval,
-		QuiesceWait: sync.QuiesceWait,
-		Enabled:     true,
-		OnStart:     sync.OnStart,
-		OnStop:      sync.OnStop,
-	}
-
-	out.S3Endpoint = sync.S3Endpoint
-	out.S3Bucket = sync.S3Bucket
-	if out.S3Bucket == "" {
-		out.S3Bucket = cfg.Cache.S3.Bucket
-	}
-	out.S3Region = sync.S3Region
-	out.S3UseSSL = sync.S3UseSSL
-	// The access key and secret key are resolved from the engine-s3-auth
-	// Secret at render time, never from literal values here.
-
-	if cfg.Fleet.EngineCacheSyncImage == "" {
-		logger.Warn("fleet.engine_cache_sync_image is empty; worker-cache sync disabled (set it to the supervisor image, the Helm chart does this automatically)")
-		return repository.K8sCacheSyncConfig{}
-	}
-
-	return out
 }
 
 // validateFleetEnv rejects engine env configuration that Kubernetes would
@@ -1299,34 +1229,6 @@ func newK8sClientset() (kubernetes.Interface, error) {
 		return nil, fmt.Errorf("create clientset: %w", err)
 	}
 	return clientset, nil
-}
-
-// validateCacheConfig resolves the cache vhost, and fails fast on
-// configuration that would break the proxy (vhost collision).
-func validateCacheConfig(cfg *domain.Config) (string, error) {
-	controlHost := hostOf(cfg.Server.PublicURL)
-	if controlHost == "" {
-		return "", fmt.Errorf("server.public_url must be an absolute URL (scheme://host) so the cache vhost can be derived")
-	}
-	cacheHost := cfg.Cache.PublicHost
-	if cacheHost == "" {
-		cacheHost = fmt.Sprintf("cache.%s", controlHost)
-	}
-	if cacheHost == controlHost {
-		return "", fmt.Errorf("cache.public_host (%s) must differ from the control-plane host (%s); set a dedicated cache vhost", cacheHost, controlHost)
-	}
-	return cacheHost, nil
-}
-
-// hostOf strips scheme, port and path from a URL, returning its hostname.
-// (An explicit port is dropped so the derived cache vhost matches the
-// ingress Host header / TLS SAN, which never carry a port.)
-func hostOf(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	return u.Hostname()
 }
 
 // parseTolerations parses tolerations in the key[:value[:effect]] format.

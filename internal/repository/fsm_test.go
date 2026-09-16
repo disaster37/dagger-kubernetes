@@ -3,6 +3,7 @@ package repository
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -439,7 +440,7 @@ func TestFSMTraceStats(t *testing.T) {
 	}
 }
 
-func TestFSMMetaAndCacheRouting(t *testing.T) {
+func TestFSMMeta(t *testing.T) {
 	f := newTestFSM(t)
 
 	// Meta.
@@ -454,73 +455,42 @@ func TestFSMMetaAndCacheRouting(t *testing.T) {
 	if _, err := f.readMeta("nope"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("readMeta missing: %v", err)
 	}
-
-	// Manifest routes.
-	applyCmd(t, f, kindUpsertManifestRoute, &domain.CacheRoute{Repo: "r", Tag: "t", Digest: "d1", BackendID: "b1", StoredBytes: 10, CreatedAt: "2026-01-01T00:00:00Z", LastSeenAt: "2026-01-01T00:00:00Z"})
-	applyCmd(t, f, kindUpsertManifestRoute, &domain.CacheRoute{Repo: "r", Tag: "t", Digest: "d2", BackendID: "b2", StoredBytes: 20, CreatedAt: "2026-02-01T00:00:00Z", LastSeenAt: "2026-02-01T00:00:00Z"})
-	cr, ok := f.lookupManifestRoute("r", "t")
-	if !ok || cr.BackendID != "b2" || cr.StoredBytes != 20 {
-		t.Fatalf("manifest route = %+v ok=%v", cr, ok)
-	}
-	if cr.CreatedAt != "2026-01-01T00:00:00Z" {
-		t.Fatalf("created_at should be set-once: %q", cr.CreatedAt)
-	}
-
-	// Blob routes (dedupe + most recent).
-	applyCmd(t, f, kindUpsertBlobRoute, cmdUpsertBlobRoute{Digest: "dgst", BackendID: "b1", CreatedAt: "2026-01-01T00:00:00Z"})
-	applyCmd(t, f, kindUpsertBlobRoute, cmdUpsertBlobRoute{Digest: "dgst", BackendID: "b1", CreatedAt: "2026-03-01T00:00:00Z"})
-	applyCmd(t, f, kindUpsertBlobRoute, cmdUpsertBlobRoute{Digest: "dgst", BackendID: "b2", CreatedAt: "2026-02-01T00:00:00Z"})
-	if backend, ok := f.lookupBlobRoute("dgst"); !ok || backend != "b2" {
-		t.Fatalf("lookupBlobRoute = %q ok=%v, want b2", backend, ok)
-	}
-
-	// Charges.
-	charges := f.allCharges()
-	if charges["b2"] != 20 {
-		t.Fatalf("allCharges = %v", charges)
-	}
-
-	// Upload lifecycle.
-	applyCmd(t, f, kindRecordUpload, &domain.CacheUploadSession{UploadUUID: "up", Repo: "r", BackendID: "b1", CreatedAt: "2026-01-01T00:00:00Z"})
-	if _, ok := f.lookupUpload("up"); !ok {
-		t.Fatal("upload should exist")
-	}
-	applyCmd(t, f, kindDeleteUpload, cmdDeleteUpload{UUID: "up"})
-	if _, ok := f.lookupUpload("up"); ok {
-		t.Fatal("upload should be gone")
-	}
-
-	// Delete manifest route.
-	applyCmd(t, f, kindDeleteManifestRoute, cmdDeleteManifestRoute{Repo: "r", Tag: "t"})
-	if _, ok := f.lookupManifestRoute("r", "t"); ok {
-		t.Fatal("manifest route should be gone")
-	}
 }
 
-func TestFSMReapUploads(t *testing.T) {
-	f := newTestFSM(t)
-	old := time.Now().UTC().Add(-3 * time.Hour).Format(time.RFC3339)
-	fresh := time.Now().UTC().Format(time.RFC3339)
-	applyCmd(t, f, kindRecordUpload, &domain.CacheUploadSession{UploadUUID: "old", CreatedAt: old})
-	applyCmd(t, f, kindRecordUpload, &domain.CacheUploadSession{UploadUUID: "fresh", CreatedAt: fresh})
-
-	cutoff := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
-	f.state.mu.Lock()
-	n, err := f.state.reapUploads(cutoff)
-	f.state.mu.Unlock()
-	if err != nil || n != 1 {
-		t.Fatalf("reap = %d err=%v, want 1", n, err)
-	}
-	if _, ok := f.lookupUpload("old"); ok {
-		t.Fatal("old upload should be reaped")
-	}
-	if _, ok := f.lookupUpload("fresh"); !ok {
-		t.Fatal("fresh upload should remain")
+// TestFSMReservedCacheRouteKindsReplayNoOp ensures the removed registry-cache
+// routing commands (persisted as command.Kind bytes in pre-upgrade Raft logs)
+// replay as decode-only no-ops instead of erroring with "unknown raft command
+// kind" (D1). Payloads are raw maps so the test does not depend on the deleted
+// payload types.
+func TestFSMReservedCacheRouteKindsReplayNoOp(t *testing.T) {
+	legacy := []struct {
+		kind    commandKind
+		payload map[string]any
+	}{
+		{kindUpsertManifestRoute, map[string]any{"repo": "r", "tag": "t", "digest": "d", "backend_id": "b"}},
+		{kindDeleteManifestRoute, map[string]any{"repo": "r", "tag": "t"}},
+		{kindUpsertBlobRoute, map[string]any{"digest": "d", "backend_id": "b", "created_at": "2026-01-01T00:00:00Z"}},
+		{kindRecordUpload, map[string]any{"upload_uuid": "up", "repo": "r", "backend_id": "b"}},
+		{kindDeleteUpload, map[string]any{"uuid": "up"}},
+		{kindReapUploads, map[string]any{"cutoff": "2026-01-01T00:00:00Z"}},
+		{kindTouchManifestRoute, map[string]any{"repo": "r", "tag": "t", "at": "2026-01-01T00:00:00Z"}},
 	}
 
-	// Invalid cutoff errors.
-	if _, err := f.state.reapUploads("not-a-time"); err == nil {
-		t.Fatal("expected error for invalid cutoff")
+	for _, tc := range legacy {
+		t.Run(fmt.Sprintf("kind-%d", tc.kind), func(t *testing.T) {
+			f := newTestFSM(t)
+			cmd, err := newCommand(tc.kind, tc.payload)
+			if err != nil {
+				t.Fatalf("newCommand: %v", err)
+			}
+			resp, err := f.applyCommand(cmd)
+			if err != nil {
+				t.Fatalf("applyCommand(kind %d): %v", tc.kind, err)
+			}
+			if resp != nil {
+				t.Fatalf("resp = %v, want nil no-op", resp)
+			}
+		})
 	}
 }
 
@@ -715,9 +685,6 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "tr-del", UserID: "u", UpdatedAt: time.Now().UTC()})
 	applyCmd(t, f, kindDeleteTrace, cmdDeleteTrace{TraceID: "tr-del"})
 	applyCmd(t, f, kindSetMeta, cmdSetMeta{Key: "k", Value: "v"})
-	applyCmd(t, f, kindUpsertManifestRoute, &domain.CacheRoute{Repo: "r", Tag: "t", BackendID: "b1", StoredBytes: 5, CreatedAt: "2026-01-01T00:00:00Z", LastSeenAt: "2026-01-01T00:00:00Z"})
-	applyCmd(t, f, kindUpsertBlobRoute, cmdUpsertBlobRoute{Digest: "dgst", BackendID: "b1", CreatedAt: "2026-01-01T00:00:00Z"})
-	applyCmd(t, f, kindRecordUpload, &domain.CacheUploadSession{UploadUUID: "up", CreatedAt: "2026-01-01T00:00:00Z"})
 
 	snap, err := f.Snapshot()
 	if err != nil {
@@ -753,17 +720,8 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	if _, err := restored.readTrace("tr-del"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("deleted trace should not survive restore: %v", err)
 	}
-	if cr, ok := restored.lookupManifestRoute("r", "t"); !ok || cr.StoredBytes != 5 {
-		t.Fatalf("manifest route after restore = %+v ok=%v", cr, ok)
-	}
-	if b, ok := restored.lookupBlobRoute("dgst"); !ok || b != "b1" {
-		t.Fatalf("blob route after restore = %q ok=%v", b, ok)
-	}
 	if v, _ := restored.readMeta("k"); v != "v" {
 		t.Fatalf("meta after restore = %q", v)
-	}
-	if _, ok := restored.lookupUpload("up"); !ok {
-		t.Fatal("upload after restore missing")
 	}
 
 	// Restore replaces (not merges).
@@ -782,6 +740,39 @@ func TestFSMSnapshotRestoreRoundTrip(t *testing.T) {
 	// Corrupt snapshot.
 	if err := NewFSM().Restore(io.NopCloser(strings.NewReader("{not-json"))); err == nil {
 		t.Fatal("expected error for corrupt snapshot")
+	}
+}
+
+// TestFSMOldSnapshotWithRemovedCacheKeysRestores verifies the D1 compatibility
+// guarantee: a pre-upgrade snapshot that still carries the removed
+// registry-cache keys (object_routes/blob_routes/uploads) restores cleanly —
+// encoding/json ignores unknown keys, so the cache-route data is silently
+// dropped while every surviving key restores.
+func TestFSMOldSnapshotWithRemovedCacheKeysRestores(t *testing.T) {
+	old := `{
+	  "users": [{"id":"u","username":"alice","role":"admin","password_hash":"hash",
+	             "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+	  "groups": [],
+	  "memberships": [],
+	  "tokens": [],
+	  "projects": [],
+	  "traces": [],
+	  "meta": {"k":"v"},
+	  "object_routes": [{"repo":"a","tag":"b","backend_id":"x",
+	                     "created_at":"2026-01-01T00:00:00Z","last_seen_at":"2026-01-01T00:00:00Z"}],
+	  "blob_routes": [{"digest":"sha256:abc","backend_id":"x","created_at":"2026-01-01T00:00:00Z"}],
+	  "uploads": [{"upload_uuid":"uuid","created_at":"2026-01-01T00:00:00Z"}]
+	}`
+	f := NewFSM()
+	if err := f.Restore(io.NopCloser(strings.NewReader(old))); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	u, err := f.readUserByID("u")
+	if err != nil || u.Username != "alice" || u.PasswordHash != "hash" {
+		t.Fatalf("user after restore = %+v err=%v (known keys must survive)", u, err)
+	}
+	if v, _ := f.readMeta("k"); v != "v" {
+		t.Fatalf("meta after restore = %q", v)
 	}
 }
 

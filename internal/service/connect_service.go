@@ -34,7 +34,6 @@ func (s *ConnectService) ConnectEnv(ctx context.Context, userID, version string,
 	snap := &domain.ConnectEnvSnapshot{
 		ServerURL:    s.cfg.Server.PublicURL,
 		DataHostname: s.cfg.Server.DataHost,
-		CacheBackend: "s3",
 		VersionFloor: s.cfg.Version.Floor,
 		Token:        s.tokenMeta(ctx, userID),
 	}

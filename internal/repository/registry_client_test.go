@@ -1,11 +1,8 @@
 package repository
 
 import (
-	"bytes"
 	"context"
 	"errors"
-	"fmt"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -22,11 +19,11 @@ func digestRepeat(c string) string {
 	return "sha256:" + strings.Repeat(c, 64)
 }
 
-func testClient(t *testing.T, handler http.HandlerFunc) *RegistryStatsClient {
+func testClient(t *testing.T, handler http.HandlerFunc) *DistributionClient {
 	t.Helper()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
-	return NewRegistryStatsClient(ts.Listener.Addr().String())
+	return NewDistributionClient(ts.Listener.Addr().String())
 }
 
 func TestRegistryCatalog(t *testing.T) {
@@ -86,7 +83,7 @@ func TestRegistryCatalog(t *testing.T) {
 
 func TestRegistryUnreachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	c := NewRegistryStatsClient(ts.Listener.Addr().String())
+	c := NewDistributionClient(ts.Listener.Addr().String())
 	ts.Close() // now unreachable
 
 	_, err := c.Catalog(context.Background())
@@ -139,22 +136,12 @@ func TestRegistryManifestSize(t *testing.T) {
 			wantLayers: 2,
 		},
 		{
-			name: "no-sizes-fallback-head",
+			name: "no-sizes-unknown",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method {
-				case http.MethodGet:
-					_, _ = fmt.Fprintf(w, `{"config":{"digest":"sha256:cfg"},"layers":[{"digest":"%s"},{"digest":"%s"}]}`, digestRepeat("1"), digestRepeat("2"))
-				case http.MethodHead:
-					if r.URL.Path == "/v2/dagger-cache/blobs/"+digestRepeat("1") {
-						w.Header().Set("Content-Length", "40")
-					} else if r.URL.Path == "/v2/dagger-cache/blobs/"+digestRepeat("2") {
-						w.Header().Set("Content-Length", "50")
-					}
-					w.WriteHeader(http.StatusOK)
-				}
+				_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg"},"layers":[{"digest":"sha256:l1"},{"digest":"sha256:l2"}]}`))
 			},
 			wantDigest: "", // computed from body hash
-			wantSize:   90,
+			wantSize:   -1,
 			wantLayers: 2,
 		},
 		{
@@ -242,74 +229,8 @@ func TestRegistryPing(t *testing.T) {
 	}
 }
 
-func TestRegistryProbeManifest(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  int
-		wantOK  bool
-		wantErr error
-	}{
-		{"ok-200", http.StatusOK, true, nil},
-		{"not-found-404", http.StatusNotFound, false, nil},
-		{"method-not-allowed-405", http.StatusMethodNotAllowed, false, nil},
-		{"unauthorized-401", http.StatusUnauthorized, false, ErrRegistryUnreachable},
-		{"forbidden-403", http.StatusForbidden, false, ErrRegistryUnreachable},
-		{"server-error-500", http.StatusInternalServerError, false, ErrRegistryUnreachable},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodHead {
-					t.Errorf("method = %q", r.Method)
-				}
-				w.WriteHeader(tc.status)
-			})
-			got, err := c.ProbeManifest(context.Background(), "dagger-cache", "v0-21-4")
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tc.wantErr)
-			}
-			if got != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", got, tc.wantOK)
-			}
-		})
-	}
-}
-
-func TestRegistryProbeBlob(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  int
-		wantOK  bool
-		wantErr error
-	}{
-		{"ok-200", http.StatusOK, true, nil},
-		{"not-found-404", http.StatusNotFound, false, nil},
-		{"method-not-allowed-405", http.StatusMethodNotAllowed, false, nil},
-		{"unauthorized-401", http.StatusUnauthorized, false, ErrRegistryUnreachable},
-		{"forbidden-403", http.StatusForbidden, false, ErrRegistryUnreachable},
-		{"server-error-500", http.StatusInternalServerError, false, ErrRegistryUnreachable},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodHead {
-					t.Errorf("method = %q", r.Method)
-				}
-				w.WriteHeader(tc.status)
-			})
-			got, err := c.ProbeBlob(context.Background(), "dagger-cache", digestRepeat("a"))
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tc.wantErr)
-			}
-			if got != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", got, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestRegistryHost(t *testing.T) {
-	c := NewRegistryStatsClient("localhost:5000")
+	c := NewDistributionClient("localhost:5000")
 	if c.Host() != "localhost:5000" {
 		t.Fatalf("Host = %q", c.Host())
 	}
@@ -318,7 +239,7 @@ func TestRegistryHost(t *testing.T) {
 	}
 }
 
-func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
+func TestDistributionClientWithAuthSendsBasic(t *testing.T) {
 	tests := []struct {
 		name     string
 		username string
@@ -338,7 +259,7 @@ func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			c := NewRegistryStatsClientWithAuth(ts.Listener.Addr().String(), tc.username, tc.password)
+			c := NewDistributionClientWithAuth(ts.Listener.Addr().String(), tc.username, tc.password)
 			if err := c.Ping(context.Background()); err != nil {
 				t.Fatalf("Ping: %v", err)
 			}
@@ -346,25 +267,6 @@ func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
 				t.Fatalf("Authorization = %q, want %q", gotAuth, tc.wantAuth)
 			}
 		})
-	}
-}
-
-func TestBlobSizeMissingLength(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	_, err := c.BlobSize(context.Background(), "dagger-cache", digestRepeat("a"))
-	if err == nil {
-		t.Fatal("expected error when content-length missing")
-	}
-}
-
-func TestBlobSizeInvalidDigest(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected request to %q", r.URL.Path)
-	})
-	if _, err := c.BlobSize(context.Background(), "dagger-cache", "sha256:not-hex"); err == nil {
-		t.Fatal("expected error for invalid digest")
 	}
 }
 
@@ -377,7 +279,7 @@ func TestDeleteManifestInvalidDigest(t *testing.T) {
 	}
 }
 
-func TestGetManifestRejectsMalformedDigestHeader(t *testing.T) {
+func TestManifestSizeRejectsMalformedDigestHeader(t *testing.T) {
 	// A compromised registry returning a non-sha256 digest header must not
 	// propagate it: the client falls back to computing the digest from the
 	// body (CWE-20/CWE-918).
@@ -408,168 +310,64 @@ func TestCatalogRejectsOversizedBody(t *testing.T) {
 	}
 }
 
-func TestUploadBlobStream(t *testing.T) {
-	payload := []byte("streamed-blob-bytes-0123456789")
-	wantDigest := "sha256:" + sha256HexBytes(payload)
-
-	tests := []struct {
-		name       string
-		digest     string
-		size       int64
-		wantErr    error
-		wantPut    bool
-		respDigest string
-		putStatus  int
-		initStatus int
-	}{
-		{
-			name:      "ok",
-			digest:    wantDigest,
-			size:      int64(len(payload)),
-			wantPut:   true,
-			putStatus: http.StatusCreated,
-		},
-		{
-			name:      "ok-200",
-			digest:    wantDigest,
-			size:      int64(len(payload)),
-			wantPut:   true,
-			putStatus: http.StatusOK,
-		},
-		{
-			name:       "digest-mismatch-header",
-			digest:     wantDigest,
-			size:       int64(len(payload)),
-			wantPut:    true,
-			putStatus:  http.StatusCreated,
-			respDigest: "sha256:" + strings.Repeat("f", 64),
-			wantErr:    errUploadDigestMismatch,
-		},
-		{
-			name:       "initiate-500",
-			digest:     wantDigest,
-			size:       int64(len(payload)),
-			initStatus: http.StatusInternalServerError,
-			wantErr:    ErrRegistryUnreachable,
-		},
-		{
-			name:      "put-500",
-			digest:    wantDigest,
-			size:      int64(len(payload)),
-			wantPut:   true,
-			putStatus: http.StatusInternalServerError,
-			wantErr:   ErrRegistryUnreachable,
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			var gotBody []byte
-			var gotLength int64
-			var gotPutDigest string
-			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method {
-				case http.MethodPost:
-					if r.URL.Path != "/v2/dagger-cache/blobs/uploads/" {
-						t.Errorf("post path = %q", r.URL.Path)
-					}
-					if tc.initStatus != 0 {
-						w.WriteHeader(tc.initStatus)
-						return
-					}
-					w.Header().Set("Location", "http://"+r.Host+"/v2/dagger-cache/blobs/uploads/1")
-					w.WriteHeader(http.StatusAccepted)
-				case http.MethodPut:
-					gotLength = r.ContentLength
-					gotPutDigest = r.URL.Query().Get("digest")
-					if tc.respDigest != "" {
-						w.Header().Set("Docker-Content-Digest", tc.respDigest)
-					}
-					b, _ := io.ReadAll(r.Body)
-					gotBody = b
-					w.WriteHeader(tc.putStatus)
-				default:
-					t.Errorf("unexpected %s %s", r.Method, r.URL.Path)
-				}
-			})
-
-			err := c.UploadBlobStream(context.Background(), "dagger-cache", tc.digest, tc.size, bytes.NewReader(payload))
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tc.wantErr)
-			}
-			if !tc.wantPut {
-				return
-			}
-			if !bytes.Equal(gotBody, payload) {
-				t.Fatalf("uploaded body = %q, want %q", gotBody, payload)
-			}
-			if gotLength != tc.size {
-				t.Fatalf("Content-Length = %d, want %d", gotLength, tc.size)
-			}
-			if gotPutDigest != tc.digest {
-				t.Fatalf("digest param = %q, want %q", gotPutDigest, tc.digest)
-			}
-		})
-	}
-}
-
-func TestUploadBlobStreamInvalidDigest(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected request to %q", r.URL.Path)
-	})
-	if err := c.UploadBlobStream(context.Background(), "dagger-cache", "sha256:not-hex", 1, strings.NewReader("x")); err == nil {
-		t.Fatal("expected error for invalid digest")
-	}
-}
-
-func TestUploadBlobStreamMissingLocation(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusAccepted) // no Location header
-	})
-	if err := c.UploadBlobStream(context.Background(), "dagger-cache", digestRepeat("a"), 1, strings.NewReader("x")); err == nil {
-		t.Fatal("expected error for missing Location header")
-	}
-}
-
-func TestUploadBlobDelegatesToStream(t *testing.T) {
-	// UploadBlob must keep working (CLI cache path) and return the computed
-	// digest of the buffered body.
-	var gotBody []byte
-	var gotDigestParam string
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodPost:
-			w.Header().Set("Location", "http://"+r.Host+"/v2/dagger-cache/blobs/uploads/1")
-			w.WriteHeader(http.StatusAccepted)
-		case http.MethodPut:
-			gotDigestParam = r.URL.Query().Get("digest")
-			b, _ := io.ReadAll(r.Body)
-			gotBody = b
-			w.Header().Set("Docker-Content-Digest", gotDigestParam)
-			w.WriteHeader(http.StatusCreated)
-		}
-	})
-
-	body := []byte("buffered-then-streamed")
-	digest, size, err := c.UploadBlob(context.Background(), "dagger-cache", bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("UploadBlob: %v", err)
-	}
-	if size != int64(len(body)) {
-		t.Fatalf("size = %d, want %d", size, len(body))
-	}
-	if digest != "sha256:"+sha256HexBytes(body) {
-		t.Fatalf("digest = %s, want sha256 of the body", digest)
-	}
-	if !bytes.Equal(gotBody, body) || gotDigestParam != digest {
-		t.Fatalf("uploaded = %q (digest %q), want %q (digest %s)", gotBody, gotDigestParam, body, digest)
-	}
-}
-
-func TestRegistryStatsClientWithTimeout(t *testing.T) {
-	// The 10s default truncates multi-GB transfers (worker snapshots); the
-	// builder must raise the total per-request timeout.
-	c := NewRegistryStatsClient("reg:5000").WithTimeout(5 * time.Minute)
+func TestDistributionClientWithTimeout(t *testing.T) {
+	// The 10s default truncates large transfers; the caller can raise the
+	// total per-request timeout.
+	c := NewDistributionClient("reg:5000").WithTimeout(5 * time.Minute)
 	if c.httpClient.Timeout != 5*time.Minute {
 		t.Fatalf("timeout = %v, want 5m", c.httpClient.Timeout)
+	}
+}
+
+// TestDistributionClientPathEscaping verifies that repository/tag/digest
+// values taken from the prune request body are path-escaped before they are
+// interpolated into the wire URL (CWE-22/CWE-918): they cannot traverse out
+// of /v2/ via "..", steer the host via an absolute URL, or inject a
+// query/fragment.
+func TestDistributionClientPathEscaping(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	var gotPaths []string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.EscapedPath())
+		if r.URL.RawQuery != "" {
+			t.Errorf("rawQuery = %q, want empty (metacharacters must be escaped into the path)", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg","size":1},"layers":[]}`))
+	})
+
+	// Tags: one hostile repo per case.
+	tagsCases := []struct {
+		name     string
+		repo     string
+		wantPath string
+	}{
+		{"nested", "a/b", "/v2/a%2Fb/tags/list"},
+		{"traversal", "../../v2/_catalog", "/v2/..%2F..%2Fv2%2F_catalog/tags/list"},
+		{"absolute-url", "http://evil.com:5000/x", "/v2/http:%2F%2Fevil.com:5000%2Fx/tags/list"},
+		{"query-fragment", "a?b#c", "/v2/a%3Fb%23c/tags/list"},
+	}
+	for _, tc := range tagsCases {
+		if _, err := c.Tags(context.Background(), tc.repo); err != nil {
+			t.Fatalf("%s: Tags: %v", tc.name, err)
+		}
+		if got := gotPaths[len(gotPaths)-1]; got != tc.wantPath {
+			t.Errorf("%s: wire path = %q, want %q", tc.name, got, tc.wantPath)
+		}
+	}
+
+	// ManifestSize + DeleteManifest: hostile repo AND tag, then a valid
+	// digest (the colon survives; everything else is escaped).
+	if _, _, _, err := c.ManifestSize(context.Background(), "a?b#c", "v1?x#y"); err != nil {
+		t.Fatalf("ManifestSize: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; got != "/v2/a%3Fb%23c/manifests/v1%3Fx%23y" {
+		t.Errorf("manifest wire path = %q", got)
+	}
+	if err := c.DeleteManifest(context.Background(), "a?b#c", digest); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; got != "/v2/a%3Fb%23c/manifests/"+digest {
+		t.Errorf("delete wire path = %q, want /v2/a%%3Fb%%23c/manifests/%s", got, digest)
 	}
 }

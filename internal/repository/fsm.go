@@ -31,12 +31,15 @@ const (
 	kindUpsertTraceIngest
 	kindMarkTraceFailed
 	kindSetMeta
+	// Slots 15, 16, 18, 19, 20, 21 and 25 were the registry-cache routing
+	// kinds (manifest/blob routes and upload sessions). They are reserved:
+	// their numeric IDs are persisted in the Raft log (command.Kind) and must
+	// never be renumbered, or a node replaying a pre-upgrade log tail would
+	// misapply commands. Their apply cases are decode-only no-ops below.
 	kindUpsertManifestRoute
 	kindDeleteManifestRoute
 	// Slot 17 was kindDeleteRoutesForBackend (removed). It is reserved via a
-	// blank identifier so the numeric IDs of the kinds below stay stable: they
-	// are persisted in the Raft log (command.Kind) and must not be renumbered,
-	// or a node replaying a pre-upgrade log tail would misapply commands.
+	// blank identifier for the same reason.
 	_
 	kindUpsertBlobRoute
 	kindRecordUpload
@@ -156,25 +159,6 @@ type (
 		Value string `json:"value"`
 	}
 
-	cmdDeleteManifestRoute struct {
-		Repo string `json:"repo"`
-		Tag  string `json:"tag"`
-	}
-
-	cmdUpsertBlobRoute struct {
-		Digest    string `json:"digest"`
-		BackendID string `json:"backend_id"`
-		CreatedAt string `json:"created_at"`
-	}
-
-	cmdDeleteUpload struct {
-		UUID string `json:"uuid"`
-	}
-
-	cmdReapUploads struct {
-		CutoffRFC3339 string `json:"cutoff"`
-	}
-
 	cmdDeleteTrace struct {
 		TraceID string `json:"trace_id"`
 	}
@@ -191,13 +175,6 @@ type (
 	cmdTouchSession struct {
 		CertFP string    `json:"cert_fp"`
 		At     time.Time `json:"at"`
-	}
-
-	// cmdTouchManifestRoute updates the LastSeenAt on an existing manifest route.
-	cmdTouchManifestRoute struct {
-		Repo string `json:"repo"`
-		Tag  string `json:"tag"`
-		At   string `json:"at"` // RFC3339
 	}
 )
 
@@ -293,10 +270,6 @@ type fsmState struct {
 
 	meta map[string]string
 
-	cacheObjectRoutes   map[string]*domain.CacheRoute         // "repo\x00tag" -> route
-	cacheBlobRoutes     map[string]map[string]string          // digest -> backendID -> createdAt
-	cacheUploadSessions map[string]*domain.CacheUploadSession // uuid -> session
-
 	// sessionSink receives replicated session-lease state (domain.SessionStateSink,
 	// usually the pod-local *service.Store). Nil until wired by NewRaftStore.
 	sessionSink domain.SessionStateSink
@@ -304,23 +277,20 @@ type fsmState struct {
 
 func newState() *fsmState {
 	return &fsmState{
-		users:               make(map[string]*domain.User),
-		usersByName:         make(map[string]string),
-		usersByOAuth:        make(map[string]string),
-		groups:              make(map[string]*domain.Group),
-		groupsByName:        make(map[string]string),
-		memberships:         make(map[string]map[string]struct{}),
-		membershipsByUser:   make(map[string]map[string]struct{}),
-		tokens:              make(map[string]*domain.APIToken),
-		tokensByHash:        make(map[string]string),
-		tokensByUser:        make(map[string]string),
-		projects:            make(map[string]*domain.Project),
-		projectsByName:      make(map[string]string),
-		traces:              make(map[string]*domain.TraceMeta),
-		meta:                make(map[string]string),
-		cacheObjectRoutes:   make(map[string]*domain.CacheRoute),
-		cacheBlobRoutes:     make(map[string]map[string]string),
-		cacheUploadSessions: make(map[string]*domain.CacheUploadSession),
+		users:             make(map[string]*domain.User),
+		usersByName:       make(map[string]string),
+		usersByOAuth:      make(map[string]string),
+		groups:            make(map[string]*domain.Group),
+		groupsByName:      make(map[string]string),
+		memberships:       make(map[string]map[string]struct{}),
+		membershipsByUser: make(map[string]map[string]struct{}),
+		tokens:            make(map[string]*domain.APIToken),
+		tokensByHash:      make(map[string]string),
+		tokensByUser:      make(map[string]string),
+		projects:          make(map[string]*domain.Project),
+		projectsByName:    make(map[string]string),
+		traces:            make(map[string]*domain.TraceMeta),
+		meta:              make(map[string]string),
 	}
 }
 
@@ -441,38 +411,13 @@ func (s *fsmState) applyTraceCacheCommand(cmd *command) (interface{}, error, boo
 			s.meta[p.Key] = p.Value
 			return nil
 		}), true
-	case kindUpsertManifestRoute:
-		return nil, applyPayload(cmd, "manifest route", func(cr domain.CacheRoute) error {
-			s.upsertManifestRoute(&cr)
-			return nil
-		}), true
-	case kindDeleteManifestRoute:
-		return nil, applyPayload(cmd, "delete manifest route", func(p cmdDeleteManifestRoute) error {
-			delete(s.cacheObjectRoutes, manifestRouteKey(p.Repo, p.Tag))
-			return nil
-		}), true
-	case kindUpsertBlobRoute:
-		return nil, applyPayload(cmd, "upsert blob route", func(p cmdUpsertBlobRoute) error {
-			s.upsertBlobRoute(p.Digest, p.BackendID, p.CreatedAt)
-			return nil
-		}), true
-	case kindRecordUpload:
-		return nil, applyPayload(cmd, "upload session", func(sess domain.CacheUploadSession) error {
-			s.recordUpload(&sess)
-			return nil
-		}), true
-	case kindDeleteUpload:
-		return nil, applyPayload(cmd, "delete upload", func(p cmdDeleteUpload) error {
-			delete(s.cacheUploadSessions, p.UUID)
-			return nil
-		}), true
-	case kindReapUploads:
-		p, err := decode[cmdReapUploads](cmd, "reap uploads")
-		if err != nil {
-			return nil, err, true
-		}
-		n, err := s.reapUploads(p.CutoffRFC3339)
-		return n, err, true
+	case kindUpsertManifestRoute, kindDeleteManifestRoute, kindUpsertBlobRoute,
+		kindRecordUpload, kindDeleteUpload, kindReapUploads:
+		// Reserved registry-cache routing kinds. Decode-only no-op: the
+		// payload is discarded without unmarshalling so a node replaying a
+		// pre-upgrade Raft log tail does not error (the routing state was
+		// removed along with the remote cache).
+		return nil, nil, true
 	case kindDeleteTrace:
 		return nil, applyPayload(cmd, "delete trace", func(p cmdDeleteTrace) error {
 			delete(s.traces, p.TraceID)
@@ -506,10 +451,9 @@ func (s *fsmState) applySessionCommand(cmd *command) (error, bool) {
 			return nil
 		}), true
 	case kindTouchManifestRoute:
-		return applyPayload(cmd, "touch manifest route", func(p cmdTouchManifestRoute) error {
-			s.touchManifestRoute(p.Repo, p.Tag, p.At)
-			return nil
-		}), true
+		// Reserved registry-cache routing kind. Decode-only no-op (see
+		// applyTraceCacheCommand).
+		return nil, true
 	default:
 		return nil, false
 	}
@@ -912,71 +856,6 @@ func (s *fsmState) markTraceFailed(p cmdMarkTraceFailed) bool {
 	return true
 }
 
-// --- cache routing ----------------------------------------------------------
-
-func manifestRouteKey(repo, tag string) string {
-	return fmt.Sprintf("%s\x00%s", repo, tag)
-}
-
-func (s *fsmState) upsertManifestRoute(cr *domain.CacheRoute) {
-	key := manifestRouteKey(cr.Repo, cr.Tag)
-	existing, ok := s.cacheObjectRoutes[key]
-	cp := *cr
-	if ok {
-		// created_at is set-once; last_seen_at updates on every upsert.
-		cp.CreatedAt = existing.CreatedAt
-	}
-	s.cacheObjectRoutes[key] = &cp
-}
-
-// touchManifestRoute updates LastSeenAt on an existing route only (no-op when absent).
-func (s *fsmState) touchManifestRoute(repo, tag, at string) {
-	key := manifestRouteKey(repo, tag)
-	route, ok := s.cacheObjectRoutes[key]
-	if !ok {
-		return
-	}
-	route.LastSeenAt = at
-}
-
-func (s *fsmState) upsertBlobRoute(digest, backendID, createdAt string) {
-	routes, ok := s.cacheBlobRoutes[digest]
-	if !ok {
-		routes = make(map[string]string)
-		s.cacheBlobRoutes[digest] = routes
-	}
-	// INSERT OR IGNORE: keep the first created_at.
-	if _, exists := routes[backendID]; exists {
-		return
-	}
-	routes[backendID] = createdAt
-}
-
-func (s *fsmState) recordUpload(sess *domain.CacheUploadSession) {
-	cp := *sess
-	s.cacheUploadSessions[sess.UploadUUID] = &cp
-}
-
-// reapUploads deletes upload sessions older than cutoff and returns the count.
-func (s *fsmState) reapUploads(cutoffRFC3339 string) (int, error) {
-	cutoff, err := time.Parse(time.RFC3339, cutoffRFC3339)
-	if err != nil {
-		return 0, fmt.Errorf("parse reap cutoff: %w", err)
-	}
-	n := 0
-	for uuid, sess := range s.cacheUploadSessions {
-		created, err := time.Parse(time.RFC3339, sess.CreatedAt)
-		if err != nil {
-			return 0, fmt.Errorf("parse upload created_at: %w", err)
-		}
-		if created.Before(cutoff) {
-			delete(s.cacheUploadSessions, uuid)
-			n++
-		}
-	}
-	return n, nil
-}
-
 // --- read helpers (all take RLock internally and return deep copies) --------
 
 func (f *FSM) readUserByID(id string) (*domain.User, error) {
@@ -1320,54 +1199,6 @@ func (f *FSM) readMeta(key string) (string, error) {
 		return "", fmt.Errorf("meta %s: %w", key, domain.ErrNotFound)
 	}
 	return v, nil
-}
-
-func (f *FSM) lookupManifestRoute(repo, tag string) (domain.CacheRoute, bool) {
-	f.state.mu.RLock()
-	defer f.state.mu.RUnlock()
-	cr, ok := f.state.cacheObjectRoutes[manifestRouteKey(repo, tag)]
-	if !ok {
-		return domain.CacheRoute{}, false
-	}
-	return *cr, true
-}
-
-func (f *FSM) lookupBlobRoute(digest string) (string, bool) {
-	f.state.mu.RLock()
-	defer f.state.mu.RUnlock()
-	routes, ok := f.state.cacheBlobRoutes[digest]
-	if !ok || len(routes) == 0 {
-		return "", false
-	}
-	bestBackend := ""
-	bestCreated := ""
-	for backendID, createdAt := range routes {
-		if createdAt > bestCreated || (createdAt == bestCreated && (bestBackend == "" || backendID < bestBackend)) {
-			bestBackend = backendID
-			bestCreated = createdAt
-		}
-	}
-	return bestBackend, true
-}
-
-func (f *FSM) lookupUpload(uuid string) (domain.CacheUploadSession, bool) {
-	f.state.mu.RLock()
-	defer f.state.mu.RUnlock()
-	sess, ok := f.state.cacheUploadSessions[uuid]
-	if !ok {
-		return domain.CacheUploadSession{}, false
-	}
-	return *sess, true
-}
-
-func (f *FSM) allCharges() map[string]int64 {
-	f.state.mu.RLock()
-	defer f.state.mu.RUnlock()
-	out := make(map[string]int64)
-	for _, cr := range f.state.cacheObjectRoutes {
-		out[cr.BackendID] += cr.StoredBytes
-	}
-	return out
 }
 
 func oauthKey(provider, oauthID string) string {

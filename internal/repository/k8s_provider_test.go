@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -1289,6 +1288,23 @@ func TestK8sEngineTOMLConfigMap(t *testing.T) {
 	}
 }
 
+func TestK8sEngineTOMLMirrorHTTP(t *testing.T) {
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.RegistryMirrors = map[string][]string{
+			"docker.io": {"docker-io-mirror.dagger-kubernetes.svc:5000"},
+		}
+		cfg.MirrorHTTP = []string{"docker-io-mirror.dagger-kubernetes.svc:5000"}
+	})
+
+	ensureEngineSet(t, p, cs)
+
+	wantTOML := "[registry.\"docker.io\"]\n  mirrors = [\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n\n" +
+		"[registry.\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n  http = true\n"
+	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
+		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	}
+}
+
 func TestK8sEngineTOMLDefaultLogFormat(t *testing.T) {
 	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
 		cfg.LogFormat = "json"
@@ -1507,317 +1523,5 @@ func TestK8sSetVersionIdleSincePreservesLabels(t *testing.T) {
 	}
 	if sts.Labels[engineLabelVersion] != testEngineVersion {
 		t.Errorf("label version = %q, want %q", sts.Labels[engineLabelVersion], testEngineVersion)
-	}
-}
-
-// --- worker-cache sync (cache-restore init + cache-sync sidecar) -----------
-
-func testCacheSyncConfig() K8sCacheSyncConfig {
-	return K8sCacheSyncConfig{
-		Image:       "docker.io/disaster/dagger-kubernetes:dev",
-		Interval:    10 * time.Minute,
-		QuiesceWait: 10 * time.Second,
-		Enabled:     true,
-		OnStart:     true,
-		OnStop:      true,
-		S3Endpoint:  "minio.dagger-kubernetes.svc:9000",
-		S3Bucket:    "snapshot-bucket",
-		S3Region:    "eu-west-1",
-		S3UseSSL:    false,
-	}
-}
-
-// containerByName finds a container by name in the given list.
-func containerByName(t *testing.T, containers []corev1.Container, name string) *corev1.Container {
-	t.Helper()
-	for i := range containers {
-		if containers[i].Name == name {
-			return &containers[i]
-		}
-	}
-	return nil
-}
-
-// requireSyncEnv asserts the common env contract of both sync containers.
-func requireSyncEnv(t *testing.T, envs []corev1.EnvVar, version string, serve bool) {
-	t.Helper()
-	want := map[string]string{
-		"CACHE_SYNC_TAG":           domain.WorkerSnapshotTagV2(version),
-		"CACHE_SYNC_BASE_DIR":      "/var/lib/dagger",
-		"CACHE_SYNC_WORKER_SUBDIR": "worker",
-		"CACHE_SYNC_S3_ENDPOINT":   "minio.dagger-kubernetes.svc:9000",
-		"CACHE_SYNC_S3_BUCKET":     "snapshot-bucket",
-		"CACHE_SYNC_S3_REGION":     "eu-west-1",
-		"CACHE_SYNC_S3_USE_SSL":    "false",
-	}
-	if serve {
-		want["CACHE_SYNC_TMP_DIR"] = "/tmp"
-		want["CACHE_SYNC_INTERVAL"] = (10 * time.Minute).String()
-		want["CACHE_SYNC_QUIESCE_WAIT"] = (10 * time.Second).String()
-	}
-	got := map[string]string{}
-	for _, env := range envs {
-		if env.ValueFrom != nil {
-			// S3 credentials are Secret references, never literal values.
-			if env.Name != "CACHE_SYNC_S3_ACCESS_KEY" && env.Name != "CACHE_SYNC_S3_SECRET_KEY" {
-				t.Errorf("env %s must be a literal value, got %+v", env.Name, env.ValueFrom)
-			}
-			continue
-		}
-		got[env.Name] = env.Value
-	}
-	for name, value := range want {
-		if got[name] != value {
-			t.Errorf("env %s = %q, want %q", name, got[name], value)
-		}
-	}
-	if !serve {
-		for _, name := range []string{"CACHE_SYNC_TMP_DIR", "CACHE_SYNC_INTERVAL", "CACHE_SYNC_QUIESCE_WAIT"} {
-			if _, ok := got[name]; ok {
-				t.Errorf("restore container must not carry %s", name)
-			}
-		}
-	}
-}
-
-func TestK8sCacheSyncContainersRendered(t *testing.T) {
-	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		cfg.CacheSync = testCacheSyncConfig()
-	})
-
-	sts := ensureEngineSet(t, p, cs)
-	podSpec := sts.Spec.Template.Spec
-
-	// --- init container: restores the snapshot before the engine starts ---
-	restore := containerByName(t, podSpec.InitContainers, cacheSyncRestoreContainer)
-	if restore == nil {
-		t.Fatalf("cache-restore init container missing, got %v", podSpec.InitContainers)
-	}
-	if restore.Image != "docker.io/disaster/dagger-kubernetes:dev" {
-		t.Errorf("init image = %q", restore.Image)
-	}
-	if !slices.Equal(restore.Command, []string{supervisorBinaryPath, "cache-sync", "restore"}) {
-		t.Errorf("init command = %v", restore.Command)
-	}
-	requireSyncEnv(t, restore.Env, testEngineVersion, false)
-
-	if len(restore.VolumeMounts) != 1 {
-		t.Fatalf("init mounts = %+v", restore.VolumeMounts)
-	}
-	if m := restore.VolumeMounts[0]; m.Name != volumeDaggerKubernetes || m.MountPath != "/var/lib/dagger" || m.ReadOnly {
-		t.Errorf("init mount = %+v, want %s read-write at /var/lib/dagger", m, volumeDaggerKubernetes)
-	}
-	if restore.SecurityContext == nil || restore.SecurityContext.RunAsUser == nil || *restore.SecurityContext.RunAsUser != 0 ||
-		restore.SecurityContext.Privileged == nil || !*restore.SecurityContext.Privileged {
-		t.Errorf("init securityContext = %+v, want runAsUser=0 + privileged", restore.SecurityContext)
-	}
-
-	// --- sidecar: periodic + on-stop push, read-only PVC, tmp emptyDir ---
-	sidecar := containerByName(t, podSpec.Containers, cacheSyncSidecarContainer)
-	if sidecar == nil {
-		t.Fatalf("cache-sync sidecar missing, got %v", podSpec.Containers)
-	}
-	if sidecar.Image != "docker.io/disaster/dagger-kubernetes:dev" {
-		t.Errorf("sidecar image = %q", sidecar.Image)
-	}
-	if !slices.Equal(sidecar.Command, []string{supervisorBinaryPath, "cache-sync", "serve"}) {
-		t.Errorf("sidecar command = %v", sidecar.Command)
-	}
-	requireSyncEnv(t, sidecar.Env, testEngineVersion, true)
-	if sidecar.ReadinessProbe != nil || sidecar.LivenessProbe != nil {
-		t.Error("sidecar must have no probes (auxiliary to the engine's readiness)")
-	}
-
-	ro, rw := 0, 0
-	for _, m := range sidecar.VolumeMounts {
-		switch {
-		case m.Name == volumeDaggerKubernetes && m.MountPath == "/var/lib/dagger" && m.ReadOnly:
-			ro++
-		case m.Name == volumeCacheSyncTmp && m.MountPath == "/tmp" && !m.ReadOnly:
-			rw++
-		}
-	}
-	if ro != 1 || rw != 1 {
-		t.Errorf("sidecar mounts = %+v, want %s read-only at /var/lib/dagger + %s at /tmp", sidecar.VolumeMounts, volumeDaggerKubernetes, volumeCacheSyncTmp)
-	}
-	if sidecar.SecurityContext == nil || sidecar.SecurityContext.RunAsUser == nil || *sidecar.SecurityContext.RunAsUser != 0 {
-		t.Errorf("sidecar securityContext = %+v, want runAsUser=0", sidecar.SecurityContext)
-	}
-
-	// --- the tmp volume is a node-backed emptyDir ---
-	vol := volumeByName(sts, volumeCacheSyncTmp)
-	if vol == nil || vol.EmptyDir == nil {
-		t.Fatalf("expected %s emptyDir volume, got %+v", volumeCacheSyncTmp, vol)
-	}
-
-	// --- the engine container is untouched and still first ---
-	if podSpec.Containers[0].Name != "engine" {
-		t.Errorf("engine must remain the first container, got %q", podSpec.Containers[0].Name)
-	}
-}
-
-func TestK8sCacheSyncDisabled(t *testing.T) {
-	p, cs := defaultK8sProvider()
-	sts := ensureEngineSet(t, p, cs)
-	podSpec := sts.Spec.Template.Spec
-
-	if containerByName(t, podSpec.InitContainers, cacheSyncRestoreContainer) != nil {
-		t.Error("cache-restore must be absent when sync is disabled")
-	}
-	if containerByName(t, podSpec.Containers, cacheSyncSidecarContainer) != nil {
-		t.Error("cache-sync must be absent when sync is disabled")
-	}
-	if vol := volumeByName(sts, volumeCacheSyncTmp); vol != nil {
-		t.Errorf("expected no %s volume, got %+v", volumeCacheSyncTmp, vol)
-	}
-}
-
-func TestK8sCacheSyncEnabledWithoutImage(t *testing.T) {
-	// Graceful degradation: enabled but no image -> no sync containers, the
-	// engine pod still starts.
-	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		cfg.CacheSync = testCacheSyncConfig()
-		cfg.CacheSync.Image = ""
-	})
-	sts := ensureEngineSet(t, p, cs)
-	podSpec := sts.Spec.Template.Spec
-
-	if containerByName(t, podSpec.InitContainers, cacheSyncRestoreContainer) != nil {
-		t.Error("cache-restore must be absent when the sync image is empty")
-	}
-	if containerByName(t, podSpec.Containers, cacheSyncSidecarContainer) != nil {
-		t.Error("cache-sync must be absent when the sync image is empty")
-	}
-}
-
-func TestK8sCacheSyncOnStartOnly(t *testing.T) {
-	// OnStart only: restore init, no sidecar, no tmp volume.
-	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		sync := testCacheSyncConfig()
-		sync.OnStop = false
-		sync.Interval = 0
-		cfg.CacheSync = sync
-	})
-	sts := ensureEngineSet(t, p, cs)
-	podSpec := sts.Spec.Template.Spec
-
-	if containerByName(t, podSpec.InitContainers, cacheSyncRestoreContainer) == nil {
-		t.Error("cache-restore must be present when OnStart is set")
-	}
-	if containerByName(t, podSpec.Containers, cacheSyncSidecarContainer) != nil {
-		t.Error("cache-sync must be absent when OnStop=false and interval=0")
-	}
-	if vol := volumeByName(sts, volumeCacheSyncTmp); vol != nil {
-		t.Errorf("expected no %s volume, got %+v", volumeCacheSyncTmp, vol)
-	}
-}
-
-func TestK8sCacheSyncOnStopOnly(t *testing.T) {
-	// OnStop only: sidecar + tmp volume, no restore init.
-	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		sync := testCacheSyncConfig()
-		sync.OnStart = false
-		cfg.CacheSync = sync
-	})
-	sts := ensureEngineSet(t, p, cs)
-	podSpec := sts.Spec.Template.Spec
-
-	if containerByName(t, podSpec.InitContainers, cacheSyncRestoreContainer) != nil {
-		t.Error("cache-restore must be absent when OnStart=false")
-	}
-	if containerByName(t, podSpec.Containers, cacheSyncSidecarContainer) == nil {
-		t.Error("cache-sync must be present when OnStop=true")
-	}
-	if vol := volumeByName(sts, volumeCacheSyncTmp); vol == nil {
-		t.Errorf("expected %s volume, got %+v", volumeCacheSyncTmp, podSpec.Volumes)
-	}
-}
-
-func TestK8sCacheSyncInitCoexistsWithCAInit(t *testing.T) {
-	// The restore init container is appended to (not replacing) the CA init.
-	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		cfg.CASecret = "custom-ca-bundle"
-		cfg.CacheSync = testCacheSyncConfig()
-	})
-	sts := ensureEngineSet(t, p, cs)
-
-	if containerByName(t, sts.Spec.Template.Spec.InitContainers, "ca-init") == nil {
-		t.Error("ca-init must still be present")
-	}
-	if containerByName(t, sts.Spec.Template.Spec.InitContainers, cacheSyncRestoreContainer) == nil {
-		t.Error("cache-restore must be appended after ca-init")
-	}
-}
-
-// TestK8sCacheSyncS3BackendEnv verifies the S3 env contract on both sync
-// containers: the S3 endpoint/bucket literals, and the credentials as Secret
-// references (never literal values in the pod spec). No per-pod isolation env
-// var exists (all pods of a StatefulSet share one snapshot prefix).
-func TestK8sCacheSyncS3BackendEnv(t *testing.T) {
-	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		sync := testCacheSyncConfig()
-		sync.S3Endpoint = "minio.dagger-kubernetes.svc:9000"
-		sync.S3Bucket = "snapshot-bucket"
-		sync.S3Region = "eu-west-1"
-		sync.S3UseSSL = false
-		cfg.CacheSync = sync
-	})
-	sts := ensureEngineSet(t, p, cs)
-	podSpec := sts.Spec.Template.Spec
-
-	wantLiterals := map[string]string{
-		"CACHE_SYNC_S3_ENDPOINT":   "minio.dagger-kubernetes.svc:9000",
-		"CACHE_SYNC_S3_BUCKET":     "snapshot-bucket",
-		"CACHE_SYNC_S3_REGION":     "eu-west-1",
-		"CACHE_SYNC_S3_USE_SSL":    "false",
-		"CACHE_SYNC_TAG":           domain.WorkerSnapshotTagV2(testEngineVersion),
-		"CACHE_SYNC_BASE_DIR":      "/var/lib/dagger",
-		"CACHE_SYNC_WORKER_SUBDIR": "worker",
-	}
-	wantSecretRefs := map[string]struct{ secret, key string }{
-		"CACHE_SYNC_S3_ACCESS_KEY": {"engine-s3-auth", "accessKey"},
-		"CACHE_SYNC_S3_SECRET_KEY": {"engine-s3-auth", "secretKey"},
-	}
-	for _, container := range []*corev1.Container{
-		containerByName(t, podSpec.InitContainers, cacheSyncRestoreContainer),
-		containerByName(t, podSpec.Containers, cacheSyncSidecarContainer),
-	} {
-		if container == nil {
-			t.Fatal("sync container missing")
-		}
-		got := map[string]corev1.EnvVar{}
-		for _, env := range container.Env {
-			got[env.Name] = env
-		}
-		for name, value := range wantLiterals {
-			env, ok := got[name]
-			if !ok {
-				t.Errorf("%s: missing env %s", container.Name, name)
-				continue
-			}
-			if env.ValueFrom != nil {
-				t.Errorf("%s: env %s must be a literal value, got %+v", container.Name, name, env.ValueFrom)
-			}
-			if env.Value != value {
-				t.Errorf("%s: env %s = %q, want %q", container.Name, name, env.Value, value)
-			}
-		}
-		for name, ref := range wantSecretRefs {
-			env, ok := got[name]
-			if !ok {
-				t.Errorf("%s: missing env %s", container.Name, name)
-				continue
-			}
-			if env.ValueFrom == nil || env.ValueFrom.SecretKeyRef == nil ||
-				env.ValueFrom.SecretKeyRef.Name != ref.secret || env.ValueFrom.SecretKeyRef.Key != ref.key {
-				t.Errorf("%s: env %s must reference secret %s/%s, got %+v", container.Name, name, ref.secret, ref.key, env.ValueFrom)
-			}
-		}
-		if _, ok := got["CACHE_SYNC_POD_NAME"]; ok {
-			t.Errorf("%s: CACHE_SYNC_POD_NAME must not be set (no per-pod isolation)", container.Name)
-		}
-		if _, ok := got["CACHE_SYNC_S3_USE_SSL"]; !ok {
-			t.Errorf("%s: missing CACHE_SYNC_S3_USE_SSL", container.Name)
-		}
 	}
 }

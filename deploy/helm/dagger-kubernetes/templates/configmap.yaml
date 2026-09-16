@@ -99,34 +99,28 @@ data:
       loki_url: {{ include "dagger-kubernetes.lokiUrl" . | quote }}
       victoria_url: {{ include "dagger-kubernetes.victoriaUrl" . | quote }}
     cache:
-      registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}
-      public_host: {{ include "dagger-kubernetes.cachePublicHost" . | quote }}
-      auth_token: ""
       s3:
         bucket: {{ include "dagger-kubernetes.s3Bucket" . | quote }}
         region: {{ .Values.supervisor.config.cache.s3.region | quote }}
-{{- with .Values.supervisor.config.cache.gc }}
-      gc:
-        enabled: {{ .enabled }}
-        max_age: {{ .maxAge | quote }}
-        schedule: {{ .schedule | quote }}
+        endpoint: {{ include "dagger-kubernetes.s3Endpoint" . | quote }}
+        use_ssl: {{ .Values.supervisor.config.cache.s3.useSSL }}
+        # S3 credentials are NOT rendered here: the supervisor reads them from
+        # the engine-s3-auth Secret (keys accessKey/secretKey) via
+        # DAGGER_KUBERNETES_CACHE_S3_* env vars. Leave the keys empty.
+        access_key: ""
+        secret_key: ""
+{{- if .Values.imageCache.enabled }}
+    image_cache:
+      mirrors:
+      {{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) }}
+      {{- $addr := include "dagger-kubernetes.imageCacheMirrorAddress" (dict "root" $ "slug" .slug) }}
+        - id: {{ .slug | quote }}
+          host: {{ .host | quote }}
+          upstream: {{ .remoteUrl | quote }}
+          internal_addr: {{ $addr | quote }}
+          backend: {{ $.Values.imageCache.storage.backend | default "s3" | quote }}
+      {{- end }}
 {{- end }}
-      sync:
-        enabled: {{ .Values.supervisor.config.cache.sync.enabled }}
-        on_start: {{ .Values.supervisor.config.cache.sync.onStart }}
-        on_stop: {{ .Values.supervisor.config.cache.sync.onStop }}
-        interval: {{ .Values.supervisor.config.cache.sync.interval | quote }}
-        quiesce_wait: {{ .Values.supervisor.config.cache.sync.quiesceWait | quote }}
-        # S3 credentials are NOT rendered here: the sync helpers read them from
-        # the engine-s3-auth Secret (keys accessKey/secretKey) and the
-        # supervisor's own S3 client from DAGGER_KUBERNETES_CACHE_SYNC_S3_*
-        # env vars. Set s3_endpoint/bucket and leave the keys empty.
-        s3_endpoint: {{ include "dagger-kubernetes.s3Endpoint" . | quote }}
-        s3_bucket: {{ include "dagger-kubernetes.s3Bucket" . | quote }}
-        s3_region: {{ .Values.supervisor.config.cache.sync.s3Region | quote }}
-        s3_use_ssl: {{ .Values.supervisor.config.cache.sync.s3UseSSL }}
-        s3_access_key: ""
-        s3_secret_key: ""
 {{- with .Values.supervisor.config.history }}
     history:
       gc:
@@ -167,10 +161,11 @@ data:
       engine_debug: {{ .Values.supervisor.config.fleet.engineDebug }}
       engine_log_format: {{ .Values.supervisor.config.fleet.engineLogFormat | quote }}
       engine_registry_mirrors:
-{{ toYaml .Values.supervisor.config.fleet.engineRegistryMirrors | indent 8 }}
-      # Empty = the supervisor image: the sync containers need the supervisor
-      # binary (cache-sync subcommand), which the engine image does not carry.
-      engine_cache_sync_image: {{ .Values.supervisor.config.fleet.engineCacheSyncImage | default (printf "%s:%s" .Values.supervisor.image.repository (.Values.supervisor.image.tag | default .Chart.AppVersion)) | quote }}
+{{ include "dagger-kubernetes.engineRegistryMirrors" . | indent 8 }}
+      # Mirror host[:port] values dialed over plaintext HTTP; engine.toml emits
+      # a [registry."<mirror>"] http = true section per entry.
+      engine_registry_mirrors_http:
+{{ include "dagger-kubernetes.imageCacheMirrorHosts" . | indent 8 }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
       client_cert_ttl: {{ .Values.supervisor.dataplane.tls.clientCertTtl | quote }}

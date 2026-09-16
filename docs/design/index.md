@@ -38,3 +38,6 @@ the decision.
 | 029  | [Raft FQDN-only discovery + NodeLocal DNSCache bypass](ADR-029-raft-fqdn-only-discovery.md) |
 | 030  | [Upstream OAuth group display + mapping diagnostics](ADR-030-upstream-oauth-group-display-and-diagnostics.md) |
 | 031  | [OAuth `admin_groups` → `RoleAdmin` promotion](ADR-031-oauth-admin-groups-role-promotion.md) |
+| 032  | [Engine local-cache purge (per version, live dagql prune)](ADR-032-engine-cache-purge.md) |
+| 033  | [Local image cache (Zot on-demand mirror)](ADR-033-local-image-mirror.md) |
+| 034  | [Admin image-cache management (list / prune / prune-all)](ADR-034-admin-image-cache-management.md) |

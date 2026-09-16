@@ -7,7 +7,7 @@
 # Every value can also be set via an environment variable using the
 # DAGGER_KUBERNETES_ prefix (dots -> underscores, uppercase). Examples:
 #   server.public_url        -> DAGGER_KUBERNETES_SERVER_PUBLIC_URL
-#   cache.registry           -> DAGGER_KUBERNETES_CACHE_REGISTRY
+#   cache.s3.endpoint        -> DAGGER_KUBERNETES_CACHE_S3_ENDPOINT
 #   fleet.max_replicas_per_version -> DAGGER_KUBERNETES_FLEET_MAX_REPLICAS_PER_VERSION
 # Environment variables take precedence over this file.
 #
@@ -185,58 +185,33 @@ telemetry:
   loki_url: "http://loki:3100"                  # Loki logs API.
   victoria_url: "http://victoria:8428"           # VictoriaMetrics API (PromQL-compatible).
 
-# --- Cache store & worker-snapshot warm start ---------------------------------
+# --- Cache store & CLI cache --------------------------------------------------
+# The only cache backend is S3: it backs the on-the-fly CLI tarball cache
+# (cli.enabled). Engines keep their BuildKit local cache on their per-pod PVC;
+# the worker-cache sync and the remote-cache registry proxy were removed.
 cache:
-  registry: "cache.reg/dagger-cache" # cache registry host/repo exposed on GET /api/v1/cache. Dagger 0.21.x removed the experimental cache-config env var, so this ref is no longer emitted to clients; warm start is cache.sync.* below.
-  public_host: ""                   # dedicated cache vhost engines push/pull through (Supervisor proxy).
-                                    # Defaults to cache.<server.public_url host>. Must differ from the control-plane host.
-  internal_addr: ""                 # single backend address (host[:port], no scheme) used when registries: [] is empty.
-  auth_token: ""                    # bearer the Supervisor accepts from engines on the legacy cache proxy.
-                                    # Empty = cache-proxy auth disabled (the S3 cache needs no bearer). Never set here in production. Never logged.
-  registries: []                    # multi-backend list for load balancing (least-charged first, by registry cache size). Empty = single-backend mode.
-    # - id: "reg-1"
-    #   internal_addr: "registry-1.dagger-kubernetes.svc:5000"   # in-cluster backends must use the <service>.<namespace>.svc form (see CONTRIBUTING.md).
-    #   username: ""
-    #   password: ""                 # set directly ONLY for non-K8s deploys. In production use password_secret:
-    #   password_secret:
-    #     name: "cache-registry-1-auth"   # K8s Secret in the fleet namespace
-    #     key: "password"                 # key holding the password (empty = "password")
-    # - id: "reg-2"
-    #   internal_addr: "registry-2.dagger-kubernetes.svc:5000"
-    #   username: ""
-    #   password: ""
-    #   password_secret:
-    #     name: "cache-registry-2-auth"
-    #     key: "password"
-  s3:                                # S3 bucket holding BuildKit cache blobs (prefix "cache/", swept by the cache GC). Also the default bucket for worker snapshots (cache.sync.s3_bucket) and the CLI cache (cli.s3_bucket).
-    bucket: ""
-    region: ""
-  gc:                                # auto-clean (GC) sweeper for cache blobs (see ADR-012).
-    enabled: false                   # master switch; disabled by default.
-    max_age: "168h"                  # purge tags whose manifest is older than this (7d).
-    schedule: "1h"                   # background sweeper ticker interval.
-  sync:                              # BuildKit local worker-cache snapshot sync (warm start; see docs/README.md).
-    enabled: true                    # master switch. Requires cache.backend "registry" or "s3" and fleet.engine_cache_sync_image; otherwise the supervisor logs a WARN and skips the sync containers (never blocks the engine pod).
-    on_start: true                   # restore the snapshot before the engine starts (init container). Skipped when the PVC already has cache content (retained across scale-down).
-    on_stop: true                    # final push after the engine stops (sidecar SIGTERM handler, after quiesce_wait).
-    interval: "10m"                  # periodic push cadence (best-effort, the engine keeps running); 0 disables periodic pushes.
-    quiesce_wait: "10s"              # grace after SIGTERM before the final on-stop push, so the engine can flush+exit. The final push must fit in fleet.engine_termination_grace_seconds minus this.
-    # --- S3 backend (only used when cache.backend is "s3") ------------------
-    # Worker snapshots go to s3://<bucket>/worker-snapshots/<version-slug>/
-    # (meta.tar.gz + blobs/sha256/...). These keys also configure the S3
-    # client shared with the CLI cache (cli.s3_*) and the cache GC sweeper.
-    # Credentials: s3_access_key/s3_secret_key are injected as env vars on the
-    # sync containers from the `engine-s3-auth` Secret (keys accessKey /
-    # secretKey) — never put them in a committed file. The supervisor's own
-    # client reads them from DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY /
-    # DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY; when both are empty the
-    # standard AWS env credential chain applies.
-    s3_endpoint: ""                  # S3-compatible endpoint, e.g. "minio.example.com:9000" (required when backend is s3).
-    s3_bucket: ""                    # snapshot bucket; empty = cache.s3.bucket.
-    s3_region: "us-east-1"           # S3 region (required by AWS S3; ignored by MinIO).
-    s3_use_ssl: true                 # use HTTPS for the S3 endpoint.
-    s3_access_key: ""                # set via env/Secret in production; empty = AWS env credential chain.
-    s3_secret_key: ""                # set via env/Secret in production; never logged.
+  s3:                                # shared S3 client for the CLI cache (cli.s3_bucket).
+    bucket: ""                       # default CLI-cache bucket. Empty + cli.enabled = config load error.
+    region: "us-east-1"              # S3 region (required by AWS S3; ignored by MinIO).
+    endpoint: ""                     # S3-compatible endpoint, e.g. "minio.example.com:9000". Empty = the supervisor logs a WARN and disables the S3-backed CLI cache (non-S3 dev setups).
+    use_ssl: true                    # use HTTPS for the S3 endpoint.
+    access_key: ""                   # set via env/Secret in production (DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY); empty = AWS env credential chain. Never put credentials in a committed file.
+    secret_key: ""                   # set via env/Secret in production (DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY); never logged.
+
+# --- Local image cache (Zot mirrors) -----------------------------------------
+# Admin-visible/read-only list of the local Zot image mirrors the supervisor
+# lists and prunes over their OCI Distribution v2 API (GET /api/v1/image-cache,
+# POST /api/v1/image-cache/prune, POST /api/v1/image-cache/prune-all). The Helm
+# chart renders this block from what it deploys; it is not normally set by hand.
+# Prune unlinks a manifest immediately; Zot's online GC reclaims the
+# unreferenced blob bytes after gcDelay on the next gcInterval cycle.
+image_cache:
+  mirrors: []                        # each: {id, host, upstream, internal_addr, backend}
+    # - id: "docker-io"              # mirror lookup key (chart slug of host).
+    #   host: "docker.io"           # upstream host.
+    #   upstream: "https://registry-1.docker.io"  # upstream base URL (informational).
+    #   internal_addr: "release-docker-io-mirror.dagger.svc:5000"  # in-cluster Zot Service address.
+    #   backend: "s3"               # "s3" | "pvc" (informational; prune is identical).
 
 # --- Pipeline history retention ------------------------------------------------
 # Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics
@@ -294,7 +269,7 @@ fleet:
   engine_debug: false                             # engine.toml: debug = true (verbose engine logging).
   engine_log_format: "json"                       # engine.toml: [log] format; "" omits the section.
   engine_registry_mirrors: {}                     # engine.toml registry mirrors, e.g. {"docker.io": ["mirror.gcr.io"]}.
-  engine_cache_sync_image: ""                     # image holding the supervisor binary, run as the engine pod's cache-restore init + cache-sync sidecar containers (cache.sync.*). Empty = sync disabled. The Helm chart renders the supervisor image; non-Helm users must set it, e.g. "docker.io/disaster/dagger-kubernetes:dev".
+  engine_registry_mirrors_http: []                # mirror host[:port] values dialed over plaintext HTTP; engine.toml emits [registry."<mirror>"] + http = true per entry (the Helm chart fills it with the local image-cache mirrors).
 
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:
@@ -352,13 +327,13 @@ ci:
 # --- On-the-fly Dagger CLI provisioning ------------------------------------
 cli:
   enabled: true                       # serve verified Dagger CLI tarballs + latest-version resolution.
-  cache_repo: "dagger-kubernetes/cli-cache"  # OCI repository for CLI tarball artifacts (registry backend; shared across all pods).
+  cache_repo: "dagger-kubernetes/cli-cache"  # legacy repo name retained for config compatibility; the S3 cache ignores it.
   release_list_ttl: "1h"              # how long to cache the upstream release list in memory.
   download_timeout: "5m"              # outbound fetch timeout for the tarball/checksums.
-  # S3 backend (only used when cache.backend is "s3"): tarballs are stored at
+  # S3 backend: tarballs are stored at
   # s3://<bucket>/<s3_prefix>/<version>/<os>/<arch>/<filename>. The rest of
-  # the S3 client (endpoint, region, SSL, credentials) is shared with the
-  # worker snapshot store, configured once via cache.sync.s3_*.
+  # the S3 client (endpoint, region, SSL, credentials) is configured once via
+  # cache.s3.*.
   s3_bucket: ""                       # CLI-cache bucket; empty = cache.s3.bucket.
   s3_prefix: "cli-cache"              # S3 key prefix for CLI tarballs.
   upstream:

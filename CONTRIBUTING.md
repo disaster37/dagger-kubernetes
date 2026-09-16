@@ -112,7 +112,6 @@ JSON responses via `json.NewEncoder(w).Encode(v)`. Error responses as `{"message
 
 ### In-cluster endpoints must use the `.svc` suffix
 When the supervisor is configured to dial an in-cluster remote component — the
-docker cache (`cache.registries[].internal_addr`, `cache.internal_addr`), the
 Dagger engine registry (`fleet.engine_image_registry`,
 `fleet.engine_registry_mirrors`), Loki (`telemetry.loki_url`), VictoriaMetrics
 (`telemetry.victoria_url`), or any other cluster-local service — the address

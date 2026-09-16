@@ -13,12 +13,12 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// TestMain satisfies the always-on S3 prerequisites (cli cache +
-// worker-cache sync) so the Load tests exercise the rest of the config
-// surface. Tests asserting the raw S3 defaults override these env vars.
+// TestMain satisfies the always-on S3 prerequisites (cli cache) so the Load
+// tests exercise the rest of the config surface. Tests asserting the raw S3
+// defaults override these env vars.
 func TestMain(m *testing.M) {
 	_ = os.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
-	_ = os.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "minio.test:9000")
+	_ = os.Setenv("DAGGER_KUBERNETES_CACHE_S3_ENDPOINT", "minio.test:9000")
 	os.Exit(m.Run())
 }
 
@@ -42,9 +42,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Fleet.Namespace != "dagger-kubernetes" {
 		t.Fatalf("fleet.namespace default = %q, want dagger-kubernetes", cfg.Fleet.Namespace)
-	}
-	if cfg.Cache.InternalAddr != "" {
-		t.Fatalf("cache.internal_addr default = %q, want empty", cfg.Cache.InternalAddr)
 	}
 	if cfg.Supervisor.Dataplane.TLS.CertPath != "/etc/dagger-kubernetes/tls/tls.crt" {
 		t.Fatalf("supervisor.dataplane.tls.cert_path default = %q", cfg.Supervisor.Dataplane.TLS.CertPath)
@@ -159,15 +156,6 @@ func TestLoadDefaults(t *testing.T) {
 	}
 	if cfg.Fleet.VersionRetention != 24*time.Hour {
 		t.Fatalf("fleet.version_retention default = %v, want 24h", cfg.Fleet.VersionRetention)
-	}
-	if cfg.Cache.GC.Enabled {
-		t.Fatal("cache.gc.enabled default should be false")
-	}
-	if cfg.Cache.GC.MaxAge != 168*time.Hour {
-		t.Fatalf("cache.gc.max_age default = %v, want 168h", cfg.Cache.GC.MaxAge)
-	}
-	if cfg.Cache.GC.Schedule != time.Hour {
-		t.Fatalf("cache.gc.schedule default = %v, want 1h", cfg.Cache.GC.Schedule)
 	}
 	if cfg.History.GC.Enabled {
 		t.Fatal("history.gc.enabled default should be false")
@@ -381,7 +369,6 @@ func TestLoadRaftClusterDomain(t *testing.T) {
 func TestLoadEnvOverride(t *testing.T) {
 	t.Setenv("DAGGER_KUBERNETES_SERVER_CONTROL_ADDR", ":7070")
 	t.Setenv("DAGGER_KUBERNETES_LOG_LEVEL", "error")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_GC_ENABLED", "true")
 	t.Setenv("DAGGER_KUBERNETES_FLEET_VERSION_RETENTION", "90m")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
@@ -394,9 +381,6 @@ func TestLoadEnvOverride(t *testing.T) {
 	}
 	if cfg.LogLevel != "error" {
 		t.Fatalf("env override log_level = %q, want error", cfg.LogLevel)
-	}
-	if !cfg.Cache.GC.Enabled {
-		t.Fatal("env override cache.gc.enabled = false, want true")
 	}
 	if cfg.Fleet.VersionRetention != 90*time.Minute {
 		t.Fatalf("env override fleet.version_retention = %v, want 90m", cfg.Fleet.VersionRetention)
@@ -1113,10 +1097,6 @@ func TestLoadExtendedDurationUnits(t *testing.T) {
 auth:
   jwt:
     refresh_ttl: "7d"
-cache:
-  gc:
-    max_age: "30d"
-    schedule: "1d12h"
 history:
   gc:
     max_age: "7d"
@@ -1137,12 +1117,6 @@ cli:
 
 	if cfg.Auth.JWT.RefreshTTL != 168*time.Hour {
 		t.Fatalf("auth.jwt.refresh_ttl = %v, want 168h (7d)", cfg.Auth.JWT.RefreshTTL)
-	}
-	if cfg.Cache.GC.MaxAge != 30*24*time.Hour {
-		t.Fatalf("cache.gc.max_age = %v, want 720h (30d)", cfg.Cache.GC.MaxAge)
-	}
-	if cfg.Cache.GC.Schedule != 36*time.Hour {
-		t.Fatalf("cache.gc.schedule = %v, want 36h (1d12h)", cfg.Cache.GC.Schedule)
 	}
 	if cfg.History.GC.MaxAge != 168*time.Hour {
 		t.Fatalf("history.gc.max_age = %v, want 168h (7d)", cfg.History.GC.MaxAge)
@@ -1516,33 +1490,32 @@ func TestDecodeSettingsRejectsNonPointer(t *testing.T) {
 	}
 }
 
-func TestLoadCacheSyncS3Defaults(t *testing.T) {
-	// Disable both S3 consumers and clear the TestMain-provided prerequisites
+func TestLoadCacheS3Defaults(t *testing.T) {
+	// Disable the S3 consumer and clear the TestMain-provided prerequisites
 	// to observe the raw defaults.
 	t.Setenv("DAGGER_KUBERNETES_CLI_ENABLED", "false")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_ENABLED", "false")
 	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_ENDPOINT", "")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
 		t.Fatalf("Load with missing file: %v", err)
 	}
 
-	if cfg.Cache.Sync.S3Endpoint != "" {
-		t.Fatalf("cache.sync.s3_endpoint default should be empty, got %q", cfg.Cache.Sync.S3Endpoint)
+	if cfg.Cache.S3.Endpoint != "" {
+		t.Fatalf("cache.s3.endpoint default should be empty, got %q", cfg.Cache.S3.Endpoint)
 	}
-	if cfg.Cache.Sync.S3Bucket != "" {
-		t.Fatalf("cache.sync.s3_bucket default should be empty, got %q", cfg.Cache.Sync.S3Bucket)
+	if cfg.Cache.S3.Bucket != "" {
+		t.Fatalf("cache.s3.bucket default should be empty, got %q", cfg.Cache.S3.Bucket)
 	}
-	if cfg.Cache.Sync.S3Region != "us-east-1" {
-		t.Fatalf("cache.sync.s3_region default = %q, want us-east-1", cfg.Cache.Sync.S3Region)
+	if cfg.Cache.S3.Region != "us-east-1" {
+		t.Fatalf("cache.s3.region default = %q, want us-east-1", cfg.Cache.S3.Region)
 	}
-	if !cfg.Cache.Sync.S3UseSSL {
-		t.Fatal("cache.sync.s3_use_ssl default should be true")
+	if !cfg.Cache.S3.UseSSL {
+		t.Fatal("cache.s3.use_ssl default should be true")
 	}
-	if cfg.Cache.Sync.S3AccessKey != "" || cfg.Cache.Sync.S3SecretKey != "" {
-		t.Fatal("cache.sync.s3_access_key/s3_secret_key defaults should be empty")
+	if cfg.Cache.S3.AccessKey != "" || cfg.Cache.S3.SecretKey != "" {
+		t.Fatal("cache.s3.access_key/secret_key defaults should be empty")
 	}
 	if cfg.CLI.S3Bucket != "" {
 		t.Fatalf("cli.s3_bucket default should be empty, got %q", cfg.CLI.S3Bucket)
@@ -1552,31 +1525,62 @@ func TestLoadCacheSyncS3Defaults(t *testing.T) {
 	}
 }
 
-func TestLoadCacheSyncS3EnvOverride(t *testing.T) {
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "minio.example.com:9000")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_BUCKET", "snapshots")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_REGION", "eu-west-1")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_USE_SSL", "false")
+func TestLoadCacheS3EnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_ENDPOINT", "minio.example.com:9000")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "snapshots")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_REGION", "eu-west-1")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_USE_SSL", "false")
 	t.Setenv("DAGGER_KUBERNETES_CLI_S3_PREFIX", "mirror/cli")
 
 	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	if cfg.Cache.Sync.S3Endpoint != "minio.example.com:9000" {
-		t.Fatalf("cache.sync.s3_endpoint = %q", cfg.Cache.Sync.S3Endpoint)
+	if cfg.Cache.S3.Endpoint != "minio.example.com:9000" {
+		t.Fatalf("cache.s3.endpoint = %q", cfg.Cache.S3.Endpoint)
 	}
-	if cfg.Cache.Sync.S3Bucket != "snapshots" {
-		t.Fatalf("cache.sync.s3_bucket = %q", cfg.Cache.Sync.S3Bucket)
+	if cfg.Cache.S3.Bucket != "snapshots" {
+		t.Fatalf("cache.s3.bucket = %q", cfg.Cache.S3.Bucket)
 	}
-	if cfg.Cache.Sync.S3Region != "eu-west-1" {
-		t.Fatalf("cache.sync.s3_region = %q", cfg.Cache.Sync.S3Region)
+	if cfg.Cache.S3.Region != "eu-west-1" {
+		t.Fatalf("cache.s3.region = %q", cfg.Cache.S3.Region)
 	}
-	if cfg.Cache.Sync.S3UseSSL {
-		t.Fatal("cache.sync.s3_use_ssl = true, want false")
+	if cfg.Cache.S3.UseSSL {
+		t.Fatal("cache.s3.use_ssl = true, want false")
 	}
 	if cfg.CLI.S3Prefix != "mirror/cli" {
 		t.Fatalf("cli.s3_prefix = %q", cfg.CLI.S3Prefix)
+	}
+}
+
+func TestLoadEngineRegistryMirrorsHTTP(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`
+fleet:
+  engine_registry_mirrors_http:
+    - "docker-io-mirror.dagger-kubernetes.svc:5000"
+    - "ghcr-io-mirror.dagger-kubernetes.svc:5000"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{
+		"docker-io-mirror.dagger-kubernetes.svc:5000",
+		"ghcr-io-mirror.dagger-kubernetes.svc:5000",
+	}
+	if len(cfg.Fleet.EngineRegistryMirrorsHTTP) != len(want) {
+		t.Fatalf("engine_registry_mirrors_http = %v, want %v", cfg.Fleet.EngineRegistryMirrorsHTTP, want)
+	}
+	for i := range want {
+		if cfg.Fleet.EngineRegistryMirrorsHTTP[i] != want[i] {
+			t.Errorf("engine_registry_mirrors_http[%d] = %q, want %q", i, cfg.Fleet.EngineRegistryMirrorsHTTP[i], want[i])
+		}
 	}
 }
 
@@ -1588,8 +1592,6 @@ func TestValidateS3Prerequisites(t *testing.T) {
 			CLI: domain.CLIConfig{Enabled: true, S3Prefix: "cli-cache"},
 		}
 		cfg.Cache.S3.Bucket = "shared"
-		cfg.Cache.Sync.Enabled = true
-		cfg.Cache.Sync.S3Endpoint = "minio:9000"
 		cfg.CLI.Upstream.ReleasesURL = "https://api.github.com/repos/dagger/dagger/releases"
 		cfg.CLI.Upstream.DownloadBase = "https://github.com/dagger/dagger/releases/download"
 		cfg.CLI.CacheRepo = "dagger-kubernetes/cli-cache"
@@ -1597,78 +1599,6 @@ func TestValidateS3Prerequisites(t *testing.T) {
 		cfg.CLI.DownloadTimeout = 5 * time.Minute
 		return cfg
 	}
-
-	t.Run("cache sync", func(t *testing.T) {
-		tests := []struct {
-			name    string
-			mut     func(*domain.Config)
-			wantErr string
-		}{
-			{
-				name: "prerequisites satisfied",
-				mut:  func(c *domain.Config) {},
-			},
-			{
-				name: "missing endpoint",
-				mut: func(c *domain.Config) {
-					c.Cache.Sync.S3Endpoint = ""
-				},
-				wantErr: "cache.sync.s3_endpoint is required",
-			},
-			{
-				name: "missing bucket",
-				mut: func(c *domain.Config) {
-					c.Cache.S3.Bucket = ""
-				},
-				wantErr: "cache.sync.s3_bucket (or cache.s3.bucket) is required",
-			},
-			{
-				name: "sync bucket overrides shared bucket",
-				mut: func(c *domain.Config) {
-					c.Cache.S3.Bucket = ""
-					c.Cache.Sync.S3Bucket = "sync-only"
-				},
-			},
-			{
-				name: "sync disabled skips prerequisite checks",
-				mut: func(c *domain.Config) {
-					c.Cache.Sync.Enabled = false
-					c.Cache.Sync.S3Endpoint = ""
-					c.Cache.S3.Bucket = ""
-				},
-			},
-			{
-				name: "negative interval rejected",
-				mut: func(c *domain.Config) {
-					c.Cache.Sync.Interval = -time.Second
-				},
-				wantErr: "cache.sync.interval must be >= 0",
-			},
-			{
-				name: "negative quiesce wait rejected",
-				mut: func(c *domain.Config) {
-					c.Cache.Sync.QuiesceWait = -time.Second
-				},
-				wantErr: "cache.sync.quiesce_wait must be >= 0",
-			},
-		}
-		for _, tt := range tests {
-			t.Run(tt.name, func(t *testing.T) {
-				cfg := baseConfig()
-				tt.mut(cfg)
-				err := validateCacheSyncConfig(cfg)
-				if tt.wantErr == "" {
-					if err != nil {
-						t.Fatalf("validateCacheSyncConfig err = %v, want nil", err)
-					}
-					return
-				}
-				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
-					t.Fatalf("validateCacheSyncConfig err = %v, want %q", err, tt.wantErr)
-				}
-			})
-		}
-	})
 
 	t.Run("cli cache", func(t *testing.T) {
 		tests := []struct {
@@ -1726,4 +1656,97 @@ func TestValidateS3Prerequisites(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestLoadImageCacheMirrors(t *testing.T) {
+	// Defaults: no mirrors configured.
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load defaults: %v", err)
+	}
+	if len(cfg.ImageCache.Mirrors) != 0 {
+		t.Fatalf("image_cache.mirrors default = %v, want empty", cfg.ImageCache.Mirrors)
+	}
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`
+image_cache:
+  mirrors:
+    - id: "docker-io"
+      host: "docker.io"
+      upstream: "https://registry-1.docker.io"
+      internal_addr: "rel-docker-io-mirror.dagger.svc:5000"
+      backend: "s3"
+    - id: "ghcr-io"
+      host: "ghcr.io"
+      upstream: "https://ghcr.io"
+      internal_addr: "rel-ghcr-io-mirror.dagger.svc:5000"
+      backend: "pvc"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err = Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.ImageCache.Mirrors) != 2 {
+		t.Fatalf("mirrors = %v, want 2", cfg.ImageCache.Mirrors)
+	}
+	m := cfg.ImageCache.Mirrors[0]
+	if m.ID != "docker-io" || m.Host != "docker.io" || m.Upstream != "https://registry-1.docker.io" ||
+		m.InternalAddr != "rel-docker-io-mirror.dagger.svc:5000" || m.Backend != "s3" {
+		t.Fatalf("mirror[0] = %+v", m)
+	}
+	if cfg.ImageCache.Mirrors[1].Backend != "pvc" {
+		t.Fatalf("mirror[1].backend = %q, want pvc", cfg.ImageCache.Mirrors[1].Backend)
+	}
+}
+
+func TestValidateImageCacheConfig(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{ImageCache: domain.ImageCacheConfig{Mirrors: []domain.ImageCacheMirror{{
+			ID:           "docker-io",
+			Host:         "docker.io",
+			Upstream:     "https://registry-1.docker.io",
+			InternalAddr: "rel-docker-io-mirror.dagger.svc:5000",
+			Backend:      "s3",
+		}}}}
+	}
+
+	tests := []struct {
+		name    string
+		mut     func(c *domain.Config)
+		wantErr string
+	}{
+		{name: "valid"},
+		{name: "empty is valid", mut: func(c *domain.Config) { c.ImageCache.Mirrors = nil }},
+		{name: "missing id", mut: func(c *domain.Config) { c.ImageCache.Mirrors[0].ID = "" }, wantErr: "id must not be empty"},
+		{name: "missing host", mut: func(c *domain.Config) { c.ImageCache.Mirrors[0].Host = "" }, wantErr: "host must not be empty"},
+		{name: "missing internal_addr", mut: func(c *domain.Config) { c.ImageCache.Mirrors[0].InternalAddr = "" }, wantErr: "internal_addr must not be empty"},
+		{name: "bad backend", mut: func(c *domain.Config) { c.ImageCache.Mirrors[0].Backend = "nfs" }, wantErr: `backend "nfs" must be "s3" or "pvc"`},
+		{name: "duplicate id", mut: func(c *domain.Config) {
+			c.ImageCache.Mirrors = append(c.ImageCache.Mirrors, c.ImageCache.Mirrors[0])
+		}, wantErr: "duplicates an earlier entry"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			if tt.mut != nil {
+				tt.mut(cfg)
+			}
+			err := validateImageCacheConfig(cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateImageCacheConfig = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateImageCacheConfig err = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
 }

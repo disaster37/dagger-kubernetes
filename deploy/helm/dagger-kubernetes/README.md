@@ -1,7 +1,7 @@
 # dagger-kubernetes Helm Chart
 
 Self-hosted, Dagger-Cloud-compatible platform: S3-backed cache with
-worker-snapshot warm start, auto-scaling engine fleets, live pipeline UI, and
+warm-starting engine PVCs, auto-scaling engine fleets, live pipeline UI, and
 drop-in CI integration.
 <!-- version-marker -->
 [^1]: Latest released version: `0.1.0`
@@ -75,20 +75,6 @@ The chart never asks for URLs — `server.public_url` (UI + API) and
 Service is exposed via LoadBalancer/NodePort without an ingress (the chart
 cannot know the LB hostname or the auto-assigned nodePort).
 
-The **cache vhost** (`server cache public_host`, the host engines push/pull
-through) is derived the same way: `cache.<control-plane host>` by default, or
-any explicit name via `supervisor.config.cache.publicHost`. When
-`ingress.enabled`, the chart automatically adds the cache host as a second
-Ingress host rule (routing to the `-control` Service) and appends it to
-`ingress.tls[].hosts` — you never list it in `ingress.hosts` yourself. Its DNS
-must resolve to the same ingress IP.
-
-> **Wildcard certificates:** the derived name `cache.<host>` is a
-> second-level subdomain (`cache.dagger.company.com`), which a single-level
-> wildcard certificate (`*.company.com`) does **not** cover. In that case set
-> `supervisor.config.cache.publicHost` to a one-level name, e.g.
-> `dagger-cache.company.com` — the override is free-form.
-
 Container paths and ports are fixed (control `:8080`, data `:8443`, raft
 `:8081`, data dir `/var/lib/dagger-kubernetes`) — only the Service ports are
 configurable (`service.control.port`, `service.data.port`).
@@ -98,7 +84,7 @@ configurable (`service.control.port`, `service.data.port`).
 | Dependency | Chart | Default | Purpose |
 |---|---|---|---|
 | OpenTelemetry Collector | `opentelemetry-collector` ([repo](https://open-telemetry.github.io/opentelemetry-helm-charts)) | enabled | OTLP ingest from Dagger CLI & supervisor; fans out to Tempo / Loki / VictoriaMetrics |
-| MinIO | `minio` ([charts.min.io](https://charts.min.io/)) | enabled | S3-compatible object store backing BuildKit cache blobs (swept by the cache GC), worker snapshots, and the CLI cache; creates the `dagger-cache` bucket on install |
+| MinIO | `minio` ([charts.min.io](https://charts.min.io/)) | enabled | S3-compatible object store backing the local image cache and the CLI cache; creates the `dagger-cache` and `image-cache` buckets on install |
 | Grafana Tempo | `tempo` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Distributed tracing backend, stores OTLP traces |
 | Grafana Loki | `loki` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Log aggregation backend, stores OTLP logs |
 | VictoriaMetrics | `victoria-metrics-single` ([victoriametrics](https://victoriametrics.github.io/helm-charts/)) | enabled | PromQL-compatible metrics backend |
@@ -226,14 +212,6 @@ helm install dagger-kubernetes oci://ghcr.io/disaster37/charts/dagger-kubernetes
   --set dataIngress.enabled=true \
   --set dataIngress.host=data.your-domain.com
 ```
-
-> **Cache vhost SAN:** the cache proxy shares the control-plane TLS listener,
-> so the server certificate must include the cache vhost (derived
-> `cache.<control-plane host>` or the `supervisor.config.cache.publicHost`
-> override) as a SAN. The `embedded` provider adds it automatically; the
-> chart's `dataCert` template only adds `dataIngress.host`, so when using
-> cert-manager add the cache host to the `Certificate` `dnsNames` (via a
-> custom `Certificate`) or use a wildcard certificate.
 
 ## Production recommendations
 
@@ -455,10 +433,10 @@ dependency's in-cluster Service using Go template expressions. The mapping is:
 | `telemetry.victoriaUrl` | `dagger-kubernetes.victoriaUrl` | `<release>-victoria-server.<namespace>.svc:8428` |
 | `server.public_url` | `dagger-kubernetes.publicUrl` | computed from ingress / service exposition |
 | `server.data_hostname` | `dagger-kubernetes.dataHostname` | computed from dataIngress / service exposition |
-| `cache.public_host` | `dagger-kubernetes.cachePublicHost` | `supervisor.config.cache.publicHost`, else `cache.<control-plane host>` |
-| `cache.registry` | `dagger-kubernetes.cacheRegistry` | `<cachePublicHost>/dagger-cache` (ref exposed on `GET /api/v1/cache`) |
-| `cache.sync.s3_endpoint` | `dagger-kubernetes.s3Endpoint` | `<release>-minio.<namespace>.svc:9000` (when `minio.enabled`) |
-| `cache.s3.bucket` / `cache.sync.s3_bucket` | `dagger-kubernetes.s3Bucket` | `cache.sync.s3Bucket`, else `cache.s3.bucket`, else first `minio.buckets[].name`, else `dagger-cache` |
+| `cache.s3.endpoint` | `dagger-kubernetes.s3Endpoint` | `supervisor.config.cache.s3.endpoint`, else `<release>-minio.<namespace>.svc:9000` (when `minio.enabled`) |
+| `cache.s3.bucket` | `dagger-kubernetes.s3Bucket` | `cache.s3.bucket`, else first `minio.buckets[].name`, else `dagger-cache` |
+| `fleet.engine_registry_mirrors` | `dagger-kubernetes.engineRegistryMirrors` | user map merged with one generated image-cache mirror address per enabled upstream (when `imageCache.enabled`) |
+| `fleet.engine_registry_mirrors_http` | `dagger-kubernetes.imageCacheMirrorHosts` | `<release>-<slug>-mirror.<namespace>.svc:5000` per enabled upstream |
 
 All auto-wired endpoints use the `<service>.<namespace>.svc` form — never bare
 service names or `.svc.<cluster-domain>` FQDNs — so a single `.svc` entry in
@@ -546,46 +524,27 @@ rolling-restart, then delete the removed pod.
 > intentionally not carried over. The bootstrap-admin flow provisions a fresh
 > admin when the user count is 0.
 
-### Cache proxy (engine → Supervisor → S3)
+### CLI cache (S3)
 
-The Supervisor acts as an OCI Distribution v2 reverse proxy in front of the
-S3-backed cache. Configure it under `supervisor.config.cache`:
-
-| Value | Default | Description |
-|---|---|---|
-| `supervisor.config.cache.publicHost` | `""` | Dedicated cache vhost engines push/pull through. Empty ⇒ `cache.<control-plane host>`. Must differ from the control-plane host. The ref exposed on `GET /api/v1/cache` is `<publicHost>/dagger-cache`; it is no longer emitted to clients (Dagger 0.21.x removed the experimental cache-config env var). |
-| `supervisor.config.cache.s3.bucket` | `""` | S3 bucket holding BuildKit cache blobs (prefix `cache/`, swept by the cache GC); also the default bucket for worker snapshots and the CLI cache. Empty ⇒ the auto-created MinIO bucket (`dagger-cache`). |
-| `supervisor.config.cache.s3.region` | `"us-east-1"` | S3 region. |
-
-When `ingress.enabled`, the chart adds a second Ingress host rule for the cache
-vhost (routing to the `-control` Service) and appends it to `ingress.tls[].hosts`
-— no need to list the cache host in `ingress.hosts`. Override the vhost with
-`supervisor.config.cache.publicHost` (empty = derived `cache.<control-plane
-host>`; any format works, e.g. `dagger-cache.company.com`). The control-plane
-TLS certificate must include the cache vhost as a SAN.
-
-#### S3 backend
-
-The BuildKit cache blobs live in `supervisor.config.cache.s3.bucket`, and the
-worker-snapshot sync, the CLI cache, and the cache GC sweeper use the same
-bucket:
+The on-the-fly Dagger CLI provisioning addon (`supervisor.config.cli.enabled`)
+stores verified CLI tarballs in S3 so every supervisor pod can serve them.
+Configure the shared S3 client under `supervisor.config.cache.s3`:
 
 | Value | Default | Description |
 |---|---|---|
-| `supervisor.config.cache.s3.bucket` | `""` | BuildKit cache-blob bucket (prefix `cache/`); also the default bucket for worker snapshots and the CLI cache. |
-| `supervisor.config.cache.s3.region` | `""` | S3 region. |
-| `supervisor.config.cache.sync.s3Endpoint` | `""` | S3-compatible endpoint (e.g. `minio.dagger-kubernetes.svc:9000`; auto-wired to the MinIO subchart Service when `minio.enabled`); also configures the supervisor's shared S3 client (CLI cache + GC). |
-| `supervisor.config.cache.sync.s3Bucket` | `""` | Worker-snapshot bucket (empty = `cache.s3.bucket`). |
-| `supervisor.config.cache.sync.s3Region` | `us-east-1` | S3 region. |
-| `supervisor.config.cache.sync.s3UseSSL` | `true` | Use HTTPS for the S3 endpoint. |
+| `supervisor.config.cache.s3.bucket` | `""` | Default bucket for the CLI cache. Empty ⇒ the auto-created MinIO bucket (`dagger-cache`). |
+| `supervisor.config.cache.s3.region` | `"us-east-1"` | S3 region (ignored by MinIO). |
+| `supervisor.config.cache.s3.endpoint` | `""` | S3-compatible endpoint (e.g. `minio.dagger-kubernetes.svc:9000`; auto-wired to the MinIO subchart Service when `minio.enabled`). Empty = the supervisor logs a WARN and disables the CLI cache. |
+| `supervisor.config.cache.s3.useSSL` | `false` | Use HTTPS for the S3 endpoint. |
+| `supervisor.config.cache.s3.accessKey` / `secretKey` | `""` | Leave empty: the supervisor reads the credentials from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY`/`..._SECRET_KEY` (empty falls back to the AWS env credential chain). |
 | `supervisor.config.cli.s3Bucket` / `supervisor.config.cli.s3Prefix` | `""` / `cli-cache` | CLI-tarball bucket + key prefix. |
 
 **Credentials:** the chart does NOT render S3 secrets into the ConfigMap.
 Create the `engine-s3-auth` Secret in the release namespace (keys `accessKey`
-and `secretKey`) — the engine-pod sync containers receive it as Secret
-references — and the supervisor pods read the same keys from it via optional
-env injection (`DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY` /
-`DAGGER_KUBERNETES_CACHE_SYNC_S3_SECRET_KEY`; when the Secret is absent the
+and `secretKey`) — the image-cache mirrors read it directly for their S3
+storage — and the supervisor pods read the same keys from it via optional
+env injection (`DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY` /
+`DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY`; when the Secret is absent the
 S3 client falls back to the AWS env credential chain):
 
 ```bash
@@ -593,9 +552,18 @@ kubectl -n <namespace> create secret generic engine-s3-auth \
   --from-literal=accessKey=... --from-literal=secretKey=...
 ```
 
-**Cleanup:** the cache GC sweeps objects under the `cache/` prefix by
-`LastModified`; worker snapshots self-clean on engine start. Configure a bucket
-lifecycle policy as defense-in-depth (see docs/README.md, "Cache auto-clean").
+### Local image cache (Zot mirror)
+
+`imageCache.enabled: true` deploys one Zot OCI registry per enabled upstream (a
+`Deployment` + `<name>-zot-config` ConfigMap + `Service`, backed by the shared
+MinIO/S3 `image-cache` bucket by default). Zot's `extensions.sync` fetches an
+image from upstream on first request (`onDemand: true`) and serves it from cache
+afterwards; there is no TTL — invalidate with the admin image-cache prune. Zot's
+online GC reclaims unreferenced blob bytes after `imageCache.gc.delay` on the
+next `imageCache.gc.interval`. The generated mirror addresses are merged into
+the engine's `engine.toml` with `http = true` for the plaintext in-cluster
+mirrors. See docs/README.md, "Local image cache (Zot mirror)", and
+[ADR-033](../../../docs/design/ADR-033-local-image-mirror.md).
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
@@ -668,10 +636,12 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled). |
 | `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled). |
 | `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled). |
-| `supervisor.config.cache.publicHost` | string | `""` | Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`). Must differ from the control-plane host. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled. |
-| `supervisor.config.cache.authToken` | string | `""` | Engine→proxy bearer for the cache. Empty = "placeholder". |
 | `supervisor.config.cache.s3.bucket` | string | `""` | S3 bucket name (empty = auto-created MinIO bucket, `dagger-cache`). |
 | `supervisor.config.cache.s3.region` | string | `"us-east-1"` | S3 region (ignored by MinIO). |
+| `supervisor.config.cache.s3.endpoint` | string | `""` | S3-compatible endpoint for the shared S3 client (CLI cache). Auto-wired to `<release>-minio.<namespace>.svc:9000` when the minio subchart is enabled. |
+| `supervisor.config.cache.s3.useSSL` | bool | `false` | Use HTTPS for the S3 endpoint. |
+| `supervisor.config.cache.s3.accessKey` | string | `""` | S3 access key. Leave empty: the supervisor reads it from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY`. |
+| `supervisor.config.cache.s3.secretKey` | string | `""` | S3 secret key. Leave empty: the supervisor reads it from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY`. |
 | `supervisor.config.history.gc.enabled` | bool | `false` | Master switch for the history auto-purge sweeper. |
 | `supervisor.config.history.gc.maxAge` | string | `"720h"` | Purge traces older than this (30d default). Duration strings accept Go units plus `d` (day) and `w` (week), e.g. `7d`, `1w`. |
 | `supervisor.config.history.gc.schedule` | string | `"1h"` | History sweeper ticker interval. |
@@ -700,7 +670,8 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the `engine-image-auth` Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
 | `supervisor.config.fleet.engineDebug` | bool | `false` | Enable engine.toml [debug]. |
 | `supervisor.config.fleet.engineLogFormat` | string | `"json"` | Engine log format (json, text; empty omits). |
-| `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). Dotted keys such as `docker.io`, `ghcr.io`, `public.ecr.aws` are preserved verbatim. |
+| `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). Dotted keys such as `docker.io`, `ghcr.io`, `public.ecr.aws` are preserved verbatim. When `imageCache.enabled`, the generated in-cluster mirror addresses are merged into this map. |
+| `supervisor.config.fleet.engineRegistryMirrorsHttp` | array | `[]` | Mirror host[:port] values dialed over plaintext HTTP; engine.toml emits `[registry."<mirror>"]` + `http = true` per entry. Auto-populated with the image-cache mirrors when `imageCache.enabled`. |
 | `supervisor.config.leaseTtl` | string | `"2m"` | Engine session lease TTL. |
 | `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
 | `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21"]` | Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor). |
@@ -713,6 +684,44 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.logLevel` | string | `"info"` | Supervisor log level. |
 | `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
 | `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |
+
+### Local image cache (Zot mirror)
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `imageCache.enabled` | bool | `false` | Enable the local image cache (Zot mirrors). |
+| `imageCache.image.repository` | string | `"ghcr.io/project-zot/zot"` | Zot image repository. |
+| `imageCache.image.tag` | string | `"v2.1.21"` | Zot image tag (pinned; v2.x serves the OCI Distribution v2 API + online GC). |
+| `imageCache.image.pullPolicy` | string | `"IfNotPresent"` | Image pull policy. |
+| `imageCache.logLevel` | string | `"warn"` | Zot log level (`config.json` `log.level`). |
+| `imageCache.storage.backend` | string | `"s3"` | Mirror storage backend: `s3` (shared MinIO) or `pvc` (per-mirror PVC). |
+| `imageCache.storage.s3.bucket` | string | `"image-cache"` | S3 bucket for cached blobs (auto-created when `minio.enabled`). |
+| `imageCache.storage.s3.region` | string | `"us-east-1"` | S3 region (ignored by MinIO). |
+| `imageCache.storage.s3.endpoint` | string | `""` | S3 endpoint; auto-wired to `<release>-minio.<namespace>.svc:9000` when `minio.enabled`. |
+| `imageCache.storage.s3.forcePathStyle` | bool | `true` | Use path-style S3 addressing (required by MinIO). |
+| `imageCache.storage.s3.secure` | bool | `false` | Use HTTPS for the S3 endpoint. |
+| `imageCache.storage.pvc.storageClass` | string | `""` | StorageClass for per-mirror PVCs (empty = cluster default). |
+| `imageCache.storage.pvc.size` | string | `"20Gi"` | PVC size per mirror. |
+| `imageCache.gc.enabled` | bool | `true` | Enable Zot online garbage collection (`storage.gc`). |
+| `imageCache.gc.delay` | string | `"2h"` | Minimum age of an unreferenced blob before Zot GC reclaims it (`storage.gcDelay`). |
+| `imageCache.gc.interval` | string | `"1h"` | How often Zot runs GC (`storage.gcInterval`). |
+| `imageCache.gc.timeWindow` | string | `""` | Optional daily off-peak GC window `"HH:MM-HH:MM"` (`storage.gcTimeWindow`; empty = unrestricted). |
+| `imageCache.dedupe` | bool | `true` | Deduplicate identical blobs across manifests (`storage.dedupe`). |
+| `imageCache.sync.onDemand` | bool | `true` | Fetch an upstream image on first request (`extensions.sync.registry.onDemand`). |
+| `imageCache.sync.preserveDigest` | bool | `true` | Keep upstream manifest digests (`extensions.sync.registry.preserveDigest`). |
+| `imageCache.sync.tlsVerify` | bool | `true` | Verify upstream TLS certificates. |
+| `imageCache.sync.pollInterval` | string | `""` | Periodic upstream refresh interval (empty = on-demand only; do not use for Docker Hub). |
+| `imageCache.sync.maxRetries` | int | `3` | Upstream fetch retry count. |
+| `imageCache.sync.retryDelay` | string | `"15m"` | Delay between upstream fetch retries. |
+| `imageCache.resources.requests.cpu` | string | `"100m"` | Mirror CPU request. |
+| `imageCache.resources.requests.memory` | string | `"128Mi"` | Mirror memory request. |
+| `imageCache.resources.limits.cpu` | string | `"500m"` | Mirror CPU limit. |
+| `imageCache.resources.limits.memory` | string | `"512Mi"` | Mirror memory limit. |
+| `imageCache.nodeSelector` | object | `{}` | Node selector for mirror pods. |
+| `imageCache.tolerations` | array | `[]` | Tolerations for mirror pods. |
+| `imageCache.securityContext` | object | `{runAsNonRoot: true, runAsUser: 65532, fsGroup: 65532}` | Pod securityContext for mirror pods. |
+| `imageCache.presets` | object | `docker.io`/`ghcr.io`/`public.ecr.aws`/`quay.io` enabled; `gcr.io`/`registry.dagger.io` disabled | Built-in upstream presets. Each entry: `{enabled, username, passwordSecretRef}`. |
+| `imageCache.registries` | array | `[]` | Extra/custom upstreams (private ECR/GAR/Harbor/…): `{host, remoteUrl, username, passwordSecretRef}`. Private credentials are a documented follow-up (Zot `credentialsFile`). |
 
 ### Authentication
 
@@ -822,10 +831,10 @@ Configure it under `supervisor.config.history`:
 | Name | Type | Default | Description |
 |---|---|---|---|
 | `opentelemetry-collector.enabled` | bool | `true` | Install OpenTelemetry Collector subchart. |
-| `minio.enabled` | bool | `true` | Install MinIO subchart (S3-compatible object store for worker snapshots, CLI cache, and BuildKit cache GC). |
+| `minio.enabled` | bool | `true` | Install MinIO subchart (S3-compatible object store for the local image cache and the CLI cache). |
 | `minio.rootUser` / `minio.rootPassword` | string | `"minioadmin"` | MinIO root credentials (dev defaults; change in production). Rendered into the `engine-s3-auth` Secret. |
 | `minio.users` | array | `[]` | Extra MinIO users to create; empty (default) disables the subchart's built-in `console` user. |
-| `minio.buckets` | array | `[{name: dagger-cache}]` | Buckets created on install by the MinIO chart's post-install hook. |
+| `minio.buckets` | array | `[{name: dagger-cache}, {name: image-cache}]` | Buckets created on install by the MinIO chart's post-install hook (`image-cache` backs the local image mirror). |
 | `tempo.enabled` | bool | `true` | Install Grafana Tempo subchart (traces). |
 | `tempo.tempo.retention` | string | `720h` | Trace retention duration. Set to match (or exceed) `supervisor.config.history.gc.maxAge`. |
 | `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |

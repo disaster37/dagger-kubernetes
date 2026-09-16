@@ -6,12 +6,15 @@
 - **Date:** 2026-08-14
 - **Deciders:** dagger-kubernetes maintainers
 
-> **Superseded (2026-09-14):** Dagger 0.21.x removed
+> **Superseded (2026-09-14; updated 2026-09-15):** Dagger 0.21.x removed
 > `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, so the supervisor no longer emits the
 > BuildKit cache config (Connect/env, CI wrapper, shell integrations, Helm).
-> Cache warm start is now provided by the worker-snapshot sync
-> (`cache.sync.*`); the MagicCache dashboard itself is retained. The body below
-> is kept as the historical decision record.
+> The worker-cache sync was removed (2026-09); warm start is now the retained
+> engine PVC, and the remote BuildKit cache remains removed. The MagicCache /
+> "Sync cache" dashboard and its API (`GET /api/v1/cache`, `POST
+> /api/v1/cache/purge`) were removed in the dead-remote-cache cleanup
+> (2026-09-15); an admin "Image cache" page replaces its nav slot in a
+> follow-up. The body below is kept as the historical decision record.
 
 ## Context
 
@@ -71,8 +74,8 @@ traffic when the cache is unreachable.
 purges every tag in the `dagger-cache` repo (the global `cache` tag plus any
 pre-migration legacy version tags), capped at 1000 tags. Purge is idempotent:
 a missing tag counts as `already_purged` and returns 200, so retries are safe.
-The registry must have delete enabled (`REGISTRY_STORAGE_DELETE_ENABLED=true`);
-a 405/403 from `DELETE` maps to 409 "registry delete not enabled".
+The registry must have deletes enabled; a 405/403 from `DELETE` maps to 409
+"registry delete not enabled".
 
 `cache.gc.*` config governs a background sweeper (`CacheStatsService.RunGC`,
 ticker via `StartGCSweeper`): the global `cache` tag is deleted when not

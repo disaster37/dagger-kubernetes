@@ -1,0 +1,216 @@
+{{- if .Values.imageCache.enabled }}
+{{- $root := . }}
+{{- $ns := include "dagger-kubernetes.namespace" . }}
+{{- $backend := .Values.imageCache.storage.backend | default "s3" }}
+{{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) }}
+{{- $name := printf "%s-%s-mirror" $root.Release.Name .slug }}
+{{- $configName := printf "%s-zot-config" $name }}
+{{- $s3Endpoint := "" }}
+{{- if eq $backend "s3" }}
+{{- $s3Endpoint = required (printf "imageCache.storage.s3.endpoint (or minio.enabled) is required for the s3 backend of mirror %q" .slug) (include "dagger-kubernetes.imageCacheS3Endpoint" $root) }}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $configName }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+    dagger-kubernetes.io/registry: {{ .slug }}
+data:
+  config.json: |
+    {{- $storage := dict "rootDirectory" "/var/lib/registry" "dedupe" $root.Values.imageCache.dedupe }}
+    {{- if $root.Values.imageCache.gc.enabled }}
+    {{- $_ := set $storage "gc" true }}
+    {{- $_ := set $storage "gcDelay" $root.Values.imageCache.gc.delay }}
+    {{- $_ := set $storage "gcInterval" $root.Values.imageCache.gc.interval }}
+    {{- if $root.Values.imageCache.gc.timeWindow }}
+    {{- $_ := set $storage "gcTimeWindow" $root.Values.imageCache.gc.timeWindow }}
+    {{- end }}
+    {{- end }}
+    {{- if eq $backend "s3" }}
+    {{- $_ := set $storage "storageDriver" (dict
+      "name" "s3"
+      "rootdirectory" (printf "/%s" .slug)
+      "region" $root.Values.imageCache.storage.s3.region
+      "regionendpoint" $s3Endpoint
+      "bucket" $root.Values.imageCache.storage.s3.bucket
+      "forcepathstyle" $root.Values.imageCache.storage.s3.forcePathStyle
+      "secure" $root.Values.imageCache.storage.s3.secure
+      "skipverify" false) }}
+    {{- end }}
+    {{- $syncRegistry := dict
+      "urls" (list .remoteUrl)
+      "onDemand" $root.Values.imageCache.sync.onDemand
+      "tlsVerify" $root.Values.imageCache.sync.tlsVerify
+      "preserveDigest" $root.Values.imageCache.sync.preserveDigest
+      "maxRetries" $root.Values.imageCache.sync.maxRetries
+      "retryDelay" $root.Values.imageCache.sync.retryDelay }}
+    {{- if $root.Values.imageCache.sync.pollInterval }}
+    {{- $_ := set $syncRegistry "pollInterval" $root.Values.imageCache.sync.pollInterval }}
+    {{- end }}
+    {{- $config := dict
+      "distSpecVersion" "1.1.1"
+      "storage" $storage
+      "http" (dict "address" "0.0.0.0" "port" "5000" "compat" (list "docker2s2"))
+      "log" (dict "level" $root.Values.imageCache.logLevel)
+      "extensions" (dict "sync" (dict "enable" true "registries" (list $syncRegistry))) }}
+    {{- $config | toPrettyJson | nindent 4 }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+    dagger-kubernetes.io/registry: {{ .slug }}
+spec:
+  replicas: 1
+  {{- if eq $backend "pvc" }}
+  # A Deployment (unlike a StatefulSet) cannot use volumeClaimTemplates: the
+  # PVC is a standalone claim. With the default RollingUpdate strategy the
+  # surge pod cannot mount the RWO claim while the old pod still holds it
+  # (different node = stuck rollout), so replace the pod one-shot instead.
+  strategy:
+    type: Recreate
+  {{- end }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "dagger-kubernetes.name" $root }}
+      app.kubernetes.io/instance: {{ $root.Release.Name }}
+      app.kubernetes.io/component: image-cache
+      dagger-kubernetes.io/registry: {{ .slug }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "dagger-kubernetes.name" $root }}
+        app.kubernetes.io/instance: {{ $root.Release.Name }}
+        app.kubernetes.io/component: image-cache
+        dagger-kubernetes.io/registry: {{ .slug }}
+    spec:
+      {{- $sc := $root.Values.imageCache.securityContext | default dict }}
+      securityContext:
+        runAsNonRoot: {{ if hasKey $sc "runAsNonRoot" }}{{ $sc.runAsNonRoot }}{{ else }}true{{ end }}
+        runAsUser: {{ if hasKey $sc "runAsUser" }}{{ $sc.runAsUser }}{{ else }}65532{{ end }}
+        fsGroup: {{ if hasKey $sc "fsGroup" }}{{ $sc.fsGroup }}{{ else }}65532{{ end }}
+      {{- with $root.Values.imageCache.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $root.Values.imageCache.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: zot
+          image: "{{ $root.Values.imageCache.image.repository }}:{{ $root.Values.imageCache.image.tag }}"
+          imagePullPolicy: {{ $root.Values.imageCache.image.pullPolicy }}
+          args: ["serve", "/etc/zot/config.json"]
+          # Matches the chart's hardening convention (supervisor, MinIO): no
+          # privilege escalation, no capabilities. Zot binds :5000
+          # (unprivileged) and needs no extra caps for S3 or PVC storage.
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: ["ALL"]
+          ports:
+            - name: registry
+              containerPort: 5000
+          env:
+            {{- if eq $backend "s3" }}
+            # Zot's S3 driver uses the AWS SDK default credential chain; inject
+            # the shared engine S3 credentials rather than embedding them in
+            # the ConfigMap.
+            - name: AWS_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef:
+                  name: engine-s3-auth
+                  key: accessKey
+                  optional: true
+            - name: AWS_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: engine-s3-auth
+                  key: secretKey
+                  optional: true
+            {{- end }}
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: registry
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: registry
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            failureThreshold: 3
+          resources:
+            {{- toYaml $root.Values.imageCache.resources | nindent 12 }}
+          volumeMounts:
+            - name: zot-config
+              mountPath: /etc/zot
+              readOnly: true
+            - name: data
+              mountPath: /var/lib/registry
+      volumes:
+        - name: zot-config
+          configMap:
+            name: {{ $configName }}
+        - name: data
+          {{- if eq $backend "pvc" }}
+          persistentVolumeClaim:
+            claimName: {{ $name }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+    dagger-kubernetes.io/registry: {{ .slug }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: {{ include "dagger-kubernetes.name" $root }}
+    app.kubernetes.io/instance: {{ $root.Release.Name }}
+    app.kubernetes.io/component: image-cache
+    dagger-kubernetes.io/registry: {{ .slug }}
+  ports:
+    - name: registry
+      port: 5000
+      targetPort: registry
+{{- if eq $backend "pvc" }}
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" $root | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+    dagger-kubernetes.io/registry: {{ .slug }}
+spec:
+  accessModes: ["ReadWriteOnce"]
+  {{- with $root.Values.imageCache.storage.pvc.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $root.Values.imageCache.storage.pvc.size | quote }}
+{{- end }}
+{{- end }}
+{{- end }}

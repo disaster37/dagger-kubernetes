@@ -79,6 +79,33 @@ func TestEngineTOMLRender(t *testing.T) {
 				"[registry.\"public.ecr.aws\"]\n  mirrors = [\"hm-registry.hm.dm.ad/docker-aws\"]\n",
 		},
 		{
+			name: "mirror http only",
+			cfg:  engineTOML{MirrorHTTP: []string{"docker-io-mirror.dagger-kubernetes.svc:5000"}},
+			want: "[registry.\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n  http = true\n",
+		},
+		{
+			name: "mirror http sorted and deduped",
+			cfg: engineTOML{MirrorHTTP: []string{
+				"ghcr-io-mirror.dagger-kubernetes.svc:5000",
+				"docker-io-mirror.dagger-kubernetes.svc:5000",
+				"ghcr-io-mirror.dagger-kubernetes.svc:5000",
+				"",
+			}},
+			want: "[registry.\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n  http = true\n\n" +
+				"[registry.\"ghcr-io-mirror.dagger-kubernetes.svc:5000\"]\n  http = true\n",
+		},
+		{
+			name: "mirrors combined with mirror http",
+			cfg: engineTOML{
+				RegistryMirrors: map[string][]string{
+					"docker.io": {"docker-io-mirror.dagger-kubernetes.svc:5000"},
+				},
+				MirrorHTTP: []string{"docker-io-mirror.dagger-kubernetes.svc:5000"},
+			},
+			want: "[registry.\"docker.io\"]\n  mirrors = [\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n\n" +
+				"[registry.\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n  http = true\n",
+		},
+		{
 			name: "escaping in log format",
 			cfg:  engineTOML{LogFormat: "a\"b\\c\nd\te"},
 			want: "[log]\n  format = \"a\\\"b\\\\c\\nd\\te\"\n",

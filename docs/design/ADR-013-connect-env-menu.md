@@ -4,11 +4,12 @@
 - **Date:** 2026-08-17
 - **Deciders:** dagger-kubernetes maintainers
 
-> **Superseded (2026-09-14):** Dagger 0.21.x removed
+> **Superseded (2026-09-14; updated 2026-09-15):** Dagger 0.21.x removed
 > `_EXPERIMENTAL_DAGGER_CACHE_CONFIG`, so the supervisor no longer emits the
 > BuildKit cache config (Connect/env, CI wrapper, shell integrations, Helm).
-> Cache warm start is now provided by the worker-snapshot sync
-> (`cache.sync.*`). The body below is kept as the historical decision record.
+> The worker-cache sync was removed (2026-09); warm start is now the retained
+> engine PVC, and the remote BuildKit cache remains removed. The body below is
+> kept as the historical decision record.
 
 ## Context
 

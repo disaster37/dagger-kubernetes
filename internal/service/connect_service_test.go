@@ -74,9 +74,6 @@ func TestConnectEnvNoVersionMasked(t *testing.T) {
 	if snap.DataHostname != "data.example.com" {
 		t.Fatalf("DataHostname = %q", snap.DataHostname)
 	}
-	if snap.CacheBackend != "s3" {
-		t.Fatalf("CacheBackend = %q", snap.CacheBackend)
-	}
 	if snap.VersionFloor != "v0.19.0" {
 		t.Fatalf("VersionFloor = %q", snap.VersionFloor)
 	}

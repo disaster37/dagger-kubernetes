@@ -18,10 +18,37 @@
 
     <div v-else>
       <div v-for="version in fleet" :key="version.version" class="card">
-        <h3>{{ version.version }}</h3>
+        <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px;">
+          <h3>{{ version.version }}</h3>
+          <button
+            v-if="auth.isAdmin"
+            class="btn"
+            :disabled="purging[version.version]"
+            @click="purge(version.version)"
+          >
+            {{ purging[version.version] ? 'Purging…' : 'Purge local cache' }}
+          </button>
+        </div>
         <p style="color: #8b949e; font-size: 13px;">
           {{ version.readyReplicas }}/{{ version.replicas }} ready
         </p>
+
+        <div
+          v-if="purgeResults[version.version]"
+          style="margin-top: 8px; padding: 8px 12px; border-radius: 6px; background: #161b22; font-size: 13px;"
+        >
+          <p>{{ purgeSummary(purgeResults[version.version]) }}</p>
+          <ul v-if="failedPods(purgeResults[version.version]).length" style="margin: 6px 0 0; padding-left: 18px;">
+            <li v-for="pod in failedPods(purgeResults[version.version])" :key="pod.pod_name">
+              <code>{{ pod.pod_name }}</code>: {{ pod.error }}
+            </li>
+          </ul>
+        </div>
+
+        <div v-if="purgeErrors[version.version]" class="error-banner" style="margin-top: 8px;">
+          <p>{{ purgeErrors[version.version] }}</p>
+        </div>
+
         <table style="margin-top: 12px;">
           <thead>
             <tr>
@@ -53,14 +80,19 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { fetchFleetInfo } from '@/api/client'
-import type { FleetInfo } from '@/api/types'
+import { fetchFleetInfo, purgeEngineCache } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
+import type { EngineCachePurgeResult, EnginePodPurgeResult, FleetInfo } from '@/api/types'
 
 const REFRESH_MS = 10_000
 
+const auth = useAuthStore()
 const fleet = ref<FleetInfo[]>([])
 const loading = ref(true)
 const error = ref<string | null>(null)
+const purging = ref<Record<string, boolean>>({})
+const purgeResults = ref<Record<string, EngineCachePurgeResult>>({})
+const purgeErrors = ref<Record<string, string>>({})
 let timer: number | undefined
 let loadingInFlight = false
 
@@ -76,6 +108,33 @@ async function load(): Promise<void> {
     loading.value = false
     loadingInFlight = false
   }
+}
+
+async function purge(version: string): Promise<void> {
+  if (!window.confirm(`Purge the local BuildKit cache on every ${version} engine pod? Running pipelines are not interrupted.`)) {
+    return
+  }
+  purging.value = { ...purging.value, [version]: true }
+  purgeErrors.value = { ...purgeErrors.value, [version]: '' }
+  try {
+    const result = await purgeEngineCache(version)
+    purgeResults.value = { ...purgeResults.value, [version]: result }
+    void load()
+  } catch (e) {
+    const err = e as { response?: { data?: { message?: string } } }
+    purgeErrors.value = { ...purgeErrors.value, [version]: err.response?.data?.message || 'Purge failed' }
+  } finally {
+    purging.value = { ...purging.value, [version]: false }
+  }
+}
+
+function purgeSummary(result: EngineCachePurgeResult): string {
+  const pruned = result.pods.filter((p) => p.pruned).length
+  return `Pruned ${pruned}/${result.pods.length} pods`
+}
+
+function failedPods(result: EngineCachePurgeResult): EnginePodPurgeResult[] {
+  return result.pods.filter((p) => p.error)
 }
 
 onMounted(() => {

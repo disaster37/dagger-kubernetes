@@ -8,6 +8,7 @@ type Config struct {
 	Auth       AuthConfig       `mapstructure:"auth"`
 	Telemetry  TelemetryConfig  `mapstructure:"telemetry"`
 	Cache      CacheConfig      `mapstructure:"cache"`
+	ImageCache ImageCacheConfig `mapstructure:"image_cache"`
 	History    HistoryConfig    `mapstructure:"history"`
 	Fleet      FleetConfig      `mapstructure:"fleet"`
 	CA         CAConfig         `mapstructure:"ca"`
@@ -248,68 +249,41 @@ type TelemetryConfig struct {
 	VictoriaURL  string `mapstructure:"victoria_url"`
 }
 
-// RegistryBackend is one backend OCI registry the Supervisor proxies to.
-type RegistryBackend struct {
-	ID             string     `mapstructure:"id"`
-	InternalAddr   string     `mapstructure:"internal_addr"` // host[:port], no scheme
-	Username       string     `mapstructure:"username"`
-	Password       string     `mapstructure:"password"`
-	PasswordSecret *SecretRef `mapstructure:"password_secret"` // K8s Secret ref; resolves Password when empty
-}
-
-// SecretRef names one key of a K8s Secret in the fleet namespace.
-type SecretRef struct {
-	Name string `mapstructure:"name"`
-	Key  string `mapstructure:"key"`
-}
-
 type CacheConfig struct {
-	Registry     string            `mapstructure:"registry"`      // legacy single ref "host/repo"
-	PublicHost   string            `mapstructure:"public_host"`   // dedicated cache vhost
-	InternalAddr string            `mapstructure:"internal_addr"` // legacy single backend addr
-	AuthToken    string            `mapstructure:"auth_token"`    // engine→proxy bearer
-	Registries   []RegistryBackend `mapstructure:"registries"`    // multi-backend list
-	S3           S3Config          `mapstructure:"s3"`
-	GC           GCConfig          `mapstructure:"gc"`
-	Sync         CacheSyncConfig   `mapstructure:"sync"`
+	S3 S3Config `mapstructure:"s3"`
 }
 
-// CacheSyncConfig governs the BuildKit local worker-cache snapshot sync: the
-// engine pod's /var/lib/dagger/worker dir is pushed to the shared backend
-// (OCI registry when cache.backend is "registry", S3 prefix when "s3") and
-// restored by fresh pods (warm start). The sync is best-effort and additive —
-// the remote BuildKit cache remains the source of truth for content.
-type CacheSyncConfig struct {
-	Enabled     bool          `mapstructure:"enabled"`      // master switch
-	OnStart     bool          `mapstructure:"on_start"`     // restore snapshot on start (init container)
-	OnStop      bool          `mapstructure:"on_stop"`      // final push on stop (sidecar SIGTERM handler)
-	Interval    time.Duration `mapstructure:"interval"`     // periodic push; 0 = disabled
-	QuiesceWait time.Duration `mapstructure:"quiesce_wait"` // grace before final on-stop push
-
-	// S3-specific settings (only used when cache.backend is "s3"). They also
-	// configure the S3 client shared with the CLI cache and the cache GC.
-	S3Endpoint  string `mapstructure:"s3_endpoint"`   // S3-compatible endpoint, e.g. "minio.example.com:9000"
-	S3Bucket    string `mapstructure:"s3_bucket"`     // snapshot bucket; empty = cache.s3.bucket
-	S3Region    string `mapstructure:"s3_region"`     // region (required by AWS S3; ignored by MinIO)
-	S3UseSSL    bool   `mapstructure:"s3_use_ssl"`    // use HTTPS for the S3 endpoint
-	S3AccessKey string `mapstructure:"s3_access_key"` // set via env/secret in production
-	S3SecretKey string `mapstructure:"s3_secret_key"` // set via env/secret in production
-}
-
+// S3Config is the shared S3 client configuration consumed by the CLI cache
+// (cli.enabled). The bucket is also the default bucket for the CLI cache
+// (cli.s3_bucket).
 type S3Config struct {
-	Bucket string `mapstructure:"bucket"`
-	Region string `mapstructure:"region"`
+	Bucket    string `mapstructure:"bucket"`
+	Region    string `mapstructure:"region"`
+	Endpoint  string `mapstructure:"endpoint"`   // S3-compatible endpoint, e.g. "minio.example.com:9000"
+	UseSSL    bool   `mapstructure:"use_ssl"`    // use HTTPS for the S3 endpoint
+	AccessKey string `mapstructure:"access_key"` // set via env/secret in production
+	SecretKey string `mapstructure:"secret_key"` // set via env/secret in production
 }
 
-// GCConfig governs the cache auto-clean background sweeper.
-type GCConfig struct {
-	Enabled  bool          `mapstructure:"enabled"`
-	MaxAge   time.Duration `mapstructure:"max_age"`
-	Schedule time.Duration `mapstructure:"schedule"`
+// ImageCacheConfig describes the local image mirrors the supervisor manages
+// over their OCI Distribution v2 API. It is admin-visible/read-only and
+// rendered by the Helm chart from what the chart deploys; the supervisor never
+// sees the mirror's own S3 credentials.
+type ImageCacheConfig struct {
+	Mirrors []ImageCacheMirror `mapstructure:"mirrors"`
+}
+
+// ImageCacheMirror is one local Zot mirror endpoint.
+type ImageCacheMirror struct {
+	ID           string `mapstructure:"id"`            // slug, e.g. "docker-io"
+	Host         string `mapstructure:"host"`          // upstream host, e.g. "docker.io"
+	Upstream     string `mapstructure:"upstream"`      // upstream base URL
+	InternalAddr string `mapstructure:"internal_addr"` // "<release>-<slug>-mirror.<ns>.svc:5000"
+	Backend      string `mapstructure:"backend"`       // "s3" | "pvc" (informational)
 }
 
 // HistoryConfig governs pipeline-history retention (trace_meta + logs +
-// metrics). Mirrors CacheConfig.GC.
+// metrics).
 type HistoryConfig struct {
 	GC HistoryGCConfig `mapstructure:"gc"`
 }
@@ -373,11 +347,12 @@ type FleetConfig struct {
 	EngineDebug            bool                    `mapstructure:"engine_debug"`
 	EngineLogFormat        string                  `mapstructure:"engine_log_format"`
 	EngineRegistryMirrors  map[string][]string     `mapstructure:"engine_registry_mirrors"`
-	// EngineCacheSyncImage is the image holding the supervisor binary, run as
-	// the engine pod's cache-restore init container and cache-sync sidecar.
-	// "" = worker-cache sync disabled (the Helm chart renders the supervisor
-	// image; non-Helm users must set it explicitly).
-	EngineCacheSyncImage string `mapstructure:"engine_cache_sync_image"`
+	// EngineRegistryMirrorsHTTP lists mirror host[:port] values that are
+	// dialed over plaintext HTTP. engine.toml emits a
+	// [registry."<mirror>"] http = true section per entry (BuildKit requires
+	// the mirror host itself to be marked http for in-cluster plaintext
+	// mirrors).
+	EngineRegistryMirrorsHTTP []string `mapstructure:"engine_registry_mirrors_http"`
 }
 
 type CAConfig struct {
@@ -434,9 +409,8 @@ type CLIConfig struct {
 	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`
 	CIWrapperPath   string            `mapstructure:"ci_wrapper_path"` // path to pre-built dagger-kubernetes-ci binary
 
-	// S3-specific settings (only used when cache.backend is "s3"). The rest
-	// of the S3 client (endpoint, region, SSL, credentials) is shared with
-	// the worker snapshot store, configured once via cache.sync.s3_*.
+	// S3-specific settings for the CLI cache. The rest of the S3 client
+	// (endpoint, region, SSL, credentials) is configured via cache.s3.*.
 	S3Bucket string `mapstructure:"s3_bucket"` // CLI-cache bucket; empty = cache.s3.bucket
 	S3Prefix string `mapstructure:"s3_prefix"` // S3 key prefix for CLI tarballs, default "cli-cache"
 }

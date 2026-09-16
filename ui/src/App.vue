@@ -4,7 +4,6 @@
       <router-link to="/" class="logo">Dagger Kubernetes</router-link>
       <div class="nav-links">
         <router-link to="/pipelines">Pipelines</router-link>
-        <router-link to="/cache">Sync cache</router-link>
         <router-link to="/history">History</router-link>
         <router-link to="/fleet">Runners</router-link>
         <router-link to="/services">Services</router-link>
@@ -14,6 +13,7 @@
           <router-link to="/admin/users">Users</router-link>
           <router-link to="/admin/groups">Groups</router-link>
           <router-link to="/admin/projects">Projects</router-link>
+          <router-link to="/image-cache">Image cache</router-link>
         </template>
       </div>
       <StatusIndicator v-if="auth.isAuthenticated" />

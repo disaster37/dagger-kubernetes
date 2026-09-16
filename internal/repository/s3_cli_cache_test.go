@@ -14,6 +14,12 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 )
 
+// sha256HexBytes returns the hex-encoded sha256 digest of b.
+func sha256HexBytes(b []byte) string {
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
+
 // newTestS3CLICache builds an S3CLICache backed by the in-memory mock.
 func newTestS3CLICache(mock *mockS3ObjectStore, prefix string) *S3CLICache {
 	return &S3CLICache{

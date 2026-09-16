@@ -20,7 +20,6 @@ type ConnectTokenMeta struct {
 type ConnectEnvSnapshot struct {
 	ServerURL       string           `json:"server_url"`
 	DataHostname    string           `json:"data_hostname"`
-	CacheBackend    string           `json:"cache_backend"`
 	VersionFloor    string           `json:"version_floor"`
 	AllowedVersions []string         `json:"allowed_versions"`
 	SelectedVersion string           `json:"selected_version,omitempty"`

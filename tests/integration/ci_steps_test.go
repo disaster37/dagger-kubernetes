@@ -86,7 +86,6 @@ func startCIStepsServer(t *testing.T) (controlURL, adminToken string) {
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(
 		service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger),
@@ -130,7 +129,7 @@ func startCIStepsServer(t *testing.T) (controlURL, adminToken string) {
 		PipelineURL:     "https://supv.example.com",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
 		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
 		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logs, JWT: jwtSvc,
@@ -207,7 +206,6 @@ func TestCIWrapperStreamsNestedSteps(t *testing.T) {
 	// The wrapper loads the config (missing file -> defaults); satisfy the
 	// always-on S3 prerequisites so validation passes.
 	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
-	t.Setenv("DAGGER_KUBERNETES_CACHE_SYNC_S3_ENDPOINT", "localhost:9000")
 
 	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
 

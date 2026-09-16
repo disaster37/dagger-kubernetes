@@ -133,33 +133,20 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("telemetry.loki_url", "http://loki:3100")
 	v.SetDefault("telemetry.victoria_url", "http://victoria:8428")
 
-	v.SetDefault("cache.registry", "cache.reg/dagger-cache")
-	v.SetDefault("cache.public_host", "")
-	v.SetDefault("cache.internal_addr", "")
-	v.SetDefault("cache.auth_token", "")
-	v.SetDefault("cache.registries", []domain.RegistryBackend{})
+	// Shared S3 client config for the CLI cache (cli.enabled).
+	// cache.s3.bucket is also the default bucket for the CLI cache
+	// (cli.s3_bucket).
 	v.SetDefault("cache.s3.bucket", "")
-	v.SetDefault("cache.s3.region", "")
+	v.SetDefault("cache.s3.region", "us-east-1")
+	v.SetDefault("cache.s3.endpoint", "")
+	v.SetDefault("cache.s3.use_ssl", true)
+	v.SetDefault("cache.s3.access_key", "")
+	v.SetDefault("cache.s3.secret_key", "")
 
-	v.SetDefault("cache.gc.enabled", false)
-	v.SetDefault("cache.gc.max_age", "168h") // 7d
-	v.SetDefault("cache.gc.schedule", "1h")
-
-	// BuildKit local worker-cache snapshot sync (warm start). The snapshot
-	// repo/tag are domain constants, not config keys. The s3_* keys configure
-	// the S3 backend (cache.backend: "s3") and the S3 client shared with the
-	// CLI cache and the cache GC.
-	v.SetDefault("cache.sync.enabled", true)
-	v.SetDefault("cache.sync.on_start", true)
-	v.SetDefault("cache.sync.on_stop", true)
-	v.SetDefault("cache.sync.interval", 10*time.Minute)
-	v.SetDefault("cache.sync.quiesce_wait", 10*time.Second)
-	v.SetDefault("cache.sync.s3_endpoint", "")
-	v.SetDefault("cache.sync.s3_bucket", "")
-	v.SetDefault("cache.sync.s3_region", "us-east-1")
-	v.SetDefault("cache.sync.s3_use_ssl", true)
-	v.SetDefault("cache.sync.s3_access_key", "")
-	v.SetDefault("cache.sync.s3_secret_key", "")
+	// Local image mirrors (Zot) the supervisor lists/prunes over their OCI
+	// Distribution v2 API. Admin-visible/read-only; the Helm chart renders the
+	// block from what it deploys.
+	v.SetDefault("image_cache.mirrors", []domain.ImageCacheMirror{})
 
 	v.SetDefault("history.gc.enabled", false)
 	v.SetDefault("history.gc.max_age", "720h") // 30d
@@ -195,8 +182,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("fleet.engine_debug", false)
 	v.SetDefault("fleet.engine_log_format", "json")
 	v.SetDefault("fleet.engine_registry_mirrors", map[string][]string{})
+	v.SetDefault("fleet.engine_registry_mirrors_http", []string{})
 	v.SetDefault("fleet.engine_extra_env_from", map[string]domain.EnvVarSource{})
-	v.SetDefault("fleet.engine_cache_sync_image", "")
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
@@ -276,12 +263,12 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("validate cli config: %w", err)
 	}
 
-	if err := validateCIConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate ci config: %w", err)
+	if err := validateImageCacheConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate image cache config: %w", err)
 	}
 
-	if err := validateCacheSyncConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate cache sync config: %w", err)
+	if err := validateCIConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate ci config: %w", err)
 	}
 
 	return &cfg, nil
@@ -736,7 +723,7 @@ func validateCLIConfig(cfg *domain.Config) error {
 	}
 
 	// When the cache backend is s3, the CLI cache lives in an S3 bucket that
-	// shares the worker-snapshot S3 client; validate its prerequisites.
+	// shares the cache.s3.* S3 client; validate its prerequisites.
 	if s3BucketWithFallback(cfg.CLI.S3Bucket, cfg.Cache.S3.Bucket) == "" {
 		return fmt.Errorf("cli.s3_bucket (or cache.s3.bucket) is required when cli.enabled")
 	}
@@ -744,6 +731,33 @@ func validateCLIConfig(cfg *domain.Config) error {
 		return fmt.Errorf("cli.s3_prefix must not be empty when cli.enabled")
 	}
 
+	return nil
+}
+
+// validateImageCacheConfig guards the local image-mirror endpoints the
+// supervisor manages. Each mirror needs a non-empty id/host/internal_addr, a
+// backend of "s3" or "pvc", and a unique id (the id is the API/UI lookup key
+// and the chart-derived slug of host).
+func validateImageCacheConfig(cfg *domain.Config) error {
+	seen := make(map[string]bool, len(cfg.ImageCache.Mirrors))
+	for i, m := range cfg.ImageCache.Mirrors {
+		if strings.TrimSpace(m.ID) == "" {
+			return fmt.Errorf("image_cache.mirrors[%d].id must not be empty", i)
+		}
+		if strings.TrimSpace(m.Host) == "" {
+			return fmt.Errorf("image_cache.mirrors[%d].host must not be empty", i)
+		}
+		if strings.TrimSpace(m.InternalAddr) == "" {
+			return fmt.Errorf("image_cache.mirrors[%d].internal_addr must not be empty", i)
+		}
+		if m.Backend != "s3" && m.Backend != "pvc" {
+			return fmt.Errorf("image_cache.mirrors[%d].backend %q must be \"s3\" or \"pvc\"", i, m.Backend)
+		}
+		if seen[m.ID] {
+			return fmt.Errorf("image_cache.mirrors[%d].id %q duplicates an earlier entry", i, m.ID)
+		}
+		seen[m.ID] = true
+	}
 	return nil
 }
 
@@ -770,29 +784,4 @@ func s3BucketWithFallback(own, shared string) string {
 		return own
 	}
 	return shared
-}
-
-// validateCacheSyncConfig guards the worker-cache sync timings. Negative
-// durations are unit mistakes (0 is the documented "disabled" value). When
-// the S3 backend is selected, its prerequisites are validated here; the
-// remaining prerequisites (registry backend, sync image) are enforced at
-// wiring time with a WARN + graceful disable — sync must never block the
-// engine pod.
-func validateCacheSyncConfig(cfg *domain.Config) error {
-	if !cfg.Cache.Sync.Enabled {
-		return nil
-	}
-	if cfg.Cache.Sync.Interval < 0 {
-		return fmt.Errorf("cache.sync.interval must be >= 0 (0 disables periodic sync)")
-	}
-	if cfg.Cache.Sync.QuiesceWait < 0 {
-		return fmt.Errorf("cache.sync.quiesce_wait must be >= 0")
-	}
-	if cfg.Cache.Sync.S3Endpoint == "" {
-		return fmt.Errorf("cache.sync.s3_endpoint is required")
-	}
-	if s3BucketWithFallback(cfg.Cache.Sync.S3Bucket, cfg.Cache.S3.Bucket) == "" {
-		return fmt.Errorf("cache.sync.s3_bucket (or cache.s3.bucket) is required")
-	}
-	return nil
 }

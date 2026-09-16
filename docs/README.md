@@ -1,7 +1,7 @@
 # Dagger Kubernetes
 
 A self-hosted, **Dagger-Cloud-compatible** platform that gives you an
-S3-backed cache with worker-snapshot warm start, auto-scaling engine fleets, a
+S3-backed cache with warm-starting engine PVCs, auto-scaling engine fleets, a
 live pipeline UI, and drop-in CI integration — without sending your builds or
 telemetry to a third party.
 
@@ -17,8 +17,8 @@ The Supervisor (`cmd/api`) provides three functions:
 The Dagger CLI talks to the Supervisor exactly as it would talk to Dagger
 Cloud: same `DAGGER_CLOUD_URL` / `DAGGER_CLOUD_TOKEN` env vars and the same
 `dagger-cloud://self` runner host. Cache warm start is handled server-side by
-the worker-snapshot sync (`cache.sync.*`); Dagger 0.21.x removed the
-experimental cache-config env var, so none is emitted.
+the retained per-engine PVC; Dagger 0.21.x removed the experimental
+cache-config env var, so none is emitted.
 
 ---
 
@@ -35,7 +35,8 @@ experimental cache-config env var, so none is emitted.
   - [Full reference](#full-reference)
 - [Running the Supervisor](#running-the-supervisor)
 - [Engine fleet](#engine-fleet)
-- [Remote shared cache](#remote-shared-cache)
+- [Caching](#caching)
+- [Local image cache (Zot on-demand mirror)](#local-image-cache-zot-on-demand-mirror)
 - [Pipeline history retention](#pipeline-history-retention)
 - [Authentication](#authentication)
 - [TLS & client certificates](#tls--client-certificates)
@@ -153,12 +154,12 @@ The Helm chart deploys:
 - **Grafana Loki** — log aggregation (logs)
 - **VictoriaMetrics** — PromQL-compatible metrics
 - **Grafana** — dashboards with auto-provisioned datasources
-- **MinIO** — S3-compatible object store backing the remote shared cache, worker snapshots, and CLI cache
+- **MinIO** — S3-compatible object store backing the remote shared cache, the local image cache, and the CLI cache
 
 Every tool is toggleable with its own `enabled` flag (e.g.
 `grafana.enabled: false`). When disabled, you provide your own endpoint in
 `supervisor.config.telemetry` and/or
-`supervisor.config.cache.sync.s3Endpoint`. The supervisor itself is toggled
+`supervisor.config.cache.s3.endpoint`. The supervisor itself is toggled
 with `supervisor.enabled`.
 
 The chart never asks for URLs: `server.public_url` (UI + API) and
@@ -173,7 +174,7 @@ subchart's post-install hook. The supervisor's cache endpoint, bucket, and
 region are auto-wired to the in-cluster MinIO Service, and engine cache
 credentials live in the `engine-s3-auth` Secret (rendered from the MinIO root
 credentials). To use an external S3-compatible store, disable the subchart and
-set `supervisor.config.cache.sync.s3Endpoint` (plus bucket/region as needed).
+set `supervisor.config.cache.s3.endpoint` (plus bucket/region as needed).
 Engine image-pull credentials live in the `engine-image-auth` Secret (key
 `.dockerconfigjson`, rendered by the chart from
 `supervisor.config.fleet.engineDockerConfig`; empty = `{}`), which the engine
@@ -199,11 +200,12 @@ export _EXPERIMENTAL_DAGGER_TAG=v0.21.4
 dagger call github.com/your-org/ci@v1.0.0 build
 ```
 
-Cache **warm start** is automatic: each engine pod restores its BuildKit
-worker cache from the shared snapshot on start (see
-[Worker-cache sync](#worker-cache-sync-warm-start)). Dagger 0.21.x removed the
-experimental BuildKit cache-config environment variable, so no client-side
-cache setup is needed.
+Cache **warm start** is automatic: each engine pod keeps its BuildKit worker
+cache on a per-pod PVC that survives scale-down (the PVC is deleted only when
+the version's StatefulSet is deleted), so an engine re-created for the same
+version reuses its warm cache. A brand-new PVC starts cold — there is no
+shared snapshot sync. Dagger 0.21.x removed the experimental BuildKit
+cache-config environment variable, so no client-side cache setup is needed.
 
 Or skip the env-var juggling and use the wrapper:
 
@@ -220,8 +222,8 @@ The Connect page lists every required client variable — `DAGGER_CLOUD_URL`,
 `DAGGER_CLOUD_TOKEN`, `_EXPERIMENTAL_DAGGER_RUNNER_HOST` — plus
 `_EXPERIMENTAL_DAGGER_TAG` only when you explicitly pin a version. Dagger
 0.21.x removed the experimental cache-config variable this platform used to
-emit, so cache warm start is handled automatically by the worker-snapshot sync
-(see [Worker-cache sync](#worker-cache-sync-warm-start)).
+emit, so cache warm start comes from the engine's retained per-pod PVC and
+needs no client-side configuration.
 
 1. Pick an engine version from the dropdown (optional — leave "No pin" to use
    the CLI default).
@@ -260,8 +262,8 @@ regenerate them on the **Settings** page to enable full-snippet copy.
                                      │  ─ Hertz API      ─ L4 TLS proxy    │
                                      │  ─ UI (SPA)       ─ pins to pod IP   │
                                      │  ─ OTLP forward                       │
-                                     │  ─ S3 client (CLI cache + cache GC)  │
-                                     └───┬─────────────┬─────────────┬─────┘
+                                      │  ─ S3 client (CLI cache)              │
+                                      └───┬─────────────┬─────────────┬─────┘
                                          │             │             │
                           mints client   │             │             │ forwards OTLP
                           cert + lease   │             │             │
@@ -269,11 +271,11 @@ regenerate them on the **Settings** page to enable full-snippet copy.
                   │                                    │                        │
                   ▼                                    ▼                        ▼
    ┌─────────────────────────────┐      ┌──────────────────────────────┐  ┌───────────┐
-   │  Engine fleet (K8s)         │      │  MinIO / S3-compatible store  │  │  Grafana   │
-   │  per-version StatefulSet    │      │  worker snapshots (warm start)│  │ dashboards │
-   │  dagger-engine-v0-21-4      │      │  CLI cache                    │  └───────────┘
-   │  autoscaled 0..N            │      │  BuildKit cache GC targets    │
-   └─────────────────────────────┘      └──────────────────────────────┘
+    │  Engine fleet (K8s)         │      │  MinIO / S3-compatible store  │  │  Grafana   │
+     │  per-version StatefulSet    │      │  image cache (Zot mirrors)    │  │ dashboards │
+     │  dagger-engine-v0-21-4      │      │  CLI cache                    │  └───────────┘
+     │  autoscaled 0..N            │      │                               │
+    └─────────────────────────────┘      └──────────────────────────────┘
 ```
 
 **Flow for a `dagger call`:**
@@ -292,10 +294,9 @@ regenerate them on the **Settings** page to enable full-snippet copy.
    `-data` Services select the current **Raft leader** pod (label
    `dagger-kubernetes.io/raft-leader`), so the tunnel and its lease-touch
    heartbeats always run where Raft writes can be applied.
-4. Engines push/pull BuildKit cache blobs directly against the S3-compatible
-   object store (`type=s3` cache config), while the supervisor uses the same
-   store for worker-cache snapshots, the verified CLI cache, and the GC
-   sweeper.
+4. Engines pull container images through the in-cluster Zot mirrors
+   (cached in the same S3 store), while the supervisor uses the store for the
+   verified CLI cache.
 5. CLI emits OTLP telemetry; the Supervisor forwards it to the local
    collector, which fans out to Tempo (traces), Loki (logs) and
    VictoriaMetrics (metrics). The pipeline UI reads those backends directly.
@@ -424,20 +425,11 @@ inline comments. The sections below summarise the most important ones.
 |                 | `tls.client_auth`                         | `true`                                                   | mTLS: require + verify peer client certs.                                                                                                     |
 | `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP. Helm auto-wires `<release>-opentelemetry-collector.<ns>.svc:4318`.                                                                 |
 |                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm to `<release>-<svc>.<ns>.svc:<port>`).                                                                  |
-| `cache`         | `s3.bucket`                               | `""`                                                     | S3 bucket holding BuildKit cache blobs (prefix `cache/`, swept by the cache GC); also the default bucket for worker snapshots and the CLI cache. |
-|                 | `s3.region`                               | `""`                                                     | S3 region (required by AWS S3; ignored by MinIO).                                                                                             |
-|                 | `gc.enabled`                              | `false`                                                  | Master switch for the S3 cache auto-clean sweeper.                                                                                            |
-|                 | `gc.max_age`                              | `168h`                                                   | Delete cache objects whose `LastModified` is older than this (7d).                                                                            |
-|                 | `gc.schedule`                             | `1h`                                                     | Sweeper ticker interval.                                                                                                                      |
-|                 | `sync.enabled`                            | `true`                                                   | Master switch for the BuildKit local worker-cache snapshot sync (warm start). Requires `cache.sync.s3_endpoint` and `fleet.engine_cache_sync_image`; otherwise the supervisor logs a WARN and skips the sync containers. |
-|                 | `sync.on_start` / `sync.on_stop`          | `true` / `true`                                          | Restore the snapshot before the engine starts (skipped when the PVC already has cache content) / final push after the engine stops.            |
-|                 | `sync.interval`                           | `10m`                                                    | Periodic push cadence (best-effort, the engine keeps running); `0` disables.                                                                  |
-|                 | `sync.quiesce_wait`                       | `10s`                                                    | Grace after SIGTERM before the final on-stop push; the push must fit in `fleet.engine_termination_grace_seconds` minus this.                   |
-|                 | `sync.s3_endpoint`                        | `""` (chart: MinIO Service)                              | S3-compatible endpoint (`host[:port]`) for snapshots, CLI cache, and GC.                                                                      |
-|                 | `sync.s3_bucket`                          | `""` (`cache.s3.bucket`)                                 | Snapshot bucket; empty falls back to `cache.s3.bucket`.                                                                                       |
-|                 | `sync.s3_region`                          | `us-east-1`                                              | S3 region (required by AWS S3; ignored by MinIO).                                                                                             |
-|                 | `sync.s3_use_ssl`                         | `true`                                                   | Use HTTPS for the S3 endpoint.                                                                                                                |
-|                 | `sync.s3_access_key` / `sync.s3_secret_key` | `""`                                                   | S3 credentials (env/Secret only; empty falls back to the AWS env chain).                                                                      |
+| `cache`         | `s3.bucket`                               | `""`                                                     | Default bucket for the CLI cache.                                                                                                             |
+|                 | `s3.region`                               | `us-east-1`                                              | S3 region (required by AWS S3; ignored by MinIO).                                                                                             |
+|                 | `s3.endpoint`                             | `""` (chart: MinIO Service)                              | S3-compatible endpoint (`host[:port]`) for the shared S3 client (CLI cache). Empty = the supervisor logs a WARN and disables the S3-backed CLI cache. |
+|                 | `s3.use_ssl`                              | `true`                                                   | Use HTTPS for the S3 endpoint.                                                                                                                |
+|                 | `s3.access_key` / `s3.secret_key`         | `""`                                                     | S3 credentials (env/Secret only; empty falls back to the AWS env chain).                                                                      |
 | `history`       | `gc.enabled`                              | `false`                                                  | Master switch for the history auto-purge sweeper.                                                                                             |
 |                 | `gc.max_age`                              | `720h`                                                   | Purge traces whose last update is older than this (30d).                                                                                      |
 |                 | `gc.schedule`                             | `1h`                                                     | History sweeper ticker interval.                                                                                                              |
@@ -457,7 +449,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_debug`                            | `false`                                                  | `engine.toml: debug = true`.                                                                                                                  |
 |                 | `engine_log_format`                       | `json`                                                   | `engine.toml: [log] format`; `""` omits.                                                                                                      |
 |                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
-|                 | `engine_cache_sync_image`                 | `""` (chart: the supervisor image)                       | Image holding the supervisor binary, run as the engine pod's cache-restore init + cache-sync sidecar. Empty = sync disabled (non-Helm deploys must set it). |
+|                 | `engine_registry_mirrors_http`            | `[]` (chart: generated mirror hosts)                     | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors). |
 | `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
 | `supervisor.dataplane.tls` | `provider`                        | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Chart auto-switches when `dataCert.enabled` or `dataIngress.tls.secretName` is set. Minting CA is auto-bootstrapped for all. |
@@ -578,10 +570,14 @@ Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
   running with a dangling `SSL_CERT_FILE`. Empty `engine_ca_secret`
   disables CA injection entirely (pre-change behavior).
 - **Generated `engine.toml`** (`fleet.engine_debug`,
-  `fleet.engine_log_format`, `fleet.engine_registry_mirrors`) — the
+  `fleet.engine_log_format`, `fleet.engine_registry_mirrors`,
+  `fleet.engine_registry_mirrors_http`) — the
   supervisor renders a legacy BuildKit-style `engine.toml` and stores it in
   a fleet-wide ConfigMap `dagger-engine-config` (key `engine.toml`), which
   it ensures on every `EnsureStatefulSet` (i.e. on every acquire). The
+  `engine_registry_mirrors_http` entries add `[registry."<mirror>"]` +
+  `http = true` sections for plaintext mirrors (the chart populates it from
+  the local image-cache mirrors). The
   ConfigMap is mounted via `subPath` at `/etc/dagger/engine.toml`, which
   the Dagger engine (v0.19+) reads automatically — no extra engine arg or
   env var is needed. Config edits propagate to new pods on the next
@@ -597,207 +593,224 @@ full rationale and alternatives considered.
 
 ---
 
-## Remote shared cache
+## Caching
 
-The remote shared cache lives in a single **S3-compatible object store**
-(MinIO when the Helm subchart is enabled, or any external S3 endpoint). The
-bucket holds three kinds of objects:
+### CLI cache (S3)
 
-| Prefix | Contents | Written by |
-|---|---|---|
-| `cache/` | BuildKit remote-cache blobs (content-addressed, optional) | Engine pods when a client configures its own S3 cache backend |
-| `worker-snapshots/<version-slug>/` | BuildKit local worker-cache snapshots (`meta.tar.gz` + one object per content blob under `blobs/sha256/`) | `cache-restore` init container / `cache-sync` sidecar |
-| `cli-cache/<version>/<os>/<arch>/<filename>` | Verified Dagger CLI tarballs | Supervisor CLI addon |
-
-Dagger 0.21.x removed the experimental BuildKit cache-config environment
-variable, so the platform **no longer emits or auto-configures a remote
-BuildKit cache**. Cache **warm start** is instead provided by the
-worker-snapshot sync (`cache.sync.*`, below): each engine pod restores its
-local worker cache from the shared snapshot on start and pushes it on stop.
-
-The S3 bucket, GC sweeper, and CLI cache documented below still apply: cache
-blobs a client writes to the `cache/` prefix through its own explicit
-configuration are found and swept by the GC. The S3
-client shared by the worker-snapshot sync, the CLI cache, and the cache GC is
-configured once under `cache.sync.s3_*` (endpoint, region, SSL, credentials):
-
-```yaml
-cache:
-  s3:
-    bucket: "dagger-cache"          # BuildKit cache blobs (prefix cache/)
-    region: "us-east-1"
-  sync:
-    s3_endpoint: "minio.dagger-kubernetes.svc:9000"  # <service>.<namespace>.svc form (see CONTRIBUTING.md)
-    s3_bucket: ""                   # empty = cache.s3.bucket
-    s3_region: "us-east-1"
-    s3_use_ssl: false
-    s3_access_key: ""               # set via env/secret in production
-    s3_secret_key: ""
-cli:
-  s3_bucket: ""                     # empty = cache.s3.bucket
-  s3_prefix: "cli-cache"
-```
-
-BuildKit cache is content-addressed, so pushes from sibling pods of the same
-engine version are safe. Credentials are never rendered into the config file:
-in the Helm chart the `engine-s3-auth` Secret (keys `accessKey`/`secretKey`)
-holds the MinIO root credentials and is read by the sync helpers, while the
-supervisor's S3 client reads the same keys from
-`DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY` / `..._SECRET_KEY` (falling back
-to the standard AWS environment chain when empty). With an external S3
-provider, create the `engine-s3-auth` Secret yourself (or inject the keys via
-env) and set `supervisor.config.cache.sync.s3Endpoint`.
-
-> **Note:** the Sync cache dashboard reports the S3 GC rules, the remote-cache
-> hit rate (from BuildKit counters in VictoriaMetrics), and the admin purge
-> action; per-object size stats are not collected for the S3 backend (see
-> ADR-012).
-
-### Cache auto-clean (GC)
-
-A background sweeper can clean the BuildKit cache blobs. It lists the objects
-under the cache prefix (`s3://<cache.s3.bucket>/cache/`), checks each
-object's own `LastModified` timestamp, and deletes objects older than
-`cache.gc.max_age`. It is **disabled by default**:
+The supervisor's on-the-fly Dagger CLI addon (`cli.enabled`) stores verified
+CLI tarballs in a **S3-compatible object store** (MinIO when the Helm subchart
+is enabled, or any external S3 endpoint) under
+`cli-cache/<version>/<os>/<arch>/<filename>`. The S3 client is configured once
+under `cache.s3.*` (endpoint, region, SSL, credentials):
 
 ```yaml
 cache:
   s3:
     bucket: "dagger-cache"
     region: "us-east-1"
-  gc:
-    enabled: true                 # master switch
-    max_age: "168h"               # delete cache objects older than 7d ("7d" also accepted)
-    schedule: "1h"                # sweeper interval
+    endpoint: "minio.dagger-kubernetes.svc:9000"  # <service>.<namespace>.svc form (see CONTRIBUTING.md)
+    use_ssl: false
+    access_key: ""                  # set via env/secret in production
+    secret_key: ""
+cli:
+  s3_bucket: ""                     # empty = cache.s3.bucket
+  s3_prefix: "cli-cache"
 ```
 
-The worker-snapshot (`worker-snapshots/`) and CLI-cache (`cli-cache/`) prefixes
-are never swept — snapshots are overwritten in place (`meta.tar.gz`) with
-content-addressed, idempotent blobs, and the CLI cache uses immutable versioned
-keys. Orphaned snapshot blobs are reclaimed by a **bucket lifecycle policy**
-(recommended, see "Worker-cache sync").
+Credentials are never rendered into the config file: in the Helm chart the
+`engine-s3-auth` Secret (keys `accessKey`/`secretKey`) holds the MinIO root
+credentials, injected into the supervisor as
+`DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY` / `..._SECRET_KEY` (falling back to the
+standard AWS environment chain when empty). With an external S3 provider,
+create the `engine-s3-auth` Secret yourself (or inject the keys via env) and
+set `supervisor.config.cache.s3.endpoint`.
 
-> **Defense-in-depth:** configure an S3 bucket **lifecycle policy** to delete
-> objects older than N days regardless of the sweeper. It covers objects the
-> sweeper misses while the supervisor is down and prefixes the sweeper does
-> not touch (e.g. snapshots of deleted engine versions). The policy is
-> bucket-level configuration, not code.
+The CLI-cache (`cli-cache/`) prefix is never swept — it uses immutable
+versioned keys.
 
-### Purging cache (admin)
-
-From the Sync cache page, admins can purge the remote cache with a single
-button. The underlying endpoint is `POST /api/v1/cache/purge` (admin-only); it
-deletes every object under the S3 cache prefix (capped at 1000 objects per
-call; run it repeatedly for a large cache).
-
-### Worker-cache sync (warm start)
+### Local engine cache (warm start)
 
 Each engine pod keeps its BuildKit **local** cache on a per-pod PVC
-(`/var/lib/dagger/worker`). That cache is lost whenever a pod gets a fresh PVC:
-scale-out to a new replica, node migration, PVC re-provision, or a new engine
-version — every such pod cold-starts (no cache hits) until it re-fills its
-worker dir. Worker-cache sync fixes this by syncing the worker dir through a
-shared S3 bucket, so a pod can **warm-start** from a sibling pod's cache:
+(`/var/lib/dagger/worker`). The PVC uses the StatefulSet's default retention
+policy: it survives scale-down (`WhenScaled: Retain`, so an engine re-created
+for the same version — scale-out, node migration — reuses its warm cache) and
+is deleted only when the version's StatefulSet is deleted (`WhenDeleted:
+Delete`, i.e. the idle-version GC).
 
-1. **On start** — a `cache-restore` init container restores
-   `/var/lib/dagger/worker/` from the shared snapshot, but only when the
-   worker dir is empty (a PVC retained across scale-down keeps its newer
-   local cache).
-2. **On stop** — a `cache-sync` sidecar traps SIGTERM, waits
-   `cache.sync.quiesce_wait` for the engine to flush+exit, then pushes the
-   final snapshot.
-3. **Periodic** — every `cache.sync.interval`, the sidecar pushes a snapshot so
-   a crash (non-graceful stop) or a long-running pod doesn't leave the shared
-   cache stale.
+There is **no shared snapshot sync**: the former `cache.sync.*` config, the
+`cache-restore` init container, and the `cache-sync` sidecar were removed
+(2026-09). Restoring large snapshots on fresh pods was slow and could restore
+data that was never used; the retained PVC already provides warm starts. A
+brand-new PVC starts cold and re-fills from the remote BuildKit cache and the
+upstream registries.
 
-Both helpers are the existing `supervisor` binary (`supervisor cache-sync
-restore|serve`) running in the engine pod. They are rendered by the supervisor
-when `cache.sync.enabled` is true, `cache.sync.s3_endpoint` and a bucket are
-set, and `fleet.engine_cache_sync_image` is set (the Helm chart fills it with
-the supervisor image automatically); any missing prerequisite logs a WARN and
-skips the containers — sync never blocks the engine pod.
+### Purging the local cache (admin)
 
-**Snapshot format (v3).** Snapshots live under
-`s3://<bucket>/worker-snapshots/<version-slug>/` with `meta.tar.gz` (the
-metadata tarball) and one object per content blob whose S3 key mirrors the
-engine's **on-disk content store** under `blobs/sha256/`: the flat layout used
-by Dagger v0.19+ (`blobs/sha256/<full-hex>`) or the sharded layout of engines
-that shard (`blobs/sha256/<first-two-hex>/<full-hex>`). Because the key mirrors
-the path, the same code syncs both layouts with no mapping table. A push tars
-the metadata first, walks the content store, and uploads only blobs missing
-from the bucket (HEAD probe per blob), so there is no manifest size ceiling.
-**The metadata tarball is only published when every walked blob was uploaded
-successfully** (or was already present): a failed upload or a blob collected by
-BuildKit GC aborts the push with a warning and leaves the previous consistent
-snapshot — metadata and blobs — in place, so a restore can never resolve to
-metadata whose blobs are absent. All pods of the same StatefulSet (same engine
-version) share one snapshot prefix: concurrent pushes are safe
-(content-addressed object keys, last-writer-wins `meta.tar.gz`). The snapshot is
-updated in place — `meta.tar.gz` is atomically overwritten on each push and
-content-addressed blob uploads are idempotent. The sidecar never deletes from
-the shared prefix (a startup wipe would destroy snapshots that concurrent pods
-are still using); orphaned blobs are harmless and are reclaimed by an S3 bucket
-lifecycle policy. Credentials come from the `engine-s3-auth` Secret (keys
-`accessKey`/`secretKey`), rendered as Secret references on the sync containers.
+The Runners page shows a per-version **"Purge cache"** button (admin-only). It
+calls `POST /api/v1/fleet/:version/purge-cache` and returns an
+`EngineCachePurgeResult` with a per-pod outcome. `GET` on the same path returns
+the last recorded result.
+
+What it does, per engine version:
+
+1. **Live prune on every pod.** The supervisor speaks the engine's session HTTP
+   protocol directly over plaintext TCP (`POST http://<pod-ip>:9999/query` with
+   a synthetic `X-Dagger-Client-Metadata` header) and runs the dagql mutation
+   `{ engine { localCache { prune(useDefaultPolicy: false) } } }` concurrently on
+   **all** pods of the version's StatefulSet. No `dagger` CLI subprocess, no
+   scale-to-zero, no PVC deletion — the engines stay up and available. The
+   purge is **purely local**: it has no sync/push follow-up, and the result's
+   `pods[]` entries carry only `pod_name`, `ordinal`, `pruned`, and `error`
+   (the former `synced` field was removed with the worker-cache sync).
 
 Semantics and caveats:
 
-- **Best-effort and additive.** The sync warms the *local* cache; the remote
-  BuildKit cache remains the source of truth
-  for content. A corrupt/missing snapshot only means a cold start.
-- **Dirty periodic snapshots.** Periodic pushes never pause the engine, so
-  they capture a slightly dirty copy (BoltDB is crash-safe: a torn read
-  recovers to the last committed transaction). Worst case on restore: the
-  most recent cache entries are missing — harmless for a cache.
-- **Corrupt metadata DB.** After an S3 restore the helper opens
-  `metadata.db` (BoltDB) to verify integrity; a corrupt DB discards the whole
-  worker dir so the next start retries a clean restore.
-- **Cross-version restore is a non-goal.** Worker dirs are version-specific
-  (BoltDB schema), hence the per-version tag / snapshot prefix; the remote
-  BuildKit cache already covers cross-version sharing via content addressing.
-- **Termination-grace budget.** The final push must finish within
-  `fleet.engine_termination_grace_seconds` (default 120s) minus
-  `cache.sync.quiesce_wait`. A truncated push cannot corrupt the previous
-  snapshot (the metadata object is only updated after every referenced blob
-  was uploaded), but operators with very large caches should raise the grace
-  period.
-- **Temp disk.** Only the metadata tarball needs the sidecar's node-backed
-  emptyDir (`cache-sync-tmp`) — a few MB, not the size of the worker dir
-  (content blobs stream straight through).
-- **Stats/GC.** The snapshot storage is excluded from the cache GC/purge
-  sweeps (`worker-snapshots/` lies outside the S3 cache prefix). Stale
-  snapshot cleanup relies on a **bucket lifecycle policy** — recommended,
-  e.g. "delete objects under `worker-snapshots/` older than 7 days". That
-  policy is the only reclaimer of orphaned blobs.
+- **Admin-only.** Both routes are gated by `adminOnly`.
+- **Allowed with running sessions.** `useDefaultPolicy:false` prunes only
+  *releasable* entries, so a live prune does not corrupt in-flight pipelines.
+  There is no pinned-session refusal.
+- **Idempotent.** Re-running after a completed/failed purge is safe (pruning an
+  already-pruned cache is a no-op).
+- **Per-version serialization.** A concurrent purge of the same version returns
+  `409 purge already in progress`; different versions can purge in parallel.
+- **No `cli.enabled` requirement.** The endpoint needs only a Kubernetes
+  clientset + fleet provider (always true in the live deployment) and reachable
+  target pods.
+- **Per-pod failure reporting.** A pod that fails to prune keeps its cache; its
+  error is reported in `pods[].error` and summarised in `message`. The
+  aggregate state is `completed` whenever the orchestration ran over all
+  targeted pods (even with per-pod failures); `failed` is reserved for
+  precondition failures (fleet not found).
+- **Zero replicas** is a no-op (`replicas:0`, `completed`).
+- **Status is in-memory.** A supervisor restart loses the last result; re-running
+  is idempotent.
+
+---
+
+## Local image cache (Zot on-demand mirror)
+
+The chart can run a **local image cache**: one [Zot](https://zotregistry.dev/)
+OCI registry per upstream registry, acting as an **on-demand pull-through
+cache**, backed by the shared MinIO/S3 store (Helm: `imageCache.enabled`,
+default `false`). Every enabled upstream gets a `Deployment` +
+`<name>-zot-config` ConfigMap + `Service` in the release namespace, and the
+generated mirror addresses are merged into the engine's `engine.toml` so
+pipeline image pulls hit the mirror first. See
+[ADR-033](design/ADR-033-local-image-mirror.md).
+
+Zot's `extensions.sync` fetches an upstream image on the first request
+(`onDemand: true`) and serves it from cache afterwards; there is **no TTL**.
+Invalidate explicitly with the admin image-cache prune (below). `http.compat:
+["docker2s2"]` + `preserveDigest: true` preserve upstream Docker manifest
+digests, so `@digest` pulls and prune-by-digest keep working.
+
+### Presets and custom registries
+
+| Preset | Upstream | Default |
+|---|---|---|
+| `docker.io` | `https://registry-1.docker.io` | enabled |
+| `ghcr.io` | `https://ghcr.io` | enabled |
+| `public.ecr.aws` | `https://public.ecr.aws` | enabled |
+| `quay.io` | `https://quay.io` | enabled |
+| `gcr.io` | `https://gcr.io` | disabled |
+| `registry.dagger.io` | `https://registry.dagger.io` | disabled |
+
+Private ECR/GAR/Harbor or any other upstream goes in
+`imageCache.registries` (`{host, remoteUrl, username, passwordSecretRef}`):
 
 ```yaml
-cache:
-  s3:
-    bucket: "my-dagger-kubernetes"   # remote BuildKit cache + default sync/CLI bucket
-    region: "us-east-1"
-  sync:
-    enabled: true        # master switch
-    on_start: true       # restore on start (init container)
-    on_stop: true        # final push on stop (sidecar)
-    interval: "10m"      # periodic push; 0 disables
-    quiesce_wait: "10s"  # grace before the final on-stop push
-    s3_endpoint: "minio.example.com:9000"
-    s3_region: "us-east-1"
-    s3_use_ssl: true
-fleet:
-  engine_termination_grace_seconds: 120  # raise for very large caches
+imageCache:
+  enabled: true
+  registries:
+    - host: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+      remoteUrl: "https://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+      username: "AWS"
+      passwordSecretRef: { name: "ecr-creds", key: "password" }
 ```
 
-Helper env contract (rendered by the supervisor onto the init container and
-sidecar):
+The mirror address is deterministic —
+`<release>-<slug>-mirror.<namespace>.svc:5000`, with `slug` derived from the
+upstream host (`docker.io` → `docker-io`) — so it lines up 1:1 with the
+`engine.toml` mirror entry. A slug collision between two upstreams fails `helm
+template`. Private-upstream credentials (`imageCache.registries[].username`/
+`passwordSecretRef`) are **not rendered yet**: v1 presets are public, and
+private registries are a documented follow-up (Zot `extensions.sync.
+credentialsFile`).
 
-| Env var | Meaning |
-|---|---|
-| `CACHE_SYNC_TAG` | per-version tag (`worker-v2-<version-slug>`) the S3 snapshot prefix derives its slug from |
-| `CACHE_SYNC_S3_ENDPOINT` / `_BUCKET` / `_REGION` / `_USE_SSL` | target object store |
-| `CACHE_SYNC_S3_ACCESS_KEY` / `_SECRET_KEY` | Secret references (`engine-s3-auth`, keys `accessKey`/`secretKey`) |
-| `CACHE_SYNC_BASE_DIR` / `_WORKER_SUBDIR` | `/var/lib/dagger` + `worker` |
-| `CACHE_SYNC_TMP_DIR` / `_INTERVAL` / `_QUIESCE_WAIT` | sidecar tuning |
+### Storage, GC, and invalidation
+
+`imageCache.storage.backend` selects the cache storage:
+
+- `s3` (default) — Zot's `storage.storageDriver` (`name: s3`) points at the
+  `image-cache` bucket (`imageCache.storage.s3.bucket`, auto-created by the
+  MinIO subchart; endpoint auto-wired to the in-cluster MinIO Service when
+  `minio.enabled`). Credentials are injected as `AWS_ACCESS_KEY_ID`/
+  `AWS_SECRET_ACCESS_KEY` from the `engine-s3-auth` Secret, never embedded in
+  the ConfigMap.
+- `pvc` — per-mirror `PersistentVolumeClaim`
+  (`imageCache.storage.pvc.storageClass`/`size`, default `20Gi`).
+
+Zot runs **online GC** (no stop-the-world step): deleting a manifest unlinks it
+immediately and the referenced blobs are reclaimed automatically once their
+unreferenced age exceeds `imageCache.gc.delay` (default `2h`) on the next
+`imageCache.gc.interval` cycle (default `1h`); `imageCache.gc.timeWindow`
+optionally restricts GC to a daily off-peak window. `imageCache.dedupe`
+(default `true`) stores a single copy of shared layers. There is **no** offline
+`registry garbage-collect` procedure and no delete-enable flag — Zot always
+allows manifest deletion (no auth configured).
+
+The mirrors are unauthenticated plaintext HTTP inside the cluster, so engines
+need no credential for them. `engine-image-auth` (`.dockerconfigjson`) is still
+used by the kubelet for the engine image itself and for registries that are not
+mirrored.
+
+### Managing the image cache (admin)
+
+The supervisor exposes an admin-only API and UI page (`/image-cache`) for the
+configured mirrors, speaking each mirror's OCI Distribution v2 API. Its
+endpoint list comes from the read-only, chart-rendered `image_cache.mirrors`
+config block (`{id, host, upstream, internal_addr, backend}`). See
+[ADR-034](design/ADR-034-admin-image-cache-management.md).
+
+- `GET /api/v1/image-cache` — lists each mirror's repositories/tags with digest,
+  size, and layer count. Per-mirror failures are reported inline
+  (`reachable:false` + `error`), never as a failed request.
+- `POST /api/v1/image-cache/prune` — body
+  `{mirror_id, refs: [{repository, tag?|digest?}]}`; prunes the selected
+  manifests (a tag is resolved to its digest first; a missing manifest counts
+  as already pruned).
+- `POST /api/v1/image-cache/prune-all` — body `{mirror_id}` (empty = all
+  mirrors); enumerates the catalog and deletes every tag-reachable manifest,
+  returning aggregate totals plus per-item failures.
+
+Pruning calls **only the mirror's API** — no workload scaling, PVC deletion,
+storage wipe, or rollout restart — so it is safe to run on a live mirror.
+Deleted manifests are re-fetched from upstream on the next request; blob bytes
+are reclaimed by Zot GC after `gcDelay` as described above.
+
+### `engine.toml` wiring
+
+When `imageCache.enabled` the chart merges the generated mirror addresses into
+`fleet.engine_registry_mirrors` (user-provided entries are preserved) and sets
+`fleet.engine_registry_mirrors_http` to the list of plaintext mirror hosts. The
+supervisor renders both; the HTTP list adds the BuildKit-required `http = true`
+sections:
+
+```toml
+[registry."docker.io"]
+  mirrors = ["my-release-docker-io-mirror.dagger-kubernetes.svc:5000"]
+
+[registry."my-release-docker-io-mirror.dagger-kubernetes.svc:5000"]
+  http = true
+```
+
+`engine.toml` mirrors cover the images pipelines pull (`container from`,
+`with-exec`, …). The **engine image** is pulled by the kubelet before the pod
+starts and is *not* routed through the mirror — that remains
+`fleet.engine_image_registry` + `engine-image-auth`. If a mirror is down the
+engine fails that pull; BuildKit does not silently fall back to the upstream
+for a configured mirror. Disabling `imageCache` removes the mirror workloads
+and restores the raw upstream configuration.
 
 ---
 
@@ -1267,15 +1280,16 @@ subcommand remain (they import flat-file tokens, not SQLite data):
   RFC 7518); shorter values are rejected at startup. When empty, a 32-byte
   random secret is generated and persisted in the database on first boot.
 - Secrets (`auth.jwt.secret`, `auth.oauth.client_secret`,
-  `auth.bootstrap_admin.password`, `cache.sync.s3_access_key`,
-  `cache.sync.s3_secret_key`) are **never rendered into the ConfigMap**.
+  `auth.bootstrap_admin.password`, `cache.s3.access_key`,
+  `cache.s3.secret_key`) are **never rendered into the ConfigMap**.
   In the Helm chart they are mounted as K8s Secrets and injected via env vars
   (`DAGGER_KUBERNETES_AUTH_JWT_SECRET`,
   `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`,
   `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`); the S3 credentials are
   read from the `engine-s3-auth` Secret (keys `accessKey`/`secretKey`) and
-  injected as `DAGGER_KUBERNETES_CACHE_SYNC_S3_ACCESS_KEY` /
-  `..._SECRET_KEY` for the supervisor's own S3 client. To manage
+  injected as `DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY` /
+  `..._SECRET_KEY` for the supervisor's own S3 client (image-cache mirrors read
+  the same Secret keys directly). To manage
   secrets outside Helm (e.g. SealedSecrets/ExternalSecrets), point
   `auth.jwt.secretRef`, `auth.oauth.clientSecretRef`, or
   `auth.bootstrapAdmin.secretRef` at a pre-existing Secret (`{name, key}`);
@@ -1571,14 +1585,11 @@ Features:
   state). Dagger engine verbose progress payloads (base64 protobufs) are
   collapsed to a placeholder rather than rendered as base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
-- **Sync cache dashboard** (`/cache`) — cache running state, S3 remote-cache
-  hit rate (from VictoriaMetrics BuildKit counters), auto-clean (GC) rules
-  with last/next run, and admin-only purge button
 - **History dashboard** (`/history`) — pipeline-history trace count + oldest
   update, auto-purge (GC) rules with last/next run summary, and admin-only
   per-trace / purge-all buttons
 - **Services status page** (`/services`) — every platform service
-  (supervisor, cache, collector, tempo, loki, victoria, fleet) with a
+  (supervisor, collector, tempo, loki, victoria, fleet) with a
   `ok`/`degraded`/`down`/`unknown` state and a rolled-up overall state
 - **Connect page** (`/connect`) — ready-to-copy Dagger CLI environment:
   every required env var (`DAGGER_CLOUD_URL`, `DAGGER_CLOUD_TOKEN`,
@@ -1648,9 +1659,7 @@ step summary with the trace link and Check Runs annotated with cache stats.
 
 The GHA integration emits no cache environment variable: Dagger 0.21.x removed
 the experimental BuildKit cache-config variable, so warm start comes from the
-platform's worker-snapshot sync (`cache.sync.*`) and needs no client-side
-configuration. See
-[Worker-cache sync](#worker-cache-sync-warm-start).
+engine's retained per-pod PVC and needs no client-side configuration.
 
 ### Jenkins
 
@@ -1680,9 +1689,7 @@ and prepends it to `PATH`. See [CLI provisioning](#cli-provisioning).
 
 The shared library emits no cache environment variable: Dagger 0.21.x removed
 the experimental BuildKit cache-config variable, so warm start comes from the
-platform's worker-snapshot sync (`cache.sync.*`) and needs no client-side
-configuration. See
-[Worker-cache sync](#worker-cache-sync-warm-start).
+engine's retained per-pod PVC and needs no client-side configuration.
 
 #### Dynamic stages
 
@@ -1866,9 +1873,8 @@ pin with `cli_version: v0.21.4`). See [CLI provisioning](#cli-provisioning).
 
 The plugin passes `DAGGER_TAG` through to the engine but emits no cache
 environment variable: Dagger 0.21.x removed the experimental BuildKit
-cache-config variable, so warm start comes from the platform's worker-snapshot
-sync (`cache.sync.*`) and needs no client-side configuration. See
-[Worker-cache sync](#worker-cache-sync-warm-start).
+cache-config variable, so warm start comes from the engine's retained per-pod
+PVC and needs no client-side configuration.
 
 ### CLI provisioning
 
@@ -1881,8 +1887,7 @@ the CLI "on the fly" without a public Dagger image:
 | `GET /api/v1/cli/<version>?os=linux&arch=amd64` | Stream the sha256-verified tarball (`Content-Type: application/gzip`, `Content-Disposition: attachment`). |
 
 Both endpoints are auth-gated (`Authorization: Bearer <token>` — the CI
-runner's `DAGGER_CLOUD_TOKEN`), matching `/api/v1/cache` and
-`/api/v1/connect/env`. `os` is `linux` or `darwin`; `arch` is `amd64`, `arm64`,
+runner's `DAGGER_CLOUD_TOKEN`), matching `/api/v1/connect/env`. `os` is `linux` or `darwin`; `arch` is `amd64`, `arm64`,
 or `armv7` (default `linux`/`amd64`).
 
 **`latest` semantics (allowlist-aware):** `latest` is the highest released
@@ -1900,8 +1905,8 @@ can serve cached binaries without re-downloading from GitHub.
 `s3://<bucket>/<cli.s3_prefix>/<version>/<os>/<arch>/<filename>` — e.g.
 `s3://dagger-cache/cli-cache/v0.21.8/linux/amd64/dagger_v0.21.8_linux_amd64.tar.gz`.
 `Has` is an S3 HEAD, `Get` an S3 GET, `Put` a verified S3 PUT; the S3 client
-(endpoint, region, SSL, credentials) is shared with the worker snapshot store
-via `cache.sync.s3_*`. The bucket falls back to `cache.s3.bucket` when
+(endpoint, region, SSL, credentials) is configured once via `cache.s3.*`.
+The bucket falls back to `cache.s3.bucket` when
 `cli.s3_bucket` is empty.
 
 **Mirror / offline:** point `cli.upstream.releases_url` and
@@ -1959,7 +1964,7 @@ all delegate to (or mirror) this script.
   never green.
 - **Backups:** the cache store and telemetry backends use persistent
   volumes. Back up the following PVCs:
-  - MinIO PV (S3 cache, worker snapshots, CLI cache)
+  - MinIO PV (S3 cache, image cache, CLI cache)
   - Tempo PV (trace data)
   - Loki PV (log data)
   - VictoriaMetrics PV (metrics data)
@@ -1993,7 +1998,7 @@ the Dagger source tree for breaking changes:
 - `engine/client/client.go` — runner-host negotiation. The experimental
   BuildKit cache-config variable this platform used (`cache` handling in older
   Dagger releases) was removed upstream in 0.21.x; the supervisor no longer
-  emits it (warm start is the worker-snapshot sync).
+  emits it (warm start is the retained engine PVC).
 
 When any of these change shape, update
 [`internal/handler`](../internal/handler) (control handlers and L4 data-plane proxy) and the

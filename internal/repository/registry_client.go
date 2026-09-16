@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,8 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
-	"strings"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -28,13 +25,7 @@ var (
 	ErrRegistryUnreachable     = errors.New("registry unreachable")
 	ErrRegistryCatalogDisabled = domain.ErrRegistryCatalogDisabled
 	ErrManifestNotFound        = domain.ErrManifestNotFound
-
-	// errUploadDigestMismatch is returned when the registry reports a
-	// different digest than the one announced for the uploaded blob.
-	errUploadDigestMismatch = errors.New("upload digest mismatch")
 )
-
-var _ domain.CLIRegistryClient = (*RegistryStatsClient)(nil)
 
 // maxRegistryBody caps the size of a registry response body the client will
 // decode (manifests, catalog, tags). A compromised or misbehaving registry
@@ -73,21 +64,20 @@ func readBounded(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
-// RegistryStatsClient is a minimal OCI Distribution v2 client used to probe
-// the shared cache registry (catalog, tags, manifests, delete) over stdlib
-// net/http. It talks to the *internal* registry address, never the public
-// cache vhost.
-type RegistryStatsClient struct {
-	host       string // e.g. "localhost:5000" (cache.internal_addr) or derived from cache.registry
+// DistributionClient is a minimal OCI Distribution v2 client used to list and
+// prune the local image mirrors (Zot serves this API) over stdlib net/http. It
+// talks to the *internal* mirror address, never a public vhost.
+type DistributionClient struct {
+	host       string // e.g. "dagger-docker-io-mirror.dagger.svc:5000"
 	username   string
 	password   string
 	httpClient *http.Client
 }
 
-var _ domain.RegistryClient = (*RegistryStatsClient)(nil)
+var _ domain.DistributionClient = (*DistributionClient)(nil)
 
-func NewRegistryStatsClient(host string) *RegistryStatsClient {
-	return &RegistryStatsClient{
+func NewDistributionClient(host string) *DistributionClient {
+	return &DistributionClient{
 		host: host,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
@@ -95,10 +85,10 @@ func NewRegistryStatsClient(host string) *RegistryStatsClient {
 	}
 }
 
-// NewRegistryStatsClientWithAuth returns a client that sends Basic auth on
-// every request (per-backend registry credentials).
-func NewRegistryStatsClientWithAuth(host, username, password string) *RegistryStatsClient {
-	c := NewRegistryStatsClient(host)
+// NewDistributionClientWithAuth returns a client that sends Basic auth on
+// every request.
+func NewDistributionClientWithAuth(host, username, password string) *DistributionClient {
+	c := NewDistributionClient(host)
 	c.username = username
 	c.password = password
 	return c
@@ -106,26 +96,24 @@ func NewRegistryStatsClientWithAuth(host, username, password string) *RegistrySt
 
 // WithTimeout returns the client with the given total per-request timeout,
 // overriding the 10s default. http.Client.Timeout covers connection,
-// redirects, and reading the response body, so the default truncates
-// multi-GB transfers (worker-snapshot push/pull); such callers raise it to
-// their operation budget.
-func (c *RegistryStatsClient) WithTimeout(d time.Duration) *RegistryStatsClient {
+// redirects, and reading the response body.
+func (c *DistributionClient) WithTimeout(d time.Duration) *DistributionClient {
 	c.httpClient.Timeout = d
 	return c
 }
 
 // Host returns the registry host the client talks to.
-func (c *RegistryStatsClient) Host() string {
+func (c *DistributionClient) Host() string {
 	return c.host
 }
 
 // baseURL returns the scheme-prefixed registry host root.
-func (c *RegistryStatsClient) baseURL() string {
+func (c *DistributionClient) baseURL() string {
 	return fmt.Sprintf("http://%s", c.host)
 }
 
 // do performs a request and maps transport errors to ErrRegistryUnreachable.
-func (c *RegistryStatsClient) do(ctx context.Context, method, rawURL, accept string) (*http.Response, error) {
+func (c *DistributionClient) do(ctx context.Context, method, rawURL, accept string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -149,7 +137,7 @@ func discard(resp *http.Response) {
 }
 
 // Ping probes registry reachability (GET /v2/). Returns nil if reachable.
-func (c *RegistryStatsClient) Ping(ctx context.Context) error {
+func (c *DistributionClient) Ping(ctx context.Context) error {
 	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/", c.baseURL()), "")
 	if err != nil {
 		return err
@@ -163,54 +151,9 @@ func (c *RegistryStatsClient) Ping(ctx context.Context) error {
 	return nil
 }
 
-// ProbeManifest performs a HEAD request for repo:ref. It reports
-// (true, nil) when the manifest exists (200), (false, nil) when it is
-// definitively absent (404, or 405 which some registries return for HEAD),
-// and (false, ErrRegistryUnreachable) for transport errors or any other
-// non-2xx status (401/403/5xx) so the router marks the backend down.
-func (c *RegistryStatsClient) ProbeManifest(ctx context.Context, repo, ref string) (bool, error) {
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(ref)), manifestAccept)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return false, nil
-	}
-	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
-}
-
-// ProbeBlob performs a HEAD request for repo's blob digest. It reports
-// (true, nil) when the blob exists (200), (false, nil) when it is
-// definitively absent (404, or 405 which some registries return for HEAD),
-// and (false, ErrRegistryUnreachable) for transport errors or any other
-// non-2xx status (401/403/5xx) so the router marks the backend down.
-func (c *RegistryStatsClient) ProbeBlob(ctx context.Context, repo, digest string) (bool, error) {
-	if !validDigest(digest) {
-		return false, fmt.Errorf("invalid digest: must be sha256:<hex>")
-	}
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return false, nil
-	}
-	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
-}
-
 // Catalog returns the list of repositories. Returns ErrRegistryCatalogDisabled
 // on 404/403, ErrRegistryUnreachable on transport error.
-func (c *RegistryStatsClient) Catalog(ctx context.Context) ([]string, error) {
+func (c *DistributionClient) Catalog(ctx context.Context) ([]string, error) {
 	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/_catalog", c.baseURL()), "")
 	if err != nil {
 		return nil, err
@@ -240,7 +183,7 @@ func (c *RegistryStatsClient) Catalog(ctx context.Context) ([]string, error) {
 }
 
 // Tags returns the tags for a repository.
-func (c *RegistryStatsClient) Tags(ctx context.Context, repo string) ([]string, error) {
+func (c *DistributionClient) Tags(ctx context.Context, repo string) ([]string, error) {
 	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/tags/list", c.baseURL(), url.PathEscape(repo)), "")
 	if err != nil {
 		return nil, err
@@ -282,7 +225,7 @@ const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/
 // getManifest fetches repo:tag's manifest, mapping 404 to ErrManifestNotFound
 // and other non-2xx to ErrRegistryUnreachable. It returns the decoded manifest
 // plus its digest (from Docker-Content-Digest, or computed from the body).
-func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string) (*manifest, string, error) {
+func (c *DistributionClient) getManifest(ctx context.Context, repo, tag string) (*manifest, string, error) {
 	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
 	if err != nil {
 		return nil, "", err
@@ -325,9 +268,9 @@ func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string)
 
 // ManifestSize fetches the manifest for repo:tag and returns (digest, sizeBytes,
 // layerCount). sizeBytes is the sum of layer + config descriptor sizes; when
-// those sizes are absent it falls back to HEAD blob Content-Length and, if
-// that also fails, returns -1. Returns ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error) {
+// those sizes are absent the listing reports -1 (unknown) rather than issuing a
+// HEAD per blob. Returns ErrManifestNotFound on 404.
+func (c *DistributionClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error) {
 	m, digest, err := c.getManifest(ctx, repo, tag)
 	if err != nil {
 		return "", 0, 0, err
@@ -341,47 +284,18 @@ func (c *RegistryStatsClient) ManifestSize(ctx context.Context, repo, tag string
 		size += m.Config.Size
 	}
 
-	// Some registries omit descriptor sizes; fall back to blob Content-Length.
+	// Some registries omit descriptor sizes; report unknown rather than
+	// falling back to a HEAD per blob.
 	if size == 0 && len(m.Layers) > 0 {
-		size = 0
-		for _, l := range m.Layers {
-			bs, err := c.BlobSize(ctx, repo, l.Digest)
-			if err != nil {
-				return digest, -1, layers, nil
-			}
-			size += bs
-		}
+		size = -1
 	}
 
 	return digest, size, layers, nil
 }
 
-// BlobSize returns a blob's size via HEAD /v2/<repo>/blobs/<digest>
-// Content-Length. Returns 0 + error when the registry does not expose it.
-func (c *RegistryStatsClient) BlobSize(ctx context.Context, repo, digest string) (int64, error) {
-	if !validDigest(digest) {
-		return 0, fmt.Errorf("invalid digest: must be sha256:<hex>")
-	}
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
-	if err != nil {
-		return 0, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("blob head status %d", resp.StatusCode)
-	}
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
-			return n, nil
-		}
-	}
-	return 0, fmt.Errorf("blob head missing content-length")
-}
-
 // DeleteManifest deletes a manifest by digest. Returns
 // domain.ErrRegistryDeleteDisabled on 405/403.
-func (c *RegistryStatsClient) DeleteManifest(ctx context.Context, repo, digest string) error {
+func (c *DistributionClient) DeleteManifest(ctx context.Context, repo, digest string) error {
 	if !validDigest(digest) {
 		return fmt.Errorf("invalid digest: must be sha256:<hex>")
 	}
@@ -399,220 +313,4 @@ func (c *RegistryStatsClient) DeleteManifest(ctx context.Context, repo, digest s
 		return fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 	return nil
-}
-
-// createdAnnotation is the OCI annotation carrying a manifest's creation time.
-const createdAnnotation = "org.opencontainers.image.created"
-
-// ManifestCreated fetches the manifest for repo:tag and returns its creation
-// time from the OCI created annotation. It returns a zero time (no error) when
-// the annotation is absent, and ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) ManifestCreated(ctx context.Context, repo, tag string) (time.Time, error) {
-	m, _, err := c.getManifest(ctx, repo, tag)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if m.Annotations == nil {
-		return time.Time{}, nil
-	}
-	raw, ok := m.Annotations[createdAnnotation]
-	if !ok || raw == "" {
-		return time.Time{}, nil
-	}
-	created, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	return created, nil
-}
-
-// UploadBlob performs a monolithic blob upload to repo, returning the digest
-// and byte count. Buffers the body to compute the sha256 digest, then
-// delegates to UploadBlobStream.
-func (c *RegistryStatsClient) UploadBlob(ctx context.Context, repo string, body io.Reader) (digest string, size int64, err error) {
-	// Read the entire body into memory so we can compute sha256 and send it
-	// as a monolithic upload (single PUT with digest query param).
-	buf := new(bytes.Buffer)
-	size, err = io.Copy(buf, body)
-	if err != nil {
-		return "", 0, fmt.Errorf("read body: %w", err)
-	}
-	sum := sha256.Sum256(buf.Bytes())
-	digest = fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
-
-	if err := c.UploadBlobStream(ctx, repo, digest, size, bytes.NewReader(buf.Bytes())); err != nil {
-		return "", 0, err
-	}
-	return digest, size, nil
-}
-
-// UploadBlobStream uploads a blob whose sha256 digest and byte size are known
-// up front, streaming body in a single monolithic PUT (no in-memory
-// buffering). Follows OCI Distribution v2: POST /v2/<repo>/blobs/uploads/ ->
-// PUT <location>?digest=sha256:<hex>.
-func (c *RegistryStatsClient) UploadBlobStream(ctx context.Context, repo, digest string, size int64, body io.Reader) error {
-	if !validDigest(digest) {
-		return fmt.Errorf("invalid digest: must be sha256:<hex>")
-	}
-
-	// Initiate a monolithic blob upload.
-	initResp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/v2/%s/blobs/uploads/", c.baseURL(), url.PathEscape(repo)), "")
-	if err != nil {
-		return err
-	}
-	defer func() { _ = initResp.Body.Close() }()
-	discard(initResp)
-
-	if initResp.StatusCode != http.StatusAccepted {
-		return fmt.Errorf("%w: initiate upload status %d", ErrRegistryUnreachable, initResp.StatusCode)
-	}
-
-	location := initResp.Header.Get("Location")
-	if location == "" {
-		return fmt.Errorf("upload init missing Location header")
-	}
-	// OCI allows a relative Location; resolve it against the registry base.
-	if !strings.Contains(location, "://") {
-		location = c.baseURL() + location
-	}
-
-	// PUT the blob with the digest. Use url.Parse to safely compose the
-	// digest query parameter onto the registry-returned Location header.
-	u, err := url.Parse(location)
-	if err != nil {
-		return fmt.Errorf("parse upload location: %w", err)
-	}
-	q := u.Query()
-	q.Set("digest", digest)
-	u.RawQuery = q.Encode()
-	putURL := u.String()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, body)
-	if err != nil {
-		return fmt.Errorf("build put request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	req.ContentLength = size
-	if c.username != "" || c.password != "" {
-		req.SetBasicAuth(c.username, c.password)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: upload status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	// Verify the returned digest matches what we announced when the registry
-	// reports it (the PUT's digest= param already guarantees it; this is
-	// defense-in-depth against a misbehaving registry).
-	if dgst := resp.Header.Get("Docker-Content-Digest"); dgst != "" && validDigest(dgst) && dgst != digest {
-		return fmt.Errorf("%w: uploaded %s, registry reported %s", errUploadDigestMismatch, digest, dgst)
-	}
-	return nil
-}
-
-// PutManifest pushes an OCI manifest to repo:tag.
-func (c *RegistryStatsClient) PutManifest(ctx context.Context, repo, tag string, manifest *domain.CLIManifest) error {
-	body, err := json.Marshal(manifest)
-	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build put request: %w", err)
-	}
-	req.Header.Set("Content-Type", domain.MediaTypeOCIImageManifest)
-	if c.username != "" || c.password != "" {
-		req.SetBasicAuth(c.username, c.password)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: put manifest status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-	return nil
-}
-
-// GetManifest fetches and decodes a CLI manifest for repo:tag.
-// Returns ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) GetManifest(ctx context.Context, repo, tag string) (*domain.CLIManifest, error) {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusNotFound {
-		discard(resp)
-		return nil, fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, tag)
-	}
-	if resp.StatusCode != http.StatusOK {
-		discard(resp)
-		return nil, fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	body, err := readBounded(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
-	}
-
-	var m domain.CLIManifest
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("decode manifest: %w", err)
-	}
-	return &m, nil
-}
-
-// GetBlob streams a blob from repo:digest, returning the body and Content-Length.
-func (c *RegistryStatsClient) GetBlob(ctx context.Context, repo, digest string) (io.ReadCloser, int64, error) {
-	if !validDigest(digest) {
-		return nil, 0, fmt.Errorf("invalid digest: must be sha256:<hex>")
-	}
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
-	if err != nil {
-		return nil, 0, err
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		_ = resp.Body.Close()
-		return nil, 0, fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, digest)
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, 0, fmt.Errorf("%w: get blob status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	var size int64 = -1
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
-			size = n
-		}
-	}
-	return resp.Body, size, nil
-}
-
-// ManifestExists is a HEAD-based check for a manifest (no body download).
-func (c *RegistryStatsClient) ManifestExists(ctx context.Context, repo, tag string) (bool, error) {
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return false, nil
-	}
-	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
 }
