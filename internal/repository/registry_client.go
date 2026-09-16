@@ -111,6 +111,14 @@ func NewDistributionClient(host string) *DistributionClient {
 		host: host,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
+			// A compromised or poisoned mirror must not be able to pivot the
+			// supervisor to another host with a 3xx (CWE-918/CWE-601): the
+			// distribution client only ever talks to the configured mirror.
+			// Zot serves catalog/tags/manifests inline; blob redirects (S3
+			// presigned URLs) are never fetched here.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }

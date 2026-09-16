@@ -615,3 +615,39 @@ func TestDistributionClientNestedRepository(t *testing.T) {
 		t.Fatalf("got %v", got)
 	}
 }
+
+// TestDistributionClientRejectsRedirects proves a hostile/poisoned mirror
+// cannot pivot the client to another host with a 3xx (CWE-918/CWE-601). Every
+// call must surface ErrRegistryUnreachable and the redirect target must never
+// be contacted — a followed 307 would replay the DELETE against that host.
+func TestDistributionClientRejectsRedirects(t *testing.T) {
+	var pivotHit bool
+	pivot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pivotHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer pivot.Close()
+
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, pivot.URL, http.StatusTemporaryRedirect)
+	})
+
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Ping err = %v, want ErrRegistryUnreachable", err)
+	}
+	if _, err := c.Catalog(context.Background()); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Catalog err = %v, want ErrRegistryUnreachable", err)
+	}
+	if _, err := c.Tags(context.Background(), "library/alpine"); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Tags err = %v, want ErrRegistryUnreachable", err)
+	}
+	if _, _, _, err := c.ManifestSize(context.Background(), "library/alpine", "3.20"); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("ManifestSize err = %v, want ErrRegistryUnreachable", err)
+	}
+	if err := c.DeleteManifest(context.Background(), "library/alpine", digestRepeat("a")); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("DeleteManifest err = %v, want ErrRegistryUnreachable", err)
+	}
+	if pivotHit {
+		t.Fatal("redirect target was contacted: SSRF pivot was not blocked")
+	}
+}
