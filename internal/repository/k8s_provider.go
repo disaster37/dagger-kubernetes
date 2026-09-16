@@ -27,14 +27,22 @@ const (
 	engineLabelVersion = "version"
 	enginePort         = 9999
 
-	engineConfigMapName       = "dagger-engine-config"
-	engineTOMLKey             = "engine.toml"
-	engineTOMLPath            = "/etc/dagger-config/engine.toml"
+	engineConfigMapName = "dagger-engine-config"
+	engineTOMLKey       = "engine.toml"
+	// engineConfigDir is the engine container's config directory and the mount
+	// target of the projected volume carrying the image-pull auth secret plus
+	// (when configured) the engine.toml ConfigMap. Projecting the ConfigMap
+	// key engineTOMLKey here lands it at /etc/dagger/engine.toml, the engine
+	// entrypoint's hard-coded --config path, so BuildKit reads the mirrors
+	// without any extra arg. The image already ships a placeholder
+	// /etc/dagger/engine.toml; the projected volume replaces the whole
+	// directory instead of bind-mounting a file under the secret mount (the
+	// latter is rejected by runc on this cluster with "not a directory").
+	engineConfigDir           = "/etc/dagger"
 	engineCAMountPath         = "/usr/local/share/ca-certificates" // Dagger auto-detects CAs here on startup
-	engineImageAuthSecretName = "engine-image-auth"                // holds engine image-pull auth (.dockerconfigjson); mounted as /etc/dagger
+	engineImageAuthSecretName = "engine-image-auth"                // holds engine image-pull auth (.dockerconfigjson); projected into engineConfigDir
 	volumeDaggerKubernetes    = "dagger-kubernetes"
-	volumeEngineConfig        = "engine-config"
-	volumeDaggerConfig        = "dagger-config"
+	volumeEngineConfig        = "engine-config" // projected secret + engine.toml ConfigMap, mounted at engineConfigDir
 	volumeCABundle            = "ca-bundle"
 	volumeCASecret            = "ca-secret" // K8s Secret volume (read-only); mounted only in init container
 
@@ -190,7 +198,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 		ImagePullPolicy: p.cfg.PullPolicy,
 		Args:            args,
 		Env:             p.engineEnv(),
-		VolumeMounts:    p.engineVolumeMounts(daggerTOML),
+		VolumeMounts:    p.engineVolumeMounts(),
 		SecurityContext: &corev1.SecurityContext{Privileged: &privileged},
 		Resources: corev1.ResourceRequirements{
 			Requests: corev1.ResourceList{
@@ -313,12 +321,13 @@ func secretEnvVar(name, secretName, key string) corev1.EnvVar {
 }
 
 // engineVolumeMounts returns the engine container mounts: the data dir and
-// the engine image-pull auth secret dir, plus the CA bundle and engine.toml
-// files when enabled (an empty daggerTOML omits the latter).
-func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount {
+// the engine-config volume (image-pull auth secret plus the projected
+// engine.toml) at the engine's config directory, plus the CA bundle when
+// enabled.
+func (p *K8sProvider) engineVolumeMounts() []corev1.VolumeMount {
 	mounts := []corev1.VolumeMount{
 		{Name: volumeDaggerKubernetes, MountPath: "/var/lib/dagger"},
-		{Name: volumeEngineConfig, MountPath: "/etc/dagger"},
+		{Name: volumeEngineConfig, MountPath: engineConfigDir},
 	}
 	if p.cfg.CASecret != "" {
 		mounts = append(mounts, corev1.VolumeMount{
@@ -326,29 +335,42 @@ func (p *K8sProvider) engineVolumeMounts(daggerTOML string) []corev1.VolumeMount
 			MountPath: engineCAMountPath,
 		})
 	}
-	if daggerTOML != "" {
-		mounts = append(mounts, corev1.VolumeMount{
-			Name:      volumeDaggerConfig,
-			MountPath: engineTOMLPath,
-			SubPath:   engineTOMLKey,
-			ReadOnly:  true,
-		})
-	}
 	return mounts
 }
 
-// podVolumes returns the pod volumes: the engine image-pull auth secret dir,
-// plus the CA bundle and the engine.toml ConfigMap when enabled (an empty
-// daggerTOML omits the latter).
+// podVolumes returns the pod volumes: the engine image-pull auth secret,
+// projected together with the engine.toml ConfigMap in one volume when a
+// config is rendered (an empty daggerTOML keeps the secret-only volume), plus
+// the CA bundle volumes when a CA secret is configured.
 func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
-	volumes := []corev1.Volume{
-		{
-			Name: volumeEngineConfig,
-			VolumeSource: corev1.VolumeSource{
-				Secret: &corev1.SecretVolumeSource{SecretName: engineImageAuthSecretName},
-			},
+	engineConfig := corev1.Volume{
+		Name: volumeEngineConfig,
+		VolumeSource: corev1.VolumeSource{
+			Secret: &corev1.SecretVolumeSource{SecretName: engineImageAuthSecretName},
 		},
 	}
+	if daggerTOML != "" {
+		engineConfig.VolumeSource = corev1.VolumeSource{
+			Projected: &corev1.ProjectedVolumeSource{
+				Sources: []corev1.VolumeProjection{
+					{
+						Secret: &corev1.SecretProjection{
+							LocalObjectReference: corev1.LocalObjectReference{Name: engineImageAuthSecretName},
+						},
+					},
+					{
+						ConfigMap: &corev1.ConfigMapProjection{
+							LocalObjectReference: corev1.LocalObjectReference{Name: engineConfigMapName},
+							Items: []corev1.KeyToPath{
+								{Key: engineTOMLKey, Path: engineTOMLKey},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	volumes := []corev1.Volume{engineConfig}
 	if p.cfg.CASecret != "" {
 		volumes = append(volumes,
 			corev1.Volume{
@@ -366,16 +388,6 @@ func (p *K8sProvider) podVolumes(daggerTOML string) []corev1.Volume {
 				},
 			},
 		)
-	}
-	if daggerTOML != "" {
-		volumes = append(volumes, corev1.Volume{
-			Name: volumeDaggerConfig,
-			VolumeSource: corev1.VolumeSource{
-				ConfigMap: &corev1.ConfigMapVolumeSource{
-					LocalObjectReference: corev1.LocalObjectReference{Name: engineConfigMapName},
-				},
-			},
-		})
 	}
 	return volumes
 }

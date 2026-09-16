@@ -320,10 +320,12 @@ func TestDistributionClientWithTimeout(t *testing.T) {
 }
 
 // TestDistributionClientPathEscaping verifies that repository/tag/digest
-// values taken from the prune request body are path-escaped before they are
-// interpolated into the wire URL (CWE-22/CWE-918): they cannot traverse out
-// of /v2/ via "..", steer the host via an absolute URL, or inject a
-// query/fragment.
+// values taken from the prune request body are validated and path-escaped
+// before they are interpolated into the wire URL (CWE-22/CWE-918): they cannot
+// traverse out of /v2/ via "..", steer the host via an absolute URL, or inject
+// a query/fragment. Repository separators are preserved (each segment is
+// escaped independently) so nested repos such as "library/alpine" reach the
+// registry as a literal path instead of "library%2Falpine".
 func TestDistributionClientPathEscaping(t *testing.T) {
 	digest := "sha256:" + strings.Repeat("a", 64)
 	var gotPaths []string
@@ -336,19 +338,35 @@ func TestDistributionClientPathEscaping(t *testing.T) {
 		_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg","size":1},"layers":[]}`))
 	})
 
-	// Tags: one hostile repo per case.
+	// Tags: nested repos keep their separators; hostile repos are rejected.
 	tagsCases := []struct {
 		name     string
 		repo     string
 		wantPath string
+		wantErr  bool
 	}{
-		{"nested", "a/b", "/v2/a%2Fb/tags/list"},
-		{"traversal", "../../v2/_catalog", "/v2/..%2F..%2Fv2%2F_catalog/tags/list"},
-		{"absolute-url", "http://evil.com:5000/x", "/v2/http:%2F%2Fevil.com:5000%2Fx/tags/list"},
-		{"query-fragment", "a?b#c", "/v2/a%3Fb%23c/tags/list"},
+		{"nested", "library/alpine", "/v2/library/alpine/tags/list", false},
+		{"deeply-nested", "team/project/image", "/v2/team/project/image/tags/list", false},
+		{"query-fragment", "a?b#c", "/v2/a%3Fb%23c/tags/list", false},
+		{"traversal", "../../v2/_catalog", "", true},
+		{"empty-segment", "a//b", "", true},
+		{"dot-segment", "a/./b", "", true},
+		{"absolute-url", "http://evil.com:5000/x", "", true},
+		{"empty", "", "", true},
 	}
 	for _, tc := range tagsCases {
-		if _, err := c.Tags(context.Background(), tc.repo); err != nil {
+		before := len(gotPaths)
+		_, err := c.Tags(context.Background(), tc.repo)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: Tags(%q) = nil error, want rejection", tc.name, tc.repo)
+			}
+			if len(gotPaths) != before {
+				t.Errorf("%s: rejected repo must not issue a request, got %q", tc.name, gotPaths[before:])
+			}
+			continue
+		}
+		if err != nil {
 			t.Fatalf("%s: Tags: %v", tc.name, err)
 		}
 		if got := gotPaths[len(gotPaths)-1]; got != tc.wantPath {
@@ -356,18 +374,46 @@ func TestDistributionClientPathEscaping(t *testing.T) {
 		}
 	}
 
-	// ManifestSize + DeleteManifest: hostile repo AND tag, then a valid
-	// digest (the colon survives; everything else is escaped).
-	if _, _, _, err := c.ManifestSize(context.Background(), "a?b#c", "v1?x#y"); err != nil {
+	// ManifestSize: nested repo + an escapable-but-hostile tag.
+	if _, _, _, err := c.ManifestSize(context.Background(), "library/alpine", "v1?x#y"); err != nil {
 		t.Fatalf("ManifestSize: %v", err)
 	}
-	if got := gotPaths[len(gotPaths)-1]; got != "/v2/a%3Fb%23c/manifests/v1%3Fx%23y" {
+	if got := gotPaths[len(gotPaths)-1]; got != "/v2/library/alpine/manifests/v1%3Fx%23y" {
 		t.Errorf("manifest wire path = %q", got)
 	}
-	if err := c.DeleteManifest(context.Background(), "a?b#c", digest); err != nil {
+	// A tag containing "/" is not a single segment and must be rejected.
+	if _, _, _, err := c.ManifestSize(context.Background(), "library/alpine", "v1/evil"); err == nil {
+		t.Error("ManifestSize accepted a tag containing '/'")
+	}
+
+	// DeleteManifest: nested repo, valid digest (colon survives escaping).
+	if err := c.DeleteManifest(context.Background(), "library/alpine", digest); err != nil {
 		t.Fatalf("DeleteManifest: %v", err)
 	}
-	if got := gotPaths[len(gotPaths)-1]; got != "/v2/a%3Fb%23c/manifests/"+digest {
-		t.Errorf("delete wire path = %q, want /v2/a%%3Fb%%23c/manifests/%s", got, digest)
+	if got := gotPaths[len(gotPaths)-1]; got != "/v2/library/alpine/manifests/"+digest {
+		t.Errorf("delete wire path = %q, want /v2/library/alpine/manifests/%s", got, digest)
+	}
+}
+
+// TestDistributionClientNestedRepository serves only the literal nested path:
+// the old whole-string escaping turned "library/alpine" into
+// "library%2Falpine" and 404ed, so this is a regression test for the slash
+// case against a server that does not unescape.
+func TestDistributionClientNestedRepository(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/v2/library/alpine/tags/list" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"library/alpine","tags":["3.20","latest"]}`))
+	})
+
+	got, err := c.Tags(context.Background(), "library/alpine")
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if len(got) != 2 || got[0] != "3.20" || got[1] != "latest" {
+		t.Fatalf("got %v", got)
 	}
 }

@@ -56,7 +56,10 @@ data:
       "storage" $storage
       "http" (dict "address" "0.0.0.0" "port" "5000" "compat" (list "docker2s2"))
       "log" (dict "level" $root.Values.imageCache.logLevel)
-      "extensions" (dict "sync" (dict "enable" true "registries" (list $syncRegistry))) }}
+      "extensions" (dict "sync" (dict
+        "enable" true
+        "downloadDir" ($root.Values.imageCache.sync.downloadDir | default "/var/lib/registry/sync")
+        "registries" (list $syncRegistry))) }}
     {{- $config | toPrettyJson | nindent 4 }}
 ---
 apiVersion: apps/v1

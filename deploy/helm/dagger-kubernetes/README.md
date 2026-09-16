@@ -560,8 +560,12 @@ MinIO/S3 `image-cache` bucket by default). Zot's `extensions.sync` fetches an
 image from upstream on first request (`onDemand: true`) and serves it from cache
 afterwards; there is no TTL — invalidate with the admin image-cache prune. Zot's
 online GC reclaims unreferenced blob bytes after `imageCache.gc.delay` on the
-next `imageCache.gc.interval`. The generated mirror addresses are merged into
-the engine's `engine.toml` with `http = true` for the plaintext in-cluster
+next `imageCache.gc.interval`. `imageCache.sync.downloadDir` (default
+`/var/lib/registry/sync`, on the mounted data volume for both storage backends)
+is always rendered because Zot requires it when sync is enabled with S3 storage;
+`imageCache.dedupe` defaults to `false` (Zot rejects dedupe with the S3 driver
+unless a remote DB is configured). The generated mirror addresses are merged
+into the engine's `engine.toml` with `http = true` for the plaintext in-cluster
 mirrors. See docs/README.md, "Local image cache (Zot mirror)", and
 [ADR-033](../../../docs/design/ADR-033-local-image-mirror.md).
 
@@ -706,10 +710,11 @@ Configure it under `supervisor.config.history`:
 | `imageCache.gc.delay` | string | `"2h"` | Minimum age of an unreferenced blob before Zot GC reclaims it (`storage.gcDelay`). |
 | `imageCache.gc.interval` | string | `"1h"` | How often Zot runs GC (`storage.gcInterval`). |
 | `imageCache.gc.timeWindow` | string | `""` | Optional daily off-peak GC window `"HH:MM-HH:MM"` (`storage.gcTimeWindow`; empty = unrestricted). |
-| `imageCache.dedupe` | bool | `true` | Deduplicate identical blobs across manifests (`storage.dedupe`). |
+| `imageCache.dedupe` | bool | `false` | Deduplicate identical blobs across manifests (`storage.dedupe`). Off by default: Zot rejects dedupe with the S3 driver (`no remote database configured`) unless a remote cache/DB is configured, which this chart does not render. |
 | `imageCache.sync.onDemand` | bool | `true` | Fetch an upstream image on first request (`extensions.sync.registry.onDemand`). |
 | `imageCache.sync.preserveDigest` | bool | `true` | Keep upstream manifest digests (`extensions.sync.registry.preserveDigest`). |
 | `imageCache.sync.tlsVerify` | bool | `true` | Verify upstream TLS certificates. |
+| `imageCache.sync.downloadDir` | string | `"/var/lib/registry/sync"` | Local scratch directory for sync downloads (`extensions.sync.downloadDir`). Required by Zot when sync is enabled with S3 storage. Must live under the mounted data volume (`/var/lib/registry`: emptyDir for `s3`, the PVC for `pvc`). |
 | `imageCache.sync.pollInterval` | string | `""` | Periodic upstream refresh interval (empty = on-demand only; do not use for Docker Hub). |
 | `imageCache.sync.maxRetries` | int | `3` | Upstream fetch retry count. |
 | `imageCache.sync.retryDelay` | string | `"15m"` | Delay between upstream fetch retries. |

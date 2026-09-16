@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -47,6 +48,35 @@ var digestRe = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
 // before it is interpolated into a registry URL path.
 func validDigest(d string) bool {
 	return digestRe.MatchString(d)
+}
+
+// escapeRepository validates and escapes an OCI repository name for a
+// Distribution v2 request path. The name is split on "/" and each segment is
+// escaped independently so the separators survive: escaping the whole string
+// would turn "library/alpine" into "library%2Falpine", which registries treat
+// as a single (nonexistent) repository and answer with 404. Empty, "." and
+// ".." segments are rejected so a hostile repository cannot traverse out of
+// /v2/ (CWE-22/CWE-918).
+func escapeRepository(repo string) (string, error) {
+	segments := strings.Split(repo, "/")
+	for i, seg := range segments {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("invalid repository %q: empty or traversal segment", repo)
+		}
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/"), nil
+}
+
+// escapeTag validates and escapes an image tag as a single path segment. A tag
+// (unlike a repository) must not contain "/" and must not be a "."/".."
+// traversal value; everything else is percent-escaped so query/fragment
+// metacharacters cannot alter the request (CWE-22/CWE-918).
+func escapeTag(tag string) (string, error) {
+	if tag == "" || tag == "." || tag == ".." || strings.Contains(tag, "/") {
+		return "", fmt.Errorf("invalid tag %q", tag)
+	}
+	return url.PathEscape(tag), nil
 }
 
 // readBounded reads at most maxRegistryBody+1 bytes from r and returns an
@@ -184,7 +214,11 @@ func (c *DistributionClient) Catalog(ctx context.Context) ([]string, error) {
 
 // Tags returns the tags for a repository.
 func (c *DistributionClient) Tags(ctx context.Context, repo string) ([]string, error) {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/tags/list", c.baseURL(), url.PathEscape(repo)), "")
+	repoPath, err := escapeRepository(repo)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/tags/list", c.baseURL(), repoPath), "")
 	if err != nil {
 		return nil, err
 	}
@@ -226,7 +260,15 @@ const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/
 // and other non-2xx to ErrRegistryUnreachable. It returns the decoded manifest
 // plus its digest (from Docker-Content-Digest, or computed from the body).
 func (c *DistributionClient) getManifest(ctx context.Context, repo, tag string) (*manifest, string, error) {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
+	repoPath, err := escapeRepository(repo)
+	if err != nil {
+		return nil, "", err
+	}
+	tagPath, err := escapeTag(tag)
+	if err != nil {
+		return nil, "", err
+	}
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), repoPath, tagPath), manifestAccept)
 	if err != nil {
 		return nil, "", err
 	}
@@ -299,7 +341,11 @@ func (c *DistributionClient) DeleteManifest(ctx context.Context, repo, digest st
 	if !validDigest(digest) {
 		return fmt.Errorf("invalid digest: must be sha256:<hex>")
 	}
-	resp, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
+	repoPath, err := escapeRepository(repo)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), repoPath, url.PathEscape(digest)), "")
 	if err != nil {
 		return err
 	}

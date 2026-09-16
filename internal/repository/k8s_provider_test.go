@@ -1268,23 +1268,37 @@ func TestK8sEngineTOMLConfigMap(t *testing.T) {
 		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
 	}
 
-	// STS has volume dagger-config (ConfigMap source).
-	cfgVol := volumeByName(sts, volumeDaggerConfig)
-	if cfgVol == nil {
-		t.Fatalf("expected %s volume, got %+v", volumeDaggerConfig, sts.Spec.Template.Spec.Volumes)
+	// STS has a single projected engine-config volume carrying the image-auth
+	// secret plus the engine.toml ConfigMap key.
+	authVol := volumeByName(sts, volumeEngineConfig)
+	if authVol == nil || authVol.Projected == nil {
+		t.Fatalf("expected projected %s volume, got %+v", volumeEngineConfig, sts.Spec.Template.Spec.Volumes)
 	}
-	if cfgVol.ConfigMap == nil || cfgVol.ConfigMap.Name != engineConfigMapName {
-		t.Errorf("expected ConfigMap %s, got %+v", engineConfigMapName, cfgVol.ConfigMap)
+	if len(authVol.Projected.Sources) != 2 {
+		t.Fatalf("projected sources = %+v, want secret + configmap", authVol.Projected.Sources)
+	}
+	if s := authVol.Projected.Sources[0].Secret; s == nil || s.Name != engineImageAuthSecretName {
+		t.Errorf("first projection = %+v, want secret %s", authVol.Projected.Sources[0], engineImageAuthSecretName)
+	}
+	cm := authVol.Projected.Sources[1].ConfigMap
+	if cm == nil || cm.Name != engineConfigMapName {
+		t.Fatalf("second projection = %+v, want configmap %s", authVol.Projected.Sources[1], engineConfigMapName)
+	}
+	if len(cm.Items) != 1 || cm.Items[0].Key != engineTOMLKey || cm.Items[0].Path != engineTOMLKey {
+		t.Errorf("configmap items = %+v, want key/path %s", cm.Items, engineTOMLKey)
 	}
 
-	// Mounted read-only at /etc/dagger/engine.toml via subPath.
+	// The projected volume is mounted at /etc/dagger, so the ConfigMap key
+	// lands at /etc/dagger/engine.toml — the engine's hard-coded --config
+	// path. Assert the literal end path (not just the constant) so a wrong
+	// mount path that BuildKit would silently ignore fails the test.
 	container := sts.Spec.Template.Spec.Containers[0]
-	tomlMount := mountByName(&container, volumeDaggerConfig)
-	if tomlMount == nil {
-		t.Fatalf("expected %s mount, got %+v", volumeDaggerConfig, container.VolumeMounts)
+	authMount := mountByName(&container, volumeEngineConfig)
+	if authMount == nil || authMount.MountPath != "/etc/dagger" || authMount.SubPath != "" {
+		t.Fatalf("engine-config mount = %+v, want path /etc/dagger with no subPath", authMount)
 	}
-	if tomlMount.MountPath != engineTOMLPath || tomlMount.SubPath != engineTOMLKey || !tomlMount.ReadOnly {
-		t.Errorf("engine.toml mount = %+v, want path %s subPath %s readOnly", tomlMount, engineTOMLPath, engineTOMLKey)
+	if got := authMount.MountPath + "/" + cm.Items[0].Path; got != "/etc/dagger/engine.toml" {
+		t.Errorf("engine.toml lands at %s, want /etc/dagger/engine.toml", got)
 	}
 }
 
@@ -1339,13 +1353,17 @@ func TestK8sEngineTOMLEmpty(t *testing.T) {
 		t.Error("expected stale configmap to be deleted")
 	}
 
-	// No dagger-config volume/mount.
-	if vol := volumeByName(sts, volumeDaggerConfig); vol != nil {
-		t.Errorf("expected no %s volume, got %+v", volumeDaggerConfig, vol)
+	// No engine.toml projection: the engine-config volume stays a plain
+	// secret-only volume (no projected source, no file mount).
+	vol := volumeByName(sts, volumeEngineConfig)
+	if vol == nil || vol.Secret == nil || vol.Secret.SecretName != engineImageAuthSecretName || vol.Projected != nil {
+		t.Errorf("engine-config volume = %+v, want secret-only %s", vol, engineImageAuthSecretName)
 	}
 	container := sts.Spec.Template.Spec.Containers[0]
-	if mount := mountByName(&container, volumeDaggerConfig); mount != nil {
-		t.Errorf("expected no %s mount, got %+v", volumeDaggerConfig, mount)
+	for _, m := range container.VolumeMounts {
+		if m.MountPath == "/etc/dagger/engine.toml" {
+			t.Errorf("expected no engine.toml file mount, got %+v", m)
+		}
 	}
 }
 

@@ -406,10 +406,11 @@ supervisor:
 ## @param imageCache.gc.delay Minimum age of an unreferenced blob before Zot GC reclaims it (storage.gcDelay).
 ## @param imageCache.gc.interval How often Zot runs GC (storage.gcInterval).
 ## @param imageCache.gc.timeWindow Optional daily off-peak GC window "HH:MM-HH:MM" (storage.gcTimeWindow; empty = unrestricted).
-## @param imageCache.dedupe Deduplicate identical blobs across manifests (storage.dedupe).
+## @param imageCache.dedupe Deduplicate identical blobs across manifests (storage.dedupe). Default false: Zot rejects dedupe with the S3 driver ("no remote database configured") unless a remote cache/DB (e.g. Redis) is configured, which this chart does not render. Enable it only with a dedupe-capable backend (documented follow-up).
 ## @param imageCache.sync.onDemand Fetch an upstream image on first request (extensions.sync.registry.onDemand).
 ## @param imageCache.sync.preserveDigest Keep upstream manifest digests (extensions.sync.registry.preserveDigest).
 ## @param imageCache.sync.tlsVerify Verify upstream TLS certificates.
+## @param imageCache.sync.downloadDir Local scratch directory for sync downloads (extensions.sync.downloadDir). Required by Zot whenever sync is enabled with S3 storage. Must live under the mounted data volume (/var/lib/registry, an emptyDir for the s3 backend or the PVC for the pvc backend) so it stays writable; changing it elsewhere requires an extra volume/mount.
 ## @param imageCache.sync.pollInterval Periodic upstream refresh interval (empty = on-demand only; do not use for Docker Hub).
 ## @param imageCache.sync.maxRetries Upstream fetch retry count.
 ## @param imageCache.sync.retryDelay Delay between upstream fetch retries.
@@ -445,11 +446,12 @@ imageCache:
     delay: "2h"
     interval: "1h"
     timeWindow: ""
-  dedupe: true
+  dedupe: false
   sync:
     onDemand: true
     preserveDigest: true
     tlsVerify: true
+    downloadDir: "/var/lib/registry/sync"
     pollInterval: ""
     maxRetries: 3
     retryDelay: "15m"

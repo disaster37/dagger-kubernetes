@@ -577,16 +577,21 @@ Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
   it ensures on every `EnsureStatefulSet` (i.e. on every acquire). The
   `engine_registry_mirrors_http` entries add `[registry."<mirror>"]` +
   `http = true` sections for plaintext mirrors (the chart populates it from
-  the local image-cache mirrors). The
-  ConfigMap is mounted via `subPath` at `/etc/dagger/engine.toml`, which
-  the Dagger engine (v0.19+) reads automatically — no extra engine arg or
-  env var is needed. Config edits propagate to new pods on the next
-  acquire; already-running pods keep the old config until restarted or
-  scaled. When the rendered TOML is empty (debug=false, log format `""`,
-  no mirrors), no ConfigMap volume/mount is added and any stale ConfigMap
-  is deleted best-effort — the pod spec reverts to the pre-change shape.
-  By default `engine_log_format: "json"` renders `[log]\n  format = "json"`,
-  so every engine gets the mount by default (intended behavior change).
+  the local image-cache mirrors). The ConfigMap key is **projected**,
+  together with the `engine-image-auth` Secret, into one engine-config volume
+  mounted at `/etc/dagger`, so the file lands at `/etc/dagger/engine.toml`
+  and the Secret entry at `/etc/dagger/.dockerconfigjson` — the Dagger engine
+  (v0.19+) reads its hard-coded default config path automatically, with no
+  extra engine arg or env var. (A file `subPath` mount nested under the
+  Secret's directory mount is rejected by runc with `... not a directory`;
+  the projected volume avoids that.) Config edits propagate to new pods on
+  the next acquire; already-running pods keep the old config until restarted
+  or scaled. When the rendered TOML is empty (debug=false, log format `""`,
+  no mirrors), the volume falls back to the Secret-only source and any stale
+  ConfigMap is deleted best-effort — the pod spec reverts to the pre-change
+  shape. By default `engine_log_format: "json"` renders `[log]\n  format =
+  "json"`, so every engine gets the mount by default (intended behavior
+  change).
 
 See [ADR-011](design/ADR-011-engine-env-ca-config-injection.md) for the
 full rationale and alternatives considered.
@@ -754,10 +759,21 @@ Zot runs **online GC** (no stop-the-world step): deleting a manifest unlinks it
 immediately and the referenced blobs are reclaimed automatically once their
 unreferenced age exceeds `imageCache.gc.delay` (default `2h`) on the next
 `imageCache.gc.interval` cycle (default `1h`); `imageCache.gc.timeWindow`
-optionally restricts GC to a daily off-peak window. `imageCache.dedupe`
-(default `true`) stores a single copy of shared layers. There is **no** offline
-`registry garbage-collect` procedure and no delete-enable flag — Zot always
-allows manifest deletion (no auth configured).
+optionally restricts GC to a daily off-peak window. `imageCache.dedupe` is
+**disabled by default**: Zot rejects `storage.dedupe` with the S3 driver
+("no remote database configured") unless a remote cache/DB (e.g. Redis) is
+configured, which this chart does not render — a dedupe-capable backend is a
+documented follow-up. There is **no** offline `registry garbage-collect`
+procedure and no delete-enable flag — Zot always allows manifest deletion (no
+auth configured).
+
+Because `extensions.sync` must stage downloads locally, the chart always renders
+`extensions.sync.downloadDir` (`imageCache.sync.downloadDir`, default
+`/var/lib/registry/sync`). The path lives under the mirror's mounted data volume
+(`/var/lib/registry`) for both backends — the `s3` backend's `rootDirectory`
+emptyDir and the `pvc` backend's PVC — so it is writable in both cases. Zot
+requires this key with S3 storage; omitting it makes the mirror pod fail at
+startup.
 
 The mirrors are unauthenticated plaintext HTTP inside the cluster, so engines
 need no credential for them. `engine-image-auth` (`.dockerconfigjson`) is still

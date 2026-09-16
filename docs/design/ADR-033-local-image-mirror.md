@@ -53,7 +53,17 @@ PVC).
   `<name>-zot-config` ConfigMap): `distSpecVersion`, `storage`
   (`rootDirectory`, `dedupe`, `gc`/`gcDelay`/`gcInterval`/optional
   `gcTimeWindow`, and a `storageDriver` for s3), `http` (`compat:
-  ["docker2s2"]`), `log`, and `extensions.sync`. Zot reads a file, not env vars.
+  ["docker2s2"]`), `log`, and `extensions.sync` (`enable`, `downloadDir`,
+  `registries`). Zot reads a file, not env vars.
+- **`dedupe` is off by default.** Zot rejects `storage.dedupe: true` with the
+  S3 driver ("no remote database configured") unless a remote cache/DB (e.g.
+  Redis) is configured; the chart sets `imageCache.dedupe: false` and does not
+  render a remote cache. A dedupe-capable backend is a documented follow-up.
+- **`extensions.sync.downloadDir` is always rendered** (`imageCache.sync.
+  downloadDir`, default `/var/lib/registry/sync`) whenever sync is enabled.
+  Zot requires a local staging directory with S3 storage; the path sits under
+  the mirror's data volume — the S3 `storage.rootDirectory` emptyDir **or** the
+  per-mirror PVC — so it is writable for both backends.
 - **S3 storage** uses `storage.storageDriver` (`name: s3`) with
   `regionendpoint` = `<release>-minio.<namespace>.svc:9000`,
   `forcepathstyle=true`, `secure=false`, `rootdirectory=/<slug>`. Credentials
@@ -95,8 +105,8 @@ PVC).
   step. `storage.gc: true` + `gcDelay` (minimum age of an unreferenced blob,
   chart default `2h`) + `gcInterval` (scheduler frequency, chart default `1h`)
   reclaim blob bytes automatically after a manifest `DELETE`. `gcTimeWindow`
-  optionally restricts GC to a daily off-peak window. `storage.dedupe: true`
-  keeps a single copy of shared layers. There is **no** offline
+  optionally restricts GC to a daily off-peak window. `storage.dedupe` stays
+  `false` because the S3 driver requires a remote DB; there is **no** offline
   `registry garbage-collect` procedure and **no** Helm CronJob.
 
 #### Registry presets
