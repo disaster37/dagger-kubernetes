@@ -47,6 +47,8 @@ data:
         group_mappings:
 {{ toYaml .Values.auth.oauth.groupMappings | indent 10 }}
         default_group: {{ .Values.auth.oauth.defaultGroup | quote }}
+        admin_groups:
+{{ toYaml .Values.auth.oauth.adminGroups | indent 10 }}
         cookie_secure: {{ .Values.auth.oauth.cookieSecure }}
         issuer_url: {{ .Values.auth.oauth.issuerUrl | quote }}
         scopes:
@@ -97,35 +99,27 @@ data:
       loki_url: {{ include "dagger-kubernetes.lokiUrl" . | quote }}
       victoria_url: {{ include "dagger-kubernetes.victoriaUrl" . | quote }}
     cache:
-      backend: {{ .Values.supervisor.config.cache.backend | quote }}
-      registry: {{ include "dagger-kubernetes.cacheRegistry" . | quote }}
-      public_host: {{ include "dagger-kubernetes.cachePublicHost" . | quote }}
-      internal_addr: {{ include "dagger-kubernetes.cacheInternalAddr" . | quote }}
-      auth_token: ""
-{{- if .Values.supervisor.config.cache.registries }}
-      registries:
-{{- range .Values.supervisor.config.cache.registries }}
-        - id: {{ .id | quote }}
-          internal_addr: {{ .internalAddr | quote }}
-          username: {{ .username | quote }}
-          password: ""
-          {{- with .passwordSecret }}
-          password_secret:
-            name: {{ .name | quote }}
-            key: {{ .key | quote }}
-          {{- end }}
-{{- end }}
-{{- end }}
-{{- if eq .Values.supervisor.config.cache.backend "s3" }}
       s3:
-        bucket: {{ .Values.supervisor.config.cache.s3.bucket | quote }}
+        bucket: {{ include "dagger-kubernetes.s3Bucket" . | quote }}
         region: {{ .Values.supervisor.config.cache.s3.region | quote }}
-{{- end }}
-{{- with .Values.supervisor.config.cache.gc }}
-      gc:
-        enabled: {{ .enabled }}
-        max_age: {{ .maxAge | quote }}
-        schedule: {{ .schedule | quote }}
+        endpoint: {{ include "dagger-kubernetes.s3Endpoint" . | quote }}
+        use_ssl: {{ .Values.supervisor.config.cache.s3.useSSL }}
+        # S3 credentials are NOT rendered here: the supervisor reads them from
+        # the engine-s3-auth Secret (keys accessKey/secretKey) via
+        # DAGGER_KUBERNETES_CACHE_S3_* env vars. Leave the keys empty.
+        access_key: ""
+        secret_key: ""
+{{- if .Values.imageCache.enabled }}
+    image_cache:
+      mirrors:
+      {{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) }}
+      {{- $addr := include "dagger-kubernetes.imageCacheMirrorAddress" (dict "root" $ "slug" .slug) }}
+        - id: {{ .slug | quote }}
+          host: {{ .host | quote }}
+          upstream: {{ .remoteUrl | quote }}
+          internal_addr: {{ $addr | quote }}
+          backend: {{ $.Values.imageCache.storage.backend | default "s3" | quote }}
+      {{- end }}
 {{- end }}
 {{- with .Values.supervisor.config.history }}
     history:
@@ -167,7 +161,11 @@ data:
       engine_debug: {{ .Values.supervisor.config.fleet.engineDebug }}
       engine_log_format: {{ .Values.supervisor.config.fleet.engineLogFormat | quote }}
       engine_registry_mirrors:
-{{ toYaml .Values.supervisor.config.fleet.engineRegistryMirrors | indent 8 }}
+{{ include "dagger-kubernetes.engineRegistryMirrors" . | indent 8 }}
+      # Mirror host[:port] values dialed over plaintext HTTP; engine.toml emits
+      # a [registry."<mirror>"] http = true section per entry.
+      engine_registry_mirrors_http:
+{{ include "dagger-kubernetes.imageCacheMirrorHosts" . | indent 8 }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
       client_cert_ttl: {{ .Values.supervisor.dataplane.tls.clientCertTtl | quote }}
@@ -186,6 +184,8 @@ data:
       enabled: {{ .Values.supervisor.config.cli.enabled }}
       release_list_ttl: {{ .Values.supervisor.config.cli.releaseListTtl | quote }}
       download_timeout: {{ .Values.supervisor.config.cli.downloadTimeout | quote }}
+      s3_bucket: {{ include "dagger-kubernetes.s3Bucket" . | quote }}
+      s3_prefix: {{ .Values.supervisor.config.cli.s3Prefix | quote }}
       upstream:
         releases_url: {{ .Values.supervisor.config.cli.upstream.releasesUrl | quote }}
         download_base: {{ .Values.supervisor.config.cli.upstream.downloadBase | quote }}

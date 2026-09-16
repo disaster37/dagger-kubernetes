@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
 	"os"
 	"testing"
@@ -18,7 +17,8 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
-// rbacEnv holds a fully wired server on fixed ports for black-box HTTP tests.
+// rbacEnv holds a fully wired server on test-scoped listeners for black-box
+// HTTP tests.
 type rbacEnv struct {
 	baseURL    string
 	sessions   *service.Store
@@ -60,35 +60,26 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
-	// Allocate a random control-plane port per test instance so stale
-	// servers from slow-shutting-down previous tests never intercept requests.
-	controlLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocate control port: %v", err)
-	}
-	controlPort := controlLn.Addr().(*net.TCPAddr).Port
-	_ = controlLn.Close()
-
-	dataLn, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("allocate data port: %v", err)
-	}
-	dataPort := dataLn.Addr().(*net.TCPAddr).Port
-	_ = dataLn.Close()
+	// Bind random loopback listeners per test instance so stale servers from
+	// slow-shutting-down previous tests never intercept requests and nothing
+	// can claim the ports before the server binds them.
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr := listenerAddr(controlLn)
 
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: fmt.Sprintf("127.0.0.1:%d", controlPort),
-		DataAddr:    fmt.Sprintf("127.0.0.1:%d", dataPort),
-		DataHost:    "localhost",
+		ControlAddr:     controlAddr,
+		DataAddr:        listenerAddr(dataLn),
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc,
 		Groups: groupsSvc, Projects: projectsSvc, Tokens: tokensSvc,
 		Quota: quotaSvc, Attribution: attributionSvc, TraceMeta: traceMetaRepo,
@@ -109,7 +100,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	time.Sleep(500 * time.Millisecond)
 
 	return &rbacEnv{
-		baseURL:    fmt.Sprintf("http://localhost:%d", controlPort),
+		baseURL:    fmt.Sprintf("http://localhost%s", controlAddr),
 		sessions:   sessions,
 		traceMeta:  traceMetaRepo,
 		users:      usersSvc,
@@ -324,20 +315,22 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
-	controlAddr, dataAddr := freeAddr(t), freeAddr(t)
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: controlAddr,
-		DataAddr:    dataAddr,
-		DataHost:    "localhost",
+		ControlAddr:     controlAddr,
+		DataAddr:        dataAddr,
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
 		Projects: projectsSvc, Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
 		TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,

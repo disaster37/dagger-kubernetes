@@ -44,8 +44,10 @@ func (s *stepsLogRepo) DeleteTraceLogs(context.Context, string) error { return n
 // startCIStepsServer boots a supervisor wired like startPipelineURLServer, but
 // with stub trace/log repositories returning a fixed nested tree (root -> two
 // children, one failed) + span-correlated logs.
-func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (controlURL, adminToken string) {
+func startCIStepsServer(t *testing.T) (controlURL, adminToken string) {
 	t.Helper()
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
 	logger := observ.NewTestLogger()
 	store := newIntegrationStore(t)
 
@@ -84,7 +86,6 @@ func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (controlURL,
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(
 		service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger),
@@ -120,13 +121,15 @@ func startCIStepsServer(t *testing.T, controlAddr, dataAddr string) (controlURL,
 	}}
 
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: controlAddr,
-		DataAddr:    dataAddr,
-		DataHost:    "localhost",
-		PipelineURL: "https://supv.example.com",
+		ControlAddr:     controlAddr,
+		DataAddr:        dataAddr,
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
+		PipelineURL:     "https://supv.example.com",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
 		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
 		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logs, JWT: jwtSvc,
@@ -197,9 +200,12 @@ func parseNDJSON(t *testing.T, out string) []domain.CIEvent {
 // reconstructing the supervisor's nested span tree (states + logs), and with
 // --steps disabled stdout stays empty (backwards compatible).
 func TestCIWrapperStreamsNestedSteps(t *testing.T) {
-	serverURL, adminToken := startCIStepsServer(t, freeAddr(t), freeAddr(t))
+	serverURL, adminToken := startCIStepsServer(t)
 	bin := buildCIWrapper(t)
 	installFakeDagger(t)
+	// The wrapper loads the config (missing file -> defaults); satisfy the
+	// always-on S3 prerequisites so validation passes.
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
 
 	missingConfig := filepath.Join(t.TempDir(), "missing.yaml")
 

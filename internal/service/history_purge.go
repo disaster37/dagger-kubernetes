@@ -31,7 +31,7 @@ const historyStatsTTL = 15 * time.Second
 type HistoryPurgeService struct {
 	traceMeta  domain.TraceMetaRepository
 	logs       domain.LogRepository      // Loki (may be nil)
-	metrics    domain.CacheMetricsClient // VictoriaMetrics (may be nil)
+	metrics    domain.TraceSeriesDeleter // VictoriaMetrics (may be nil)
 	gcCfg      domain.HistoryGCConfig
 	logger     *logrus.Logger
 	metricsObs *observ.Metrics // may be nil
@@ -50,7 +50,7 @@ type HistoryPurgeService struct {
 func NewHistoryPurgeService(
 	traceMeta domain.TraceMetaRepository,
 	logs domain.LogRepository,
-	metrics domain.CacheMetricsClient,
+	metrics domain.TraceSeriesDeleter,
 	gcCfg domain.HistoryGCConfig,
 	logger *logrus.Logger,
 	obs *observ.Metrics,

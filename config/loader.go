@@ -44,6 +44,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.allowed_teams", []string{})
 	v.SetDefault("auth.oauth.allowed_groups", []string{})
 	v.SetDefault("auth.oauth.group_mappings", []domain.GroupMappingRule{})
+	v.SetDefault("auth.oauth.admin_groups", []string{})
 	v.SetDefault("auth.oauth.default_group", "")
 	v.SetDefault("auth.oauth.cookie_secure", false)
 	v.SetDefault("auth.oauth.issuer_url", "")
@@ -132,18 +133,20 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("telemetry.loki_url", "http://loki:3100")
 	v.SetDefault("telemetry.victoria_url", "http://victoria:8428")
 
-	v.SetDefault("cache.backend", "registry")
-	v.SetDefault("cache.registry", "cache.reg/dagger-cache")
-	v.SetDefault("cache.public_host", "")
-	v.SetDefault("cache.internal_addr", "")
-	v.SetDefault("cache.auth_token", "")
-	v.SetDefault("cache.registries", []domain.RegistryBackend{})
+	// Shared S3 client config for the CLI cache (cli.enabled).
+	// cache.s3.bucket is also the default bucket for the CLI cache
+	// (cli.s3_bucket).
 	v.SetDefault("cache.s3.bucket", "")
-	v.SetDefault("cache.s3.region", "")
+	v.SetDefault("cache.s3.region", "us-east-1")
+	v.SetDefault("cache.s3.endpoint", "")
+	v.SetDefault("cache.s3.use_ssl", true)
+	v.SetDefault("cache.s3.access_key", "")
+	v.SetDefault("cache.s3.secret_key", "")
 
-	v.SetDefault("cache.gc.enabled", false)
-	v.SetDefault("cache.gc.max_age", "168h") // 7d
-	v.SetDefault("cache.gc.schedule", "1h")
+	// Local image mirrors (Zot) the supervisor lists/prunes over their OCI
+	// Distribution v2 API. Admin-visible/read-only; the Helm chart renders the
+	// block from what it deploys.
+	v.SetDefault("image_cache.mirrors", []domain.ImageCacheMirror{})
 
 	v.SetDefault("history.gc.enabled", false)
 	v.SetDefault("history.gc.max_age", "720h") // 30d
@@ -179,6 +182,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("fleet.engine_debug", false)
 	v.SetDefault("fleet.engine_log_format", "json")
 	v.SetDefault("fleet.engine_registry_mirrors", map[string][]string{})
+	v.SetDefault("fleet.engine_registry_mirrors_http", []string{})
 	v.SetDefault("fleet.engine_extra_env_from", map[string]domain.EnvVarSource{})
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
@@ -205,6 +209,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("cli.cache_repo", "dagger-kubernetes/cli-cache")
 	v.SetDefault("cli.release_list_ttl", time.Hour)
 	v.SetDefault("cli.download_timeout", 5*time.Minute)
+	v.SetDefault("cli.s3_bucket", "")
+	v.SetDefault("cli.s3_prefix", "cli-cache")
 	v.SetDefault("cli.upstream.releases_url", "https://api.github.com/repos/dagger/dagger/releases")
 	v.SetDefault("cli.upstream.download_base", "https://github.com/dagger/dagger/releases/download")
 	v.SetDefault("cli.upstream.github_token", "")
@@ -241,6 +247,10 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("validate group mappings: %w", err)
 	}
 
+	if err := validateOAuthAdminGroups(&cfg); err != nil {
+		return nil, fmt.Errorf("validate oauth admin_groups: %w", err)
+	}
+
 	if err := validateServerConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate server config: %w", err)
 	}
@@ -251,6 +261,10 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateCLIConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate cli config: %w", err)
+	}
+
+	if err := validateImageCacheConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate image cache config: %w", err)
 	}
 
 	if err := validateCIConfig(&cfg); err != nil {
@@ -603,6 +617,24 @@ func validateGroupMappings(cfg *domain.Config) error {
 	return nil
 }
 
+// validateOAuthAdminGroups rejects empty/whitespace-only entries and
+// duplicates. Entries are exact string equality (case-sensitive, matching the
+// exact-match semantics). Entries are NOT checked against the supervisor
+// group-name regex because they are upstream IdP names, not supervisor groups.
+func validateOAuthAdminGroups(cfg *domain.Config) error {
+	seen := make(map[string]bool, len(cfg.Auth.OAuth.AdminGroups))
+	for i, g := range cfg.Auth.OAuth.AdminGroups {
+		if strings.TrimSpace(g) == "" {
+			return fmt.Errorf("auth.oauth.admin_groups[%d] must not be empty", i)
+		}
+		if seen[g] {
+			return fmt.Errorf("auth.oauth.admin_groups[%d] %q duplicates an earlier entry", i, g)
+		}
+		seen[g] = true
+	}
+	return nil
+}
+
 // validateOAuthRevalidation enforces constraints on the IdP revalidation config.
 // Only validated when auth.oauth.enabled is true.
 func validateOAuthRevalidation(cfg *domain.Config) error {
@@ -690,6 +722,42 @@ func validateCLIConfig(cfg *domain.Config) error {
 		return fmt.Errorf("cli.cache_repo %q is not a valid OCI repository name", cfg.CLI.CacheRepo)
 	}
 
+	// When the cache backend is s3, the CLI cache lives in an S3 bucket that
+	// shares the cache.s3.* S3 client; validate its prerequisites.
+	if s3BucketWithFallback(cfg.CLI.S3Bucket, cfg.Cache.S3.Bucket) == "" {
+		return fmt.Errorf("cli.s3_bucket (or cache.s3.bucket) is required when cli.enabled")
+	}
+	if cfg.CLI.S3Prefix == "" {
+		return fmt.Errorf("cli.s3_prefix must not be empty when cli.enabled")
+	}
+
+	return nil
+}
+
+// validateImageCacheConfig guards the local image-mirror endpoints the
+// supervisor manages. Each mirror needs a non-empty id/host/internal_addr, a
+// backend of "s3" or "pvc", and a unique id (the id is the API/UI lookup key
+// and the chart-derived slug of host).
+func validateImageCacheConfig(cfg *domain.Config) error {
+	seen := make(map[string]bool, len(cfg.ImageCache.Mirrors))
+	for i, m := range cfg.ImageCache.Mirrors {
+		if strings.TrimSpace(m.ID) == "" {
+			return fmt.Errorf("image_cache.mirrors[%d].id must not be empty", i)
+		}
+		if strings.TrimSpace(m.Host) == "" {
+			return fmt.Errorf("image_cache.mirrors[%d].host must not be empty", i)
+		}
+		if strings.TrimSpace(m.InternalAddr) == "" {
+			return fmt.Errorf("image_cache.mirrors[%d].internal_addr must not be empty", i)
+		}
+		if m.Backend != "s3" && m.Backend != "pvc" {
+			return fmt.Errorf("image_cache.mirrors[%d].backend %q must be \"s3\" or \"pvc\"", i, m.Backend)
+		}
+		if seen[m.ID] {
+			return fmt.Errorf("image_cache.mirrors[%d].id %q duplicates an earlier entry", i, m.ID)
+		}
+		seen[m.ID] = true
+	}
 	return nil
 }
 
@@ -707,4 +775,13 @@ func validateCIConfig(cfg *domain.Config) error {
 		return fmt.Errorf("ci.jenkins.steps_max_depth must be >= 0")
 	}
 	return nil
+}
+
+// s3BucketWithFallback returns the effective bucket for an S3-backed
+// subsystem: its own bucket wins, falling back to the shared cache.s3.bucket.
+func s3BucketWithFallback(own, shared string) string {
+	if own != "" {
+		return own
+	}
+	return shared
 }

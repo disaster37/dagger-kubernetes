@@ -36,10 +36,11 @@ at supervisor startup and rendered into the engine StatefulSet pod template:
    validated fields. The K8s provider renders TOML by hand (`fmt.Sprintf`
    + a small escaper — no new dependency) and stores it in a fleet-wide
    ConfigMap `dagger-engine-config` (key `engine.toml`), ensured on every
-   `EnsureStatefulSet`, mounted via `subPath` at
-   `/etc/dagger/engine.toml` (engines v0.19+ read this path automatically).
-   When the rendered TOML is empty, no volume/mount is added and a stale
-   ConfigMap is deleted best-effort.
+   `EnsureStatefulSet`, projected together with the `engine-image-auth`
+   Secret into the engine-config volume mounted at `/etc/dagger` (the key
+   lands at `/etc/dagger/engine.toml`; engines v0.19+ read this path
+   automatically). When the rendered TOML is empty, the volume falls back
+   to the Secret-only source and a stale ConfigMap is deleted best-effort.
 4. **D4 — Supervisor log format** (top-level `log_format`, default
    `json`): `observ.NewLogger(level, format)` supports `json`/`text`.
    Supervisor-wide concern, separate from the engine's own `[log] format`
@@ -72,6 +73,15 @@ at supervisor startup and rendered into the engine StatefulSet pod template:
 - The ConfigMap is fleet-wide (shared by all version STSes) and is NOT
   deleted by `DeleteStatefulSet` — a version's GC must not remove fleet
   config.
+- **2026-09-16 revision:** D3 originally mounted the ConfigMap file via
+  `subPath` at `/etc/dagger/engine.toml`, nested under the
+  `engine-image-auth` Secret mount at `/etc/dagger`. The k3s `home` cluster's
+  runc rejects that combination (`error mounting ... not a directory`; a
+  minimal repro pod with the same two mounts fails identically, while either
+  mount alone or a projected volume starts). The engine-config volume is now
+  a projected volume (Secret + ConfigMap) mounted at `/etc/dagger`; the end
+  path is unchanged (`/etc/dagger/engine.toml`) and the live cluster
+  validates it.
 - No `domain.FleetProvider` interface change → stub provider,
   `internal/handler` tests, and `tests/integration` are unaffected.
 - No RBAC changes: `configmaps` CRUD was already permitted, and
@@ -89,8 +99,9 @@ at supervisor startup and rendered into the engine StatefulSet pod template:
   K8s-native way to ship non-sensitive config. Using a Secret would add
   RBAC surface and operator confusion.
 - **Sidecar injection** (an init container that writes `engine.toml`) —
-  rejected: a ConfigMap + `subPath` mount is simpler, has no image
-  dependency, and is what the upstream Dagger docs recommend.
+   rejected: a projected ConfigMap + Secret volume has no image dependency
+   and needs no privileged copy step; the engine-config volume carries both
+   files directly.
 - **Configurable CA mount path** — rejected: the fixed path
   `/usr/local/share/ca-certificates` is where Dagger auto-detects CAs on
   startup (per the upstream docs). No env vars are needed — the engine

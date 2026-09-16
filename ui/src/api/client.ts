@@ -2,18 +2,21 @@ import axios, { type AxiosError, type AxiosRequestConfig } from 'axios'
 import { useAuthStore } from '@/stores/auth'
 import type {
   AuthUser,
-  CacheInfo,
   ConnectEnvSnapshot,
+  EngineCachePurgeResult,
   FleetInfo,
   Group,
   GroupSummary,
   HistoryInfo,
   HistoryPurgeRequest,
   HistoryPurgeResult,
+  ImageCacheInfo,
+  ImageCachePruneAllResult,
+  ImageCachePruneRef,
+  ImageCachePruneResult,
   PlatformStatus,
   Project,
   Providers,
-  PurgeResult,
   TokenMeta,
   TraceDetail,
   TraceLogEntry,
@@ -190,13 +193,9 @@ export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')
   return (data as FleetInfo[] | null) ?? []
 }
-export async function fetchCacheInfo(): Promise<CacheInfo> {
-  const { data } = await api.get('/api/v1/cache')
-  return data as CacheInfo
-}
-export async function purgeCache(): Promise<PurgeResult> {
-  const { data } = await api.post('/api/v1/cache/purge')
-  return data as PurgeResult
+export async function purgeEngineCache(version: string): Promise<EngineCachePurgeResult> {
+  const { data } = await api.post(`/api/v1/fleet/${encodeURIComponent(version)}/purge-cache`)
+  return data as EngineCachePurgeResult
 }
 export async function fetchHistoryInfo(): Promise<HistoryInfo> {
   const { data } = await api.get('/api/v1/history')
@@ -213,6 +212,25 @@ export async function purgeAllHistory(): Promise<HistoryPurgeResult> {
 export async function fetchPlatformStatus(): Promise<PlatformStatus> {
   const { data } = await api.get('/api/v1/status')
   return data as PlatformStatus
+}
+
+// --- Image cache (local Zot mirrors, admin) ---
+export async function fetchImageCacheInfo(): Promise<ImageCacheInfo> {
+  // Every mirror walk is capped by its own 30s budget; allow more than the
+  // 30s instance default so a slow mirror does not abort the listing.
+  const { data } = await api.get('/api/v1/image-cache', { timeout: 60000 })
+  return data as ImageCacheInfo
+}
+export async function pruneImageCache(mirrorId: string, refs: ImageCachePruneRef[]): Promise<ImageCachePruneResult> {
+  // The server-side prune budget is 30s; 60s avoids racing it at the default.
+  const { data } = await api.post('/api/v1/image-cache/prune', { mirror_id: mirrorId, refs }, { timeout: 60000 })
+  return data as ImageCachePruneResult
+}
+export async function pruneAllImageCache(mirrorId?: string): Promise<ImageCachePruneAllResult> {
+  // The server-side prune-all budget is 10 minutes; the 30s default would
+  // abort the UI long before the server finishes.
+  const { data } = await api.post('/api/v1/image-cache/prune-all', { mirror_id: mirrorId ?? '' }, { timeout: 660000 })
+  return data as ImageCachePruneAllResult
 }
 
 // --- Connect-env snapshot ---

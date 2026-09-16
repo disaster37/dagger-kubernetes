@@ -324,3 +324,30 @@ func (s *stubSessionStore) List() []*domain.Lease {
 	}
 	return out
 }
+
+// stubFleetProvider is an in-memory FleetProvider for status/fleet tests.
+type stubFleetProvider struct {
+	versions []string
+	replicas map[string][]domain.Replica
+	allErr   error
+}
+
+func (p *stubFleetProvider) EnsureStatefulSet(string, string) error { return nil }
+func (p *stubFleetProvider) DeleteStatefulSet(string) error         { return nil }
+func (p *stubFleetProvider) EnsureService(string) error             { return nil }
+func (p *stubFleetProvider) DeleteService(string) error             { return nil }
+func (p *stubFleetProvider) GetReplicas(v string) ([]domain.Replica, error) {
+	return p.replicas[v], nil
+}
+func (p *stubFleetProvider) ScaleUp(string, int) error                        { return nil }
+func (p *stubFleetProvider) ScaleDown(string, int) error                      { return nil }
+func (p *stubFleetProvider) GetReadyReplicaIP(string, string) (string, error) { return "", nil }
+func (p *stubFleetProvider) WaitForReady(string, string) error                { return nil }
+func (p *stubFleetProvider) GetEngineImage(v string) string                   { return v }
+func (p *stubFleetProvider) AllVersions() ([]string, error)                   { return p.versions, p.allErr }
+func (p *stubFleetProvider) VersionIdleSince(string) (time.Time, bool, error) {
+	return time.Time{}, false, nil
+}
+func (p *stubFleetProvider) SetVersionIdleSince(string, time.Time) error { return nil }
+
+var _ domain.FleetProvider = (*stubFleetProvider)(nil)

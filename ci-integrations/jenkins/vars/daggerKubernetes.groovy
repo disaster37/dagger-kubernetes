@@ -31,79 +31,84 @@ def call(Map params = [:], Closure body = null) {
 
     boolean dynamicStages = envTruthy(params.dynamicStages, env.DAGGER_KUBERNETES_DYNAMIC_STAGES, false)
     int timeoutMinutes = (params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES ?: 30) as int
-    boolean magicCache = envTruthy(params.magicCache, env.DAGGER_KUBERNETES_MAGIC_CACHE, false)
-    String cacheRegistry = params.cacheRegistry ?: env.DAGGER_KUBERNETES_CACHE_REGISTRY ?: 'cache.reg/dagger-cache'
 
     if (!serverUrl || !token) {
         error "daggerKubernetes: serverUrl and token are required"
     }
 
-    String cacheConfig = ''
-    if (magicCache) {
-        assertShellSafe(cacheRegistry, 'cacheRegistry')
-        cacheConfig = "type=registry,ref=${cacheRegistry}:cache,mode=max"
-    }
+	if (dynamicStages) {
+		String daggerCommand = params.command ?: env.DAGGER_COMMAND
+		if (!daggerCommand) {
+			error "daggerKubernetes(dynamicStages: true): pass `command: 'dagger call ...'` (or set env.DAGGER_COMMAND)"
+		}
 
-    if (dynamicStages) {
-        String daggerCommand = params.command ?: env.DAGGER_COMMAND
-        if (!daggerCommand) {
-            error "daggerKubernetes(dynamicStages: true): pass `command: 'dagger call ...'` (or set env.DAGGER_COMMAND)"
-        }
+		// Stage 1: Provision Dagger CLI (only when provisionCli is enabled).
+		if (params.provisionCli) {
+			stage("Provision Dagger CLI") {
+				provisionCli(serverUrl: serverUrl, token: token,
+							 version: params.cliVersion ?: env.DAGGER_KUBERNETES_CLI_VERSION,
+							 os: params.cliOs, arch: params.cliArch)
+			}
+		}
 
-        // Stage 1: Provision Dagger CLI (only when provisionCli is enabled).
-        if (params.provisionCli) {
-            stage("Provision Dagger CLI") {
-                provisionCli(serverUrl: serverUrl, token: token,
-                             version: params.cliVersion ?: env.DAGGER_KUBERNETES_CLI_VERSION,
-                             os: params.cliOs, arch: params.cliArch)
-            }
-        }
-
-        // Stage 2: Run the dagger command with plain-text output.
-        stage("Dagger") {
-            String stderrFile = "/tmp/dagger-stderr-${env.BUILD_NUMBER}.log"
-            withEnv([
-                "DAGGER_CLOUD_URL=${serverUrl}",
-                "DAGGER_CLOUD_TOKEN=${token}",
-                "_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self"
-            ] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : []) +
-              (cacheConfig ? ["_EXPERIMENTAL_DAGGER_CACHE_CONFIG=${cacheConfig}"] : [])) {
-                timeout(time: timeoutMinutes, unit: 'MINUTES') {
-                    try {
-                        // Run dagger: stdout streams to the console while
-                        // stderr is captured to a temp file (the trace ID
-                        // appears on stderr). daggerCommand is the deliberate
-                        // exception to assertShellSafe — it IS the shell
-                        // command, authored by the trusted pipeline author;
-                        // the only other interpolated value, stderrFile, is a
-                        // constant path plus the numeric BUILD_NUMBER.
-                        sh "${daggerCommand} 2>'${stderrFile}'"
-                    } catch (e) {
-                        echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
-                        throw e
-                    } finally {
-                        // Replay dagger's stderr into the build log and
-                        // extract the trace ID for the pipeline-view link.
-                        // Runs on success AND failure so the temp file is
-                        // always cleaned up (CWE-404) and a failed run still
-                        // surfaces dagger's stderr.
-                        String stderr = sh(script: "cat '${stderrFile}' 2>/dev/null || true", returnStdout: true).trim()
-                        if (stderr) {
-                            echo stderr
-                        }
-                        String traceId = extractTraceId(stderr)
-                        if (traceId) {
-                            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${traceId}"
-                        } else {
-                            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/traces/latest"
-                        }
-                        sh "rm -f '${stderrFile}'"
-                    }
-                }
-            }
-        }
-        return
-    }
+		// Stage 2: Run the dagger command with real-time plaintext streaming.
+		stage("Dagger") {
+			String stderrFile = "/tmp/dagger-stderr-${env.BUILD_NUMBER}.log"
+			withEnv([
+				"DAGGER_CLOUD_URL=${serverUrl}",
+				"DAGGER_CLOUD_TOKEN=${token}",
+				"DAGGER_KUBERNETES_TOKEN=${token}",
+				"_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self"
+			] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : [])) {
+				timeout(time: timeoutMinutes, unit: 'MINUTES') {
+					try {
+						// Prefer dagger-kubernetes-ci for correct trace
+						// discovery (supervisor API, not regex) and real-time
+						// plaintext streaming. Falls back to running dagger
+						// directly when the CI wrapper is not available.
+						String ciBin = sh(script: "which dagger-kubernetes-ci 2>/dev/null || true", returnStdout: true).trim()
+						if (ciBin) {
+							// Strip leading "dagger" from the command — the
+							// CI wrapper takes positional args after flags and
+							// strips "dagger" itself, but we pass clean args.
+							String daggerArgs = daggerCommand.replaceFirst(/^dagger\s*/, '')
+							assertShellSafe(serverUrl, 'serverUrl')
+							sh """
+								dagger-kubernetes-ci --steps --steps-format plain \
+									--server '${serverUrl}' \
+									--config /dev/null \
+									${daggerArgs} \
+									2>'${stderrFile}'
+							"""
+						} else {
+							// Fallback: run dagger directly. Trace ID
+							// extraction from stderr is best-effort via the
+							// structured [dagger-kubernetes-ci] prefix, which
+							// won't appear here; link will point to
+							// /traces/latest.
+							sh "${daggerCommand} 2>'${stderrFile}'"
+						}
+					} catch (e) {
+						echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
+						throw e
+					} finally {
+						String stderr = sh(script: "cat '${stderrFile}' 2>/dev/null || true", returnStdout: true).trim()
+						if (stderr) {
+							echo stderr
+						}
+						String traceId = extractTraceId(stderr)
+						if (traceId) {
+							echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${traceId}"
+						} else {
+							echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/traces/latest"
+						}
+						sh "rm -f '${stderrFile}'"
+					}
+				}
+			}
+		}
+		return
+	}
 
     if (params.provisionCli) {
         provisionCli(serverUrl: serverUrl, token: token,
@@ -118,9 +123,6 @@ def call(Map params = [:], Closure body = null) {
     ]) {
         if (version) {
             env._EXPERIMENTAL_DAGGER_TAG = version
-        }
-        if (cacheConfig) {
-            env._EXPERIMENTAL_DAGGER_CACHE_CONFIG = cacheConfig
         }
 
         if (body) {
@@ -165,10 +167,19 @@ boolean parseBool(String s, boolean deflt) {
 }
 
 // extractTraceId extracts the trace id from dagger's stderr output for the
-// pipeline-view link; empty when none was captured.
+// pipeline-view link. It first looks for the structured format emitted by
+// dagger-kubernetes-ci ("discovered trace <hex> from supervisor"), which is
+// authoritative because it comes from the supervisor's trace-meta API. Falls
+// back to matching any 32+ char hex string (unreliable — may match Docker
+// digests and other hashes) for backwards compatibility with raw dagger runs.
 String extractTraceId(String stderr) {
-    def m = (stderr ?: '') =~ /[a-f0-9]{32,}/
-    return m ? m[0] : ''
+	if (!stderr) return ''
+	// Prefer the CI wrapper's structured discovery output.
+	def m = (stderr =~ /\[dagger-kubernetes-ci\] discovered trace ([a-fA-F0-9]{16,128})/)
+	if (m) return m[0][1]
+	// Fallback: any hex string (best-effort, may be wrong).
+	m = (stderr =~ /[a-f0-9]{32,}/)
+	return m ? m[0] : ''
 }
 
 // isShellUnsafe reports whether value contains a character that could break

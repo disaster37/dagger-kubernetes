@@ -117,8 +117,10 @@ func sha256Hex(b []byte) string {
 // startCLIServer boots a full supervisor wired with a CLI service whose
 // upstream points at the returned httptest server. Returns the control-plane
 // URL, the admin token, and the upstream tarball digest.
-func startCLIServer(t *testing.T, controlAddr, dataAddr string) (serverURL, adminToken, digest string, tarballBytes []byte) {
+func startCLIServer(t *testing.T) (serverURL, adminToken, digest string, tarballBytes []byte) {
 	t.Helper()
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
 
 	tarball := buildCLITarball(t, "#!/bin/sh\necho dagger\n")
 	digest = sha256Hex(tarball)
@@ -169,7 +171,6 @@ func startCLIServer(t *testing.T, controlAddr, dataAddr string) (serverURL, admi
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(
 		service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger),
@@ -186,13 +187,15 @@ func startCLIServer(t *testing.T, controlAddr, dataAddr string) (serverURL, admi
 	cliSvc := service.NewCLIService(versionResolver, cliUpstream, cliCache, "http://localhost"+controlAddr, time.Hour, logger, observ.NewMetrics(nil))
 
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: controlAddr,
-		DataAddr:    dataAddr,
-		DataHost:    "localhost",
-		PipelineURL: "http://localhost" + controlAddr,
+		ControlAddr:     controlAddr,
+		DataAddr:        dataAddr,
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
+		PipelineURL:     "http://localhost" + controlAddr,
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
 		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
 		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
@@ -228,7 +231,7 @@ func cliGet(t *testing.T, url, token string) (status int, header http.Header, bo
 }
 
 func TestCLILatestEndpoint(t *testing.T) {
-	serverURL, token, digest, _ := startCLIServer(t, freeAddr(t), freeAddr(t))
+	serverURL, token, digest, _ := startCLIServer(t)
 
 	status, _, body := cliGet(t, serverURL+"/api/v1/cli/versions/latest?os=linux&arch=amd64", token)
 	if status != http.StatusOK {
@@ -251,7 +254,7 @@ func TestCLILatestEndpoint(t *testing.T) {
 }
 
 func TestCLIDownloadEndpoint(t *testing.T) {
-	serverURL, token, digest, tarball := startCLIServer(t, freeAddr(t), freeAddr(t))
+	serverURL, token, digest, tarball := startCLIServer(t)
 
 	status, header, body := cliGet(t, serverURL+"/api/v1/cli/v0.21.8?os=linux&arch=amd64", token)
 	if status != http.StatusOK {
@@ -286,7 +289,7 @@ func TestCLIDownloadEndpoint(t *testing.T) {
 }
 
 func TestCLIDownloadNotAllowedVersion(t *testing.T) {
-	serverURL, token, _, _ := startCLIServer(t, freeAddr(t), freeAddr(t))
+	serverURL, token, _, _ := startCLIServer(t)
 
 	status, _, _ := cliGet(t, serverURL+"/api/v1/cli/v0.22.0?os=linux&arch=amd64", token)
 	if status != http.StatusBadRequest {
@@ -295,7 +298,7 @@ func TestCLIDownloadNotAllowedVersion(t *testing.T) {
 }
 
 func TestCLIDownloadUnknownVersion(t *testing.T) {
-	serverURL, token, _, _ := startCLIServer(t, freeAddr(t), freeAddr(t))
+	serverURL, token, _, _ := startCLIServer(t)
 
 	// v0.21.99 is allowed (minor 0.21 in the allowlist) but does not exist
 	// upstream, so the upstream 404 must surface as HTTP 404.

@@ -8,6 +8,7 @@ export interface AuthUser {
   role: Role
   groups: GroupSummary[]
   oauth_provider?: string
+  oauth_groups?: string[]
 }
 
 export interface Group extends GroupSummary {
@@ -32,6 +33,7 @@ export interface UserRow {
   username: string
   role: Role
   oauth_provider?: string
+  oauth_groups?: string[]
   groups: GroupSummary[]
   created_at: string
   token?: TokenMeta | null
@@ -133,55 +135,20 @@ export interface FleetInfo {
   ordinals: FleetReplica[]
 }
 
-export interface CacheRef {
-  ref: string
-  tag: string
-  size: number
-  layer_count: number
-  digest: string
-  last_used_at?: string
+export interface EnginePodPurgeResult {
+  pod_name: string
+  ordinal: number
+  pruned: boolean
+  error?: string
 }
 
-export interface GCRunSummary {
+export interface EngineCachePurgeResult {
+  version: string
+  state: 'running' | 'completed' | 'failed'
   started_at: string
-  finished_at: string
-  purged_tags: number
-  freed_bytes: number
-  skipped: number
-  errors: number
-  message?: string
-}
-
-export interface GCRules {
-  enabled: boolean
-  max_age: string
-  schedule: string
-  last_run_at?: string
-  last_run_summary?: GCRunSummary
-  next_run_at?: string
-}
-
-export interface CacheInfo {
-  backend: string
-  registry: string
-  running: boolean
-  reachable: boolean
-  total_size: number
-  object_count: number
-  ref: CacheRef | null
-  hit_rate: number | null
-  hit_count: number
-  miss_count: number
-  collected_at: string
-  message?: string
-  gc: GCRules
-}
-
-export interface PurgeResult {
-  purged: number
-  freed_bytes: number
-  tags: string[]
-  already_purged: number
+  finished_at?: string
+  replicas: number
+  pods: EnginePodPurgeResult[]
   message?: string
 }
 
@@ -260,10 +227,83 @@ export interface ConnectTokenMeta {
 export interface ConnectEnvSnapshot {
   server_url: string
   data_hostname: string
-  cache_backend: string
   version_floor: string
   allowed_versions: string[]
   selected_version?: string
   token: ConnectTokenMeta
   env_vars: ConnectEnvVar[]
+}
+
+// --- Image cache (local Zot mirrors, admin) ---
+
+export interface ImageCacheTag {
+  tag: string
+  digest: string
+  size_bytes: number
+  layer_count: number
+}
+
+export interface ImageCacheRepository {
+  repository: string
+  tags: ImageCacheTag[]
+}
+
+export interface ImageCacheMirrorInfo {
+  id: string
+  host: string
+  upstream: string
+  backend: string
+  reachable: boolean
+  repositories: ImageCacheRepository[]
+  error?: string
+}
+
+export interface ImageCacheInfo {
+  mirrors: ImageCacheMirrorInfo[]
+  collected_at: string
+}
+
+export interface ImageCachePruneRef {
+  repository: string
+  tag?: string
+  digest?: string
+}
+
+export interface ImageCachePruneItem {
+  repository: string
+  tag?: string
+  digest?: string
+  pruned: boolean
+  error?: string
+}
+
+export interface ImageCachePruneResult {
+  mirror_id: string
+  items: ImageCachePruneItem[]
+  pruned: number
+  errors: number
+  message?: string
+}
+
+export interface ImageCachePruneAllItem {
+  repository: string
+  tag?: string
+  digest?: string
+  pruned: boolean
+  error?: string
+}
+
+export interface ImageCachePruneAllMirror {
+  mirror_id: string
+  manifests_pruned: number
+  repositories_processed: number
+  errors: number
+  failed?: ImageCachePruneAllItem[]
+  message?: string
+  error?: string
+}
+
+export interface ImageCachePruneAllResult {
+  mirrors: ImageCachePruneAllMirror[]
+  message?: string
 }

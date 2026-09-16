@@ -2,10 +2,8 @@ package service
 
 import (
 	"context"
-	"fmt"
 	"net"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -20,14 +18,12 @@ const (
 )
 
 // StatusService implements domain.StatusProvider. It probes each platform
-// service (supervisor, cache, telemetry backends, fleet) and rolls the results
-// into a PlatformStatus. The last result is cached for statusCacheTTL so kube
+// service (supervisor, telemetry backends, fleet) and rolls the results into a
+// PlatformStatus. The last result is cached for statusCacheTTL so kube
 // liveness/readiness probes do not trigger probe storms.
 type StatusService struct {
 	cfg          *domain.Config
-	cache        *Cache
-	router       *RegistryRouter // may be nil (s3 backend)
-	fleetManager *Manager        // may be nil
+	fleetManager *Manager // may be nil
 	logger       *logrus.Logger
 
 	raftCleanState domain.RaftCleanState // nil when raft is not in use (single-node, tests)
@@ -37,11 +33,9 @@ type StatusService struct {
 	cachedAt time.Time
 }
 
-func NewStatusService(cfg *domain.Config, cache *Cache, router *RegistryRouter, fleet *Manager, logger *logrus.Logger, raftCleanState domain.RaftCleanState) *StatusService {
+func NewStatusService(cfg *domain.Config, fleet *Manager, logger *logrus.Logger, raftCleanState domain.RaftCleanState) *StatusService {
 	return &StatusService{
 		cfg:            cfg,
-		cache:          cache,
-		router:         router,
 		fleetManager:   fleet,
 		logger:         logger,
 		raftCleanState: raftCleanState,
@@ -81,7 +75,6 @@ func (s *StatusService) probe(ctx context.Context) *domain.PlatformStatus {
 
 	services := []domain.ServiceStatus{
 		supervisor,
-		s.probeCache(ctx),
 		s.probeTelemetry(ctx, "collector", s.cfg.Telemetry.CollectorURL),
 		s.probeTelemetry(ctx, "tempo", s.cfg.Telemetry.TempoURL),
 		s.probeTelemetry(ctx, "loki", s.cfg.Telemetry.LokiURL),
@@ -96,6 +89,11 @@ func (s *StatusService) probe(ctx context.Context) *domain.PlatformStatus {
 	}
 }
 
+// rfc3339 formats t as a UTC RFC3339 timestamp.
+func rfc3339(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
+
 // newServiceStatus builds a status row stamped with the current check time.
 func newServiceStatus(name, category string, configured bool) domain.ServiceStatus {
 	return domain.ServiceStatus{
@@ -103,56 +101,6 @@ func newServiceStatus(name, category string, configured bool) domain.ServiceStat
 		Category:   category,
 		Configured: configured,
 		CheckedAt:  rfc3339(time.Now()),
-	}
-}
-
-// probeCache checks the cache backend (registry ping or s3 bucket presence).
-func (s *StatusService) probeCache(ctx context.Context) domain.ServiceStatus {
-	st := newServiceStatus("cache", "cache", s.cache != nil && s.cache.Type != "")
-	if !st.Configured {
-		st.State = domain.ServiceUnknown
-		return st
-	}
-	switch s.cache.Type {
-	case "registry":
-		if s.router == nil || len(s.router.Backends()) == 0 {
-			st.State = domain.ServiceDown
-			st.Message = "registry not configured"
-			return st
-		}
-		var down []string
-		up := 0
-		for _, b := range s.router.Backends() {
-			client, ok := s.router.ClientByID(b.ID)
-			if !ok || client.Ping(ctx) != nil {
-				down = append(down, b.ID)
-				continue
-			}
-			up++
-		}
-		switch {
-		case up == 0:
-			st.State = domain.ServiceDown
-			st.Message = "registry unreachable"
-		case len(down) > 0:
-			st.State = domain.ServiceDegraded
-			st.Message = fmt.Sprintf("registry backend unreachable: %s", strings.Join(down, ", "))
-		default:
-			st.State = domain.ServiceOK
-		}
-		return st
-	case "s3":
-		if s.cache.S3.Bucket == "" {
-			st.State = domain.ServiceDown
-			st.Message = "s3 bucket not configured"
-			return st
-		}
-		st.State = domain.ServiceOK
-		return st
-	default:
-		st.State = domain.ServiceDown
-		st.Message = "unknown cache backend"
-		return st
 	}
 }
 

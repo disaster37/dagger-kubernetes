@@ -32,7 +32,7 @@
         </div>
         <p style="font-size: 12px; color: #8b949e; margin-top: 12px;">
           Server <code>{{ snap.server_url }}</code> · data host <code>{{ snap.data_hostname }}</code> ·
-          cache backend <code>{{ snap.cache_backend }}</code> · version floor <code>{{ snap.version_floor }}</code>
+          version floor <code>{{ snap.version_floor }}</code>
         </p>
       </div>
 

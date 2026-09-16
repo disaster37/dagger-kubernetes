@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -19,11 +20,11 @@ func digestRepeat(c string) string {
 	return "sha256:" + strings.Repeat(c, 64)
 }
 
-func testClient(t *testing.T, handler http.HandlerFunc) *RegistryStatsClient {
+func testClient(t *testing.T, handler http.HandlerFunc) *DistributionClient {
 	t.Helper()
 	ts := httptest.NewServer(handler)
 	t.Cleanup(ts.Close)
-	return NewRegistryStatsClient(ts.Listener.Addr().String())
+	return NewDistributionClient(ts.Listener.Addr().String())
 }
 
 func TestRegistryCatalog(t *testing.T) {
@@ -83,7 +84,7 @@ func TestRegistryCatalog(t *testing.T) {
 
 func TestRegistryUnreachable(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	c := NewRegistryStatsClient(ts.Listener.Addr().String())
+	c := NewDistributionClient(ts.Listener.Addr().String())
 	ts.Close() // now unreachable
 
 	_, err := c.Catalog(context.Background())
@@ -136,22 +137,12 @@ func TestRegistryManifestSize(t *testing.T) {
 			wantLayers: 2,
 		},
 		{
-			name: "no-sizes-fallback-head",
+			name: "no-sizes-unknown",
 			handler: func(w http.ResponseWriter, r *http.Request) {
-				switch r.Method {
-				case http.MethodGet:
-					_, _ = fmt.Fprintf(w, `{"config":{"digest":"sha256:cfg"},"layers":[{"digest":"%s"},{"digest":"%s"}]}`, digestRepeat("1"), digestRepeat("2"))
-				case http.MethodHead:
-					if r.URL.Path == "/v2/dagger-cache/blobs/"+digestRepeat("1") {
-						w.Header().Set("Content-Length", "40")
-					} else if r.URL.Path == "/v2/dagger-cache/blobs/"+digestRepeat("2") {
-						w.Header().Set("Content-Length", "50")
-					}
-					w.WriteHeader(http.StatusOK)
-				}
+				_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg"},"layers":[{"digest":"sha256:l1"},{"digest":"sha256:l2"}]}`))
 			},
 			wantDigest: "", // computed from body hash
-			wantSize:   90,
+			wantSize:   -1,
 			wantLayers: 2,
 		},
 		{
@@ -185,6 +176,203 @@ func TestRegistryManifestSize(t *testing.T) {
 				t.Errorf("layers = %d, want %d", layers, tc.wantLayers)
 			}
 		})
+	}
+}
+
+// indexChild renders one image-index child descriptor with a platform.
+func indexChild(digest, os, arch string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":100,"platform":{"os":%q,"architecture":%q}}`, digest, os, arch)
+}
+
+// attestChild renders a BuildKit attestation child descriptor.
+func attestChild(digest string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":50,"platform":{"os":"unknown","architecture":"unknown"},"annotations":{%q:%q}}`, digest, annotationReferenceType, referenceTypeAttestation)
+}
+
+// indexBody renders an OCI image index with the given child descriptors.
+func indexBody(children ...string) string {
+	return fmt.Sprintf(`{"mediaType":%q,"manifests":[%s]}`, ociIndexMediaType, strings.Join(children, ","))
+}
+
+// directBody renders a direct manifest whose config + layers sum to size with
+// the given layer count (config and each layer = size/(layers+1)).
+func directBody(size int64, layers int) string {
+	per := size / int64(layers+1)
+	descriptors := make([]string, 0, layers)
+	for i := 0; i < layers; i++ {
+		descriptors = append(descriptors, fmt.Sprintf(`{"digest":"sha256:%064x","size":%d}`, i, per))
+	}
+	return fmt.Sprintf(`{"config":{"digest":"sha256:cfg","size":%d},"layers":[%s]}`, per, strings.Join(descriptors, ","))
+}
+
+// indexTestHandler serves an index at the v0-21-4 tag and its children by
+// digest; children absent from the map 404.
+func indexTestHandler(index, indexDigest string, children map[string]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		const tagPath = "/v2/dagger-cache/manifests/v0-21-4"
+		if r.URL.Path == tagPath {
+			w.Header().Set("Docker-Content-Digest", indexDigest)
+			_, _ = w.Write([]byte(index))
+			return
+		}
+		digest := strings.TrimPrefix(r.URL.Path, "/v2/dagger-cache/manifests/")
+		body, ok := children[digest]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+// TestRegistryManifestSizeIndex covers index / manifest-list resolution: the
+// returned digest must stay the top-level index digest (prune unlinks the tag)
+// while size/layers come from a representative child.
+func TestRegistryManifestSizeIndex(t *testing.T) {
+	amd64 := digestRepeat("a")
+	arm64 := digestRepeat("b")
+	attest := digestRepeat("c")
+	nested := digestRepeat("d")
+	nested2 := digestRepeat("3")
+	grand := digestRepeat("f")
+	indexDig := digestRepeat("e")
+
+	amd64Body := directBody(300, 2)
+	arm64Body := directBody(330, 2)
+	grandBody := directBody(500, 4)
+
+	tests := []struct {
+		name        string
+		index       string
+		indexDigest string
+		children    map[string]string
+		wantDigest  string
+		wantSize    int64
+		wantLayers  int64
+	}{
+		{
+			name:        "amd64-preferred",
+			index:       indexBody(indexChild(amd64, "linux", "amd64"), indexChild(arm64, "linux", "arm64")),
+			indexDigest: indexDig,
+			children:    map[string]string{amd64: amd64Body, arm64: arm64Body},
+			wantDigest:  indexDig,
+			wantSize:    300,
+			wantLayers:  2,
+		},
+		{
+			name:        "arm64-fallback",
+			index:       indexBody(indexChild(arm64, "linux", "arm64")),
+			indexDigest: indexDig,
+			children:    map[string]string{arm64: arm64Body},
+			wantDigest:  indexDig,
+			wantSize:    330,
+			wantLayers:  2,
+		},
+		{
+			name:        "attestation-and-unknown-skipped",
+			index:       indexBody(attestChild(attest), indexChild(arm64, "unknown", "unknown"), indexChild(amd64, "linux", "amd64")),
+			indexDigest: indexDig,
+			children:    map[string]string{amd64: amd64Body},
+			wantDigest:  indexDig,
+			wantSize:    300,
+			wantLayers:  2,
+		},
+		{
+			name:        "child-404-unknown",
+			index:       indexBody(indexChild(amd64, "linux", "amd64")),
+			indexDigest: indexDig,
+			children:    map[string]string{},
+			wantDigest:  indexDig,
+			wantSize:    -1,
+			wantLayers:  -1,
+		},
+		{
+			name:        "empty-index-unknown",
+			index:       indexBody(),
+			indexDigest: indexDig,
+			children:    map[string]string{},
+			wantDigest:  indexDig,
+			wantSize:    -1,
+			wantLayers:  -1,
+		},
+		{
+			name:        "all-attestation-unknown",
+			index:       indexBody(attestChild(attest)),
+			indexDigest: indexDig,
+			children:    map[string]string{},
+			wantDigest:  indexDig,
+			wantSize:    -1,
+			wantLayers:  -1,
+		},
+		{
+			name:        "nested-index-resolves-grandchild",
+			index:       indexBody(indexChild(nested, "linux", "amd64")),
+			indexDigest: indexDig,
+			children: map[string]string{
+				nested: indexBody(indexChild(grand, "linux", "amd64")),
+				grand:  grandBody,
+			},
+			wantDigest: indexDig,
+			wantSize:   500,
+			wantLayers: 4,
+		},
+		{
+			name:        "nested-past-depth-cap-unknown",
+			index:       indexBody(indexChild(nested, "linux", "amd64")),
+			indexDigest: indexDig,
+			children: map[string]string{
+				nested:  indexBody(indexChild(nested2, "linux", "amd64")),
+				nested2: indexBody(indexChild(grand, "linux", "amd64")),
+			},
+			wantDigest: indexDig,
+			wantSize:   -1,
+			wantLayers: -1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, indexTestHandler(tc.index, tc.indexDigest, tc.children))
+			digest, size, layers, err := c.ManifestSize(context.Background(), "dagger-cache", "v0-21-4")
+			if err != nil {
+				t.Fatalf("ManifestSize: %v", err)
+			}
+			if digest != tc.wantDigest {
+				t.Errorf("digest = %q, want %q", digest, tc.wantDigest)
+			}
+			if size != tc.wantSize {
+				t.Errorf("size = %d, want %d", size, tc.wantSize)
+			}
+			if layers != tc.wantLayers {
+				t.Errorf("layers = %d, want %d", layers, tc.wantLayers)
+			}
+		})
+	}
+}
+
+// TestManifestSizeIndexRejectsMalformedChildDigest proves an index child with a
+// hostile (non-sha256) digest is never interpolated into a request: only the
+// top-level tag fetch happens, and the result is unknown (-1/-1) with the valid
+// top-level digest (CWE-20/CWE-918).
+func TestManifestSizeIndexRejectsMalformedChildDigest(t *testing.T) {
+	var requests []string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		w.Header().Set("Docker-Content-Digest", digestRepeat("e"))
+		_, _ = w.Write([]byte(`{"mediaType":"` + ociIndexMediaType + `","manifests":[{"digest":"../../v2/_catalog","platform":{"os":"linux","architecture":"amd64"}}]}`))
+	})
+	digest, size, layers, err := c.ManifestSize(context.Background(), "dagger-cache", "v0-21-4")
+	if err != nil {
+		t.Fatalf("ManifestSize: %v", err)
+	}
+	if size != -1 || layers != -1 {
+		t.Fatalf("size/layers = %d/%d, want -1/-1", size, layers)
+	}
+	if !validDigest(digest) {
+		t.Fatalf("digest = %q, want valid top-level digest", digest)
+	}
+	if len(requests) != 1 || requests[0] != "/v2/dagger-cache/manifests/v0-21-4" {
+		t.Fatalf("requests = %v, want only the top-level tag fetch", requests)
 	}
 }
 
@@ -239,74 +427,8 @@ func TestRegistryPing(t *testing.T) {
 	}
 }
 
-func TestRegistryProbeManifest(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  int
-		wantOK  bool
-		wantErr error
-	}{
-		{"ok-200", http.StatusOK, true, nil},
-		{"not-found-404", http.StatusNotFound, false, nil},
-		{"method-not-allowed-405", http.StatusMethodNotAllowed, false, nil},
-		{"unauthorized-401", http.StatusUnauthorized, false, ErrRegistryUnreachable},
-		{"forbidden-403", http.StatusForbidden, false, ErrRegistryUnreachable},
-		{"server-error-500", http.StatusInternalServerError, false, ErrRegistryUnreachable},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodHead {
-					t.Errorf("method = %q", r.Method)
-				}
-				w.WriteHeader(tc.status)
-			})
-			got, err := c.ProbeManifest(context.Background(), "dagger-cache", "v0-21-4")
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tc.wantErr)
-			}
-			if got != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", got, tc.wantOK)
-			}
-		})
-	}
-}
-
-func TestRegistryProbeBlob(t *testing.T) {
-	tests := []struct {
-		name    string
-		status  int
-		wantOK  bool
-		wantErr error
-	}{
-		{"ok-200", http.StatusOK, true, nil},
-		{"not-found-404", http.StatusNotFound, false, nil},
-		{"method-not-allowed-405", http.StatusMethodNotAllowed, false, nil},
-		{"unauthorized-401", http.StatusUnauthorized, false, ErrRegistryUnreachable},
-		{"forbidden-403", http.StatusForbidden, false, ErrRegistryUnreachable},
-		{"server-error-500", http.StatusInternalServerError, false, ErrRegistryUnreachable},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-				if r.Method != http.MethodHead {
-					t.Errorf("method = %q", r.Method)
-				}
-				w.WriteHeader(tc.status)
-			})
-			got, err := c.ProbeBlob(context.Background(), "dagger-cache", digestRepeat("a"))
-			if !errors.Is(err, tc.wantErr) {
-				t.Fatalf("err = %v, want %v", err, tc.wantErr)
-			}
-			if got != tc.wantOK {
-				t.Fatalf("ok = %v, want %v", got, tc.wantOK)
-			}
-		})
-	}
-}
-
 func TestRegistryHost(t *testing.T) {
-	c := NewRegistryStatsClient("localhost:5000")
+	c := NewDistributionClient("localhost:5000")
 	if c.Host() != "localhost:5000" {
 		t.Fatalf("Host = %q", c.Host())
 	}
@@ -315,7 +437,7 @@ func TestRegistryHost(t *testing.T) {
 	}
 }
 
-func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
+func TestDistributionClientWithAuthSendsBasic(t *testing.T) {
 	tests := []struct {
 		name     string
 		username string
@@ -335,7 +457,7 @@ func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			c := NewRegistryStatsClientWithAuth(ts.Listener.Addr().String(), tc.username, tc.password)
+			c := NewDistributionClientWithAuth(ts.Listener.Addr().String(), tc.username, tc.password)
 			if err := c.Ping(context.Background()); err != nil {
 				t.Fatalf("Ping: %v", err)
 			}
@@ -343,25 +465,6 @@ func TestRegistryStatsClientWithAuthSendsBasic(t *testing.T) {
 				t.Fatalf("Authorization = %q, want %q", gotAuth, tc.wantAuth)
 			}
 		})
-	}
-}
-
-func TestBlobSizeMissingLength(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-	})
-	_, err := c.BlobSize(context.Background(), "dagger-cache", digestRepeat("a"))
-	if err == nil {
-		t.Fatal("expected error when content-length missing")
-	}
-}
-
-func TestBlobSizeInvalidDigest(t *testing.T) {
-	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
-		t.Errorf("unexpected request to %q", r.URL.Path)
-	})
-	if _, err := c.BlobSize(context.Background(), "dagger-cache", "sha256:not-hex"); err == nil {
-		t.Fatal("expected error for invalid digest")
 	}
 }
 
@@ -374,7 +477,7 @@ func TestDeleteManifestInvalidDigest(t *testing.T) {
 	}
 }
 
-func TestGetManifestRejectsMalformedDigestHeader(t *testing.T) {
+func TestManifestSizeRejectsMalformedDigestHeader(t *testing.T) {
 	// A compromised registry returning a non-sha256 digest header must not
 	// propagate it: the client falls back to computing the digest from the
 	// body (CWE-20/CWE-918).
@@ -402,5 +505,149 @@ func TestCatalogRejectsOversizedBody(t *testing.T) {
 	})
 	if _, err := c.Catalog(context.Background()); err == nil {
 		t.Fatal("expected error for oversized catalog body")
+	}
+}
+
+func TestDistributionClientWithTimeout(t *testing.T) {
+	// The 10s default truncates large transfers; the caller can raise the
+	// total per-request timeout.
+	c := NewDistributionClient("reg:5000").WithTimeout(5 * time.Minute)
+	if c.httpClient.Timeout != 5*time.Minute {
+		t.Fatalf("timeout = %v, want 5m", c.httpClient.Timeout)
+	}
+}
+
+// TestDistributionClientPathEscaping verifies that repository/tag/digest
+// values taken from the prune request body are validated and path-escaped
+// before they are interpolated into the wire URL (CWE-22/CWE-918): they cannot
+// traverse out of /v2/ via "..", steer the host via an absolute URL, or inject
+// a query/fragment. Repository separators are preserved (each segment is
+// escaped independently) so nested repos such as "library/alpine" reach the
+// registry as a literal path instead of "library%2Falpine".
+func TestDistributionClientPathEscaping(t *testing.T) {
+	digest := "sha256:" + strings.Repeat("a", 64)
+	var gotPaths []string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		gotPaths = append(gotPaths, r.URL.EscapedPath())
+		if r.URL.RawQuery != "" {
+			t.Errorf("rawQuery = %q, want empty (metacharacters must be escaped into the path)", r.URL.RawQuery)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"config":{"digest":"sha256:cfg","size":1},"layers":[]}`))
+	})
+
+	// Tags: nested repos keep their separators; hostile repos are rejected.
+	tagsCases := []struct {
+		name     string
+		repo     string
+		wantPath string
+		wantErr  bool
+	}{
+		{"nested", "library/alpine", "/v2/library/alpine/tags/list", false},
+		{"deeply-nested", "team/project/image", "/v2/team/project/image/tags/list", false},
+		{"query-fragment", "a?b#c", "/v2/a%3Fb%23c/tags/list", false},
+		{"traversal", "../../v2/_catalog", "", true},
+		{"empty-segment", "a//b", "", true},
+		{"dot-segment", "a/./b", "", true},
+		{"absolute-url", "http://evil.com:5000/x", "", true},
+		{"empty", "", "", true},
+	}
+	for _, tc := range tagsCases {
+		before := len(gotPaths)
+		_, err := c.Tags(context.Background(), tc.repo)
+		if tc.wantErr {
+			if err == nil {
+				t.Errorf("%s: Tags(%q) = nil error, want rejection", tc.name, tc.repo)
+			}
+			if len(gotPaths) != before {
+				t.Errorf("%s: rejected repo must not issue a request, got %q", tc.name, gotPaths[before:])
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatalf("%s: Tags: %v", tc.name, err)
+		}
+		if got := gotPaths[len(gotPaths)-1]; got != tc.wantPath {
+			t.Errorf("%s: wire path = %q, want %q", tc.name, got, tc.wantPath)
+		}
+	}
+
+	// ManifestSize: nested repo + an escapable-but-hostile tag.
+	if _, _, _, err := c.ManifestSize(context.Background(), "library/alpine", "v1?x#y"); err != nil {
+		t.Fatalf("ManifestSize: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; got != "/v2/library/alpine/manifests/v1%3Fx%23y" {
+		t.Errorf("manifest wire path = %q", got)
+	}
+	// A tag containing "/" is not a single segment and must be rejected.
+	if _, _, _, err := c.ManifestSize(context.Background(), "library/alpine", "v1/evil"); err == nil {
+		t.Error("ManifestSize accepted a tag containing '/'")
+	}
+
+	// DeleteManifest: nested repo, valid digest (colon survives escaping).
+	if err := c.DeleteManifest(context.Background(), "library/alpine", digest); err != nil {
+		t.Fatalf("DeleteManifest: %v", err)
+	}
+	if got := gotPaths[len(gotPaths)-1]; got != "/v2/library/alpine/manifests/"+digest {
+		t.Errorf("delete wire path = %q, want /v2/library/alpine/manifests/%s", got, digest)
+	}
+}
+
+// TestDistributionClientNestedRepository serves only the literal nested path:
+// the old whole-string escaping turned "library/alpine" into
+// "library%2Falpine" and 404ed, so this is a regression test for the slash
+// case against a server that does not unescape.
+func TestDistributionClientNestedRepository(t *testing.T) {
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.EscapedPath() != "/v2/library/alpine/tags/list" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"name":"library/alpine","tags":["3.20","latest"]}`))
+	})
+
+	got, err := c.Tags(context.Background(), "library/alpine")
+	if err != nil {
+		t.Fatalf("Tags: %v", err)
+	}
+	if len(got) != 2 || got[0] != "3.20" || got[1] != "latest" {
+		t.Fatalf("got %v", got)
+	}
+}
+
+// TestDistributionClientRejectsRedirects proves a hostile/poisoned mirror
+// cannot pivot the client to another host with a 3xx (CWE-918/CWE-601). Every
+// call must surface ErrRegistryUnreachable and the redirect target must never
+// be contacted — a followed 307 would replay the DELETE against that host.
+func TestDistributionClientRejectsRedirects(t *testing.T) {
+	var pivotHit bool
+	pivot := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		pivotHit = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer pivot.Close()
+
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, pivot.URL, http.StatusTemporaryRedirect)
+	})
+
+	if err := c.Ping(context.Background()); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Ping err = %v, want ErrRegistryUnreachable", err)
+	}
+	if _, err := c.Catalog(context.Background()); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Catalog err = %v, want ErrRegistryUnreachable", err)
+	}
+	if _, err := c.Tags(context.Background(), "library/alpine"); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Tags err = %v, want ErrRegistryUnreachable", err)
+	}
+	if _, _, _, err := c.ManifestSize(context.Background(), "library/alpine", "3.20"); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("ManifestSize err = %v, want ErrRegistryUnreachable", err)
+	}
+	if err := c.DeleteManifest(context.Background(), "library/alpine", digestRepeat("a")); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("DeleteManifest err = %v, want ErrRegistryUnreachable", err)
+	}
+	if pivotHit {
+		t.Fatal("redirect target was contacted: SSRF pivot was not blocked")
 	}
 }

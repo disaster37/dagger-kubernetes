@@ -2,10 +2,8 @@ package domain
 
 import "context"
 
-// CacheMetricsClient is the slice of the VictoriaMetrics client the service
-// layer needs (cache hit-rate + per-trace series deletion). Implemented by
-// repository.MetricsClient.
-type CacheMetricsClient interface {
-	CacheHitRate(ctx context.Context) (hit, miss float64, err error)
+// TraceSeriesDeleter deletes per-trace metric series from VictoriaMetrics.
+// Implemented by repository.MetricsClient.
+type TraceSeriesDeleter interface {
 	DeleteTraceSeries(ctx context.Context, traceID string) error
 }

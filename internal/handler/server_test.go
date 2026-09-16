@@ -23,7 +23,7 @@ import (
 )
 
 // newTestServer builds a Server with auth enabled plus an admin bearer for the
-// pre-existing engine/fleet/cache tests that authenticate explicitly.
+// pre-existing engine/fleet tests that authenticate explicitly.
 func newTestServer(t *testing.T) (s *Server, addr string) {
 	t.Helper()
 	env := newTestEnv(t)
@@ -39,8 +39,6 @@ func newTestEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	e.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
 	e.GET("/api/v1/fleet", s.handleFleetInfo)
-	e.GET("/api/v1/cache", s.handleCacheInfo)
-	e.POST("/api/v1/cache/purge", s.adminOnly(s.handleCachePurge))
 	e.GET("/api/v1/history", s.handleHistoryInfo)
 	e.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
 	e.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
@@ -140,27 +138,6 @@ func TestHandleEnginesBadVersion(t *testing.T) {
 
 	if resp.Result().StatusCode() != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d", resp.Result().StatusCode())
-	}
-}
-
-func TestHandleCacheInfo(t *testing.T) {
-	s, bearer := newTestServer(t)
-	e := newTestEngine(s)
-
-	resp := ut.PerformRequest(e, "GET", "/api/v1/cache", nil, ut.Header{Key: "Authorization", Value: bearer})
-	if resp.Result().StatusCode() != http.StatusOK {
-		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
-	}
-
-	var info domain.CacheStats
-	if err := json.Unmarshal(resp.Result().Body(), &info); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if info.Backend != "registry" {
-		t.Fatalf("backend = %q", info.Backend)
-	}
-	if !info.Running {
-		t.Fatal("running should be true from stub provider")
 	}
 }
 

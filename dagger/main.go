@@ -42,10 +42,10 @@ var binaries = []struct {
 var helmTemplateMatrix = [][]string{
 	{},
 	{"--set", "supervisor.enabled=false"},
-	{"--set", "opentelemetry-collector.enabled=false", "--set", "registry.enabled=false"},
+	{"--set", "opentelemetry-collector.enabled=false", "--set", "minio.enabled=false"},
 	{
 		"--set", "opentelemetry-collector.enabled=false",
-		"--set", "registry.enabled=false",
+		"--set", "minio.enabled=false",
 		"--set", "tempo.enabled=false",
 		"--set", "loki.enabled=false",
 		"--set", "victoria.enabled=false",

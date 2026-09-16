@@ -17,7 +17,6 @@ func (s *Server) handleMetricsProxy(ctx context.Context, c *app.RequestContext) 
 	if s.victoriaProxy == nil {
 		writeJSON(c, map[string]interface{}{
 			"fleet":     "/api/v1/fleet",
-			"cache":     "/api/v1/cache",
 			"query":     "/api/v1/metrics/query?query=<promql>",
 			"range":     "/api/v1/metrics/query_range?query=<promql>&start=<unix>&end=<unix>&step=<seconds>",
 			"endpoints": []string{"/api/v1/metrics/query", "/api/v1/metrics/query_range"},

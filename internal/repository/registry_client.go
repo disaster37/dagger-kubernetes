@@ -1,7 +1,6 @@
 package repository
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -12,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -29,8 +27,6 @@ var (
 	ErrRegistryCatalogDisabled = domain.ErrRegistryCatalogDisabled
 	ErrManifestNotFound        = domain.ErrManifestNotFound
 )
-
-var _ domain.CLIRegistryClient = (*RegistryStatsClient)(nil)
 
 // maxRegistryBody caps the size of a registry response body the client will
 // decode (manifests, catalog, tags). A compromised or misbehaving registry
@@ -54,6 +50,35 @@ func validDigest(d string) bool {
 	return digestRe.MatchString(d)
 }
 
+// escapeRepository validates and escapes an OCI repository name for a
+// Distribution v2 request path. The name is split on "/" and each segment is
+// escaped independently so the separators survive: escaping the whole string
+// would turn "library/alpine" into "library%2Falpine", which registries treat
+// as a single (nonexistent) repository and answer with 404. Empty, "." and
+// ".." segments are rejected so a hostile repository cannot traverse out of
+// /v2/ (CWE-22/CWE-918).
+func escapeRepository(repo string) (string, error) {
+	segments := strings.Split(repo, "/")
+	for i, seg := range segments {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("invalid repository %q: empty or traversal segment", repo)
+		}
+		segments[i] = url.PathEscape(seg)
+	}
+	return strings.Join(segments, "/"), nil
+}
+
+// escapeTag validates and escapes an image tag as a single path segment. A tag
+// (unlike a repository) must not contain "/" and must not be a "."/".."
+// traversal value; everything else is percent-escaped so query/fragment
+// metacharacters cannot alter the request (CWE-22/CWE-918).
+func escapeTag(tag string) (string, error) {
+	if tag == "" || tag == "." || tag == ".." || strings.Contains(tag, "/") {
+		return "", fmt.Errorf("invalid tag %q", tag)
+	}
+	return url.PathEscape(tag), nil
+}
+
 // readBounded reads at most maxRegistryBody+1 bytes from r and returns an
 // error when the body exceeds maxRegistryBody, so a compromised registry
 // cannot exhaust memory with an oversized response (CWE-400/CWE-770).
@@ -69,49 +94,64 @@ func readBounded(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
-// RegistryStatsClient is a minimal OCI Distribution v2 client used to probe
-// the shared cache registry (catalog, tags, manifests, delete) over stdlib
-// net/http. It talks to the *internal* registry address, never the public
-// cache vhost.
-type RegistryStatsClient struct {
-	host       string // e.g. "localhost:5000" (cache.internal_addr) or derived from cache.registry
+// DistributionClient is a minimal OCI Distribution v2 client used to list and
+// prune the local image mirrors (Zot serves this API) over stdlib net/http. It
+// talks to the *internal* mirror address, never a public vhost.
+type DistributionClient struct {
+	host       string // e.g. "dagger-docker-io-mirror.dagger.svc:5000"
 	username   string
 	password   string
 	httpClient *http.Client
 }
 
-var _ domain.RegistryClient = (*RegistryStatsClient)(nil)
+var _ domain.DistributionClient = (*DistributionClient)(nil)
 
-func NewRegistryStatsClient(host string) *RegistryStatsClient {
-	return &RegistryStatsClient{
+func NewDistributionClient(host string) *DistributionClient {
+	return &DistributionClient{
 		host: host,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
+			// A compromised or poisoned mirror must not be able to pivot the
+			// supervisor to another host with a 3xx (CWE-918/CWE-601): the
+			// distribution client only ever talks to the configured mirror.
+			// Zot serves catalog/tags/manifests inline; blob redirects (S3
+			// presigned URLs) are never fetched here.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
 
-// NewRegistryStatsClientWithAuth returns a client that sends Basic auth on
-// every request (per-backend registry credentials).
-func NewRegistryStatsClientWithAuth(host, username, password string) *RegistryStatsClient {
-	c := NewRegistryStatsClient(host)
+// NewDistributionClientWithAuth returns a client that sends Basic auth on
+// every request.
+func NewDistributionClientWithAuth(host, username, password string) *DistributionClient {
+	c := NewDistributionClient(host)
 	c.username = username
 	c.password = password
 	return c
 }
 
+// WithTimeout returns the client with the given total per-request timeout,
+// overriding the 10s default. http.Client.Timeout covers connection,
+// redirects, and reading the response body.
+func (c *DistributionClient) WithTimeout(d time.Duration) *DistributionClient {
+	c.httpClient.Timeout = d
+	return c
+}
+
 // Host returns the registry host the client talks to.
-func (c *RegistryStatsClient) Host() string {
+func (c *DistributionClient) Host() string {
 	return c.host
 }
 
 // baseURL returns the scheme-prefixed registry host root.
-func (c *RegistryStatsClient) baseURL() string {
+func (c *DistributionClient) baseURL() string {
 	return fmt.Sprintf("http://%s", c.host)
 }
 
 // do performs a request and maps transport errors to ErrRegistryUnreachable.
-func (c *RegistryStatsClient) do(ctx context.Context, method, rawURL, accept string) (*http.Response, error) {
+func (c *DistributionClient) do(ctx context.Context, method, rawURL, accept string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, rawURL, http.NoBody)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -135,7 +175,7 @@ func discard(resp *http.Response) {
 }
 
 // Ping probes registry reachability (GET /v2/). Returns nil if reachable.
-func (c *RegistryStatsClient) Ping(ctx context.Context) error {
+func (c *DistributionClient) Ping(ctx context.Context) error {
 	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/", c.baseURL()), "")
 	if err != nil {
 		return err
@@ -149,54 +189,9 @@ func (c *RegistryStatsClient) Ping(ctx context.Context) error {
 	return nil
 }
 
-// ProbeManifest performs a HEAD request for repo:ref. It reports
-// (true, nil) when the manifest exists (200), (false, nil) when it is
-// definitively absent (404, or 405 which some registries return for HEAD),
-// and (false, ErrRegistryUnreachable) for transport errors or any other
-// non-2xx status (401/403/5xx) so the router marks the backend down.
-func (c *RegistryStatsClient) ProbeManifest(ctx context.Context, repo, ref string) (bool, error) {
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(ref)), manifestAccept)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return false, nil
-	}
-	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
-}
-
-// ProbeBlob performs a HEAD request for repo's blob digest. It reports
-// (true, nil) when the blob exists (200), (false, nil) when it is
-// definitively absent (404, or 405 which some registries return for HEAD),
-// and (false, ErrRegistryUnreachable) for transport errors or any other
-// non-2xx status (401/403/5xx) so the router marks the backend down.
-func (c *RegistryStatsClient) ProbeBlob(ctx context.Context, repo, digest string) (bool, error) {
-	if !validDigest(digest) {
-		return false, fmt.Errorf("invalid digest: must be sha256:<hex>")
-	}
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return false, nil
-	}
-	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
-}
-
 // Catalog returns the list of repositories. Returns ErrRegistryCatalogDisabled
 // on 404/403, ErrRegistryUnreachable on transport error.
-func (c *RegistryStatsClient) Catalog(ctx context.Context) ([]string, error) {
+func (c *DistributionClient) Catalog(ctx context.Context) ([]string, error) {
 	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/_catalog", c.baseURL()), "")
 	if err != nil {
 		return nil, err
@@ -226,8 +221,12 @@ func (c *RegistryStatsClient) Catalog(ctx context.Context) ([]string, error) {
 }
 
 // Tags returns the tags for a repository.
-func (c *RegistryStatsClient) Tags(ctx context.Context, repo string) ([]string, error) {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/tags/list", c.baseURL(), url.PathEscape(repo)), "")
+func (c *DistributionClient) Tags(ctx context.Context, repo string) ([]string, error) {
+	repoPath, err := escapeRepository(repo)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/tags/list", c.baseURL(), repoPath), "")
 	if err != nil {
 		return nil, err
 	}
@@ -251,25 +250,144 @@ func (c *RegistryStatsClient) Tags(ctx context.Context, repo string) ([]string, 
 	return body.Tags, nil
 }
 
-// manifest is the subset of the OCI/Docker manifest needed to sum sizes.
+// manifest is the subset of the OCI/Docker manifest needed to sum sizes and to
+// resolve an image index to a representative child platform manifest.
 type manifest struct {
+	MediaType   string            `json:"mediaType"`
 	Config      *descriptor       `json:"config"`
 	Layers      []descriptor      `json:"layers"`
+	Manifests   []descriptor      `json:"manifests"`
 	Annotations map[string]string `json:"annotations"`
 }
 
 type descriptor struct {
-	Digest string `json:"digest"`
-	Size   int64  `json:"size"`
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int64             `json:"size"`
+	Platform    platform          `json:"platform"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+type platform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
 }
 
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
 
+// OCI image index / Docker manifest list media types, and the BuildKit
+// attestation annotation used to skip SBOM/provenance child descriptors.
+const (
+	ociIndexMediaType           = "application/vnd.oci.image.index.v1+json"
+	dockerManifestListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
+	annotationReferenceType     = "vnd.docker.reference.type"
+	referenceTypeAttestation    = "attestation-manifest"
+
+	// maxIndexDepth bounds how many nested index levels ManifestSize resolves
+	// before reporting unknown. Docker Hub tags are a single index level;
+	// the cap guards against pathological index-in-index chains.
+	maxIndexDepth = 2
+)
+
+// isIndexManifest reports whether m is an image index / manifest list. It
+// matches the two index media types and falls back to the structural signal
+// (no config but children present) for registries that omit mediaType.
+func isIndexManifest(m *manifest) bool {
+	switch m.MediaType {
+	case ociIndexMediaType, dockerManifestListMediaType:
+		return true
+	}
+	return m.Config == nil && len(m.Manifests) > 0
+}
+
+// isAttestation reports whether a child descriptor points at an attestation
+// manifest (BuildKit SBOM/provenance), which has no runnable config/layers and
+// must not be chosen as the representative child.
+func isAttestation(d *descriptor) bool {
+	return d.Annotations[annotationReferenceType] == referenceTypeAttestation
+}
+
+// selectChildManifest picks a representative child descriptor to size. It
+// prefers linux/amd64, skips attestation and "unknown"-platform entries, and
+// falls back to the first usable non-attestation descriptor. ok is false when
+// no usable child exists (empty index, or only attestation/unknown entries).
+func selectChildManifest(m *manifest) (descriptor, bool) {
+	var fallback descriptor
+	haveFallback := false
+	for _, d := range m.Manifests {
+		if isAttestation(&d) {
+			continue
+		}
+		if d.Platform.Architecture == "unknown" {
+			continue
+		}
+		if !haveFallback {
+			fallback = d
+			haveFallback = true
+		}
+		if d.Platform.OS == "linux" && d.Platform.Architecture == "amd64" {
+			return d, true
+		}
+	}
+	if haveFallback {
+		return fallback, true
+	}
+	return descriptor{}, false
+}
+
+// directManifestSize sums a non-index manifest's config+layers. The -1
+// "unknown" sentinel is set when the manifest has layers but their sizes are
+// absent (the registry omitted descriptor sizes) — the existing behavior.
+func directManifestSize(m *manifest) (size, layers int64) {
+	layers = int64(len(m.Layers))
+	for _, l := range m.Layers {
+		size += l.Size
+	}
+	if m.Config != nil {
+		size += m.Config.Size
+	}
+	if size == 0 && len(m.Layers) > 0 {
+		size = -1
+	}
+	return size, layers
+}
+
 // getManifest fetches repo:tag's manifest, mapping 404 to ErrManifestNotFound
 // and other non-2xx to ErrRegistryUnreachable. It returns the decoded manifest
 // plus its digest (from Docker-Content-Digest, or computed from the body).
-func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string) (*manifest, string, error) {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
+func (c *DistributionClient) getManifest(ctx context.Context, repo, tag string) (*manifest, string, error) {
+	return c.getManifestRef(ctx, repo, tag, false)
+}
+
+// getManifestByDigest fetches repo's manifest by sha256 digest (used to resolve
+// an image index to a representative child). The digest is validated before it
+// is interpolated into the request path.
+func (c *DistributionClient) getManifestByDigest(ctx context.Context, repo, digest string) (*manifest, string, error) {
+	return c.getManifestRef(ctx, repo, digest, true)
+}
+
+// getManifestRef is the shared manifest GET. When refIsDigest is true, ref is
+// validated with validDigest and path-escaped; otherwise it is escaped as a
+// tag. Everything else (Accept header, status mapping, digest header
+// validation with body-hash fallback) is common to both.
+func (c *DistributionClient) getManifestRef(ctx context.Context, repo, ref string, refIsDigest bool) (*manifest, string, error) {
+	repoPath, err := escapeRepository(repo)
+	if err != nil {
+		return nil, "", err
+	}
+	var refPath string
+	if refIsDigest {
+		if !validDigest(ref) {
+			return nil, "", fmt.Errorf("invalid digest: must be sha256:<hex>")
+		}
+		refPath = url.PathEscape(ref)
+	} else {
+		refPath, err = escapeTag(ref)
+		if err != nil {
+			return nil, "", err
+		}
+	}
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), repoPath, refPath), manifestAccept)
 	if err != nil {
 		return nil, "", err
 	}
@@ -277,7 +395,7 @@ func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string)
 
 	if resp.StatusCode == http.StatusNotFound {
 		discard(resp)
-		return nil, "", fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, tag)
+		return nil, "", fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, ref)
 	}
 	if resp.StatusCode != http.StatusOK {
 		discard(resp)
@@ -310,68 +428,56 @@ func (c *RegistryStatsClient) getManifest(ctx context.Context, repo, tag string)
 }
 
 // ManifestSize fetches the manifest for repo:tag and returns (digest, sizeBytes,
-// layerCount). sizeBytes is the sum of layer + config descriptor sizes; when
-// those sizes are absent it falls back to HEAD blob Content-Length and, if
-// that also fails, returns -1. Returns ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error) {
+// layerCount). digest is always the TOP-LEVEL manifest digest (the index digest
+// for a multi-arch tag), which the prune path uses to unlink the tag. For an
+// image index / manifest list, sizeBytes/layerCount are resolved from a
+// representative child platform manifest (linux/amd64 preferred, attestation
+// and "unknown"-platform entries skipped); when no child resolves (empty index,
+// only attestation entries, child fetch/decode failure, or nesting past
+// maxIndexDepth) both are -1 (unknown). A child-resolution failure is NOT an
+// error — the tag stays in the listing. Returns ErrManifestNotFound on 404 of
+// the top-level manifest.
+func (c *DistributionClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error) {
 	m, digest, err := c.getManifest(ctx, repo, tag)
 	if err != nil {
 		return "", 0, 0, err
 	}
-
-	layers = int64(len(m.Layers))
-	for _, l := range m.Layers {
-		size += l.Size
-	}
-	if m.Config != nil {
-		size += m.Config.Size
-	}
-
-	// Some registries omit descriptor sizes; fall back to blob Content-Length.
-	if size == 0 && len(m.Layers) > 0 {
-		size = 0
-		for _, l := range m.Layers {
-			bs, err := c.BlobSize(ctx, repo, l.Digest)
-			if err != nil {
-				return digest, -1, layers, nil
-			}
-			size += bs
-		}
-	}
-
+	size, layers = c.manifestSize(ctx, repo, m, 0)
 	return digest, size, layers, nil
 }
 
-// BlobSize returns a blob's size via HEAD /v2/<repo>/blobs/<digest>
-// Content-Length. Returns 0 + error when the registry does not expose it.
-func (c *RegistryStatsClient) BlobSize(ctx context.Context, repo, digest string) (int64, error) {
-	if !validDigest(digest) {
-		return 0, fmt.Errorf("invalid digest: must be sha256:<hex>")
+// manifestSize resolves m's (size, layers). Index manifests are resolved to a
+// representative child (descending through at most maxIndexDepth nested indexes,
+// then -1/-1); direct manifests are summed in place.
+func (c *DistributionClient) manifestSize(ctx context.Context, repo string, m *manifest, depth int) (size, layers int64) {
+	if !isIndexManifest(m) {
+		return directManifestSize(m)
 	}
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
+	if depth >= maxIndexDepth {
+		return -1, -1
+	}
+	child, ok := selectChildManifest(m)
+	if !ok {
+		return -1, -1
+	}
+	cm, _, err := c.getManifestByDigest(ctx, repo, child.Digest)
 	if err != nil {
-		return 0, err
+		return -1, -1
 	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("blob head status %d", resp.StatusCode)
-	}
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
-			return n, nil
-		}
-	}
-	return 0, fmt.Errorf("blob head missing content-length")
+	return c.manifestSize(ctx, repo, cm, depth+1)
 }
 
 // DeleteManifest deletes a manifest by digest. Returns
 // domain.ErrRegistryDeleteDisabled on 405/403.
-func (c *RegistryStatsClient) DeleteManifest(ctx context.Context, repo, digest string) error {
+func (c *DistributionClient) DeleteManifest(ctx context.Context, repo, digest string) error {
 	if !validDigest(digest) {
 		return fmt.Errorf("invalid digest: must be sha256:<hex>")
 	}
-	resp, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
+	repoPath, err := escapeRepository(repo)
+	if err != nil {
+		return err
+	}
+	resp, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), repoPath, url.PathEscape(digest)), "")
 	if err != nil {
 		return err
 	}
@@ -385,194 +491,4 @@ func (c *RegistryStatsClient) DeleteManifest(ctx context.Context, repo, digest s
 		return fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
 	}
 	return nil
-}
-
-// createdAnnotation is the OCI annotation carrying a manifest's creation time.
-const createdAnnotation = "org.opencontainers.image.created"
-
-// ManifestCreated fetches the manifest for repo:tag and returns its creation
-// time from the OCI created annotation. It returns a zero time (no error) when
-// the annotation is absent, and ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) ManifestCreated(ctx context.Context, repo, tag string) (time.Time, error) {
-	m, _, err := c.getManifest(ctx, repo, tag)
-	if err != nil {
-		return time.Time{}, err
-	}
-	if m.Annotations == nil {
-		return time.Time{}, nil
-	}
-	raw, ok := m.Annotations[createdAnnotation]
-	if !ok || raw == "" {
-		return time.Time{}, nil
-	}
-	created, err := time.Parse(time.RFC3339, raw)
-	if err != nil {
-		return time.Time{}, nil
-	}
-	return created, nil
-}
-
-// UploadBlob performs a monolithic blob upload to repo, returning the digest
-// and byte count. Uses the OCI Distribution v2 blob upload flow:
-// POST /v2/<repo>/blobs/uploads/ → PUT <location>?digest=sha256:<hex>.
-func (c *RegistryStatsClient) UploadBlob(ctx context.Context, repo string, body io.Reader) (digest string, size int64, err error) {
-	// Read the entire body into memory so we can compute sha256 and send it
-	// as a monolithic upload (single PUT with digest query param).
-	buf := new(bytes.Buffer)
-	size, err = io.Copy(buf, body)
-	if err != nil {
-		return "", 0, fmt.Errorf("read body: %w", err)
-	}
-	sum := sha256.Sum256(buf.Bytes())
-	digest = fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
-
-	// Initiate a monolithic blob upload.
-	resp, err := c.do(ctx, http.MethodPost, fmt.Sprintf("%s/v2/%s/blobs/uploads/", c.baseURL(), url.PathEscape(repo)), "")
-	if err != nil {
-		return "", 0, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-
-	if resp.StatusCode != http.StatusAccepted {
-		return "", 0, fmt.Errorf("%w: initiate upload status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	location := resp.Header.Get("Location")
-	if location == "" {
-		return "", 0, fmt.Errorf("upload init missing Location header")
-	}
-
-	// PUT the blob with the digest.
-	sep := "?"
-	if strings.Contains(location, "?") {
-		sep = "&"
-	}
-	putURL := fmt.Sprintf("%s%sdigest=%s", location, sep, digest)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, putURL, buf)
-	if err != nil {
-		return "", 0, fmt.Errorf("build put request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/octet-stream")
-	if c.username != "" || c.password != "" {
-		req.SetBasicAuth(c.username, c.password)
-	}
-	resp, err = c.httpClient.Do(req)
-	if err != nil {
-		return "", 0, fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", 0, fmt.Errorf("%w: upload status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	// Verify the returned digest matches what we computed.
-	if dgst := resp.Header.Get("Docker-Content-Digest"); dgst != "" && validDigest(dgst) {
-		digest = dgst
-	}
-	return digest, size, nil
-}
-
-// PutManifest pushes an OCI manifest to repo:tag.
-func (c *RegistryStatsClient) PutManifest(ctx context.Context, repo, tag string, manifest *domain.CLIManifest) error {
-	body, err := json.Marshal(manifest)
-	if err != nil {
-		return fmt.Errorf("marshal manifest: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPut, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), bytes.NewReader(body))
-	if err != nil {
-		return fmt.Errorf("build put request: %w", err)
-	}
-	req.Header.Set("Content-Type", domain.MediaTypeOCIImageManifest)
-	if c.username != "" || c.password != "" {
-		req.SetBasicAuth(c.username, c.password)
-	}
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("%w: %v", ErrRegistryUnreachable, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("%w: put manifest status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-	return nil
-}
-
-// GetManifest fetches and decodes a CLI manifest for repo:tag.
-// Returns ErrManifestNotFound on 404.
-func (c *RegistryStatsClient) GetManifest(ctx context.Context, repo, tag string) (*domain.CLIManifest, error) {
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode == http.StatusNotFound {
-		discard(resp)
-		return nil, fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, tag)
-	}
-	if resp.StatusCode != http.StatusOK {
-		discard(resp)
-		return nil, fmt.Errorf("%w: status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	body, err := readBounded(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read manifest: %w", err)
-	}
-
-	var m domain.CLIManifest
-	if err := json.Unmarshal(body, &m); err != nil {
-		return nil, fmt.Errorf("decode manifest: %w", err)
-	}
-	return &m, nil
-}
-
-// GetBlob streams a blob from repo:digest, returning the body and Content-Length.
-func (c *RegistryStatsClient) GetBlob(ctx context.Context, repo, digest string) (io.ReadCloser, int64, error) {
-	if !validDigest(digest) {
-		return nil, 0, fmt.Errorf("invalid digest: must be sha256:<hex>")
-	}
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/blobs/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(digest)), "")
-	if err != nil {
-		return nil, 0, err
-	}
-
-	if resp.StatusCode == http.StatusNotFound {
-		_ = resp.Body.Close()
-		return nil, 0, fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, digest)
-	}
-	if resp.StatusCode != http.StatusOK {
-		_ = resp.Body.Close()
-		return nil, 0, fmt.Errorf("%w: get blob status %d", ErrRegistryUnreachable, resp.StatusCode)
-	}
-
-	var size int64 = -1
-	if cl := resp.Header.Get("Content-Length"); cl != "" {
-		if n, err := strconv.ParseInt(cl, 10, 64); err == nil {
-			size = n
-		}
-	}
-	return resp.Body, size, nil
-}
-
-// ManifestExists is a HEAD-based check for a manifest (no body download).
-func (c *RegistryStatsClient) ManifestExists(ctx context.Context, repo, tag string) (bool, error) {
-	resp, err := c.do(ctx, http.MethodHead, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), url.PathEscape(repo), url.PathEscape(tag)), manifestAccept)
-	if err != nil {
-		return false, err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	discard(resp)
-	if resp.StatusCode == http.StatusOK {
-		return true, nil
-	}
-	if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusMethodNotAllowed {
-		return false, nil
-	}
-	return false, fmt.Errorf("%w: probe status %d", ErrRegistryUnreachable, resp.StatusCode)
 }

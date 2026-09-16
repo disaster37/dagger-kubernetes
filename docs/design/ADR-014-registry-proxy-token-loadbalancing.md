@@ -1,5 +1,11 @@
 # ADR-014: Registry proxy — token control + multi-registry load balancing
 
+> **Superseded (2026-09-14):** the cache backend moved to S3. The registry
+> proxy, multi-registry load balancing, and the engine cache token
+> (`DAGGER_KUBERNETES_TOKEN`) are no longer wired: the supervisor no longer
+> injects that env var into engine pods. This ADR is kept for historical
+> context.
+
 **Status:** Accepted · **Date:** 2026-08-17 · **Author:** dagger-kubernetes team
 
 ## Context

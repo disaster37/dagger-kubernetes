@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"net"
-	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -43,16 +41,6 @@ func closedTCP(t *testing.T) string {
 	return "http://" + addr
 }
 
-func newStatusServiceWithRegistry(t *testing.T, cfg *domain.Config, cache *Cache, fleet *Manager) *StatusService {
-	t.Helper()
-	reg := newFakeRegistry()
-	ts := httptest.NewServer(reg.handler())
-	t.Cleanup(ts.Close)
-	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
-	svc := NewStatusService(cfg, cache, router, fleet, observ.NewTestLogger(), nil)
-	return svc
-}
-
 func emptyFleet() *Manager {
 	return NewManager(&stubFleetProvider{}, NewStore(2*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
 }
@@ -66,7 +54,7 @@ func TestStatusAllOK(t *testing.T) {
 			VictoriaURL:  openTCP(t),
 		},
 	}
-	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc := NewStatusService(cfg, emptyFleet(), observ.NewTestLogger(), nil)
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -75,8 +63,8 @@ func TestStatusAllOK(t *testing.T) {
 	if status.State != domain.ServiceOK {
 		t.Fatalf("rollup = %q, want ok", status.State)
 	}
-	if len(status.Services) != 7 {
-		t.Fatalf("services = %d, want 7", len(status.Services))
+	if len(status.Services) != 6 {
+		t.Fatalf("services = %d, want 6", len(status.Services))
 	}
 	for _, svc := range status.Services {
 		if svc.State != domain.ServiceOK {
@@ -91,7 +79,7 @@ func TestStatusTelemetryDown(t *testing.T) {
 			CollectorURL: closedTCP(t),
 		},
 	}
-	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc := NewStatusService(cfg, emptyFleet(), observ.NewTestLogger(), nil)
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -109,7 +97,7 @@ func TestStatusTelemetryDown(t *testing.T) {
 
 func TestStatusUnconfiguredNoRollupImpact(t *testing.T) {
 	cfg := &domain.Config{} // no telemetry URLs
-	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
+	svc := NewStatusService(cfg, emptyFleet(), observ.NewTestLogger(), nil)
 
 	status, err := svc.Status(context.Background())
 	if err != nil {
@@ -142,7 +130,7 @@ func TestStatusFleetDegraded(t *testing.T) {
 		},
 	}, NewStore(2*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
 
-	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, fleet)
+	svc := NewStatusService(cfg, fleet, observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -161,126 +149,18 @@ func TestStatusFleetDown(t *testing.T) {
 	cfg := &domain.Config{}
 	fleet := NewManager(&stubFleetProvider{allErr: errors.New("k8s down")}, NewStore(2*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
 
-	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, fleet)
+	svc := NewStatusService(cfg, fleet, observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
 	}
 	if status.State != domain.ServiceDown {
 		t.Fatalf("rollup = %q, want down", status.State)
-	}
-}
-
-func TestStatusCacheS3(t *testing.T) {
-	cfg := &domain.Config{}
-	svc := NewStatusService(cfg, &Cache{Type: "s3", S3: domain.S3Ref{Bucket: "my-bucket"}}, nil, emptyFleet(), observ.NewTestLogger(), nil)
-
-	status, err := svc.Status(context.Background())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	for _, svc := range status.Services {
-		if svc.Name == "cache" && svc.State != domain.ServiceOK {
-			t.Errorf("cache state = %q, want ok", svc.State)
-		}
-	}
-}
-
-func TestStatusCacheDown(t *testing.T) {
-	cfg := &domain.Config{}
-	reg := newFakeRegistry()
-	ts := httptest.NewServer(reg.handler())
-	router := newTestRouter(t, domain.RegistryBackend{ID: "default", InternalAddr: ts.Listener.Addr().String()})
-	ts.Close()
-
-	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger(), nil)
-	status, err := svc.Status(context.Background())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if status.State != domain.ServiceDown {
-		t.Fatalf("rollup = %q, want down", status.State)
-	}
-}
-
-func TestStatusCacheDegraded(t *testing.T) {
-	cfg := &domain.Config{}
-	reg := newFakeRegistry()
-	ts := httptest.NewServer(reg.handler())
-	t.Cleanup(ts.Close)
-
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	badAddr := ln.Addr().String()
-	_ = ln.Close()
-
-	router := newTestRouter(t,
-		domain.RegistryBackend{ID: "good", InternalAddr: ts.Listener.Addr().String()},
-		domain.RegistryBackend{ID: "bad", InternalAddr: badAddr},
-	)
-	svc := NewStatusService(cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, router, emptyFleet(), observ.NewTestLogger(), nil)
-	status, err := svc.Status(context.Background())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	if status.State != domain.ServiceDegraded {
-		t.Fatalf("rollup = %q, want degraded", status.State)
-	}
-	for _, svc := range status.Services {
-		if svc.Name == "cache" {
-			if svc.State != domain.ServiceDegraded {
-				t.Fatalf("cache state = %q, want degraded", svc.State)
-			}
-			if !strings.Contains(svc.Message, "bad") {
-				t.Fatalf("cache message = %q, want down backend id listed", svc.Message)
-			}
-		}
-	}
-}
-
-func TestStatusCacheS3Unconfigured(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "s3"}, nil, emptyFleet(), observ.NewTestLogger(), nil)
-	status, err := svc.Status(context.Background())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	for _, svc := range status.Services {
-		if svc.Name == "cache" && svc.State != domain.ServiceDown {
-			t.Errorf("cache state = %q, want down", svc.State)
-		}
-	}
-}
-
-func TestStatusCacheUnknownBackend(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "bogus"}, nil, emptyFleet(), observ.NewTestLogger(), nil)
-	status, err := svc.Status(context.Background())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	for _, svc := range status.Services {
-		if svc.Name == "cache" && svc.State != domain.ServiceDown {
-			t.Errorf("cache state = %q, want down", svc.State)
-		}
-	}
-}
-
-func TestStatusCacheRegistryNil(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, nil, emptyFleet(), observ.NewTestLogger(), nil)
-	status, err := svc.Status(context.Background())
-	if err != nil {
-		t.Fatalf("Status: %v", err)
-	}
-	for _, svc := range status.Services {
-		if svc.Name == "cache" && svc.State != domain.ServiceDown {
-			t.Errorf("cache state = %q, want down", svc.State)
-		}
 	}
 }
 
 func TestStatusFleetNilManager(t *testing.T) {
-	svc := NewStatusService(&domain.Config{}, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, nil, nil, observ.NewTestLogger(), nil)
+	svc := NewStatusService(&domain.Config{}, nil, observ.NewTestLogger(), nil)
 	status, err := svc.Status(context.Background())
 	if err != nil {
 		t.Fatalf("Status: %v", err)
@@ -300,9 +180,7 @@ func (s *stubRaftCleanState) IsCleanState() bool { return s.clean }
 
 func newStatusServiceWithRaft(t *testing.T, cfg *domain.Config, raft domain.RaftCleanState) *StatusService {
 	t.Helper()
-	svc := newStatusServiceWithRegistry(t, cfg, &Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}, emptyFleet())
-	svc.raftCleanState = raft
-	return svc
+	return NewStatusService(cfg, emptyFleet(), observ.NewTestLogger(), raft)
 }
 
 func TestStatusRaftNotCleanSupervisorDown(t *testing.T) {

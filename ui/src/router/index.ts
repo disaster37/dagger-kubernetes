@@ -7,7 +7,6 @@ const router = createRouter({
     { path: '/', redirect: '/pipelines' },
     { path: '/pipelines', name: 'pipelines', component: () => import('@/views/Pipelines.vue') },
     { path: '/pipelines/:id', name: 'pipeline-detail', component: () => import('@/pipeline/PipelineView.vue') },
-    { path: '/cache', name: 'cache', component: () => import('@/magiccache/MagicCache.vue') },
     { path: '/history', name: 'history', component: () => import('@/history/History.vue') },
     { path: '/fleet', name: 'fleet', component: () => import('@/fleet/Runners.vue') },
     { path: '/services', name: 'services', component: () => import('@/views/Services.vue') },
@@ -18,6 +17,7 @@ const router = createRouter({
     { path: '/admin/users', name: 'admin-users', component: () => import('@/views/admin/Users.vue'), meta: { admin: true } },
     { path: '/admin/groups', name: 'admin-groups', component: () => import('@/views/admin/Groups.vue'), meta: { admin: true } },
     { path: '/admin/projects', name: 'admin-projects', component: () => import('@/views/admin/Projects.vue'), meta: { admin: true } },
+    { path: '/image-cache', name: 'image-cache', component: () => import('@/imagecache/ImageCache.vue'), meta: { admin: true } },
   ],
 })
 

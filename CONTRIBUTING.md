@@ -112,7 +112,6 @@ JSON responses via `json.NewEncoder(w).Encode(v)`. Error responses as `{"message
 
 ### In-cluster endpoints must use the `.svc` suffix
 When the supervisor is configured to dial an in-cluster remote component — the
-docker cache (`cache.registries[].internal_addr`, `cache.internal_addr`), the
 Dagger engine registry (`fleet.engine_image_registry`,
 `fleet.engine_registry_mirrors`), Loki (`telemetry.loki_url`), VictoriaMetrics
 (`telemetry.victoria_url`), or any other cluster-local service — the address
@@ -202,9 +201,13 @@ source of breakage. The three recurring failures are:
    duplicates a port already used by another test gets *stale-server* failures:
    the previous test's shutdown may still be draining, so the new test's
    requests hit the old server and fail (typically `401`). NEVER hardcode a
-   control/data port in a new integration test — allocate one with
-   `freeAddr(t)` (see `tests/integration/net_helpers_test.go`) and shut the
-   server down with a timed context in `t.Cleanup`:
+   control/data port in a new integration test and never probe-then-close a
+   port (`freeAddr`): the freed port can be grabbed by an httptest server or a
+   concurrent test binary before the supervisor binds it (Hertz panics if the
+   control-plane bind loses that race). Bind the listeners with
+   `freeListener(t)` (see `tests/integration/net_helpers_test.go`) and pass
+   them via `ServerConfig.ControlListener`/`DataListener`, then shut the server
+   down with a timed context in `t.Cleanup`:
    ```go
    t.Cleanup(func() {
        shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -310,7 +313,7 @@ directory. When editing one, copy it verbatim to the other and verify with
 ## PR checklist
 - [ ] `dagger call -m ./dagger --src . ci export --path out` exits 0 locally (same command as `.github/workflows/ci.yml`, same pinned Dagger CLI version)
 - [ ] No dead code left behind: every removed call site has its helper/function removed (`unused` lint passes — grep your touched symbols for zero remaining references)
-- [ ] New integration tests use `freeAddr(t)` for ports (no hardcoded control/data ports) and shut down servers with a timed context
+- [ ] New integration tests hand `freeListener(t)` listeners to `ServerConfig.ControlListener`/`DataListener` (no hardcoded or probe-then-close ports) and shut down servers with a timed context
 - [ ] In-cluster component URLs (cache registry, loki, victoria, ...) use the `<service>.<namespace>.svc` suffix
 - [ ] Tests cover new code (target 100% coverage)
 - [ ] Integration test proves feature works with real Dagger client

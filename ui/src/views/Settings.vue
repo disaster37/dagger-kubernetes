@@ -19,6 +19,10 @@
         <li v-for="g in auth.groups" :key="g.id">{{ g.name }}</li>
       </ul>
       <p v-else style="color: #8b949e; margin-top: 8px;">You are not a member of any group.</p>
+      <div v-if="auth.user?.oauth_groups?.length" style="margin-top: 12px;">
+        <h3>OAuth groups (upstream)</h3>
+        <span v-for="og in auth.user.oauth_groups" :key="og" class="badge badge-muted" style="margin-right: 4px;">{{ og }}</span>
+      </div>
     </div>
 
     <div class="card">
@@ -151,3 +155,7 @@ async function handleChangePassword() {
   }
 }
 </script>
+
+<style scoped>
+.badge-muted { background: #161b22; color: #8b949e; }
+</style>

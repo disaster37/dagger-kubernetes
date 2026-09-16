@@ -35,12 +35,8 @@ rules:
     resources: ["statefulsets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   - apiGroups: [""]
-    resources: ["services", "pods", "pods/log"]
+    resources: ["services", "pods"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
-  # pods/exec is only needed to stream engine logs / attach to engines.
-  - apiGroups: [""]
-    resources: ["pods/exec"]
-    verbs: ["get", "create"]
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]

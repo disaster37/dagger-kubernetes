@@ -13,10 +13,6 @@ type Metrics struct {
 	ActiveLeases                  prometheus.Gauge
 	ActiveReplicas                *prometheus.GaugeVec
 	OTelIngestTotal               *prometheus.CounterVec
-	CacheSizeBytes                prometheus.Gauge
-	CacheObjectCount              prometheus.Gauge
-	CachePurgeTotal               prometheus.Counter
-	GCRunTotal                    *prometheus.CounterVec
 	HistoryPurgeTotal             prometheus.Counter
 	HistoryGCRunTotal             *prometheus.CounterVec
 	PipelineDisconnectFailedTotal *prometheus.CounterVec
@@ -56,26 +52,6 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Help: "Total OTLP ingest requests",
 		}, []string{"signal", "status"}),
 
-		CacheSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "dagger_kubernetes_cache_size_bytes",
-			Help: "Total size of cache blobs observed in the OCI registry",
-		}),
-
-		CacheObjectCount: prometheus.NewGauge(prometheus.GaugeOpts{
-			Name: "dagger_kubernetes_cache_object_count",
-			Help: "Total number of cache layers/blobs observed in the OCI registry",
-		}),
-
-		CachePurgeTotal: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "dagger_kubernetes_cache_purge_total",
-			Help: "Total number of cache tags purged (manual + GC)",
-		}),
-
-		GCRunTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
-			Name: "dagger_kubernetes_gc_run_total",
-			Help: "Total number of cache GC sweeper runs",
-		}, []string{"status"}),
-
 		HistoryPurgeTotal: prometheus.NewCounter(prometheus.CounterOpts{
 			Name: "dagger_kubernetes_history_purge_total",
 			Help: "Total number of traces purged from history (manual + GC)",
@@ -114,10 +90,6 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.ActiveLeases,
 			m.ActiveReplicas,
 			m.OTelIngestTotal,
-			m.CacheSizeBytes,
-			m.CacheObjectCount,
-			m.CachePurgeTotal,
-			m.GCRunTotal,
 			m.HistoryPurgeTotal,
 			m.HistoryGCRunTotal,
 			m.PipelineDisconnectFailedTotal,

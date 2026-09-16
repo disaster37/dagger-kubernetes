@@ -55,34 +55,133 @@ the computed public URL and the provider callback route. */}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the cache public vhost (the host engines push/pull through the
-Supervisor proxy). Explicit value wins; otherwise derive `cache.<host>` from
-the computed public URL by stripping the scheme and any port/path. */}}
-{{- define "dagger-kubernetes.cachePublicHost" -}}
-{{- if .Values.supervisor.config.cache.publicHost -}}
-{{- .Values.supervisor.config.cache.publicHost -}}
+{{/* Resolve the S3 endpoint for the supervisor's shared S3 client (CLI cache).
+When the minio subchart is enabled, defaults to the in-cluster MinIO
+service. */}}
+{{- define "dagger-kubernetes.s3Endpoint" -}}
+{{- if .Values.supervisor.config.cache.s3.endpoint -}}
+{{- .Values.supervisor.config.cache.s3.endpoint -}}
+{{- else if .Values.minio.enabled -}}
+{{- printf "%s-minio.%s.svc:%v" .Release.Name (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
 {{- else -}}
-{{- $u := include "dagger-kubernetes.publicUrl" . -}}
-{{- $u = trimPrefix "https://" $u -}}
-{{- $u = trimPrefix "http://" $u -}}
-{{- $u = regexReplaceAll "[:/].*$" $u "" -}}
-{{- printf "cache.%s" $u -}}
+{{- "" -}}
 {{- end -}}
 {{- end -}}
 
-{{/* Resolve the public OCI cache ref used in _EXPERIMENTAL_DAGGER_CACHE_CONFIG:
-<cachePublicHost>/dagger-cache. The repo path is fixed to `dagger-cache`. */}}
-{{- define "dagger-kubernetes.cacheRegistry" -}}
-{{- printf "%s/dagger-cache" (include "dagger-kubernetes.cachePublicHost" .) -}}
+{{/* Resolve the S3 bucket name. Falls back through the hierarchy:
+cache s3 bucket -> MinIO default bucket. */}}
+{{- define "dagger-kubernetes.s3Bucket" -}}
+{{- $cacheBucket := .Values.supervisor.config.cache.s3.bucket -}}
+{{- if $cacheBucket -}}
+{{- $cacheBucket -}}
+{{- else if .Values.minio.enabled -}}
+{{- index (.Values.minio.buckets | default list) 0 | default dict | dig "name" "dagger-cache" -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
 {{- end -}}
 
-{{/* Resolve the internal cache backend address (host[:port], no scheme):
-the in-cluster registry Service when the registry subchart is enabled, in the
-<service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
-{{- define "dagger-kubernetes.cacheInternalAddr" -}}
-{{- if .Values.registry.enabled -}}
-{{- printf "%s-registry.%s.svc:5000" .Release.Name (include "dagger-kubernetes.namespace" .) -}}
+{{/* Resolve the S3 access key. Defaults to the MinIO root user when minio is
+enabled; falls back to the engine-s3-auth secret in all cases. */}}
+{{- define "dagger-kubernetes.s3AccessKey" -}}
+{{- if .Values.minio.enabled -}}
+{{- .Values.minio.rootUser | default "minioadmin" -}}
+{{- else -}}
+{{- "" -}}
 {{- end -}}
+{{- end -}}
+
+{{/* Resolve the S3 secret key. Defaults to the MinIO root password when minio
+is enabled; falls back to the engine-s3-auth secret in all cases. */}}
+{{- define "dagger-kubernetes.s3SecretKey" -}}
+{{- if .Values.minio.enabled -}}
+{{- .Values.minio.rootPassword | default "minioadmin" -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the S3 endpoint for the image-cache mirrors. Explicit value wins;
+otherwise the in-cluster MinIO service when the subchart is enabled. */}}
+{{- define "dagger-kubernetes.imageCacheS3Endpoint" -}}
+{{- if .Values.imageCache.storage.s3.endpoint -}}
+{{- .Values.imageCache.storage.s3.endpoint -}}
+{{- else if .Values.minio.enabled -}}
+{{- printf "%s-minio.%s.svc:%v" .Release.Name (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Sanitize a registry host into a DNS-label slug: lowercase, every run of
+non-[a-z0-9-] characters collapsed to a single "-", trimmed. */}}
+{{- define "dagger-kubernetes.imageCacheSlug" -}}
+{{- regexReplaceAll "[^a-z0-9]+" (. | lower) "-" | trimAll "-" -}}
+{{- end -}}
+
+{{/* Normalize the enabled image-cache upstreams into a YAML list of
+{slug, host, remoteUrl, username, passwordSecretRef}. Presets carry a fixed
+remoteUrl; custom registries supply their own. Fails on a slug collision so a
+custom host cannot silently shadow a preset. */}}
+{{- define "dagger-kubernetes.imageCacheRegistries" -}}
+{{- $presets := dict
+  "docker.io" "https://registry-1.docker.io"
+  "ghcr.io" "https://ghcr.io"
+  "public.ecr.aws" "https://public.ecr.aws"
+  "quay.io" "https://quay.io"
+  "gcr.io" "https://gcr.io"
+  "registry.dagger.io" "https://registry.dagger.io" -}}
+{{- $registries := list -}}
+{{- range $host, $remote := $presets -}}
+{{- $p := index $.Values.imageCache.presets $host | default dict -}}
+{{- if $p.enabled -}}
+{{- $registries = append $registries (dict "slug" (include "dagger-kubernetes.imageCacheSlug" $host) "host" $host "remoteUrl" $remote "username" ($p.username | default "") "passwordSecretRef" ($p.passwordSecretRef | default dict)) -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.imageCache.registries -}}
+{{- $host := required "imageCache.registries[]: host is required (the upstream registry hostname, e.g. 123456789012.dkr.ecr.us-east-1.amazonaws.com)" .host -}}
+{{- $remoteUrl := required (printf "imageCache.registries[]: remoteUrl is required for host %q (the upstream's https:// base URL, e.g. https://%s)" $host $host) .remoteUrl -}}
+{{- $registries = append $registries (dict "slug" (include "dagger-kubernetes.imageCacheSlug" $host) "host" $host "remoteUrl" $remoteUrl "username" (.username | default "") "passwordSecretRef" (.passwordSecretRef | default dict)) -}}
+{{- end -}}
+{{- $seen := dict -}}
+{{- range $registries -}}
+{{- if hasKey $seen .slug -}}
+{{- fail (printf "imageCache: duplicate mirror slug %q (host %q collides with another registry)" .slug .host) -}}
+{{- end -}}
+{{- $_ := set $seen .slug true -}}
+{{- end -}}
+{{- $registries | toYaml -}}
+{{- end -}}
+
+{{/* Resolve one mirror's in-cluster address. Takes a dict {root, slug}. */}}
+{{- define "dagger-kubernetes.imageCacheMirrorAddress" -}}
+{{- printf "%s-%s-mirror.%s.svc:5000" .root.Release.Name .slug (include "dagger-kubernetes.namespace" .root) -}}
+{{- end -}}
+
+{{/* List the generated mirror addresses (host[:port]) for every enabled
+upstream. Empty list when imageCache is disabled. */}}
+{{- define "dagger-kubernetes.imageCacheMirrorHosts" -}}
+{{- $hosts := list -}}
+{{- if .Values.imageCache.enabled -}}
+{{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) -}}
+{{- $hosts = append $hosts (include "dagger-kubernetes.imageCacheMirrorAddress" (dict "root" $ "slug" .slug)) -}}
+{{- end -}}
+{{- end -}}
+{{- $hosts | toYaml -}}
+{{- end -}}
+
+{{/* Merge the user-provided engine registry mirrors with the generated
+image-cache mirror addresses (one per enabled upstream). */}}
+{{- define "dagger-kubernetes.engineRegistryMirrors" -}}
+{{- $mirrors := deepCopy (.Values.supervisor.config.fleet.engineRegistryMirrors | default dict) -}}
+{{- if .Values.imageCache.enabled -}}
+{{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) -}}
+{{- $addr := include "dagger-kubernetes.imageCacheMirrorAddress" (dict "root" $ "slug" .slug) -}}
+{{- $existing := index $mirrors .host | default list -}}
+{{- $mirrors = set $mirrors .host (append $existing $addr) -}}
+{{- end -}}
+{{- end -}}
+{{- $mirrors | toYaml -}}
 {{- end -}}
 
 {{/* Resolve the Tempo URL: use the dependency Service when enabled, in the

@@ -227,29 +227,25 @@ supervisor:
       tempoUrl: ""
       lokiUrl: ""
       victoriaUrl: ""
-## @param supervisor.config.cache.backend Cache backend type: registry (OCI) or s3.
-## @param supervisor.config.cache.publicHost Dedicated cache vhost engines push/pull through (empty = derived `cache.<control-plane host>`, itself computed from the ingress/service exposition). Must differ from the control-plane host. Free-form: set a one-level name (e.g. `dagger-cache.company.com`) when your wildcard certificate does not cover the derived sub-subdomain. Also drives the extra ingress host rule + TLS SAN entry when ingress is enabled.
-## @param supervisor.config.cache.authToken Engine→proxy bearer for the cache. Rendered into the engine-registry-auth Secret (key `token`); the supervisor reads it from there. Empty = "placeholder".
-## @param supervisor.config.cache.registries [array] Multi-backend list of {id, internalAddr, username, password, passwordSecret}. Empty = single-backend mode (the bundled registry). The proxy load-balances across backends least-charged first (registry cache size). password must stay empty in Helm; use passwordSecret to reference a K8s Secret.
-## @param supervisor.config.cache.registries[].passwordSecret.name K8s Secret name holding the backend password (rendered as a reference, never the secret itself).
-## @param supervisor.config.cache.registries[].passwordSecret.key Key inside the Secret holding the password (empty = "password").
-## @param supervisor.config.cache.s3.bucket S3 bucket name (when backend=s3).
-## @param supervisor.config.cache.s3.region S3 region (when backend=s3).
+## @param supervisor.config.cache.s3.bucket S3 bucket name. Defaults to the auto-created minio bucket when the minio subchart is enabled.
+## @param supervisor.config.cache.s3.region S3 region (ignored by MinIO).
+## @param supervisor.config.cache.s3.endpoint S3-compatible endpoint for the shared S3 client (CLI cache). Auto-wired to `<release>-minio.<namespace>.svc:9000` when the minio subchart is enabled.
+## @param supervisor.config.cache.s3.useSSL Use HTTPS for the S3 endpoint.
+## @param supervisor.config.cache.s3.accessKey S3 access key. Leave empty in values: the supervisor reads it from the `engine-s3-auth` Secret via DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY (empty falls back to the AWS env credential chain).
+## @param supervisor.config.cache.s3.secretKey S3 secret key. Leave empty in values: the supervisor reads it from the `engine-s3-auth` Secret via DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY.
+##   The `engine-s3-auth` Secret (keys `accessKey`/`secretKey`) is rendered
+##   from the MinIO root credentials when minio.enabled; with an external S3
+##   provider create it before enabling the backend:
+##     kubectl -n <namespace> create secret generic engine-s3-auth \
+##       --from-literal=accessKey=... --from-literal=secretKey=...
     cache:
-      backend: "registry"
-      publicHost: ""
-      authToken: ""
-      registries: []
       s3:
         bucket: ""
-        region: ""
-## @param supervisor.config.cache.gc.enabled Enable the cache auto-purge sweeper. When enabled, orphaned cache refs older than maxAge are purged on each tick. Disabled by default.
-## @param supervisor.config.cache.gc.maxAge Purge cache refs older than this (7d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
-## @param supervisor.config.cache.gc.schedule Cache sweeper ticker interval.
-      gc:
-        enabled: false
-        maxAge: "168h"
-        schedule: "1h"
+        region: "us-east-1"
+        endpoint: ""
+        useSSL: false
+        accessKey: ""
+        secretKey: ""
 ## @param supervisor.config.history.gc.enabled Master switch for the history auto-purge sweeper.
 ## @param supervisor.config.history.gc.maxAge Purge traces older than this (30d default). Duration strings accept Go units plus "d" (day) and "w" (week), e.g. "7d", "1w".
 ## @param supervisor.config.history.gc.schedule History sweeper ticker interval.
@@ -286,7 +282,7 @@ supervisor:
 ## @param supervisor.config.fleet.engineCaSecretKey Key inside engineCaSecret containing the CA cert.
 ## @param supervisor.config.fleet.engineDockerConfig Base64-encoded Docker config.json
 ##   (auths for private registries) used by engine image pulls. Stored verbatim
-##   in the `engine-registry-auth` Secret `data` key `.dockerconfigjson`
+##   in the `engine-image-auth` Secret `data` key `.dockerconfigjson`
 ##   (already base64 — do NOT pre-decode): Kubernetes base64-decodes it exactly
 ##   once on mount, so engine pods read raw JSON at
 ##   `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (base64 of `{}`). This is
@@ -295,7 +291,7 @@ supervisor:
 ##   for the engine's own registry authentication.
 ## @param supervisor.config.fleet.engineDebug Enable engine.toml [debug].
 ## @param supervisor.config.fleet.engineLogFormat Engine log format (json, text; empty omits).
-## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}).
+## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). When imageCache.enabled, the generated in-cluster mirror addresses are merged into this map.
     fleet:
       maxReplicasPerVersion: 3
       maxSessionsPerReplica: 8
@@ -340,7 +336,9 @@ supervisor:
       engineLogFormat: "json"
       # engineRegistryMirrors: engine.toml registry mirrors (quote registry
       # names containing dots, or YAML nests them; the supervisor preserves
-      # dotted keys such as "docker.io", "ghcr.io", "public.ecr.aws" verbatim):
+      # dotted keys such as "docker.io", "ghcr.io", "public.ecr.aws" verbatim).
+      # When imageCache.enabled, the generated in-cluster mirror addresses are
+      # merged into this map automatically:
       # engineRegistryMirrors:
       #   "docker.io": ["mirror.gcr.io", "my-mirror.corp.example"]
       engineRegistryMirrors: {}
@@ -354,6 +352,8 @@ supervisor:
 ## @param supervisor.config.cli.enabled Enable on-the-fly Dagger CLI provisioning addon.
 ## @param supervisor.config.cli.releaseListTtl Upstream release-list cache TTL.
 ## @param supervisor.config.cli.downloadTimeout Outbound upstream fetch timeout.
+## @param supervisor.config.cli.s3Bucket S3 bucket for CLI tarballs (empty = cache.s3.bucket).
+## @param supervisor.config.cli.s3Prefix S3 key prefix for CLI tarballs.
 ## @param supervisor.config.cli.upstream.releasesUrl Release discovery URL (mirror-able).
 ## @param supervisor.config.cli.upstream.downloadBase Tarball + checksums.txt base URL (mirror-able).
 ## @param supervisor.config.cli.upstream.githubToken Optional GitHub token for the releases API.
@@ -361,6 +361,8 @@ supervisor:
       enabled: true
       releaseListTtl: "1h"
       downloadTimeout: "5m"
+      s3Bucket: ""
+      s3Prefix: "cli-cache"
       upstream:
         releasesUrl: "https://api.github.com/repos/dagger/dagger/releases"
         downloadBase: "https://github.com/dagger/dagger/releases/download"
@@ -372,6 +374,142 @@ supervisor:
 ## @param supervisor.config.otel.otlpEndpoint Supervisor OTLP export endpoint (empty disables).
     otel:
       otlpEndpoint: ""
+
+## @section Local image cache (Zot mirror)
+
+## @descriptionStart
+## A Zot OCI registry per upstream, acting as an on-demand pull-through cache.
+## When enabled, the chart renders one Deployment + `<name>-zot-config`
+## ConfigMap + Service per enabled preset / custom registry and merges the
+## generated mirror addresses into the engine's `engine.toml` registry mirrors
+## (with `http = true`, since the in-cluster mirrors are plaintext HTTP).
+## Zot's `extensions.sync` fetches an image from upstream on first request and
+## serves cached content afterwards; invalidate with the admin image-cache
+## prune (no TTL). Zot's online GC reclaims unreferenced blob bytes after
+## `imageCache.gc.delay` on the next `imageCache.gc.interval`.
+## @descriptionEnd
+
+## @param imageCache.enabled Enable the local image cache (Zot mirrors).
+## @param imageCache.image.repository Zot image repository.
+## @param imageCache.image.tag Zot image tag (pinned; v2.x serves the OCI Distribution v2 API + online GC).
+## @param imageCache.image.pullPolicy Image pull policy.
+## @param imageCache.logLevel Zot log level (config.json `log.level`).
+## @param imageCache.storage.backend Mirror storage backend: "s3" (shared MinIO) or "pvc" (per-mirror PVC).
+## @param imageCache.storage.s3.bucket S3 bucket for cached blobs (auto-created when minio.enabled).
+## @param imageCache.storage.s3.region S3 region (ignored by MinIO).
+## @param imageCache.storage.s3.endpoint S3 endpoint; auto-wired to `<release>-minio.<namespace>.svc:9000` when minio.enabled.
+## @param imageCache.storage.s3.forcePathStyle Use path-style S3 addressing (required by MinIO).
+## @param imageCache.storage.s3.secure Use HTTPS for the S3 endpoint.
+## @param imageCache.storage.pvc.storageClass StorageClass for per-mirror PVCs (empty = cluster default).
+## @param imageCache.storage.pvc.size PVC size per mirror.
+## @param imageCache.gc.enabled Enable Zot online garbage collection (storage.gc).
+## @param imageCache.gc.delay Minimum age of an unreferenced blob before Zot GC reclaims it (storage.gcDelay).
+## @param imageCache.gc.interval How often Zot runs GC (storage.gcInterval).
+## @param imageCache.gc.timeWindow Optional daily off-peak GC window "HH:MM-HH:MM" (storage.gcTimeWindow; empty = unrestricted).
+## @param imageCache.dedupe Deduplicate identical blobs across manifests (storage.dedupe). Default false: Zot rejects dedupe with the S3 driver ("no remote database configured") unless a remote cache/DB (e.g. Redis) is configured, which this chart does not render. Enable it only with a dedupe-capable backend (documented follow-up).
+## @param imageCache.sync.onDemand Fetch an upstream image on first request (extensions.sync.registry.onDemand).
+## @param imageCache.sync.preserveDigest Keep upstream manifest digests (extensions.sync.registry.preserveDigest).
+## @param imageCache.sync.tlsVerify Verify upstream TLS certificates.
+## @param imageCache.sync.downloadDir Local scratch directory for sync downloads (extensions.sync.downloadDir). Required by Zot whenever sync is enabled with S3 storage. Must live under the mounted data volume (/var/lib/registry, an emptyDir for the s3 backend or the PVC for the pvc backend) so it stays writable; changing it elsewhere requires an extra volume/mount.
+## @param imageCache.sync.pollInterval Periodic upstream refresh interval (empty = on-demand only; do not use for Docker Hub).
+## @param imageCache.sync.maxRetries Upstream fetch retry count.
+## @param imageCache.sync.retryDelay Delay between upstream fetch retries.
+## @param imageCache.resources.requests.cpu Mirror CPU request.
+## @param imageCache.resources.requests.memory Mirror memory request.
+## @param imageCache.resources.limits.cpu Mirror CPU limit.
+## @param imageCache.resources.limits.memory Mirror memory limit.
+## @param imageCache.nodeSelector [object] Node selector for mirror pods.
+## @param imageCache.tolerations [array] Tolerations for mirror pods.
+## @param imageCache.securityContext [object] Pod securityContext for mirror pods (runAsNonRoot/runAsUser/fsGroup).
+## @param imageCache.presets [object] Built-in public upstream presets (docker.io, ghcr.io, public.ecr.aws, quay.io, gcr.io, registry.dagger.io). Each entry: {enabled, username, passwordSecretRef}.
+## @param imageCache.registries [array] Extra/custom upstreams (private ECR/GAR/Harbor/…): {host, remoteUrl, username, passwordSecretRef}. Private credentials are a documented follow-up (Zot credentialsFile).
+imageCache:
+  enabled: false
+  image:
+    repository: "ghcr.io/project-zot/zot"
+    tag: "v2.1.21"
+    pullPolicy: IfNotPresent
+  logLevel: "warn"
+  storage:
+    backend: "s3"
+    s3:
+      bucket: "image-cache"
+      region: "us-east-1"
+      endpoint: ""
+      forcePathStyle: true
+      secure: false
+    pvc:
+      storageClass: ""
+      size: "20Gi"
+  gc:
+    enabled: true
+    delay: "2h"
+    interval: "1h"
+    timeWindow: ""
+  dedupe: false
+  sync:
+    onDemand: true
+    preserveDigest: true
+    tlsVerify: true
+    downloadDir: "/var/lib/registry/sync"
+    pollInterval: ""
+    maxRetries: 3
+    retryDelay: "15m"
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  nodeSelector: {}
+  tolerations: []
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 65532
+    fsGroup: 65532
+  presets:
+    docker.io:
+      enabled: true
+      username: ""
+      passwordSecretRef:
+        name: ""
+        key: ""
+    ghcr.io:
+      enabled: true
+      username: ""
+      passwordSecretRef:
+        name: ""
+        key: ""
+    public.ecr.aws:
+      enabled: true
+      username: ""
+      passwordSecretRef:
+        name: ""
+        key: ""
+    quay.io:
+      enabled: true
+      username: ""
+      passwordSecretRef:
+        name: ""
+        key: ""
+    gcr.io:
+      enabled: false
+      username: ""
+      passwordSecretRef:
+        name: ""
+        key: ""
+    registry.dagger.io:
+      enabled: false
+      username: ""
+      passwordSecretRef:
+        name: ""
+        key: ""
+  registries: []
+    # - host: "123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    #   remoteUrl: "https://123456789012.dkr.ecr.us-east-1.amazonaws.com"
+    #   username: "AWS"
+    #   passwordSecretRef: { name: "ecr-creds", key: "password" }
 
 ## @section Authentication
 
@@ -445,6 +583,10 @@ auth:
     #   - pattern: '^ldap/(.+)$'
     #     replacement: '$1'
     defaultGroup: ""
+    ## @param auth.oauth.adminGroups Upstream IdP group names that grant RoleAdmin on login/revalidation (exact, case-sensitive). Empty = disabled.
+    adminGroups: []
+    # adminGroups example (OIDC groups that auto-promote to admin):
+    # adminGroups: ["HM_ADM_ETL_Outils", "platform-admins"]
     cookieSecure: false
     issuerUrl: ""
     scopes: ["openid", "profile", "email"]
@@ -666,37 +808,81 @@ opentelemetry-collector:
           processors: [batch]
           exporters: [prometheusremotewrite]
 
-## @skip registry
-## @param registry.enabled Install Docker Registry subchart (cache backend). Uses the twuni docker-registry chart (https://helm.twun.io), packaging the registry v3 image.
-registry:
+## @skip minio
+## @param minio.enabled Install MinIO subchart (S3-compatible object store). Default S3 store for worker snapshots, CLI cache, and BuildKit cache GC.
+minio:
   enabled: true
-  replicaCount: 1
+  mode: standalone
+  ## @param minio.replicas Number of MinIO replicas (standalone mode = 1).
+  replicas: 1
+  ## @param minio.image.repository MinIO container image repository.
+  ## @param minio.image.tag MinIO container image tag.
   image:
-    tag: "3.1.1"
-  persistence:
-    enabled: true
-    deleteEnabled: true
-    size: 50Gi
-    storageClass: ""
-  storage: filesystem
+    repository: quay.io/minio/minio
+    tag: RELEASE.2024-12-18T13-15-44Z
+  ## @param minio.resources.requests.cpu MinIO CPU request.
+  ## @param minio.resources.requests.memory MinIO memory request.
+  ## @param minio.resources.limits.cpu MinIO CPU limit.
+  ## @param minio.resources.limits.memory MinIO memory limit.
   resources:
     requests:
-      cpu: 100m
-      memory: 128Mi
+      cpu: 250m
+      memory: 256Mi
     limits:
-      cpu: 500m
-      memory: 512Mi
-  extraEnvVars:
-    ## registry v3 initializes OpenTelemetry unconditionally and OTel autoexport
-    ## defaults to an OTLP exporter on localhost:4318; with no collector there it
-    ## spams "traces export: connection refused" errors. "none" disables the exporter.
-    - name: OTEL_TRACES_EXPORTER
-      value: "none"
-  garbageCollect:
-    ## @param registry.garbageCollect.enabled Enable the registry garbage-collect CronJob shipped by the docker-registry subchart. GC runs daily at 3 AM to reclaim space from untagged manifests.
+      cpu: 1000m
+      memory: 1Gi
+  ## @param minio.persistence.enabled Enable PVC for MinIO data.
+  ## @param minio.persistence.storageClass StorageClass for the MinIO PVC (empty = cluster default).
+  ## @param minio.persistence.size PVC size for MinIO object storage.
+  persistence:
     enabled: true
-    ## @param registry.garbageCollect.schedule Cron schedule for the GC job. Default: "0 3 * * *" (daily at 3 AM UTC).
-    schedule: "0 3 * * *"
+    storageClass: ""
+    size: 50Gi
+  ## @param minio.rootUser MinIO root access key. Dev default; MUST be changed in production.
+  rootUser: "minioadmin"
+  ## @param minio.rootPassword MinIO root secret key. Dev default; MUST be changed in production.
+  rootPassword: "minioadmin"
+  ## @param minio.users [array] Extra MinIO users to create (default empty: the built-in console user is disabled).
+  users: []
+  ## @param minio.buckets [array] Buckets to create on startup. The default "dagger-cache" bucket is always created; "image-cache" backs the local image mirror when imageCache.enabled.
+  buckets:
+    - name: dagger-cache
+      policy: none
+      purge: false
+    - name: image-cache
+      policy: none
+      purge: false
+  ## @param minio.service.type MinIO service type.
+  ## @param minio.service.port MinIO API port.
+  service:
+    type: ClusterIP
+    port: 9000
+  ## @param minio.consoleService.type MinIO Console service type.
+  ## @param minio.consoleService.port MinIO Console port.
+  consoleService:
+    type: ClusterIP
+    port: 9001
+  ## @param minio.podAnnotations [object] Annotations added to the MinIO pod.
+  podAnnotations: {}
+  ## @param minio.nodeSelector [object] Node selector for MinIO pod scheduling.
+  nodeSelector: {}
+  ## @param minio.tolerations [array] Tolerations for MinIO pod scheduling.
+  tolerations: []
+  ## @param minio.affinity [object] Affinity rules for MinIO pod scheduling.
+  affinity: {}
+  ## @param minio.podSecurityContext.runAsUser User ID for the MinIO container.
+  ## @param minio.podSecurityContext.runAsGroup Group ID for the MinIO container.
+  ## @param minio.podSecurityContext.fsGroup Filesystem group for mounted volumes.
+  podSecurityContext:
+    runAsUser: 1000
+    runAsGroup: 1000
+    fsGroup: 1000
+  ## @param minio.containerSecurityContext.allowPrivilegeEscalation Allow privilege escalation.
+  ## @param minio.containerSecurityContext.capabilities.drop [array] Linux capabilities to drop.
+  containerSecurityContext:
+    allowPrivilegeEscalation: false
+    capabilities:
+      drop: ["ALL"]
 
 ## @skip tempo
 ## @param tempo.enabled Install Grafana Tempo subchart (traces).

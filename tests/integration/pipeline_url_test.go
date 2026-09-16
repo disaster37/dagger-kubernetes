@@ -26,8 +26,10 @@ const ciWrapperTraceID = "abcdef0123456789abcdef0123456789"
 // control plane (Raft store, stub fleet, admin + API token) with the
 // pipeline-view base set to https://supv.example.com. It returns the
 // control-plane URL and an admin API token.
-func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (controlURL, adminToken string) {
+func startPipelineURLServer(t *testing.T) (controlURL, adminToken string) {
 	t.Helper()
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
 	logger := observ.NewTestLogger()
 	store := newIntegrationStore(t)
 
@@ -59,7 +61,6 @@ func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (control
 	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
 		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
 	}, logger, observ.NewMetrics(nil))
-	cacheBackend := &service.Cache{Type: "registry", Registry: "cache.reg/dagger-cache"}
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(
 		service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger),
@@ -68,13 +69,15 @@ func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (control
 	logsClient := repository.NewLogsClient("")
 
 	srv := handler.NewServer(&handler.ServerConfig{
-		ControlAddr: controlAddr,
-		DataAddr:    dataAddr,
-		DataHost:    "localhost",
-		PipelineURL: "https://supv.example.com",
+		ControlAddr:     controlAddr,
+		DataAddr:        dataAddr,
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
+		PipelineURL:     "https://supv.example.com",
 	}, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
-		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store), CacheBackend: cacheBackend,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
 		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
 		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
@@ -96,7 +99,7 @@ func startPipelineURLServer(t *testing.T, controlAddr, dataAddr string) (control
 // engine records a trace, and GET /api/v1/traces/:traceID/url returns the
 // self-hosted pipeline-view URL for it.
 func TestPipelineViewURLEndpoint(t *testing.T) {
-	serverURL, adminToken := startPipelineURLServer(t, freeAddr(t), freeAddr(t))
+	serverURL, adminToken := startPipelineURLServer(t)
 
 	reqBody := map[string]string{"image": "registry.dagger.io/engine:v0.21.4", "trace_id": "trace-url-int"}
 	b, _ := json.Marshal(reqBody)
@@ -140,7 +143,10 @@ func TestPipelineViewURLEndpoint(t *testing.T) {
 // integration server with a fake dagger on PATH, prints the self-hosted
 // pipeline-view link using the /pipelines/<id> path.
 func TestCIWrapperPrintsSelfHostedURL(t *testing.T) {
-	serverURL, adminToken := startPipelineURLServer(t, freeAddr(t), freeAddr(t))
+	serverURL, adminToken := startPipelineURLServer(t)
+	// The wrapper loads the config (missing file -> defaults); satisfy the
+	// always-on S3 prerequisites so validation passes.
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
 
 	binDir := t.TempDir()
 	bin := filepath.Join(binDir, "dagger-kubernetes-ci")

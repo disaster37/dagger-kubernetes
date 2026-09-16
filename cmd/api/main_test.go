@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -235,13 +234,13 @@ func TestValidateFleetEnv(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "DAGGER_KUBERNETES_TOKEN in engine_extra_env",
+			name: "DAGGER_KUBERNETES_TOKEN in engine_extra_env is no longer reserved",
 			fleet: domain.FleetConfig{
 				EngineExtraEnv: map[string]string{
-					"DAGGER_KUBERNETES_TOKEN": "should-not-be-set",
+					"DAGGER_KUBERNETES_TOKEN": "operator-supplied",
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "empty env name in engine_extra_env",
@@ -270,13 +269,13 @@ func TestValidateFleetEnv(t *testing.T) {
 			wantErr: false,
 		},
 		{
-			name: "reserved name in engine_extra_env_from",
+			name: "DAGGER_KUBERNETES_TOKEN in engine_extra_env_from is no longer reserved",
 			fleet: domain.FleetConfig{
 				EngineExtraEnvFrom: map[string]domain.EnvVarSource{
 					"DAGGER_KUBERNETES_TOKEN": {SecretName: "s", Key: "k"},
 				},
 			},
-			wantErr: true,
+			wantErr: false,
 		},
 		{
 			name: "same name in both engine_extra_env and engine_extra_env_from",
@@ -324,276 +323,6 @@ func TestValidateFleetEnv(t *testing.T) {
 			err := validateFleetEnv(&tt.fleet)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("validateFleetEnv() error = %v, wantErr %v", err, tt.wantErr)
-			}
-		})
-	}
-}
-
-func TestValidateCacheConfig(t *testing.T) {
-	base := func() *domain.Config {
-		return &domain.Config{
-			Server: domain.ServerConfig{PublicURL: "https://supv.example.com"},
-			Cache:  domain.CacheConfig{Backend: "registry"},
-		}
-	}
-
-	tests := []struct {
-		name         string
-		mut          func(*domain.Config)
-		wantHost     string
-		wantBackends int
-		wantErr      bool
-	}{
-		{
-			name:         "default-derivation",
-			mut:          func(c *domain.Config) { c.Cache.Registry = "cache.reg/dagger-cache" },
-			wantHost:     "cache.supv.example.com",
-			wantBackends: 1,
-		},
-		{
-			name: "explicit-public-host",
-			mut: func(c *domain.Config) {
-				c.Cache.PublicHost = "cache.custom.example"
-				c.Cache.Registry = "cache.reg/dagger-cache"
-			},
-			wantHost:     "cache.custom.example",
-			wantBackends: 1,
-		},
-		{
-			name: "public-host-collision",
-			mut: func(c *domain.Config) {
-				c.Cache.PublicHost = "supv.example.com"
-				c.Cache.Registry = "cache.reg/dagger-cache"
-			},
-			wantErr: true,
-		},
-		{
-			name:    "empty-backends",
-			mut:     func(c *domain.Config) {},
-			wantErr: true,
-		},
-		{
-			name: "duplicate-id",
-			mut: func(c *domain.Config) {
-				c.Cache.Registries = []domain.RegistryBackend{{ID: "a", InternalAddr: "r1:5000"}, {ID: "a", InternalAddr: "r2:5000"}}
-			},
-			wantErr: true,
-		},
-		{
-			name: "empty-id",
-			mut: func(c *domain.Config) {
-				c.Cache.Registries = []domain.RegistryBackend{{ID: "", InternalAddr: "r1:5000"}}
-			},
-			wantErr: true,
-		},
-		{
-			name:    "empty-internal-addr",
-			mut:     func(c *domain.Config) { c.Cache.Registries = []domain.RegistryBackend{{ID: "a", InternalAddr: ""}} },
-			wantErr: true,
-		},
-		{
-			name: "bad-internal-addr-scheme",
-			mut: func(c *domain.Config) {
-				c.Cache.Registries = []domain.RegistryBackend{{ID: "a", InternalAddr: "https://r1:5000"}}
-			},
-			wantErr: true,
-		},
-		{
-			name:         "synthesize-from-internal-addr",
-			mut:          func(c *domain.Config) { c.Cache.InternalAddr = "reg.internal:5000" },
-			wantHost:     "cache.supv.example.com",
-			wantBackends: 1,
-		},
-		{
-			name:    "synthesized-addr-with-scheme",
-			mut:     func(c *domain.Config) { c.Cache.InternalAddr = "https://reg.internal:5000" },
-			wantErr: true,
-		},
-		{
-			name:    "empty-public-url",
-			mut:     func(c *domain.Config) { c.Server.PublicURL = "" },
-			wantErr: true,
-		},
-		{
-			name: "multi-backend-valid",
-			mut: func(c *domain.Config) {
-				c.Cache.Registries = []domain.RegistryBackend{{ID: "a", InternalAddr: "r1:5000"}, {ID: "b", InternalAddr: "r2:5000"}}
-			},
-			wantHost:     "cache.supv.example.com",
-			wantBackends: 2,
-		},
-		{
-			name:         "s3-skip",
-			mut:          func(c *domain.Config) { c.Cache.Backend = "s3" },
-			wantHost:     "",
-			wantBackends: 0,
-			wantErr:      false,
-		},
-		{
-			name: "public-url-with-explicit-port",
-			mut: func(c *domain.Config) {
-				c.Server.PublicURL = "https://supv.example.com:443"
-				c.Cache.Registry = "cache.reg/dagger-cache"
-			},
-			wantHost:     "cache.supv.example.com",
-			wantBackends: 1,
-		},
-		{
-			name: "public-host-collision-with-port-in-control-host",
-			mut: func(c *domain.Config) {
-				c.Server.PublicURL = "https://supv.example.com:443"
-				c.Cache.PublicHost = "supv.example.com"
-				c.Cache.Registry = "cache.reg/dagger-cache"
-			},
-			wantErr: true,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := base()
-			tc.mut(cfg)
-			host, backends, err := validateCacheConfig(cfg)
-			if (err != nil) != tc.wantErr {
-				t.Fatalf("err = %v, wantErr %v", err, tc.wantErr)
-			}
-			if tc.wantErr {
-				return
-			}
-			if host != tc.wantHost {
-				t.Fatalf("host = %q, want %q", host, tc.wantHost)
-			}
-			if len(backends) != tc.wantBackends {
-				t.Fatalf("backends = %d, want %d", len(backends), tc.wantBackends)
-			}
-		})
-	}
-}
-
-func TestValidateCacheConfigSynthesizesFromRegistry(t *testing.T) {
-	cfg := &domain.Config{
-		Server: domain.ServerConfig{PublicURL: "https://supv.example.com"},
-		Cache:  domain.CacheConfig{Backend: "registry", Registry: "cache.reg/dagger-cache"},
-	}
-	_, backends, err := validateCacheConfig(cfg)
-	if err != nil {
-		t.Fatalf("validateCacheConfig: %v", err)
-	}
-	if backends[0].ID != "default" || backends[0].InternalAddr != "cache.reg" {
-		t.Fatalf("backend = %+v, want id=default addr=cache.reg", backends[0])
-	}
-}
-
-func TestHostOfStripsPort(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{"with-explicit-port", "https://supv.example.com:443", "supv.example.com"},
-		{"without-port", "https://supv.example.com", "supv.example.com"},
-		{"with-path", "https://supv.example.com/foo/bar", "supv.example.com"},
-		{"parse-failure-returns-raw", "://not-a-url", "://not-a-url"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := hostOf(tc.raw); got != tc.want {
-				t.Fatalf("hostOf(%q) = %q, want %q", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestResolveRegistryBackendSecrets(t *testing.T) {
-	logger := observ.NewTestLogger()
-	ctx := context.Background()
-	clientset := fake.NewSimpleClientset(&corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "reg-auth", Namespace: "ns"},
-		Data:       map[string][]byte{"password": []byte("s3cr3t")},
-	})
-
-	tests := []struct {
-		name      string
-		clientset kubernetes.Interface
-		namespace string
-		backends  []domain.RegistryBackend
-		wantPass  []string
-		wantErr   bool
-	}{
-		{
-			name:      "resolves password from secret",
-			clientset: clientset,
-			namespace: "ns",
-			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}}},
-			wantPass:  []string{"s3cr3t"},
-		},
-		{
-			name:      "explicit password wins",
-			clientset: clientset,
-			namespace: "ns",
-			backends:  []domain.RegistryBackend{{ID: "b1", Password: "direct", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}}},
-			wantPass:  []string{"direct"},
-		},
-		{
-			name:      "nil ref skipped",
-			clientset: clientset,
-			namespace: "ns",
-			backends:  []domain.RegistryBackend{{ID: "b1"}},
-			wantPass:  []string{""},
-		},
-		{
-			name:      "empty secret name skipped",
-			clientset: clientset,
-			namespace: "ns",
-			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: ""}}},
-			wantPass:  []string{""},
-		},
-		{
-			name:      "missing secret errors but leaves password empty",
-			clientset: clientset,
-			namespace: "ns",
-			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "nope", Key: "password"}}},
-			wantPass:  []string{""},
-			wantErr:   true,
-		},
-		{
-			// One missing Secret must NOT abort resolution for the rest
-			// (availability/degradation): the failing backend is left
-			// empty (it will 401) while subsequent backends still resolve.
-			name:      "missing secret for one backend does not block the rest",
-			clientset: clientset,
-			namespace: "ns",
-			backends: []domain.RegistryBackend{
-				{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "nope", Key: "password"}},
-				{ID: "b2", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}},
-			},
-			wantPass: []string{"", "s3cr3t"},
-			wantErr:  true,
-		},
-		{
-			name:      "nil clientset leaves password empty",
-			clientset: nil,
-			namespace: "ns",
-			backends:  []domain.RegistryBackend{{ID: "b1", PasswordSecret: &domain.SecretRef{Name: "reg-auth", Key: "password"}}},
-			wantPass:  []string{""},
-		},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := resolveRegistryBackendSecrets(ctx, tc.clientset, tc.namespace, tc.backends, logger)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			for i, want := range tc.wantPass {
-				if tc.backends[i].Password != want {
-					t.Fatalf("backend %d password = %q, want %q", i, tc.backends[i].Password, want)
-				}
 			}
 		})
 	}

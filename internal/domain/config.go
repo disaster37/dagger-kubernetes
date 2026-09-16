@@ -8,6 +8,7 @@ type Config struct {
 	Auth       AuthConfig       `mapstructure:"auth"`
 	Telemetry  TelemetryConfig  `mapstructure:"telemetry"`
 	Cache      CacheConfig      `mapstructure:"cache"`
+	ImageCache ImageCacheConfig `mapstructure:"image_cache"`
 	History    HistoryConfig    `mapstructure:"history"`
 	Fleet      FleetConfig      `mapstructure:"fleet"`
 	CA         CAConfig         `mapstructure:"ca"`
@@ -92,6 +93,10 @@ type OAuthConfig struct {
 	AllowedGroups []string           `mapstructure:"allowed_groups"` // oidc only: groups-claim allowlist (canonical)
 	GroupMappings []GroupMappingRule `mapstructure:"group_mappings"` // provider group -> supervisor group regex mapping
 	DefaultGroup  string             `mapstructure:"default_group"`  // auto-membership for new OAuth users; empty = none
+	// AdminGroups, when non-empty, promotes OAuth users to RoleAdmin when any of
+	// their RAW upstream provider groups (pre-mapping) exactly matches an entry.
+	// Case-sensitive. Empty = feature disabled (no OAuth user is auto-promoted).
+	AdminGroups []string `mapstructure:"admin_groups"`
 	// CookieSecure forces the Secure flag on the oauth_state cookie; set true
 	// when TLS terminates at an ingress/proxy in front of the supervisor.
 	CookieSecure bool `mapstructure:"cookie_secure"`
@@ -244,46 +249,41 @@ type TelemetryConfig struct {
 	VictoriaURL  string `mapstructure:"victoria_url"`
 }
 
-// RegistryBackend is one backend OCI registry the Supervisor proxies to.
-type RegistryBackend struct {
-	ID             string     `mapstructure:"id"`
-	InternalAddr   string     `mapstructure:"internal_addr"` // host[:port], no scheme
-	Username       string     `mapstructure:"username"`
-	Password       string     `mapstructure:"password"`
-	PasswordSecret *SecretRef `mapstructure:"password_secret"` // K8s Secret ref; resolves Password when empty
-}
-
-// SecretRef names one key of a K8s Secret in the fleet namespace.
-type SecretRef struct {
-	Name string `mapstructure:"name"`
-	Key  string `mapstructure:"key"`
-}
-
 type CacheConfig struct {
-	Backend      string            `mapstructure:"backend"`       // "registry" | "s3"
-	Registry     string            `mapstructure:"registry"`      // legacy single ref "host/repo"
-	PublicHost   string            `mapstructure:"public_host"`   // dedicated cache vhost
-	InternalAddr string            `mapstructure:"internal_addr"` // legacy single backend addr
-	AuthToken    string            `mapstructure:"auth_token"`    // engine→proxy bearer
-	Registries   []RegistryBackend `mapstructure:"registries"`    // multi-backend list
-	S3           S3Config          `mapstructure:"s3"`
-	GC           GCConfig          `mapstructure:"gc"`
+	S3 S3Config `mapstructure:"s3"`
 }
 
+// S3Config is the shared S3 client configuration consumed by the CLI cache
+// (cli.enabled). The bucket is also the default bucket for the CLI cache
+// (cli.s3_bucket).
 type S3Config struct {
-	Bucket string `mapstructure:"bucket"`
-	Region string `mapstructure:"region"`
+	Bucket    string `mapstructure:"bucket"`
+	Region    string `mapstructure:"region"`
+	Endpoint  string `mapstructure:"endpoint"`   // S3-compatible endpoint, e.g. "minio.example.com:9000"
+	UseSSL    bool   `mapstructure:"use_ssl"`    // use HTTPS for the S3 endpoint
+	AccessKey string `mapstructure:"access_key"` // set via env/secret in production
+	SecretKey string `mapstructure:"secret_key"` // set via env/secret in production
 }
 
-// GCConfig governs the cache auto-clean background sweeper.
-type GCConfig struct {
-	Enabled  bool          `mapstructure:"enabled"`
-	MaxAge   time.Duration `mapstructure:"max_age"`
-	Schedule time.Duration `mapstructure:"schedule"`
+// ImageCacheConfig describes the local image mirrors the supervisor manages
+// over their OCI Distribution v2 API. It is admin-visible/read-only and
+// rendered by the Helm chart from what the chart deploys; the supervisor never
+// sees the mirror's own S3 credentials.
+type ImageCacheConfig struct {
+	Mirrors []ImageCacheMirror `mapstructure:"mirrors"`
+}
+
+// ImageCacheMirror is one local Zot mirror endpoint.
+type ImageCacheMirror struct {
+	ID           string `mapstructure:"id"`            // slug, e.g. "docker-io"
+	Host         string `mapstructure:"host"`          // upstream host, e.g. "docker.io"
+	Upstream     string `mapstructure:"upstream"`      // upstream base URL
+	InternalAddr string `mapstructure:"internal_addr"` // "<release>-<slug>-mirror.<ns>.svc:5000"
+	Backend      string `mapstructure:"backend"`       // "s3" | "pvc" (informational)
 }
 
 // HistoryConfig governs pipeline-history retention (trace_meta + logs +
-// metrics). Mirrors CacheConfig.GC.
+// metrics).
 type HistoryConfig struct {
 	GC HistoryGCConfig `mapstructure:"gc"`
 }
@@ -347,6 +347,12 @@ type FleetConfig struct {
 	EngineDebug            bool                    `mapstructure:"engine_debug"`
 	EngineLogFormat        string                  `mapstructure:"engine_log_format"`
 	EngineRegistryMirrors  map[string][]string     `mapstructure:"engine_registry_mirrors"`
+	// EngineRegistryMirrorsHTTP lists mirror host[:port] values that are
+	// dialed over plaintext HTTP. engine.toml emits a
+	// [registry."<mirror>"] http = true section per entry (BuildKit requires
+	// the mirror host itself to be marked http for in-cluster plaintext
+	// mirrors).
+	EngineRegistryMirrorsHTTP []string `mapstructure:"engine_registry_mirrors_http"`
 }
 
 type CAConfig struct {
@@ -397,11 +403,16 @@ type OTelConfig struct {
 // CLIConfig configures the on-the-fly Dagger CLI provisioning addon.
 type CLIConfig struct {
 	Enabled         bool              `mapstructure:"enabled"`
-	CacheRepo       string            `mapstructure:"cache_repo"` // OCI repo for CLI tarballs, default "dagger-kubernetes/cli-cache"
+	CacheRepo       string            `mapstructure:"cache_repo"` // OCI repo for CLI tarballs, default "dagger-kubernetes/cli-cache" (registry backend)
 	ReleaseListTTL  time.Duration     `mapstructure:"release_list_ttl"`
 	DownloadTimeout time.Duration     `mapstructure:"download_timeout"`
 	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`
 	CIWrapperPath   string            `mapstructure:"ci_wrapper_path"` // path to pre-built dagger-kubernetes-ci binary
+
+	// S3-specific settings for the CLI cache. The rest of the S3 client
+	// (endpoint, region, SSL, credentials) is configured via cache.s3.*.
+	S3Bucket string `mapstructure:"s3_bucket"` // CLI-cache bucket; empty = cache.s3.bucket
+	S3Prefix string `mapstructure:"s3_prefix"` // S3 key prefix for CLI tarballs, default "cli-cache"
 }
 
 // CLIUpstreamConfig points at the Dagger release source (mirror-able for

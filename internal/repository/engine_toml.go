@@ -12,6 +12,7 @@ type engineTOML struct {
 	Debug           bool
 	LogFormat       string
 	RegistryMirrors map[string][]string
+	MirrorHTTP      []string // mirror host[:port] strings dialed over plaintext HTTP
 }
 
 // render returns the engine.toml content, or "" when the configuration is
@@ -19,7 +20,7 @@ type engineTOML struct {
 // registry hosts are sorted alphabetically and sections are separated by
 // blank lines.
 func (c engineTOML) render() string {
-	sections := make([]string, 0, 2+len(c.RegistryMirrors))
+	sections := make([]string, 0, 2+len(c.RegistryMirrors)+len(c.MirrorHTTP))
 	if c.Debug {
 		sections = append(sections, "debug = true\n")
 	}
@@ -34,7 +35,26 @@ func (c engineTOML) render() string {
 		}
 		sections = append(sections, fmt.Sprintf("[registry.%s]\n  mirrors = [%s]\n", tomlQuote(host), strings.Join(quoted, ", ")))
 	}
+	for _, mirror := range sortedUnique(c.MirrorHTTP) {
+		sections = append(sections, fmt.Sprintf("[registry.%s]\n  http = true\n", tomlQuote(mirror)))
+	}
 	return strings.Join(sections, "\n")
+}
+
+// sortedUnique returns the non-empty entries of in, sorted alphabetically and
+// deduplicated, for deterministic output.
+func sortedUnique(in []string) []string {
+	seen := make(map[string]bool, len(in))
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		if v == "" || seen[v] {
+			continue
+		}
+		seen[v] = true
+		out = append(out, v)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // mirrorHosts returns the hosts that have at least one mirror, sorted

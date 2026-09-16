@@ -16,25 +16,15 @@ type membershipEdge struct {
 	UserID  string `json:"user_id"`
 }
 
-// blobRouteEdge is one (digest, backendID, createdAt) row in a snapshot.
-type blobRouteEdge struct {
-	Digest    string `json:"digest"`
-	BackendID string `json:"backend_id"`
-	CreatedAt string `json:"created_at"`
-}
-
 // fsmSnapshotPayload is the JSON document persisted into a Raft snapshot.
 type fsmSnapshotPayload struct {
-	Users        []*cmdUser                   `json:"users"`
-	Groups       []*domain.Group              `json:"groups"`
-	Memberships  []membershipEdge             `json:"memberships"`
-	Tokens       []*cmdToken                  `json:"tokens"`
-	Projects     []*domain.Project            `json:"projects"`
-	Traces       []*domain.TraceMeta          `json:"traces"`
-	Meta         map[string]string            `json:"meta"`
-	ObjectRoutes []*domain.CacheRoute         `json:"object_routes"`
-	BlobRoutes   []blobRouteEdge              `json:"blob_routes"`
-	Uploads      []*domain.CacheUploadSession `json:"uploads"`
+	Users       []*cmdUser          `json:"users"`
+	Groups      []*domain.Group     `json:"groups"`
+	Memberships []membershipEdge    `json:"memberships"`
+	Tokens      []*cmdToken         `json:"tokens"`
+	Projects    []*domain.Project   `json:"projects"`
+	Traces      []*domain.TraceMeta `json:"traces"`
+	Meta        map[string]string   `json:"meta"`
 }
 
 // fsmSnapshot is a point-in-time snapshot of the FSM state.
@@ -77,14 +67,12 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	defer f.state.mu.RUnlock()
 
 	payload := fsmSnapshotPayload{
-		Meta:         make(map[string]string, len(f.state.meta)),
-		Users:        make([]*cmdUser, 0, len(f.state.users)),
-		Tokens:       make([]*cmdToken, 0, len(f.state.tokens)),
-		Groups:       copySlice(f.state.groups),
-		Projects:     copySlice(f.state.projects),
-		Traces:       copySlice(f.state.traces),
-		Uploads:      copySlice(f.state.cacheUploadSessions),
-		ObjectRoutes: copySlice(f.state.cacheObjectRoutes),
+		Meta:     make(map[string]string, len(f.state.meta)),
+		Users:    make([]*cmdUser, 0, len(f.state.users)),
+		Tokens:   make([]*cmdToken, 0, len(f.state.tokens)),
+		Groups:   copySlice(f.state.groups),
+		Projects: copySlice(f.state.projects),
+		Traces:   copySlice(f.state.traces),
 	}
 	for k, v := range f.state.meta {
 		payload.Meta[k] = v
@@ -98,11 +86,6 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	for gid, set := range f.state.memberships {
 		for uid := range set {
 			payload.Memberships = append(payload.Memberships, membershipEdge{GroupID: gid, UserID: uid})
-		}
-	}
-	for digest, routes := range f.state.cacheBlobRoutes {
-		for backendID, createdAt := range routes {
-			payload.BlobRoutes = append(payload.BlobRoutes, blobRouteEdge{Digest: digest, BackendID: backendID, CreatedAt: createdAt})
 		}
 	}
 	return &fsmSnapshot{payload: payload}, nil
@@ -153,22 +136,6 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	for k, v := range payload.Meta {
 		s.meta[k] = v
 	}
-	for _, cr := range payload.ObjectRoutes {
-		if cr == nil {
-			continue
-		}
-		cp := *cr
-		s.cacheObjectRoutes[manifestRouteKey(cp.Repo, cp.Tag)] = &cp
-	}
-	for _, edge := range payload.BlobRoutes {
-		s.upsertBlobRoute(edge.Digest, edge.BackendID, edge.CreatedAt)
-	}
-	for _, sess := range payload.Uploads {
-		if sess == nil {
-			continue
-		}
-		s.recordUpload(sess)
-	}
 	for _, edge := range payload.Memberships {
 		s.addMembership(edge.GroupID, edge.UserID)
 	}
@@ -201,7 +168,4 @@ func (s *fsmState) adopt(other *fsmState) {
 	s.projectsByName = other.projectsByName
 	s.traces = other.traces
 	s.meta = other.meta
-	s.cacheObjectRoutes = other.cacheObjectRoutes
-	s.cacheBlobRoutes = other.cacheBlobRoutes
-	s.cacheUploadSessions = other.cacheUploadSessions
 }

@@ -10,16 +10,15 @@ import (
 	"fmt"
 	"log"
 	"net"
-	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/minio/minio-go/v7"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
@@ -97,23 +96,6 @@ func run(c *cli.Context) error {
 
 	// The pipeline-view base URL is server.public_url. config.Load already
 	// validated it as an absolute http(s) URL.
-	cacheHost, cacheBackends, err := validateCacheConfig(cfg)
-	if err != nil {
-		return fmt.Errorf("validate cache config: %w", err)
-	}
-	if cfg.Cache.Backend == "registry" {
-		// Always resolve the public cache vhost so the emitted cache ref points
-		// at the Supervisor proxy, never the raw registry.
-		cfg.Cache.PublicHost = cacheHost
-	}
-
-	// The cache vhost is served on the same listener as the control plane, so
-	// its rewritten upload Locations must use the same scheme as server.public_url.
-	// Empty (parse failure / no scheme) means the handler falls back to https.
-	cacheScheme := ""
-	if u, err := url.Parse(cfg.Server.PublicURL); err == nil {
-		cacheScheme = u.Scheme
-	}
 
 	// The k8s clientset is needed early: it selects the TLS provider
 	// (Secret-backed minting CA) and is reused for raft TLS auto-mode and the
@@ -121,13 +103,6 @@ func run(c *cli.Context) error {
 	clientset, err := newK8sClientset()
 	if err != nil {
 		logger.WithError(err).Warn("k8s clientset unavailable; raft TLS auto-mode, minting CA sharing, and fleet provider will fall back")
-	}
-
-	// Resolve per-backend password_secret refs into Password (best-effort;
-	// mirrors loadCacheTokenFromSecret). A missing secret leaves Password empty
-	// (the backend will 401, which is observable) and never fails startup.
-	if err := resolveRegistryBackendSecrets(c.Context, clientset, cfg.Fleet.Namespace, cacheBackends, logger); err != nil {
-		logger.WithError(err).Warn("resolve registry backend secrets failed")
 	}
 
 	tlsProvider, err := selectTLSProvider(cfg, clientset)
@@ -159,13 +134,6 @@ func run(c *cli.Context) error {
 	}
 
 	sessions := service.NewStore(cfg.LeaseTTL)
-
-	cacheBackend := &service.Cache{
-		Type:       cfg.Cache.Backend,
-		Registry:   cfg.Cache.Registry,
-		PublicHost: cacheHost,
-		S3:         domain.S3Ref{Bucket: cfg.Cache.S3.Bucket, Region: cfg.Cache.S3.Region},
-	}
 
 	metrics := observ.NewMetrics(prometheus.DefaultRegisterer)
 
@@ -256,8 +224,19 @@ func run(c *cli.Context) error {
 		}
 		oauthProvider = cfg.Auth.OAuth.Provider
 
+		// Warn about group-mapping replacements that can never match a
+		// supervisor group.
+		for i, rule := range cfg.Auth.OAuth.GroupMappings {
+			if !strings.Contains(rule.Replacement, "$") && !service.ValidateGroupName(rule.Replacement) {
+				logger.WithFields(logrus.Fields{
+					"rule_index":  i,
+					"replacement": rule.Replacement,
+				}).Warn("oauth: group_mappings replacement is not a valid supervisor group name and has no capture reference; it can never match an existing group")
+			}
+		}
+
 		// Wire OAuth revalidation when OAuth is enabled.
-		revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
+		revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, cfg.Auth.OAuth.AdminGroups, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
 			Interval:      cfg.Auth.OAuth.RevalidateInterval,
 			Grace:         cfg.Auth.OAuth.RevalidateGrace,
 			FailOpen:      cfg.Auth.OAuth.RevalidateFailOpen,
@@ -278,49 +257,60 @@ func run(c *cli.Context) error {
 		VersionRetention:      cfg.Fleet.VersionRetention,
 	}, logger, metrics)
 
+	// Per-version local-cache purge: prune every running engine pod in-process
+	// (engine dagql API over plaintext TCP). Requires only a clientset + fleet
+	// provider; no CLI subsystem or S3 config.
+	var engineCachePurger domain.EngineCachePurger
+	if clientset != nil && provider != nil {
+		pruner := repository.NewSessionEnginePruner()
+		engineCachePurger = service.NewEngineCachePurgeService(provider, pruner, logger)
+	}
+
 	traces := repository.NewSpanTreeReconstructor(cfg.Telemetry.TempoURL)
 	logsClient := repository.NewLogsClient(cfg.Telemetry.LokiURL)
 
-	// --- Cache stats / status / GC wiring ---
+	// --- History / status wiring ---
 	metricsClient := repository.NewMetricsClient(cfg.Telemetry.VictoriaURL)
 
-	var router *service.RegistryRouter
-	var routesRepo *repository.CacheRoutesRepo
-	if cfg.Cache.Backend == "registry" {
-		routesRepo = repository.NewCacheRoutesRepo(raftStore)
-		router = service.NewRegistryRouter(cacheBackends, routesRepo, func(b domain.RegistryBackend) domain.RegistryClient {
-			return repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
-		}, logger)
-		if err := router.RefreshCharges(ctx); err != nil {
-			logger.WithError(err).Warn("refresh cache charges failed")
+	// Shared S3 client for the S3-backed CLI cache.
+	var s3Client *minio.Client
+	if cfg.Cache.S3.Endpoint == "" {
+		logger.Warn("cache.s3.endpoint is empty; s3-backed CLI cache disabled")
+	} else {
+		client, err := repository.NewS3Client(cfg.Cache.S3.Endpoint, cfg.Cache.S3.Region, cfg.Cache.S3.AccessKey, cfg.Cache.S3.SecretKey, cfg.Cache.S3.UseSSL)
+		if err != nil {
+			return fmt.Errorf("create s3 client: %w", err)
 		}
+		s3Client = client
 	}
 
-	cacheToken := cfg.Cache.AuthToken
-	if cacheToken == "" {
-		cacheToken = loadCacheTokenFromSecret(ctx, clientset, cfg.Fleet.Namespace, logger)
-	}
-	if cfg.Cache.Backend == "registry" && cacheToken == "" {
-		logger.Warn("cache proxy auth disabled (no cache.auth_token and no engine-registry-auth secret token): dev mode only")
-	}
-
-	cacheStatsSvc := service.NewCacheStatsService(cacheBackend, router, metricsClient, cfg.Cache.GC, logger, metrics)
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
-	statusSvc := service.NewStatusService(cfg, cacheBackend, router, fleetManager, logger, raftStore)
-	connectSvc := service.NewConnectService(cfg, cacheBackend, versionResolver, tokensSvc, logger)
+	statusSvc := service.NewStatusService(cfg, fleetManager, logger, raftStore)
+	connectSvc := service.NewConnectService(cfg, versionResolver, tokensSvc, logger)
+
+	// Local image cache: admin list/prune of the configured Zot mirrors over
+	// their OCI Distribution v2 API (chart-rendered image_cache.mirrors). Only
+	// built when at least one mirror is configured; no mirrors means the
+	// endpoints report an empty set.
+	var imageCacheSvc domain.ImageCacheService
+	if len(cfg.ImageCache.Mirrors) > 0 {
+		imageCacheSvc = service.NewImageCacheService(cfg.ImageCache.Mirrors, func(addr string) domain.DistributionClient {
+			return repository.NewDistributionClient(addr)
+		}, logger)
+	}
 
 	// --- On-the-fly Dagger CLI provisioning wiring ---
 	var cliSvc *service.CLIService
 	if cfg.CLI.Enabled {
-		// Use the first backend's client for CLI cache operations.
-		var cliRegClient domain.CLIRegistryClient
-		if len(cacheBackends) > 0 {
-			b := cacheBackends[0]
-			cliRegClient = repository.NewRegistryStatsClientWithAuth(b.InternalAddr, b.Username, b.Password)
-		} else {
-			return fmt.Errorf("CLI cache requires at least one registry cache backend")
+		// S3 backend: store tarballs in the shared S3 bucket.
+		if s3Client == nil {
+			return fmt.Errorf("cli.enabled requires cache.s3.endpoint")
 		}
-		cliCache := repository.NewRegistryCLICache(cliRegClient, cfg.CLI.CacheRepo, os.TempDir(), logger)
+		bucket := cfg.CLI.S3Bucket
+		if bucket == "" {
+			bucket = cfg.Cache.S3.Bucket
+		}
+		cliCache := repository.NewS3CLICache(s3Client, bucket, cfg.CLI.S3Prefix, logger)
 		cliUpstream := repository.NewGitHubCLIUpstream(repository.GitHubCLIUpstreamConfig{
 			ReleasesURL:  cfg.CLI.Upstream.ReleasesURL,
 			DownloadBase: cfg.CLI.Upstream.DownloadBase,
@@ -334,9 +324,6 @@ func run(c *cli.Context) error {
 		ControlAddr:  cfg.Server.ControlAddr,
 		DataAddr:     cfg.Server.DataAddr,
 		DataHost:     cfg.Server.DataHost,
-		CacheHost:    cacheHost,
-		CacheScheme:  cacheScheme,
-		CacheToken:   cacheToken,
 		CollectorURL: cfg.Telemetry.CollectorURL,
 		VictoriaURL:  cfg.Telemetry.VictoriaURL,
 		CertPath:     controlTLSCertPath,
@@ -349,7 +336,6 @@ func run(c *cli.Context) error {
 		FleetManager:         fleetManager,
 		Sessions:             sessions,
 		SessionRegistry:      repository.NewSessionRepo(raftStore),
-		CacheBackend:         cacheBackend,
 		VersionResolver:      versionResolver,
 		Auth:                 authSvc,
 		InternalAuthEnabled:  cfg.Auth.Internal.Enabled,
@@ -368,18 +354,17 @@ func run(c *cli.Context) error {
 		OAuth:                oauthSvc,
 		OAuthProvider:        oauthProvider,
 		JWT:                  jwtSvc,
-		CacheStatsProvider:   cacheStatsSvc,
-		CachePurger:          cacheStatsSvc,
+		EngineCachePurger:    engineCachePurger,
 		HistoryStatsProvider: historyPurgeSvc,
 		HistoryPurger:        historyPurgeSvc,
 		StatusProvider:       statusSvc,
 		StartupProvider:      raftStore,
 		Connect:              connectSvc,
-		Router:               router,
 		LiveHub:              liveHub,
 		Lifecycle:            pipelineLifecycle,
 		CLI:                  cliSvc,
 		CIWrapperPath:        cfg.CLI.CIWrapperPath,
+		ImageCache:           imageCacheSvc,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
@@ -388,9 +373,6 @@ func run(c *cli.Context) error {
 
 	stopStaleSweep := pipelineLifecycle.StartStaleSweep(ctx)
 	defer stopStaleSweep()
-
-	stopGC := cacheStatsSvc.StartGCSweeper(ctx)
-	defer stopGC()
 
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
@@ -410,20 +392,6 @@ func run(c *cli.Context) error {
 				expired := sessions.ReapOrphans()
 				if len(expired) > 0 {
 					metrics.ActiveLeases.Sub(float64(len(expired)))
-				}
-				if routesRepo != nil {
-					if n, err := routesRepo.ReapUploadSessions(ctx, time.Hour); err != nil {
-						// Writes are leader-only (ADR-016 D6): every follower
-						// runs this sweeper, so not-the-leader is the expected
-						// steady state on 2 of 3 pods, not an error.
-						if !errors.Is(err, domain.ErrNotLeader) {
-							logger.WithError(err).Error("reap upload sessions error")
-						} else {
-							logger.WithError(err).Debug("reap upload sessions skipped: not the raft leader")
-						}
-					} else if n > 0 {
-						logger.WithField("reaped", n).Debug("reaped stale upload sessions")
-					}
 				}
 			}
 		}
@@ -1199,6 +1167,7 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 		Debug:               cfg.Fleet.EngineDebug,
 		LogFormat:           cfg.Fleet.EngineLogFormat,
 		RegistryMirrors:     cfg.Fleet.EngineRegistryMirrors,
+		MirrorHTTP:          cfg.Fleet.EngineRegistryMirrorsHTTP,
 	}
 
 	return repository.NewK8sProvider(clientset, k8sCfg), nil
@@ -1208,15 +1177,13 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 // refuse at StatefulSet admission (duplicate container env names) or that is
 // internally inconsistent. Called once at startup (fail fast).
 func validateFleetEnv(fleet *domain.FleetConfig) error {
-	// DAGGER_KUBERNETES_TOKEN is always injected from a secret.
-	reserved := map[string]bool{"DAGGER_KUBERNETES_TOKEN": true}
 	for name := range fleet.EngineExtraEnv {
-		if err := validateEnvName(name, "engine_extra_env", reserved); err != nil {
+		if err := validateEnvName(name, "engine_extra_env"); err != nil {
 			return err
 		}
 	}
 	for name, src := range fleet.EngineExtraEnvFrom {
-		if err := validateEnvName(name, "engine_extra_env_from", reserved); err != nil {
+		if err := validateEnvName(name, "engine_extra_env_from"); err != nil {
 			return err
 		}
 		if _, dup := fleet.EngineExtraEnv[name]; dup {
@@ -1235,14 +1202,12 @@ func validateFleetEnv(fleet *domain.FleetConfig) error {
 	return nil
 }
 
-// validateEnvName rejects empty operator-supplied env var names and names the
-// supervisor injects itself. source is the fleet.* config key for errors.
-func validateEnvName(name, source string, reserved map[string]bool) error {
+// validateEnvName rejects empty operator-supplied env var names. source is the
+// fleet.* config key for errors. The supervisor no longer injects any engine
+// env vars, so there are no reserved names to reject.
+func validateEnvName(name, source string) error {
 	if name == "" {
 		return fmt.Errorf("fleet.%s contains an empty env var name", source)
-	}
-	if reserved[name] {
-		return fmt.Errorf("fleet.%s must not set %s: injected by the supervisor", source, name)
 	}
 	return nil
 }
@@ -1264,173 +1229,6 @@ func newK8sClientset() (kubernetes.Interface, error) {
 		return nil, fmt.Errorf("create clientset: %w", err)
 	}
 	return clientset, nil
-}
-
-// registryHostFrom strips the repository path from an OCI registry ref
-// ("cache.reg/dagger-cache" -> "cache.reg").
-func registryHostFrom(registry string) string {
-	host, _, ok := strings.Cut(registry, "/")
-	if !ok {
-		return registry
-	}
-	return host
-}
-
-// cacheAddrRe constrains backend internal_addr to host[:port] with no
-// scheme/path (defense against SSRF via config, CWE-918).
-var cacheAddrRe = regexp.MustCompile(`^[A-Za-z0-9._:-]+(:\d+)?$`)
-
-// validateCacheConfig resolves the cache vhost and effective backend list, and
-// fails fast on configuration that would break the proxy (vhost collision,
-// empty backends, duplicate IDs, scheme/path in internal_addr).
-func validateCacheConfig(cfg *domain.Config) (string, []domain.RegistryBackend, error) {
-	if cfg.Cache.Backend != "registry" {
-		return "", nil, nil
-	}
-
-	controlHost := hostOf(cfg.Server.PublicURL)
-	if controlHost == "" {
-		return "", nil, fmt.Errorf("server.public_url must be an absolute URL (scheme://host) so the cache vhost can be derived")
-	}
-	cacheHost := cfg.Cache.PublicHost
-	if cacheHost == "" {
-		cacheHost = fmt.Sprintf("cache.%s", controlHost)
-	}
-	if cacheHost == controlHost {
-		return "", nil, fmt.Errorf("cache.public_host (%s) must differ from the control-plane host (%s); set a dedicated cache vhost", cacheHost, controlHost)
-	}
-
-	var backends []domain.RegistryBackend
-	if len(cfg.Cache.Registries) > 0 {
-		seen := make(map[string]bool, len(cfg.Cache.Registries))
-		for _, b := range cfg.Cache.Registries {
-			if b.ID == "" {
-				return "", nil, fmt.Errorf("cache.registries entry with empty id")
-			}
-			if seen[b.ID] {
-				return "", nil, fmt.Errorf("duplicate cache backend id: %s", b.ID)
-			}
-			seen[b.ID] = true
-			if b.InternalAddr == "" {
-				return "", nil, fmt.Errorf("cache.registries entry %s: internal_addr must not be empty", b.ID)
-			}
-			if !cacheAddrRe.MatchString(b.InternalAddr) {
-				return "", nil, fmt.Errorf("cache backend internal_addr must be host[:port] (no scheme/path): %s", b.InternalAddr)
-			}
-			backends = append(backends, b)
-		}
-	} else {
-		addr := cfg.Cache.InternalAddr
-		if addr == "" {
-			addr = registryHostFrom(cfg.Cache.Registry)
-		}
-		if addr == "" {
-			return "", nil, fmt.Errorf("cache: no backend registry configured")
-		}
-		if !cacheAddrRe.MatchString(addr) {
-			return "", nil, fmt.Errorf("cache backend internal_addr must be host[:port] (no scheme/path): %s", addr)
-		}
-		backends = []domain.RegistryBackend{{ID: "default", InternalAddr: addr}}
-	}
-
-	if len(backends) == 0 {
-		return "", nil, fmt.Errorf("cache: no backend registry configured")
-	}
-	return cacheHost, backends, nil
-}
-
-// hostOf strips scheme, port and path from a URL, returning its hostname.
-// (An explicit port is dropped so the derived cache vhost matches the
-// ingress Host header / TLS SAN, which never carry a port.)
-func hostOf(rawURL string) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		return rawURL
-	}
-	return u.Hostname()
-}
-
-// resolveRegistryBackendSecrets fills Password from each backend's
-// password_secret ref (mirrors loadCacheTokenFromSecret). A missing
-// clientset/secret leaves Password empty (non-K8s deployments must set
-// Password directly in config). Resolution is per-backend best-effort: a
-// missing/unreadable Secret for one backend logs a WARN and leaves that
-// backend's Password empty (the backend will 401, which is observable) so
-// the remaining backends still resolve. The returned error aggregates any
-// per-backend failures so the caller can surface them; startup never fails.
-// Secret values are never logged.
-func resolveRegistryBackendSecrets(ctx context.Context, clientset kubernetes.Interface, namespace string, backends []domain.RegistryBackend, logger *logrus.Logger) error {
-	var errs []error
-	for i := range backends {
-		ref := backends[i].PasswordSecret
-		if ref == nil || backends[i].Password != "" {
-			continue // nothing to resolve, or explicit password wins
-		}
-		if ref.Name == "" {
-			logger.WithFields(logrus.Fields{
-				"backend_id":  backends[i].ID,
-				"secret_name": ref.Name,
-			}).Warn("cache backend password_secret: empty name; skipping")
-			continue
-		}
-		if clientset == nil {
-			logger.WithFields(logrus.Fields{
-				"backend_id":  backends[i].ID,
-				"secret_name": ref.Name,
-			}).Warn("cache backend password_secret: k8s clientset unavailable; set cache.registries[].password directly")
-			continue
-		}
-		ns := namespace
-		if ns == "" {
-			ns = "dagger-kubernetes"
-		}
-		secret, err := clientset.CoreV1().Secrets(ns).Get(ctx, ref.Name, metav1.GetOptions{})
-		if err != nil {
-			logger.WithFields(logrus.Fields{
-				"backend_id":  backends[i].ID,
-				"secret_name": ref.Name,
-			}).WithError(err).Warn("cache backend password_secret: read failed; leaving password empty")
-			errs = append(errs, fmt.Errorf("read password secret %q for backend %q: %w", ref.Name, backends[i].ID, err))
-			continue
-		}
-		key := ref.Key
-		if key == "" {
-			key = "password"
-		}
-		backends[i].Password = string(secret.Data[key])
-		if backends[i].Password == "" {
-			logger.WithFields(logrus.Fields{
-				"backend_id":  backends[i].ID,
-				"secret_name": ref.Name,
-				"secret_key":  key,
-			}).Warn("cache backend password_secret resolved to empty password")
-		}
-	}
-	return errors.Join(errs...)
-}
-
-// loadCacheTokenFromSecret reads the engine→Supervisor-proxy bearer token from
-// the engine-registry-auth K8s secret. Returns "" (with a WARN) when K8s is
-// unavailable or the secret/key is missing.
-func loadCacheTokenFromSecret(ctx context.Context, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) string {
-	if clientset == nil {
-		logger.Warn("cache auth token: k8s clientset unavailable; cannot read engine-registry-auth secret")
-		return ""
-	}
-	if namespace == "" {
-		namespace = "dagger-kubernetes"
-	}
-	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, "engine-registry-auth", metav1.GetOptions{})
-	if err != nil {
-		logger.WithError(err).Warn("cache auth token: engine-registry-auth secret unavailable")
-		return ""
-	}
-	token := string(secret.Data["token"])
-	if token == "" {
-		logger.Warn("cache auth token: engine-registry-auth secret has no token key")
-		return ""
-	}
-	return token
 }
 
 // parseTolerations parses tolerations in the key[:value[:effect]] format.
