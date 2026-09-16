@@ -62,8 +62,10 @@ Config key `auth.oauth.group_mappings`: an ordered list of
 ### 4. Membership application (D4)
 
 - Mapped supervisor group names are looked up via `GroupRepository.GetByName`.
-  Missing groups are logged (`Warn`) and skipped — never fatal, never
-  auto-created (mirrors `joinDefaultGroup`).
+  Missing groups are logged (`Warn`) and skipped — never fatal. **Superseded by
+  ADR-035:** mapped targets are now auto-created (with `agent_available=true`
+  and a configurable default quota); only the `default_group` fallback keeps the
+  must-pre-exist/skip behavior.
 - **Additive**: the user is appended to existing groups; memberships are never
   removed. Reconciliation is out of scope (admins manage memberships via UI).
 - **Applied on every login** (not just first login). Footgun (documented): an
@@ -104,7 +106,9 @@ keeps `config` free of a `service` import.
   be implicitly trusted/kept as supervisor group names (fail-closed).
 - **Auto-create missing supervisor groups** — group creation is an admin
   decision; silently creating groups from upstream names is surprising and
-  bypasses group quotas/policy.
+  bypasses group quotas/policy. (**Reversed by ADR-035**, which auto-creates
+  mapped targets with an explicit configurable default quota instead of leaving
+  the user unassigned.)
 - **Membership removal/reconciliation** — additive-only keeps the feature
   simple and predictable; removal is a future follow-up (admins manage
   memberships via the UI).
@@ -121,4 +125,5 @@ keeps `config` free of a `service` import.
 
 ## References
 
-- ADR-017 (multi-provider OAuth), ADR-010 (multi-user RBAC).
+- ADR-017 (multi-provider OAuth), ADR-010 (multi-user RBAC), ADR-035
+  (group-mapping auto-create — supersedes D4's "never auto-created" rule).

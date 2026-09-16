@@ -948,9 +948,12 @@ group that does not exist is **auto-created** (idempotently, race-safe) with
 `agent_available=true` and `max_runner_sessions` set to
 `auth.oauth.mapped_group_max_runner_sessions` (0 = unlimited). A group that
 already exists is left unchanged — its quota is never overwritten. Membership is
-applied on every login and IdP revalidation; existing memberships are never
-removed. An empty `group_mappings` list means no mapping and no membership sync —
-only `default_group` auto-join applies.
+applied on every login and IdP revalidation; admin-managed memberships are never
+removed, while memberships this feature previously added are reconciled (a
+membership is removed once its mapped group no longer resolves). An empty
+`group_mappings` list means no mapping: no membership is added, and any
+membership this feature previously added is removed (only `default_group`
+auto-join applies).
 
 Important notes:
 

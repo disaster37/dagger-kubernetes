@@ -3,7 +3,7 @@
 - **Status:** accepted
 - **Date:** 2026-09-16
 - **Deciders:** dagger-kubernetes maintainers
-- **Related:** ADR-017 (multi-provider OAuth), ADR-022 (allowlists + regex mapping), ADR-027 (membership revalidation), ADR-030 (upstream group display), ADR-031 (admin_groups promotion)
+- **Related:** ADR-017 (multi-provider OAuth), ADR-022 (allowlists + regex mapping; this ADR supersedes its "never auto-created" rule), ADR-027 (membership revalidation), ADR-030 (upstream group display), ADR-031 (admin_groups promotion)
 
 ## Context
 
@@ -96,6 +96,14 @@ is shared by login (`completeOAuthLogin`, both providers) and IdP revalidation
 - Testability: the tri-state `ensureGroupByName` contract and the conflict
   re-fetch are unit-tested, and the end-to-end flow is covered by a black-box
   integration test.
+- **Known limitation (accepted):** there is no cap on how many groups a single
+  login/revalidation may auto-create. A mapping rule whose replacement can
+  produce arbitrarily many distinct valid names (e.g. a catch-all capture rule)
+  combined with an empty allowlist lets any authenticated IdP user grow the
+  group table without bound (a DoS / resource-exhaustion vector). Operators
+  should constrain `allowed_groups`/`allowed_orgs` to the intended population
+  and prefer anchored mappings with a bounded replacement; a configurable cap is
+  a possible future follow-up.
 
 ## Alternatives considered
 
