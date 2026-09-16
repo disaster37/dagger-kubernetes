@@ -310,12 +310,14 @@ func TestOAuthCompleteGroupMapping(t *testing.T) {
 			{Pattern: "^acme$", Replacement: "acme-all"},
 			{Pattern: "^acme/eng$", Replacement: "acme-eng"},
 		},
+		MappedGroupMaxRunnerSessions: 3,
 	}
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
-	// Pre-create the target groups.
-	all, _ := gsvc.Create(ctx, GroupInput{Name: "acme-all", AgentAvailable: true})
+	// Pre-create the target groups; acme-all carries an explicit quota that
+	// must never be overwritten by the mapping default.
+	all, _ := gsvc.Create(ctx, GroupInput{Name: "acme-all", MaxRunnerSessions: 7, AgentAvailable: true})
 	eng, _ := gsvc.Create(ctx, GroupInput{Name: "acme-eng", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
@@ -330,9 +332,16 @@ func TestOAuthCompleteGroupMapping(t *testing.T) {
 	if !ids[all.ID] || !ids[eng.ID] {
 		t.Fatalf("user should be member of mapped groups, got %v", groups)
 	}
+	got, err := gsvc.GetByName(ctx, "acme-all")
+	if err != nil {
+		t.Fatalf("GetByName acme-all: %v", err)
+	}
+	if got.MaxRunnerSessions != 7 {
+		t.Fatalf("existing group quota = %d, want 7 (must never be overwritten)", got.MaxRunnerSessions)
+	}
 }
 
-func TestOAuthCompleteGroupMappingMissingGroup(t *testing.T) {
+func TestOAuthCompleteGroupMappingAutoCreatesGroup(t *testing.T) {
 	gh := newGitHubServer(t, []string{"acme"}, nil)
 	cfg := domain.OAuthConfig{
 		Enabled:      true,
@@ -341,6 +350,7 @@ func TestOAuthCompleteGroupMappingMissingGroup(t *testing.T) {
 		GroupMappings: []domain.GroupMappingRule{
 			{Pattern: "^acme$", Replacement: "does-not-exist"},
 		},
+		MappedGroupMaxRunnerSessions: 3,
 	}
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
@@ -350,8 +360,50 @@ func TestOAuthCompleteGroupMappingMissingGroup(t *testing.T) {
 		t.Fatalf("Complete: %v", err)
 	}
 	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
-	if len(groups) != 0 {
-		t.Fatalf("missing mapped group should be skipped, got %v", groups)
+	if len(groups) != 1 || groups[0].Name != "does-not-exist" {
+		t.Fatalf("user should be member of the auto-created mapped group, got %v", groups)
+	}
+	if groups[0].MaxRunnerSessions != 3 {
+		t.Fatalf("auto-created group quota = %d, want 3", groups[0].MaxRunnerSessions)
+	}
+	if !groups[0].AgentAvailable {
+		t.Fatal("auto-created group must have AgentAvailable = true")
+	}
+	created, err := gsvc.GetByName(ctx, "does-not-exist")
+	if err != nil {
+		t.Fatalf("auto-created group not persisted: %v", err)
+	}
+	if created.MaxRunnerSessions != 3 || !created.AgentAvailable {
+		t.Fatalf("persisted group = %+v, want quota 3 and agent available", created)
+	}
+}
+
+func TestOAuthCompleteGroupMappingInvalidNameSkipped(t *testing.T) {
+	gh := newGitHubServer(t, []string{"acme"}, nil)
+	cfg := domain.OAuthConfig{
+		Enabled:      true,
+		ClientID:     "cid",
+		ClientSecret: "csec",
+		GroupMappings: []domain.GroupMappingRule{
+			{Pattern: "^acme$", Replacement: "has space"},
+		},
+		DefaultGroup: "default",
+	}
+	svc, _, gsvc := newOAuthService(t, &cfg, gh)
+	ctx := context.Background()
+
+	dg, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if _, err := gsvc.GetByName(ctx, "has space"); err == nil {
+		t.Fatal("invalid mapped name must not be persisted")
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(groups) != 1 || groups[0].ID != dg.ID {
+		t.Fatalf("user should fall back to default group, got %v", groups)
 	}
 }
 

@@ -47,6 +47,7 @@ data:
         group_mappings:
 {{ toYaml .Values.auth.oauth.groupMappings | indent 10 }}
         default_group: {{ .Values.auth.oauth.defaultGroup | quote }}
+        mapped_group_max_runner_sessions: {{ .Values.auth.oauth.mappedGroupMaxRunnerSessions }}
         admin_groups:
 {{ toYaml .Values.auth.oauth.adminGroups | indent 10 }}
         cookie_secure: {{ .Values.auth.oauth.cookieSecure }}

@@ -92,7 +92,13 @@ type OAuthConfig struct {
 	AllowedTeams  []string           `mapstructure:"allowed_teams"`  // github only: "org/team" slug allowlist
 	AllowedGroups []string           `mapstructure:"allowed_groups"` // oidc only: groups-claim allowlist (canonical)
 	GroupMappings []GroupMappingRule `mapstructure:"group_mappings"` // provider group -> supervisor group regex mapping
-	DefaultGroup  string             `mapstructure:"default_group"`  // auto-membership for new OAuth users; empty = none
+	// MappedGroupMaxRunnerSessions is the max_runner_sessions (concurrent engine
+	// sessions per group; 0 = unlimited) applied to supervisor groups that are
+	// AUTO-CREATED by group_mappings when the mapped target group does not exist.
+	// It is applied only at creation time — a pre-existing group's quota is never
+	// modified. Applied on both login and IdP revalidation.
+	MappedGroupMaxRunnerSessions int    `mapstructure:"mapped_group_max_runner_sessions"`
+	DefaultGroup                 string `mapstructure:"default_group"` // auto-membership for new OAuth users; empty = none
 	// AdminGroups, when non-empty, promotes OAuth users to RoleAdmin when any of
 	// their RAW upstream provider groups (pre-mapping) exactly matches an entry.
 	// Case-sensitive. Empty = feature disabled (no OAuth user is auto-promoted).

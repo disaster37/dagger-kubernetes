@@ -59,12 +59,15 @@ type OIDCOAuthService struct {
 	allowedGroups []string
 	adminGroups   []string
 	defaultGroup  string
-	users         *UserService
-	groups        domain.GroupRepository
-	jwt           *JWTService
-	logger        *logrus.Logger
-	mapper        *GroupMapper
-	encKey        []byte // AES-256 key for encrypting upstream credentials; nil = disabled
+	// mappedGroupMaxRunnerSessions is the default max_runner_sessions applied to
+	// supervisor groups auto-created by group_mappings (0 = unlimited).
+	mappedGroupMaxRunnerSessions int
+	users                        *UserService
+	groups                       domain.GroupRepository
+	jwt                          *JWTService
+	logger                       *logrus.Logger
+	mapper                       *GroupMapper
+	encKey                       []byte // AES-256 key for encrypting upstream credentials; nil = disabled
 
 	// httpClient is the HTTP client used for OIDC provider discovery, token
 	// exchange, and userinfo. When nil, http.DefaultClient is used (via
@@ -130,25 +133,26 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *Us
 	}
 
 	return &OIDCOAuthService{ //nolint:gosec // G101: OAuth client secret is config-derived, not hardcoded.
-		clientID:        cfg.ClientID,
-		clientSecret:    cfg.ClientSecret,
-		redirectURL:     cfg.RedirectURL,
-		issuerURL:       strings.TrimRight(cfg.IssuerURL, "/"),
-		scopes:          scopes,
-		usernameClaim:   usernameClaim,
-		groupsClaim:     groupsClaim,
-		allowedOrgs:     cfg.AllowedOrgs,
-		allowedGroups:   cfg.AllowedGroups,
-		adminGroups:     cfg.AdminGroups,
-		defaultGroup:    cfg.DefaultGroup,
-		users:           users,
-		groups:          groups,
-		jwt:             jwtSvc,
-		logger:          logger,
-		mapper:          mapper,
-		httpClient:      httpClient,
-		providerFactory: defaultOIDCProviderFactory,
-		encKey:          encKey,
+		clientID:                     cfg.ClientID,
+		clientSecret:                 cfg.ClientSecret,
+		redirectURL:                  cfg.RedirectURL,
+		issuerURL:                    strings.TrimRight(cfg.IssuerURL, "/"),
+		scopes:                       scopes,
+		usernameClaim:                usernameClaim,
+		groupsClaim:                  groupsClaim,
+		allowedOrgs:                  cfg.AllowedOrgs,
+		allowedGroups:                cfg.AllowedGroups,
+		adminGroups:                  cfg.AdminGroups,
+		defaultGroup:                 cfg.DefaultGroup,
+		mappedGroupMaxRunnerSessions: cfg.MappedGroupMaxRunnerSessions,
+		users:                        users,
+		groups:                       groups,
+		jwt:                          jwtSvc,
+		logger:                       logger,
+		mapper:                       mapper,
+		httpClient:                   httpClient,
+		providerFactory:              defaultOIDCProviderFactory,
+		encKey:                       encKey,
 	}
 }
 
@@ -303,7 +307,7 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 		RefreshToken: tok.RefreshToken,
 		ExpiresAt:    tok.Expiry,
 	}
-	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "oidc", sub, username, s.defaultGroup, s.adminGroups, groups, mappedGroups, cred)
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "oidc", sub, username, s.defaultGroup, s.adminGroups, groups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("oidc oauth: %w", err)
 	}

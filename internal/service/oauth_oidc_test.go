@@ -576,6 +576,31 @@ func TestOIDCCompleteGroupMapping(t *testing.T) {
 	}
 }
 
+func TestOIDCCompleteGroupMappingAutoCreatesGroup(t *testing.T) {
+	issuer := newFakeOIDCIssuer(t)
+	issuer.claims["groups"] = []any{"devs"}
+	svc, gsvc := newOIDCService(t, oidcCfg(issuer.srv.URL, func(c *domain.OAuthConfig) {
+		c.AllowedOrgs = nil
+		c.GroupMappings = []domain.GroupMappingRule{
+			{Pattern: "^devs$", Replacement: "auto-dev"},
+		}
+		c.MappedGroupMaxRunnerSessions = 2
+	}))
+	ctx := context.Background()
+
+	_, _, u, err := svc.Complete(ctx, "code")
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
+	if len(groups) != 1 || groups[0].Name != "auto-dev" {
+		t.Fatalf("user should be member of the auto-created mapped group, got %v", groups)
+	}
+	if groups[0].MaxRunnerSessions != 2 || !groups[0].AgentAvailable {
+		t.Fatalf("auto-created group = %+v, want quota 2 and agent available", groups[0])
+	}
+}
+
 func TestOIDCCompleteNoGroupMappingsNoSync(t *testing.T) {
 	issuer := newFakeOIDCIssuer(t)
 	issuer.claims["groups"] = []any{"devs"}

@@ -57,15 +57,16 @@ type revalidationEntry struct {
 // single-flight cache. It is wired into AuthService at startup when OAuth is
 // enabled.
 type OAuthRevalidator struct {
-	provider    OAuthProvider
-	mapper      *GroupMapper
-	adminGroups []string
-	users       *UserService
-	groups      domain.GroupRepository
-	tokens      *TokenService
-	logger      *logrus.Logger
-	cfg         OAuthRevalidatorConfig
-	clock       func() time.Time
+	provider                     OAuthProvider
+	mapper                       *GroupMapper
+	adminGroups                  []string
+	mappedGroupMaxRunnerSessions int
+	users                        *UserService
+	groups                       domain.GroupRepository
+	tokens                       *TokenService
+	logger                       *logrus.Logger
+	cfg                          OAuthRevalidatorConfig
+	clock                        func() time.Time
 
 	mu    sync.Mutex
 	cache map[string]*revalidationEntry
@@ -77,6 +78,7 @@ func NewOAuthRevalidator(
 	provider OAuthProvider,
 	mapper *GroupMapper,
 	adminGroups []string,
+	mappedGroupMaxRunnerSessions int,
 	users *UserService,
 	groups domain.GroupRepository,
 	tokens *TokenService,
@@ -85,7 +87,8 @@ func NewOAuthRevalidator(
 ) *OAuthRevalidator {
 	r := &OAuthRevalidator{
 		provider: provider, mapper: mapper, adminGroups: adminGroups,
-		users: users, groups: groups,
+		mappedGroupMaxRunnerSessions: mappedGroupMaxRunnerSessions,
+		users:                        users, groups: groups,
 		tokens: tokens, logger: logger, cfg: cfg,
 		clock: func() time.Time { return time.Now().UTC() },
 		cache: make(map[string]*revalidationEntry),
@@ -268,7 +271,7 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 
 	// Success: reconcile OAuth-managed memberships (add new, remove stale).
 	mapped := r.mapper.mapIfActive(groups)
-	gids, err := reconcileMemberships(ctx, r.groups, r.logger, u, mapped)
+	gids, err := reconcileMemberships(ctx, r.groups, r.logger, u, mapped, r.mappedGroupMaxRunnerSessions)
 	if err != nil {
 		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: membership reconciliation failed during revalidation")
 	} else {

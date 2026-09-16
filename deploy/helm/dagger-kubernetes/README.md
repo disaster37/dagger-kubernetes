@@ -753,6 +753,7 @@ Configure it under `supervisor.config.history`:
 | `auth.oauth.allowedGroups` | array | `[]` | (oidc) Allowed provider group names (groups-claim allowlist; union with allowedOrgs). |
 | `auth.oauth.groupMappings` | array | `[]` | Regex group mapping: list of {pattern, replacement} mapping provider groups to supervisor group names (first-match-wins; no match drops the group). |
 | `auth.oauth.defaultGroup` | string | `""` | Default group for OAuth users. |
+| `auth.oauth.mappedGroupMaxRunnerSessions` | int | `0` | Default `max_runner_sessions` (0 = unlimited) for supervisor groups auto-created by `groupMappings`; applied only at creation time. |
 | `auth.oauth.adminGroups` | array | `[]` | Upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, checked pre-mapping); empty = disabled. |
 | `auth.oauth.cookieSecure` | bool | `false` | Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor). |
 | `auth.oauth.issuerUrl` | string | `""` | (oidc) OIDC issuer URL (e.g. https://dex.example.com). |

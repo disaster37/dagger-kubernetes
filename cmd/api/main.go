@@ -236,7 +236,7 @@ func run(c *cli.Context) error {
 		}
 
 		// Wire OAuth revalidation when OAuth is enabled.
-		revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, cfg.Auth.OAuth.AdminGroups, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
+		revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, cfg.Auth.OAuth.AdminGroups, cfg.Auth.OAuth.MappedGroupMaxRunnerSessions, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
 			Interval:      cfg.Auth.OAuth.RevalidateInterval,
 			Grace:         cfg.Auth.OAuth.RevalidateGrace,
 			FailOpen:      cfg.Auth.OAuth.RevalidateFailOpen,

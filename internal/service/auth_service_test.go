@@ -200,7 +200,7 @@ func TestAuthRefreshSessionMaxAge(t *testing.T) {
 
 	// Set up a revalidator with max age.
 	fakeProv := &fakeRevalidateProvider{groups: []string{"g1"}}
-	rv := NewOAuthRevalidator(fakeProv, nil, nil, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
+	rv := NewOAuthRevalidator(fakeProv, nil, nil, 0, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
 		SessionMaxAge: 5 * time.Minute,
 	})
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
@@ -225,7 +225,7 @@ func TestAuthRefreshRevalidatesOAuth(t *testing.T) {
 
 	// Set up OAuth user with revalidator that returns ErrForbidden.
 	fakeProv := &fakeRevalidateProvider{err: domain.ErrForbidden}
-	rv := NewOAuthRevalidator(fakeProv, nil, nil, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
+	rv := NewOAuthRevalidator(fakeProv, nil, nil, 0, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
 		Interval: 5 * time.Minute,
 		Grace:    time.Hour,
 	})

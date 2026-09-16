@@ -76,10 +76,12 @@ auth:
       # - pattern: '^github\.com/acme-(.*)$'   # Go regexp vs incoming provider group name (case-sensitive; (?i) for insensitive).
       #   replacement: 'acme-$1'               # target supervisor group name; $1/${name} capture substitution, $$ = literal $.
     # NOTE: group_mappings assigns GROUP MEMBERSHIP only, never the admin ROLE.
-    # Mapped target groups must already exist in the supervisor (only "default"
-    # is bootstrapped); missing groups are skipped with a Warn. allowed_groups /
-    # allowed_orgs are checked against the RAW upstream groups BEFORE mapping.
-    # Use admin_groups to grant the admin role.
+    # Mapped target groups are AUTO-CREATED when missing, with
+    # mapped_group_max_runner_sessions and agent_available=true; a group that
+    # already exists is left unchanged. allowed_groups / allowed_orgs are checked
+    # against the RAW upstream groups BEFORE mapping. Use admin_groups to grant
+    # the admin role.
+    mapped_group_max_runner_sessions: 0   # default max_runner_sessions (concurrent engine sessions) for groups AUTO-CREATED by group_mappings; 0 = unlimited. Applied only at creation time; never overwrites an existing group's quota.
     default_group: ""                  # new OAuth users auto-join this group (must exist); empty = none.
     admin_groups: []                   # upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, pre-mapping); empty = disabled.
       # - 'HM_ADM_ETL_Outils'           # a Dex/OIDC groups-claim value; GitHub: an org login or "org/team" slug.

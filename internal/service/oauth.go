@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -87,6 +88,55 @@ func applyOAuthAdminRole(u *domain.User, adminGroups, upstreamGroups []string) b
 	return false
 }
 
+// ensureGroupByName resolves the supervisor group named name, creating it (with
+// defaultMaxRunnerSessions and AgentAvailable=true) when it does not exist.
+//
+// Return contract (tri-state):
+//   - (nil, nil): name is not a valid supervisor group name (logged + skip).
+//   - (g, nil):   group resolved (pre-existing, or just created / re-fetched).
+//   - (nil, err): store error; caller logs and skips the group (best-effort).
+//
+// Creation is idempotent and race-safe: on domain.ErrConflict the group is
+// re-fetched by name (the concurrent winner's quota is respected). A
+// pre-existing group's quota and agent_available are never modified.
+func ensureGroupByName(
+	ctx context.Context,
+	groups domain.GroupRepository,
+	name string,
+	defaultMaxRunnerSessions int,
+	logger *logrus.Logger,
+) (*domain.Group, error) {
+	g, err := groups.GetByName(ctx, name)
+	if err == nil {
+		return g, nil
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
+		return nil, fmt.Errorf("get group %q: %w", name, err)
+	}
+	if !ValidateGroupName(name) {
+		logger.WithField("group", name).Warn("oauth: mapped group name invalid, skipping (not auto-created)")
+		return nil, nil
+	}
+	g = &domain.Group{
+		ID:                newID(),
+		Name:              name,
+		MaxRunnerSessions: defaultMaxRunnerSessions,
+		AgentAvailable:    true,
+	}
+	if err := groups.Create(ctx, g); err != nil {
+		if errors.Is(err, domain.ErrConflict) {
+			// Concurrent first-login won the race: reuse the winner's group.
+			return groups.GetByName(ctx, name)
+		}
+		return nil, fmt.Errorf("create group %q: %w", name, err)
+	}
+	logger.WithFields(logrus.Fields{
+		"group":               name,
+		"max_runner_sessions": defaultMaxRunnerSessions,
+	}).Info("oauth: auto-created mapped group")
+	return g, nil
+}
+
 // joinGroupByName best-effort adds userID to the named group. Missing groups
 // and membership errors are logged (never fatal). It serves both the mapped
 // (group_mappings) and default_group auto-join paths, so the log message is
@@ -118,6 +168,7 @@ func completeOAuthLogin(
 	adminGroups []string,
 	upstreamGroups []string,
 	mappedGroups []string,
+	mappedGroupMaxRunnerSessions int,
 	credential *oauthCredential,
 ) (access, refresh string, u *domain.User, err error) {
 	u, _, err = users.EnsureOAuthUser(ctx, provider, oauthID, username)
@@ -132,7 +183,7 @@ func completeOAuthLogin(
 
 	// Reconcile OAuth-managed memberships: add new, remove stale. Called even
 	// when mappedGroups is empty so memberships that no longer map are removed.
-	if oauthGids, rerr := reconcileMemberships(ctx, groups, logger, u, mappedGroups); rerr != nil {
+	if oauthGids, rerr := reconcileMemberships(ctx, groups, logger, u, mappedGroups, mappedGroupMaxRunnerSessions); rerr != nil {
 		logger.WithError(rerr).WithField("user_id", u.ID).Warn("oauth: membership reconciliation failed")
 	} else {
 		u.OAuthGroupIDs = oauthGids
@@ -189,23 +240,28 @@ func completeOAuthLogin(
 }
 
 // reconcileMemberships applies the desired OAuth-managed supervisor group
-// memberships for u: add memberships for names that newly resolve, remove
-// memberships for previously OAuth-managed names that no longer resolve.
-// Admin-managed memberships (groups not in u.OAuthGroupIDs) are never touched.
-// Returns the resulting supervisor group IDs.
+// memberships for u: add memberships for names that newly resolve (auto-creating
+// the group when missing, see ensureGroupByName), remove memberships for
+// previously OAuth-managed names that no longer resolve. Admin-managed
+// memberships (groups not in u.OAuthGroupIDs) are never touched. Returns the
+// resulting supervisor group IDs.
 func reconcileMemberships(
 	ctx context.Context,
 	groups domain.GroupRepository,
 	logger *logrus.Logger,
 	u *domain.User,
 	mappedNames []string,
+	defaultMaxRunnerSessions int,
 ) ([]string, error) {
 	wanted := make(map[string]bool, len(mappedNames))
 	for _, name := range mappedNames {
-		g, err := groups.GetByName(ctx, name)
+		g, err := ensureGroupByName(ctx, groups, name, defaultMaxRunnerSessions, logger)
 		if err != nil {
-			logger.WithError(err).WithField("group", name).Warn("oauth: group not found during revalidation, skipping")
+			logger.WithError(err).WithField("group", name).Warn("oauth: ensure mapped group failed, skipping")
 			continue
+		}
+		if g == nil {
+			continue // invalid name (already logged)
 		}
 		wanted[g.ID] = true
 	}

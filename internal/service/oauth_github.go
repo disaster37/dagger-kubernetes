@@ -25,37 +25,41 @@ type GitHubOAuthService struct {
 	allowedTeams []string
 	adminGroups  []string
 	defaultGroup string
-	tokenURL     string
-	apiBaseURL   string
-	http         *http.Client
-	users        *UserService
-	groups       domain.GroupRepository
-	jwt          *JWTService
-	logger       *logrus.Logger
-	mapper       *GroupMapper
-	encKey       []byte // AES-256 key for encrypting upstream credentials; nil = disabled
+	// mappedGroupMaxRunnerSessions is the default max_runner_sessions applied to
+	// supervisor groups auto-created by group_mappings (0 = unlimited).
+	mappedGroupMaxRunnerSessions int
+	tokenURL                     string
+	apiBaseURL                   string
+	http                         *http.Client
+	users                        *UserService
+	groups                       domain.GroupRepository
+	jwt                          *JWTService
+	logger                       *logrus.Logger
+	mapper                       *GroupMapper
+	encKey                       []byte // AES-256 key for encrypting upstream credentials; nil = disabled
 }
 
 // NewGitHubOAuthService returns a GitHubOAuthService. encKey is the AES-256 key
 // used to encrypt upstream OAuth credentials at rest; nil disables encryption.
 func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, encKey []byte) *GitHubOAuthService {
 	return &GitHubOAuthService{ //nolint:gosec // G101: OAuth client secret is config-derived, not hardcoded.
-		clientID:     cfg.ClientID,
-		clientSecret: cfg.ClientSecret,
-		redirectURL:  cfg.RedirectURL,
-		allowedOrgs:  cfg.AllowedOrgs,
-		allowedTeams: cfg.AllowedTeams,
-		adminGroups:  cfg.AdminGroups,
-		defaultGroup: cfg.DefaultGroup,
-		tokenURL:     "https://github.com/login/oauth/access_token",
-		apiBaseURL:   "https://api.github.com",
-		http:         &http.Client{Timeout: 10 * time.Second},
-		users:        users,
-		groups:       groups,
-		jwt:          jwtSvc,
-		logger:       logger,
-		mapper:       mapper,
-		encKey:       encKey,
+		clientID:                     cfg.ClientID,
+		clientSecret:                 cfg.ClientSecret,
+		redirectURL:                  cfg.RedirectURL,
+		allowedOrgs:                  cfg.AllowedOrgs,
+		allowedTeams:                 cfg.AllowedTeams,
+		adminGroups:                  cfg.AdminGroups,
+		defaultGroup:                 cfg.DefaultGroup,
+		mappedGroupMaxRunnerSessions: cfg.MappedGroupMaxRunnerSessions,
+		tokenURL:                     "https://github.com/login/oauth/access_token",
+		apiBaseURL:                   "https://api.github.com",
+		http:                         &http.Client{Timeout: 10 * time.Second},
+		users:                        users,
+		groups:                       groups,
+		jwt:                          jwtSvc,
+		logger:                       logger,
+		mapper:                       mapper,
+		encKey:                       encKey,
 	}
 }
 
@@ -117,7 +121,7 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 	mappedGroups := s.mapper.mapIfActive(providerGroups)
 
 	cred := &oauthCredential{Provider: "github", AccessToken: accessToken}
-	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, s.adminGroups, providerGroups, mappedGroups, cred)
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, s.adminGroups, providerGroups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("github oauth: %w", err)
 	}
