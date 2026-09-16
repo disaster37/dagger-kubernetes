@@ -94,7 +94,12 @@ likewise reclaimed automatically once unreferenced.
 A new admin `/image-cache` page (reusing the removed Sync-cache nav slot)
 renders one card per mirror: repository→tag table with checkboxes (digest, size,
 layer count), "Prune selected"/"Prune all" with confirm dialogs, per-mirror
-loading/error state, and inline per-item results. The existing per-version
+loading/error state, and inline per-item results. For multi-arch tags (OCI
+image index / Docker manifest list), `GET /api/v1/image-cache` reports
+`size_bytes`/`layer_count` from a representative child platform manifest
+(linux/amd64 preferred; attestation and `unknown`-platform entries skipped),
+while `digest` remains the top-level index digest so prune still unlinks the
+tag (see the Consequences). The existing per-version
 engine purge button on the Runners page is relabelled **"Purge local cache"**
 (kept per-version, per-pod granularity is a non-goal).
 
@@ -127,3 +132,9 @@ engine purge button on the Runners page is relabelled **"Purge local cache"**
   there is no TTL — invalidation is explicit via prune.
 - Known caveat: prune-all cannot reach untagged/orphaned manifests by tag; Zot
   GC reclaims their bytes automatically once unreferenced.
+- For multi-arch tags (OCI image index / Docker manifest list),
+  `GET /api/v1/image-cache` reports `size_bytes`/`layer_count` from a
+  representative child platform manifest (linux/amd64 preferred; attestation
+  and `unknown`-platform entries skipped), while `digest` remains the top-level
+  index digest so prune still unlinks the tag. If no child resolves, size/layer
+  count are `-1` (unknown).

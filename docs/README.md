@@ -789,7 +789,9 @@ config block (`{id, host, upstream, internal_addr, backend}`). See
 [ADR-034](design/ADR-034-admin-image-cache-management.md).
 
 - `GET /api/v1/image-cache` — lists each mirror's repositories/tags with digest,
-  size, and layer count. Per-mirror failures are reported inline
+  size, and layer count. For multi-arch tags the size/layer count reflects a
+  representative platform (linux/amd64 when present); the digest is the
+  top-level index digest. Per-mirror failures are reported inline
   (`reachable:false` + `error`), never as a failed request.
 - `POST /api/v1/image-cache/prune` — body
   `{mirror_id, refs: [{repository, tag?|digest?}]}`; prunes the selected

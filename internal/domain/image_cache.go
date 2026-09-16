@@ -46,8 +46,12 @@ type DistributionClient interface {
 	Ping(ctx context.Context) error
 	Catalog(ctx context.Context) ([]string, error)
 	Tags(ctx context.Context, repo string) ([]string, error)
-	// ManifestSize returns (digest, sizeBytes, layerCount). digest is used by
-	// the prune path for tag→digest resolution; size/layerCount by listing.
+	// ManifestSize returns (digest, sizeBytes, layerCount). digest is the
+	// top-level manifest digest (the index digest for multi-arch tags) and is
+	// used by the prune path for tag→digest resolution; size/layerCount are
+	// used by listing. For image indexes / manifest lists, size/layerCount are
+	// resolved from a representative child platform manifest (linux/amd64
+	// preferred); -1 = unknown when no child resolves.
 	ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error)
 	DeleteManifest(ctx context.Context, repo, digest string) error
 }

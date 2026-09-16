@@ -55,8 +55,8 @@
               <th>Repository</th>
               <th>Tag</th>
               <th>Digest</th>
-              <th>Size</th>
-              <th>Layers</th>
+              <th title="Multi-arch tags report a representative platform (linux/amd64 when present)">Size</th>
+              <th title="Multi-arch tags report a representative platform (linux/amd64 when present)">Layers</th>
             </tr>
           </thead>
           <tbody>
@@ -73,7 +73,7 @@
                 <td>{{ tag.tag }}</td>
                 <td><code>{{ tag.digest }}</code></td>
                 <td>{{ formatBytes(tag.size_bytes) }}</td>
-                <td>{{ tag.layer_count }}</td>
+                <td>{{ formatLayers(tag.layer_count) }}</td>
               </tr>
             </template>
           </tbody>
@@ -228,6 +228,10 @@ function failedPruneItems(result: ImageCachePruneResult) {
 
 function pruneAllSummary(result: ImageCachePruneAllResult['mirrors'][number]): string {
   return `Pruned ${result.manifests_pruned} manifest(s) across ${result.repositories_processed} repo(s), ${result.errors} error(s).`
+}
+
+function formatLayers(n: number): string {
+  return n < 0 ? 'unknown' : String(n)
 }
 
 function formatBytes(n: number): string {

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -175,6 +176,203 @@ func TestRegistryManifestSize(t *testing.T) {
 				t.Errorf("layers = %d, want %d", layers, tc.wantLayers)
 			}
 		})
+	}
+}
+
+// indexChild renders one image-index child descriptor with a platform.
+func indexChild(digest, os, arch string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":100,"platform":{"os":%q,"architecture":%q}}`, digest, os, arch)
+}
+
+// attestChild renders a BuildKit attestation child descriptor.
+func attestChild(digest string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":50,"platform":{"os":"unknown","architecture":"unknown"},"annotations":{%q:%q}}`, digest, annotationReferenceType, referenceTypeAttestation)
+}
+
+// indexBody renders an OCI image index with the given child descriptors.
+func indexBody(children ...string) string {
+	return fmt.Sprintf(`{"mediaType":%q,"manifests":[%s]}`, ociIndexMediaType, strings.Join(children, ","))
+}
+
+// directBody renders a direct manifest whose config + layers sum to size with
+// the given layer count (config and each layer = size/(layers+1)).
+func directBody(size int64, layers int) string {
+	per := size / int64(layers+1)
+	descriptors := make([]string, 0, layers)
+	for i := 0; i < layers; i++ {
+		descriptors = append(descriptors, fmt.Sprintf(`{"digest":"sha256:%064x","size":%d}`, i, per))
+	}
+	return fmt.Sprintf(`{"config":{"digest":"sha256:cfg","size":%d},"layers":[%s]}`, per, strings.Join(descriptors, ","))
+}
+
+// indexTestHandler serves an index at the v0-21-4 tag and its children by
+// digest; children absent from the map 404.
+func indexTestHandler(index, indexDigest string, children map[string]string) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		const tagPath = "/v2/dagger-cache/manifests/v0-21-4"
+		if r.URL.Path == tagPath {
+			w.Header().Set("Docker-Content-Digest", indexDigest)
+			_, _ = w.Write([]byte(index))
+			return
+		}
+		digest := strings.TrimPrefix(r.URL.Path, "/v2/dagger-cache/manifests/")
+		body, ok := children[digest]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Docker-Content-Digest", digest)
+		_, _ = w.Write([]byte(body))
+	}
+}
+
+// TestRegistryManifestSizeIndex covers index / manifest-list resolution: the
+// returned digest must stay the top-level index digest (prune unlinks the tag)
+// while size/layers come from a representative child.
+func TestRegistryManifestSizeIndex(t *testing.T) {
+	amd64 := digestRepeat("a")
+	arm64 := digestRepeat("b")
+	attest := digestRepeat("c")
+	nested := digestRepeat("d")
+	nested2 := digestRepeat("3")
+	grand := digestRepeat("f")
+	indexDig := digestRepeat("e")
+
+	amd64Body := directBody(300, 2)
+	arm64Body := directBody(330, 2)
+	grandBody := directBody(500, 4)
+
+	tests := []struct {
+		name        string
+		index       string
+		indexDigest string
+		children    map[string]string
+		wantDigest  string
+		wantSize    int64
+		wantLayers  int64
+	}{
+		{
+			name:        "amd64-preferred",
+			index:       indexBody(indexChild(amd64, "linux", "amd64"), indexChild(arm64, "linux", "arm64")),
+			indexDigest: indexDig,
+			children:    map[string]string{amd64: amd64Body, arm64: arm64Body},
+			wantDigest:  indexDig,
+			wantSize:    300,
+			wantLayers:  2,
+		},
+		{
+			name:        "arm64-fallback",
+			index:       indexBody(indexChild(arm64, "linux", "arm64")),
+			indexDigest: indexDig,
+			children:    map[string]string{arm64: arm64Body},
+			wantDigest:  indexDig,
+			wantSize:    330,
+			wantLayers:  2,
+		},
+		{
+			name:        "attestation-and-unknown-skipped",
+			index:       indexBody(attestChild(attest), indexChild(arm64, "unknown", "unknown"), indexChild(amd64, "linux", "amd64")),
+			indexDigest: indexDig,
+			children:    map[string]string{amd64: amd64Body},
+			wantDigest:  indexDig,
+			wantSize:    300,
+			wantLayers:  2,
+		},
+		{
+			name:        "child-404-unknown",
+			index:       indexBody(indexChild(amd64, "linux", "amd64")),
+			indexDigest: indexDig,
+			children:    map[string]string{},
+			wantDigest:  indexDig,
+			wantSize:    -1,
+			wantLayers:  -1,
+		},
+		{
+			name:        "empty-index-unknown",
+			index:       indexBody(),
+			indexDigest: indexDig,
+			children:    map[string]string{},
+			wantDigest:  indexDig,
+			wantSize:    -1,
+			wantLayers:  -1,
+		},
+		{
+			name:        "all-attestation-unknown",
+			index:       indexBody(attestChild(attest)),
+			indexDigest: indexDig,
+			children:    map[string]string{},
+			wantDigest:  indexDig,
+			wantSize:    -1,
+			wantLayers:  -1,
+		},
+		{
+			name:        "nested-index-resolves-grandchild",
+			index:       indexBody(indexChild(nested, "linux", "amd64")),
+			indexDigest: indexDig,
+			children: map[string]string{
+				nested: indexBody(indexChild(grand, "linux", "amd64")),
+				grand:  grandBody,
+			},
+			wantDigest: indexDig,
+			wantSize:   500,
+			wantLayers: 4,
+		},
+		{
+			name:        "nested-past-depth-cap-unknown",
+			index:       indexBody(indexChild(nested, "linux", "amd64")),
+			indexDigest: indexDig,
+			children: map[string]string{
+				nested:  indexBody(indexChild(nested2, "linux", "amd64")),
+				nested2: indexBody(indexChild(grand, "linux", "amd64")),
+			},
+			wantDigest: indexDig,
+			wantSize:   -1,
+			wantLayers: -1,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c := testClient(t, indexTestHandler(tc.index, tc.indexDigest, tc.children))
+			digest, size, layers, err := c.ManifestSize(context.Background(), "dagger-cache", "v0-21-4")
+			if err != nil {
+				t.Fatalf("ManifestSize: %v", err)
+			}
+			if digest != tc.wantDigest {
+				t.Errorf("digest = %q, want %q", digest, tc.wantDigest)
+			}
+			if size != tc.wantSize {
+				t.Errorf("size = %d, want %d", size, tc.wantSize)
+			}
+			if layers != tc.wantLayers {
+				t.Errorf("layers = %d, want %d", layers, tc.wantLayers)
+			}
+		})
+	}
+}
+
+// TestManifestSizeIndexRejectsMalformedChildDigest proves an index child with a
+// hostile (non-sha256) digest is never interpolated into a request: only the
+// top-level tag fetch happens, and the result is unknown (-1/-1) with the valid
+// top-level digest (CWE-20/CWE-918).
+func TestManifestSizeIndexRejectsMalformedChildDigest(t *testing.T) {
+	var requests []string
+	c := testClient(t, func(w http.ResponseWriter, r *http.Request) {
+		requests = append(requests, r.URL.Path)
+		w.Header().Set("Docker-Content-Digest", digestRepeat("e"))
+		_, _ = w.Write([]byte(`{"mediaType":"` + ociIndexMediaType + `","manifests":[{"digest":"../../v2/_catalog","platform":{"os":"linux","architecture":"amd64"}}]}`))
+	})
+	digest, size, layers, err := c.ManifestSize(context.Background(), "dagger-cache", "v0-21-4")
+	if err != nil {
+		t.Fatalf("ManifestSize: %v", err)
+	}
+	if size != -1 || layers != -1 {
+		t.Fatalf("size/layers = %d/%d, want -1/-1", size, layers)
+	}
+	if !validDigest(digest) {
+		t.Fatalf("digest = %q, want valid top-level digest", digest)
+	}
+	if len(requests) != 1 || requests[0] != "/v2/dagger-cache/manifests/v0-21-4" {
+		t.Fatalf("requests = %v, want only the top-level tag fetch", requests)
 	}
 }
 

@@ -242,33 +242,144 @@ func (c *DistributionClient) Tags(ctx context.Context, repo string) ([]string, e
 	return body.Tags, nil
 }
 
-// manifest is the subset of the OCI/Docker manifest needed to sum sizes.
+// manifest is the subset of the OCI/Docker manifest needed to sum sizes and to
+// resolve an image index to a representative child platform manifest.
 type manifest struct {
+	MediaType   string            `json:"mediaType"`
 	Config      *descriptor       `json:"config"`
 	Layers      []descriptor      `json:"layers"`
+	Manifests   []descriptor      `json:"manifests"`
 	Annotations map[string]string `json:"annotations"`
 }
 
 type descriptor struct {
-	Digest string `json:"digest"`
-	Size   int64  `json:"size"`
+	MediaType   string            `json:"mediaType"`
+	Digest      string            `json:"digest"`
+	Size        int64             `json:"size"`
+	Platform    platform          `json:"platform"`
+	Annotations map[string]string `json:"annotations"`
+}
+
+type platform struct {
+	OS           string `json:"os"`
+	Architecture string `json:"architecture"`
 }
 
 const manifestAccept = "application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json"
+
+// OCI image index / Docker manifest list media types, and the BuildKit
+// attestation annotation used to skip SBOM/provenance child descriptors.
+const (
+	ociIndexMediaType           = "application/vnd.oci.image.index.v1+json"
+	dockerManifestListMediaType = "application/vnd.docker.distribution.manifest.list.v2+json"
+	annotationReferenceType     = "vnd.docker.reference.type"
+	referenceTypeAttestation    = "attestation-manifest"
+
+	// maxIndexDepth bounds how many nested index levels ManifestSize resolves
+	// before reporting unknown. Docker Hub tags are a single index level;
+	// the cap guards against pathological index-in-index chains.
+	maxIndexDepth = 2
+)
+
+// isIndexManifest reports whether m is an image index / manifest list. It
+// matches the two index media types and falls back to the structural signal
+// (no config but children present) for registries that omit mediaType.
+func isIndexManifest(m *manifest) bool {
+	switch m.MediaType {
+	case ociIndexMediaType, dockerManifestListMediaType:
+		return true
+	}
+	return m.Config == nil && len(m.Manifests) > 0
+}
+
+// isAttestation reports whether a child descriptor points at an attestation
+// manifest (BuildKit SBOM/provenance), which has no runnable config/layers and
+// must not be chosen as the representative child.
+func isAttestation(d *descriptor) bool {
+	return d.Annotations[annotationReferenceType] == referenceTypeAttestation
+}
+
+// selectChildManifest picks a representative child descriptor to size. It
+// prefers linux/amd64, skips attestation and "unknown"-platform entries, and
+// falls back to the first usable non-attestation descriptor. ok is false when
+// no usable child exists (empty index, or only attestation/unknown entries).
+func selectChildManifest(m *manifest) (descriptor, bool) {
+	var fallback descriptor
+	haveFallback := false
+	for _, d := range m.Manifests {
+		if isAttestation(&d) {
+			continue
+		}
+		if d.Platform.Architecture == "unknown" {
+			continue
+		}
+		if !haveFallback {
+			fallback = d
+			haveFallback = true
+		}
+		if d.Platform.OS == "linux" && d.Platform.Architecture == "amd64" {
+			return d, true
+		}
+	}
+	if haveFallback {
+		return fallback, true
+	}
+	return descriptor{}, false
+}
+
+// directManifestSize sums a non-index manifest's config+layers. The -1
+// "unknown" sentinel is set when the manifest has layers but their sizes are
+// absent (the registry omitted descriptor sizes) — the existing behavior.
+func directManifestSize(m *manifest) (size, layers int64) {
+	layers = int64(len(m.Layers))
+	for _, l := range m.Layers {
+		size += l.Size
+	}
+	if m.Config != nil {
+		size += m.Config.Size
+	}
+	if size == 0 && len(m.Layers) > 0 {
+		size = -1
+	}
+	return size, layers
+}
 
 // getManifest fetches repo:tag's manifest, mapping 404 to ErrManifestNotFound
 // and other non-2xx to ErrRegistryUnreachable. It returns the decoded manifest
 // plus its digest (from Docker-Content-Digest, or computed from the body).
 func (c *DistributionClient) getManifest(ctx context.Context, repo, tag string) (*manifest, string, error) {
+	return c.getManifestRef(ctx, repo, tag, false)
+}
+
+// getManifestByDigest fetches repo's manifest by sha256 digest (used to resolve
+// an image index to a representative child). The digest is validated before it
+// is interpolated into the request path.
+func (c *DistributionClient) getManifestByDigest(ctx context.Context, repo, digest string) (*manifest, string, error) {
+	return c.getManifestRef(ctx, repo, digest, true)
+}
+
+// getManifestRef is the shared manifest GET. When refIsDigest is true, ref is
+// validated with validDigest and path-escaped; otherwise it is escaped as a
+// tag. Everything else (Accept header, status mapping, digest header
+// validation with body-hash fallback) is common to both.
+func (c *DistributionClient) getManifestRef(ctx context.Context, repo, ref string, refIsDigest bool) (*manifest, string, error) {
 	repoPath, err := escapeRepository(repo)
 	if err != nil {
 		return nil, "", err
 	}
-	tagPath, err := escapeTag(tag)
-	if err != nil {
-		return nil, "", err
+	var refPath string
+	if refIsDigest {
+		if !validDigest(ref) {
+			return nil, "", fmt.Errorf("invalid digest: must be sha256:<hex>")
+		}
+		refPath = url.PathEscape(ref)
+	} else {
+		refPath, err = escapeTag(ref)
+		if err != nil {
+			return nil, "", err
+		}
 	}
-	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), repoPath, tagPath), manifestAccept)
+	resp, err := c.do(ctx, http.MethodGet, fmt.Sprintf("%s/v2/%s/manifests/%s", c.baseURL(), repoPath, refPath), manifestAccept)
 	if err != nil {
 		return nil, "", err
 	}
@@ -276,7 +387,7 @@ func (c *DistributionClient) getManifest(ctx context.Context, repo, tag string) 
 
 	if resp.StatusCode == http.StatusNotFound {
 		discard(resp)
-		return nil, "", fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, tag)
+		return nil, "", fmt.Errorf("%w: %s:%s", ErrManifestNotFound, repo, ref)
 	}
 	if resp.StatusCode != http.StatusOK {
 		discard(resp)
@@ -309,30 +420,43 @@ func (c *DistributionClient) getManifest(ctx context.Context, repo, tag string) 
 }
 
 // ManifestSize fetches the manifest for repo:tag and returns (digest, sizeBytes,
-// layerCount). sizeBytes is the sum of layer + config descriptor sizes; when
-// those sizes are absent the listing reports -1 (unknown) rather than issuing a
-// HEAD per blob. Returns ErrManifestNotFound on 404.
+// layerCount). digest is always the TOP-LEVEL manifest digest (the index digest
+// for a multi-arch tag), which the prune path uses to unlink the tag. For an
+// image index / manifest list, sizeBytes/layerCount are resolved from a
+// representative child platform manifest (linux/amd64 preferred, attestation
+// and "unknown"-platform entries skipped); when no child resolves (empty index,
+// only attestation entries, child fetch/decode failure, or nesting past
+// maxIndexDepth) both are -1 (unknown). A child-resolution failure is NOT an
+// error — the tag stays in the listing. Returns ErrManifestNotFound on 404 of
+// the top-level manifest.
 func (c *DistributionClient) ManifestSize(ctx context.Context, repo, tag string) (digest string, size, layers int64, err error) {
 	m, digest, err := c.getManifest(ctx, repo, tag)
 	if err != nil {
 		return "", 0, 0, err
 	}
-
-	layers = int64(len(m.Layers))
-	for _, l := range m.Layers {
-		size += l.Size
-	}
-	if m.Config != nil {
-		size += m.Config.Size
-	}
-
-	// Some registries omit descriptor sizes; report unknown rather than
-	// falling back to a HEAD per blob.
-	if size == 0 && len(m.Layers) > 0 {
-		size = -1
-	}
-
+	size, layers = c.manifestSize(ctx, repo, m, 0)
 	return digest, size, layers, nil
+}
+
+// manifestSize resolves m's (size, layers). Index manifests are resolved to a
+// representative child (descending through at most maxIndexDepth nested indexes,
+// then -1/-1); direct manifests are summed in place.
+func (c *DistributionClient) manifestSize(ctx context.Context, repo string, m *manifest, depth int) (size, layers int64) {
+	if !isIndexManifest(m) {
+		return directManifestSize(m)
+	}
+	if depth >= maxIndexDepth {
+		return -1, -1
+	}
+	child, ok := selectChildManifest(m)
+	if !ok {
+		return -1, -1
+	}
+	cm, _, err := c.getManifestByDigest(ctx, repo, child.Digest)
+	if err != nil {
+		return -1, -1
+	}
+	return c.manifestSize(ctx, repo, cm, depth+1)
 }
 
 // DeleteManifest deletes a manifest by digest. Returns

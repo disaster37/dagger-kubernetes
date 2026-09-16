@@ -26,23 +26,83 @@ import (
 // API contract): ping, catalog, tags, manifest GET (with Docker-Content-Digest)
 // and manifest DELETE by digest.
 type fakeOCIRegistry struct {
-	mu    sync.Mutex
-	repos map[string]map[string]fakeOCIImage // repo -> tag -> image
-	srv   *httptest.Server
+	mu       sync.Mutex
+	repos    map[string]map[string]fakeOCIImage // repo -> tag -> image
+	children map[string]fakeOCIChild            // digest -> child (flat manifest)
+	srv      *httptest.Server
 }
 
 type fakeOCIImage struct {
 	digest string
 	size   int64
 	layers int64
+	// children, when non-nil, turns this tag into an OCI image index whose
+	// entries are platform manifests served by digest.
+	children []fakeOCIChild
+}
+
+type fakeOCIChild struct {
+	digest      string
+	os          string
+	arch        string
+	size        int64
+	layers      int64
+	attestation bool // BuildKit SBOM/provenance entry to be skipped
 }
 
 func newFakeOCIRegistry(t *testing.T, repos map[string]map[string]fakeOCIImage) *fakeOCIRegistry {
 	t.Helper()
-	f := &fakeOCIRegistry{repos: repos}
+	f := &fakeOCIRegistry{repos: repos, children: map[string]fakeOCIChild{}}
+	for _, tags := range repos {
+		for _, img := range tags {
+			for _, ch := range img.children {
+				f.children[ch.digest] = ch
+			}
+		}
+	}
 	f.srv = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.srv.Close)
 	return f
+}
+
+// flatManifestBody renders a direct manifest whose config + layers sum to size
+// with the given layer count (config and each layer = size/(layers+1), so the
+// sum is exact for sizes divisible by layers+1).
+func flatManifestBody(size, layers int64) []byte {
+	per := size / (layers + 1)
+	ls := make([]map[string]any, 0, layers)
+	for i := int64(0); i < layers; i++ {
+		ls = append(ls, map[string]any{"digest": fmt.Sprintf("sha256:%064x", i), "size": per})
+	}
+	body, _ := json.Marshal(map[string]any{
+		"schemaVersion": 2,
+		"config":        map[string]any{"digest": fmt.Sprintf("sha256:%064x", layers), "size": per},
+		"layers":        ls,
+	})
+	return body
+}
+
+// indexManifestBody renders an OCI image index for img.children.
+func indexManifestBody(img fakeOCIImage) []byte {
+	manifests := make([]map[string]any, 0, len(img.children))
+	for _, ch := range img.children {
+		entry := map[string]any{
+			"mediaType": "application/vnd.oci.image.manifest.v1+json",
+			"digest":    ch.digest,
+			"size":      ch.size,
+			"platform":  map[string]any{"os": ch.os, "architecture": ch.arch},
+		}
+		if ch.attestation {
+			entry["annotations"] = map[string]any{"vnd.docker.reference.type": "attestation-manifest"}
+		}
+		manifests = append(manifests, entry)
+	}
+	body, _ := json.Marshal(map[string]any{
+		"schemaVersion": 2,
+		"mediaType":     "application/vnd.oci.image.index.v1+json",
+		"manifests":     manifests,
+	})
+	return body
 }
 
 func (f *fakeOCIRegistry) host() string {
@@ -96,23 +156,33 @@ func (f *fakeOCIRegistry) serve(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet, http.MethodHead:
 		f.mu.Lock()
 		img, ok := f.repos[repo][ref]
+		var child *fakeOCIChild
+		if !ok {
+			if ch, ok2 := f.children[ref]; ok2 {
+				child = &ch
+				ok = true
+			}
+		}
 		f.mu.Unlock()
 		if !ok {
 			http.NotFound(w, r)
 			return
 		}
+		if child != nil {
+			w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
+			w.Header().Set("Docker-Content-Digest", child.digest)
+			_, _ = w.Write(flatManifestBody(child.size, child.layers))
+			return
+		}
+		if img.children != nil {
+			w.Header().Set("Content-Type", "application/vnd.oci.image.index.v1+json")
+			w.Header().Set("Docker-Content-Digest", img.digest)
+			_, _ = w.Write(indexManifestBody(img))
+			return
+		}
 		w.Header().Set("Content-Type", "application/vnd.oci.image.manifest.v1+json")
 		w.Header().Set("Docker-Content-Digest", img.digest)
-		layers := make([]map[string]any, 0, img.layers)
-		for i := int64(0); i < img.layers; i++ {
-			layers = append(layers, map[string]any{"digest": fmt.Sprintf("sha256:%064x", i), "size": img.size / (img.layers + 1)})
-		}
-		body, _ := json.Marshal(map[string]any{
-			"schemaVersion": 2,
-			"config":        map[string]any{"digest": fakeDigest(repo, "config"), "size": img.size / (img.layers + 1)},
-			"layers":        layers,
-		})
-		_, _ = w.Write(body)
+		_, _ = w.Write(flatManifestBody(img.size, img.layers))
 	case http.MethodDelete:
 		f.mu.Lock()
 		removed := false
@@ -365,6 +435,77 @@ func TestImageCachePruneAbsentIsIdempotentIntegration(t *testing.T) {
 	}
 	if prune.Pruned != 1 || prune.Errors != 0 {
 		t.Fatalf("absent manifest prune = %+v, want idempotent success", prune)
+	}
+}
+
+func TestImageCacheListIndexManifestIntegration(t *testing.T) {
+	indexDig := fakeDigest("library/alpine", "3.20")
+	amd64Dig := "sha256:" + strings.Repeat("a", 64)
+	arm64Dig := "sha256:" + strings.Repeat("b", 64)
+	attestDig := "sha256:" + strings.Repeat("c", 64)
+	fake := newFakeOCIRegistry(t, map[string]map[string]fakeOCIImage{
+		"library/alpine": {
+			"3.20": {digest: indexDig, children: []fakeOCIChild{
+				{digest: amd64Dig, os: "linux", arch: "amd64", size: 300, layers: 2},
+				{digest: arm64Dig, os: "linux", arch: "arm64", size: 310, layers: 2},
+				{digest: attestDig, os: "unknown", arch: "unknown", size: 50, layers: 1, attestation: true},
+			}},
+		},
+	})
+	env := newImageCacheTestEnv(t, fake)
+
+	// List: the index tag reports the amd64 child's nonzero size/layers and the
+	// INDEX digest (the bug was size_bytes=0/layer_count=0 for index tags).
+	status, body := env.do(t, "GET", "/api/v1/image-cache", "")
+	if status != http.StatusOK {
+		t.Fatalf("list status = %d, body=%s", status, body)
+	}
+	var info domain.ImageCacheInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		t.Fatalf("decode list: %v", err)
+	}
+	if len(info.Mirrors) != 2 || !info.Mirrors[0].Reachable {
+		t.Fatalf("mirrors = %+v", info.Mirrors)
+	}
+	alpine := findRepo(info.Mirrors[0].Repositories, "library/alpine")
+	if alpine == nil || len(alpine.Tags) != 1 {
+		t.Fatalf("alpine = %+v, want one tag", alpine)
+	}
+	tag := alpine.Tags[0]
+	if tag.Digest != indexDig {
+		t.Errorf("digest = %q, want top-level index digest %q", tag.Digest, indexDig)
+	}
+	if tag.SizeBytes != 300 {
+		t.Errorf("size_bytes = %d, want 300 (amd64 child)", tag.SizeBytes)
+	}
+	if tag.LayerCount != 2 {
+		t.Errorf("layer_count = %d, want 2 (amd64 child)", tag.LayerCount)
+	}
+
+	// Prune by tag resolves to the index digest and unlinks the tag.
+	status, body = env.do(t, "POST", "/api/v1/image-cache/prune",
+		`{"mirror_id":"docker-io","refs":[{"repository":"library/alpine","tag":"3.20"}]}`)
+	if status != http.StatusOK {
+		t.Fatalf("prune status = %d, body=%s", status, body)
+	}
+	var prune domain.ImageCachePruneResult
+	if err := json.Unmarshal(body, &prune); err != nil {
+		t.Fatalf("decode prune: %v", err)
+	}
+	if prune.Pruned != 1 || prune.Errors != 0 {
+		t.Fatalf("prune = %+v, want 1 pruned", prune)
+	}
+
+	// Re-list: the tag is gone.
+	status, body = env.do(t, "GET", "/api/v1/image-cache", "")
+	if status != http.StatusOK {
+		t.Fatalf("re-list status = %d", status)
+	}
+	if err := json.Unmarshal(body, &info); err != nil {
+		t.Fatalf("decode re-list: %v", err)
+	}
+	if repo := findRepo(info.Mirrors[0].Repositories, "library/alpine"); repo != nil {
+		t.Fatalf("alpine after prune = %+v, want gone", repo)
 	}
 }
 
