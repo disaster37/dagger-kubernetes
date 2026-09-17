@@ -41,6 +41,10 @@ func (s *stepsLogRepo) QueryTraceLogs(string, time.Time, time.Time, int) ([]doma
 
 func (s *stepsLogRepo) DeleteTraceLogs(context.Context, string) error { return nil }
 
+func (s *stepsLogRepo) SearchTraceLogs(context.Context, string, domain.LogSearchRequest) (domain.LogSearchPage, error) {
+	return domain.LogSearchPage{}, nil
+}
+
 // startCIStepsServer boots a supervisor wired like startPipelineURLServer, but
 // with stub trace/log repositories returning a fixed nested tree (root -> two
 // children, one failed) + span-correlated logs.

@@ -2,6 +2,7 @@ package domain
 
 import (
 	"context"
+	"errors"
 	"time"
 )
 
@@ -85,8 +86,40 @@ type TraceRepository interface {
 	GetTrace(traceID string) (*TraceInfo, error)
 }
 
+// ErrInvalidRegex is wrapped by LogRepository.SearchTraceLogs when the query
+// mode is "regex" and the pattern does not compile.
+var ErrInvalidRegex = errors.New("invalid regex")
+
+// LogSearchMode enumerates supported log text match modes.
+type LogSearchMode string
+
+const (
+	LogSearchContains LogSearchMode = "contains"
+	LogSearchRegex    LogSearchMode = "regex"
+)
+
+// LogSearchRequest is a subtree-scoped, text-filtered, paginated log query.
+type LogSearchRequest struct {
+	SpanIDs []string      // descendant span IDs (base64) to include; nil/empty = all spans
+	Query   string        // text to match; empty = no text filter
+	Mode    LogSearchMode // LogSearchContains | LogSearchRegex
+	Start   time.Time     // inclusive window start (handler defaults to last 24h)
+	End     time.Time     // inclusive window end (handler defaults to now)
+	Limit   int           // max matching entries to return this page
+	Cursor  int64         // unix nanos; return entries strictly after this timestamp
+}
+
+// LogSearchPage is one page of subtree-scoped search results.
+type LogSearchPage struct {
+	Entries []LogEntry `json:"entries"`
+	Next    int64      `json:"next,omitempty"` // cursor for the next page; 0 = no more
+}
+
 type LogRepository interface {
 	QueryTraceLogs(traceID string, start, end time.Time, limit int) ([]LogEntry, error)
+	// SearchTraceLogs returns one page of trace logs filtered by the request
+	// (span set + text match), ascending by timestamp, after Cursor.
+	SearchTraceLogs(ctx context.Context, traceID string, req LogSearchRequest) (LogSearchPage, error)
 	// DeleteTraceLogs requests deletion of all log streams for traceID from
 	// Loki (POST /loki/api/v1/delete). Best-effort: returns nil on 204;
 	// returns a wrapped error on non-2xx. Requires Loki compactor + deletion

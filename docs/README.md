@@ -1662,19 +1662,29 @@ Features:
   duration, and engine version; the raw trace ID is shown as a secondary
   reference under the name. The list auto-refreshes every 10s while any run is
   in flight, and the per-row duration ticks live every 1s until the run finishes
-- **Trace viewer** — compact step view: one row per high-level step (direct
-  children of the root span, with Dagger `dagger.io/ui.passthrough` spans
-  promoted) showing status and wall-clock duration. Sub-spans are collapsed
-  and summarised as a hidden count; click a step to expand. `dagger.io/ui.*`
+- **Trace viewer** — drill-down step tree: the root's direct children are shown
+  as high-level levels (with Dagger `dagger.io/ui.passthrough` spans promoted),
+  each with status and wall-clock duration. Click a level's name to **zoom in**
+  (a breadcrumb bar above the list tracks root ▸ … ▸ focus and lets you zoom
+  back out), or its chevron to expand its sub-spans in place. `dagger.io/ui.*`
   boolean span attributes drive the collapse/passthrough grouping, and engine
   internal transport spans (`POST /query`, `GET /blobs`, `connect`, …) are
   folded away by the same name rules the CI step builder uses
   (`internalSpanPrefixes`/`internalSpanExact`, ADR-024) so they never surface
-  as steps or sub-spans.
+  as levels or sub-spans.
   The trace viewer header shows an `@username` chip (or `anonymous` for
   legacy/anonymous runs) next to the status badge, and the Details table
   includes a "User" row — so the pipeline owner is always visible on the
   detail view, matching the list view's `@username · org/repo` identity.
+- **Aggregated logs per level** — the step tree shows a log panel for the
+  currently focused level, aggregating the logs of that node **and all its
+  descendants** (internal-span logs are dropped as noise). The panel pages
+  beyond the 1000-line whole-trace cap via the server-side search endpoint.
+- **Log search** — a keyword (contains) or regex search box scoped to the
+  current level. Matching is server-side (`GET /api/v1/traces/:id/search`,
+  RE2-safe) and results are highlighted with `<mark>` (never `v-html`); a
+  "Load more" button pages through further results. An invalid regex is
+  reported inline without calling the API.
 - **Services** — a summary card above the steps lists host-tunnel services
   (`dagger.Up()` / `service.Up()` / `--up`). Detection is robust: a span is a
   service when its name matches the tunable `SERVICE_SPAN_NAMES` set
@@ -1741,6 +1751,7 @@ Features:
 | `GET /api/v1/traces` | Scoped pipeline list. |
 | `GET /api/v1/traces/:id` | Reconstructed span tree + status/duration/owner. |
 | `GET /api/v1/traces/:id/logs` | Per-span logs (Loki). |
+| `GET /api/v1/traces/:id/search` | Subtree-scoped, text-filtered, paginated log search (`span_id`, `q`, `mode=contains\|regex`, `limit`, `cursor`). |
 | `GET /api/v1/traces/:id/live` | SSE re-fetch signal stream. |
 | `GET /api/v1/traces/:id/url` | Self-hosted pipeline-view URL. |
 | `GET /api/v1/traces/:id/metrics` | Trace-scoped engine resource metrics (cAdvisor). |

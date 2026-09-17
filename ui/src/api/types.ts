@@ -94,6 +94,23 @@ export interface TraceLogEntry {
   span_id?: string
 }
 
+// --- Subtree-scoped log search (GET /api/v1/traces/:id/search) ---
+
+export type LogSearchMode = 'contains' | 'regex'
+
+export interface LogSearchRequest {
+  span_id?: string
+  q?: string
+  mode?: LogSearchMode
+  limit?: number
+  cursor?: number
+}
+
+export interface LogSearchPage {
+  entries: TraceLogEntry[]
+  next?: number
+}
+
 // Frontend-only view model derived from span + logs; not part of any API contract.
 export interface ServiceInfo {
   span: SpanNode
