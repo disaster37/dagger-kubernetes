@@ -197,6 +197,21 @@ func run(c *cli.Context) error {
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
 
+	projectMapper, err := service.NewProjectMapper(cfg.Attribution.ProjectMappings)
+	if err != nil {
+		return fmt.Errorf("compile project mappings: %w", err)
+	}
+	attributionSvc.SetProjectMapper(projectMapper)
+
+	for i, rule := range cfg.Attribution.ProjectMappings {
+		if !service.ValidateGroupName(rule.Group) {
+			logger.WithFields(logrus.Fields{
+				"rule_index": i,
+				"group":      rule.Group,
+			}).Warn("attribution: project_mappings group is not a valid supervisor group name; it can never match an existing group")
+		}
+	}
+
 	liveHub := repository.NewLiveHub()
 	pipelineLifecycle := service.NewPipelineLifecycle(attributionSvc, traceMetaRepo, sessions, liveHub, cfg.Pipeline, logger, metrics)
 

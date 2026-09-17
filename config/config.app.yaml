@@ -134,3 +134,7 @@ pipeline:
 version:
   floor: "v0.19.0"                          # minimum supported engine
   allowlist: ["0.19", "0.20", "0.21"]       # major.minor prefixes to admit
+
+# --- Project → group attribution ---------------------------------------------
+attribution:
+  project_mappings: []                      # ordered {pattern, group} rules mapping a project name to an existing supervisor group (first-match-wins; empty = disabled).

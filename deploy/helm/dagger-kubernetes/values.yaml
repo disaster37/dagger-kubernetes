@@ -367,6 +367,13 @@ supervisor:
         releasesUrl: "https://api.github.com/repos/dagger/dagger/releases"
         downloadBase: "https://github.com/dagger/dagger/releases/download"
         githubToken: ""
+## @param supervisor.config.attribution.projectMappings [array] Ordered list of {pattern, group} mapping a project name (CI repo slug; Go regexp, case-sensitive) to a supervisor group name. First-match-wins; no match falls through to per-group auto_assign_pattern; empty = disabled. Target groups must already exist.
+    attribution:
+      projectMappings: []
+      # projectMappings example (regex → supervisor group name):
+      # projectMappings:
+      #   - pattern: '^github\.com/acme/.*'
+      #     group: 'acme'
 ## @param supervisor.config.logLevel Supervisor log level.
     logLevel: "info"
 ## @param supervisor.config.logFormat Supervisor log format (json, text).

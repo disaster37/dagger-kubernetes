@@ -130,6 +130,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.OAuth.GroupMappings == nil || len(cfg.Auth.OAuth.GroupMappings) != 0 {
 		t.Fatalf("auth.oauth.group_mappings default should be non-nil and empty, got %v", cfg.Auth.OAuth.GroupMappings)
 	}
+	if cfg.Attribution.ProjectMappings == nil || len(cfg.Attribution.ProjectMappings) != 0 {
+		t.Fatalf("attribution.project_mappings default should be non-nil and empty, got %v", cfg.Attribution.ProjectMappings)
+	}
 	if cfg.LogFormat != "json" {
 		t.Fatalf("log_format default = %q, want json", cfg.LogFormat)
 	}
@@ -698,6 +701,88 @@ func TestLoadRejectsInvalidGroupMappings(t *testing.T) {
 	if !strings.Contains(err.Error(), "validate group mappings") ||
 		!strings.Contains(err.Error(), "auth.oauth.group_mappings[0].pattern") {
 		t.Fatalf("Load error = %q, want wrapped group-mappings validation message", err.Error())
+	}
+}
+
+func TestValidateProjectMappings(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *domain.Config
+		wantErr string
+	}{
+		{name: "empty valid", cfg: &domain.Config{}},
+		{name: "valid rules", cfg: &domain.Config{Attribution: domain.AttributionConfig{
+			ProjectMappings: []domain.ProjectMappingRule{
+				{Pattern: `^github\.com/acme/.*`, Group: "acme"},
+				{Pattern: `^github\.com/other/.*`, Group: "other"},
+			},
+		}}},
+		{name: "empty pattern", cfg: &domain.Config{Attribution: domain.AttributionConfig{
+			ProjectMappings: []domain.ProjectMappingRule{{Pattern: "", Group: "acme"}},
+		}}, wantErr: "attribution.project_mappings[0].pattern must not be empty"},
+		{name: "bad pattern", cfg: &domain.Config{Attribution: domain.AttributionConfig{
+			ProjectMappings: []domain.ProjectMappingRule{{Pattern: "[", Group: "acme"}},
+		}}, wantErr: "attribution.project_mappings[0].pattern"},
+		{name: "empty group", cfg: &domain.Config{Attribution: domain.AttributionConfig{
+			ProjectMappings: []domain.ProjectMappingRule{{Pattern: "^x$", Group: ""}},
+		}}, wantErr: "attribution.project_mappings[0].group must not be empty"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateProjectMappings(tt.cfg)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("validateProjectMappings = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("validateProjectMappings = nil, want error containing %q", tt.wantErr)
+			}
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("validateProjectMappings = %q, want containing %q", err.Error(), tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsInvalidProjectMappings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("attribution:\n  project_mappings:\n    - pattern: \"[\"\n      group: \"acme\"\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("Load = nil, want validation error")
+	}
+	if !strings.Contains(err.Error(), "validate project mappings") ||
+		!strings.Contains(err.Error(), "attribution.project_mappings[0].pattern") {
+		t.Fatalf("Load error = %q, want wrapped project-mappings validation message", err.Error())
+	}
+}
+
+func TestLoadProjectMappings(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte("attribution:\n  project_mappings:\n    - pattern: '^github\\.com/acme/.*'\n      group: 'acme'\n    - pattern: '^github\\.com/other/.*'\n      group: 'other'\n")
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v, want nil", err)
+	}
+	want := []domain.ProjectMappingRule{
+		{Pattern: `^github\.com/acme/.*`, Group: "acme"},
+		{Pattern: `^github\.com/other/.*`, Group: "other"},
+	}
+	if !reflect.DeepEqual(cfg.Attribution.ProjectMappings, want) {
+		t.Fatalf("attribution.project_mappings = %#v, want %#v", cfg.Attribution.ProjectMappings, want)
 	}
 }
 

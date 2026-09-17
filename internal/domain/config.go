@@ -3,25 +3,26 @@ package domain
 import "time"
 
 type Config struct {
-	Server     ServerConfig     `mapstructure:"server"`
-	Supervisor SupervisorConfig `mapstructure:"supervisor"`
-	Auth       AuthConfig       `mapstructure:"auth"`
-	Telemetry  TelemetryConfig  `mapstructure:"telemetry"`
-	Cache      CacheConfig      `mapstructure:"cache"`
-	ImageCache ImageCacheConfig `mapstructure:"image_cache"`
-	History    HistoryConfig    `mapstructure:"history"`
-	Fleet      FleetConfig      `mapstructure:"fleet"`
-	CA         CAConfig         `mapstructure:"ca"`
-	Version    VersionConfig    `mapstructure:"version"`
-	LeaseTTL   time.Duration    `mapstructure:"lease_ttl"`
-	Pipeline   PipelineConfig   `mapstructure:"pipeline"`
-	CI         CIConfig         `mapstructure:"ci"`
-	LogLevel   string           `mapstructure:"log_level"`
-	LogFormat  string           `mapstructure:"log_format"` // "json" (default) | "text"
-	OTel       OTelConfig       `mapstructure:"otel"`
-	Database   DatabaseConfig   `mapstructure:"database"`
-	Raft       RaftConfig       `mapstructure:"raft"`
-	CLI        CLIConfig        `mapstructure:"cli"`
+	Server      ServerConfig      `mapstructure:"server"`
+	Supervisor  SupervisorConfig  `mapstructure:"supervisor"`
+	Auth        AuthConfig        `mapstructure:"auth"`
+	Telemetry   TelemetryConfig   `mapstructure:"telemetry"`
+	Cache       CacheConfig       `mapstructure:"cache"`
+	ImageCache  ImageCacheConfig  `mapstructure:"image_cache"`
+	History     HistoryConfig     `mapstructure:"history"`
+	Fleet       FleetConfig       `mapstructure:"fleet"`
+	CA          CAConfig          `mapstructure:"ca"`
+	Version     VersionConfig     `mapstructure:"version"`
+	LeaseTTL    time.Duration     `mapstructure:"lease_ttl"`
+	Pipeline    PipelineConfig    `mapstructure:"pipeline"`
+	CI          CIConfig          `mapstructure:"ci"`
+	LogLevel    string            `mapstructure:"log_level"`
+	LogFormat   string            `mapstructure:"log_format"` // "json" (default) | "text"
+	OTel        OTelConfig        `mapstructure:"otel"`
+	Database    DatabaseConfig    `mapstructure:"database"`
+	Raft        RaftConfig        `mapstructure:"raft"`
+	CLI         CLIConfig         `mapstructure:"cli"`
+	Attribution AttributionConfig `mapstructure:"attribution"`
 }
 
 // SupervisorConfig groups the supervisor's own subcomponent configuration.
@@ -128,6 +129,22 @@ type OAuthConfig struct {
 type GroupMappingRule struct {
 	Pattern     string `mapstructure:"pattern"`
 	Replacement string `mapstructure:"replacement"`
+}
+
+// AttributionConfig governs project → group attribution at OTLP ingest.
+type AttributionConfig struct {
+	// ProjectMappings maps a project name (CI repo slug) to a supervisor group
+	// name. Ordered; first-match-wins. Empty = disabled (per-group
+	// AutoAssignPattern and explicit assignment still apply).
+	ProjectMappings []ProjectMappingRule `mapstructure:"project_mappings"`
+}
+
+// ProjectMappingRule maps a project name to a supervisor group name. Pattern is
+// a Go regexp matched against the project name (case-sensitive; (?i) opt-in);
+// Group is the literal target supervisor group name (no capture substitution).
+type ProjectMappingRule struct {
+	Pattern string `mapstructure:"pattern"`
+	Group   string `mapstructure:"group"`
 }
 
 // DatabaseConfig configures the Raft data directory backing the multi-user
