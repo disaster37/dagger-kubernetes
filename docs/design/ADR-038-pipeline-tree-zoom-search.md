@@ -108,9 +108,12 @@ Loki timestamps; this is the accepted, stateless pager trade-off.
   (omitted for the root = whole trace).
 - **Log → step.** Each log line carries a clickable step badge resolved from
   `entry.span_id` via `computeRowOwners(focus)` (the same internal/transparent
-  ownership rules as the tree). Clicking a badge scrolls to and briefly flashes
-  the owning row. Logs that cannot be attributed (internal span, empty/unknown
-  span, span outside the focus subtree) render a muted "unattributed" badge.
+  ownership rules as the tree). A non-transparent descendant that is not itself
+  a visible row (a deeper sub-span) rolls its logs up to the nearest visible
+  row, so every badge and count maps to a row that is on screen. Clicking a
+  badge scrolls to and briefly flashes the owning row. Logs that cannot be
+  attributed (internal span, empty/unknown span, span outside the focus subtree)
+  render a muted "unattributed" badge.
 - **Step → logs.** The first search page returns per-span matching counts; the
   client rolls them up to the visible rows and renders a count badge per row.
   Clicking a count badge zooms into that step (the breadcrumb zooms back out).

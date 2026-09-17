@@ -57,10 +57,14 @@ export function visibleChildren(nodes: SpanNode[]): SpanNode[] {
 // visible row (a direct visible child of focus) that owns its logs. Spans that
 // roll up to focus itself map to focus.span_id. Internal spans are omitted
 // (their logs are "unattributed"). Mirrors the old ownerBySpanID/passthrough
-// rules (internal first, then transparent).
+// rules (internal first, then transparent), except that a non-transparent span
+// which is not itself a visible row (a deeper descendant) rolls its logs up to
+// the nearest visible row instead of owning them: the row is the only thing on
+// screen, so its badge/count must cover the whole subtree.
 export function computeRowOwners(focus: SpanNode): Map<string, string> {
   const map = new Map<string, string>()
   map.set(focus.span_id, focus.span_id)
+  const rowIDs = new Set(visibleChildren(focus.children).map((r) => r.span_id))
   const assign = (n: SpanNode, rowOwner: string) => {
     if (isInternalSpan(n)) {
       for (const c of n.children) assign(c, rowOwner)
@@ -71,8 +75,9 @@ export function computeRowOwners(focus: SpanNode): Map<string, string> {
       for (const c of n.children) assign(c, rowOwner)
       return
     }
-    map.set(n.span_id, n.span_id)
-    for (const c of n.children) assign(c, n.span_id)
+    const owner = rowIDs.has(n.span_id) ? n.span_id : rowOwner
+    map.set(n.span_id, owner)
+    for (const c of n.children) assign(c, owner)
   }
   for (const c of focus.children) assign(c, focus.span_id)
   return map
