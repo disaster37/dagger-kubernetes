@@ -307,6 +307,9 @@ pipeline:
     schedule: "1m"              # how often the sweeper scans for stale running traces.
     stale_after: "5m"           # mark running traces with no active lease (InFlight == 0)
                                 # failed once their sort key is older than this.
+  metrics:                      # trace-scoped engine resource metrics (pipeline view card).
+    enabled: true               # serve GET /api/v1/traces/:id/metrics (cAdvisor container_* series).
+    step: "15s"                 # query_range resolution; must be > 0 when enabled.
 
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
@@ -371,3 +374,8 @@ log_format: "json"   # json | text — the supervisor's own log format.
 # --- Outgoing OTLP -----------------------------------------------------------
 otel:
   otlp_endpoint: ""  # if set, the Supervisor exports its own OTLP here; empty disables.
+  # OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). This
+  # is separate from the 4 MiB control-API cap: OTLP log/trace batches are
+  # legitimately large. Keep the ingress `proxy-body-size` annotation and the
+  # collector's `max_request_body_size` at least this large.
+  ingest_max_body_size: 67108864  # 64 MiB.

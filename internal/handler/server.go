@@ -45,6 +45,12 @@ const (
 	// would buffer it fully into memory (CWE-400/CWE-770).
 	maxControlBody = 4 << 20 // 4 MiB
 
+	// defaultOTLPMaxBodyBytes caps OTLP ingest bodies when ServerConfig does
+	// not supply a limit. OTLP log/trace batches are legitimately large, so
+	// this is deliberately separate from (and much larger than) the 4 MiB
+	// control-API cap.
+	defaultOTLPMaxBodyBytes = int64(64 << 20) // 64 MiB
+
 	maxDataConnections = 512 // concurrent data-plane connections (M4).
 
 	otelSignalKey = "otel_signal" // per-request OTel signal label (B1).
@@ -157,6 +163,7 @@ type Deps struct {
 	CIWrapperPath        string // path to pre-built dagger-kubernetes-ci binary
 	StartupProvider      domain.StartupProvider
 	ImageCache           domain.ImageCacheService
+	EngineMetrics        *service.EngineMetricsService // nil = trace metrics endpoint disabled
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -177,6 +184,9 @@ type ServerConfig struct {
 	CertPath        string
 	KeyPath         string
 	PipelineURL     string // base for pipeline-view links (= server.public_url, absolute http(s))
+	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
+	// (64 MiB). The control-API maxControlBody cap is unaffected.
+	OTelMaxBodyBytes int64
 }
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
@@ -227,6 +237,7 @@ type Server struct {
 	cli               *service.CLIService
 	ciWrapperPath     string // path to pre-built dagger-kubernetes-ci binary
 	imageCache        domain.ImageCacheService
+	engineMetrics     *service.EngineMetricsService
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -272,6 +283,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		cli:               deps.CLI,
 		ciWrapperPath:     deps.CIWrapperPath,
 		imageCache:        deps.ImageCache,
+		engineMetrics:     deps.EngineMetrics,
 	}
 }
 
@@ -607,6 +619,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
 	h.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
 	h.GET("/api/v1/traces/:traceID/live", s.handleTracesLive)
+	h.GET("/api/v1/traces/:traceID/metrics", s.handleTraceMetrics)
 
 	h.GET("/api/v1/metrics", s.handleMetricsProxy)
 	h.Any("/api/v1/metrics/*s", s.handleMetricsProxy)
@@ -853,8 +866,13 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 		// Defense-in-depth: reject oversized OTLP bodies up front by
 		// Content-Length. With StreamBody on, a chunked body has no
 		// Content-Length and is bounded only by the read below; a declared
-		// Content-Length lets us fail fast before buffering (CWE-400).
-		if cl := c.Request.Header.ContentLength(); cl > maxControlBody {
+		// Content-Length lets us fail fast before buffering (CWE-400). OTLP
+		// batches use a dedicated, larger cap than the control-API bodies.
+		limit := s.cfg.OTelMaxBodyBytes
+		if limit <= 0 {
+			limit = defaultOTLPMaxBodyBytes
+		}
+		if cl := c.Request.Header.ContentLength(); int64(cl) > limit {
 			s.metrics.OTelIngestTotal.WithLabelValues(signal, "error").Inc()
 			writeError(c, consts.StatusRequestEntityTooLarge, "otel body too large")
 			return

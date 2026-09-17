@@ -199,5 +199,12 @@ data:
 {{- with .Values.supervisor.config.otel }}
     otel:
       otlp_endpoint: {{ .otlpEndpoint | quote }}
+      ingest_max_body_size: {{ .ingestMaxBodySize | default 67108864 | int64 }}
+{{- end }}
+{{- with .Values.supervisor.config.pipeline }}
+    pipeline:
+      metrics:
+        enabled: {{ .metrics.enabled }}
+        step: {{ .metrics.step | quote }}
 {{- end }}
 {{- end }}

@@ -20,6 +20,7 @@ import type {
   TokenMeta,
   TraceDetail,
   TraceLogEntry,
+  TraceMetrics,
   TraceRow,
   UserRow,
 } from '@/api/types'
@@ -188,6 +189,10 @@ export async function fetchTraceLogs(id: string): Promise<TraceLogEntry[]> {
   const { data } = await api.get(`/api/v1/traces/${id}/logs`)
   const entries = data?.entries ?? []
   return entries as TraceLogEntry[]
+}
+export async function fetchTraceMetrics(id: string): Promise<TraceMetrics> {
+  const { data } = await api.get(`/api/v1/traces/${id}/metrics`)
+  return data as TraceMetrics
 }
 export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')

@@ -51,6 +51,36 @@ type MetricResult struct {
 	Value  []interface{}     `json:"value"`
 }
 
+// MetricPoint is one sample of a time series (unix seconds + value).
+type MetricPoint struct {
+	T int64   `json:"t"`
+	V float64 `json:"v"`
+}
+
+// MetricSeries is one named, unit-tagged time series for the pipeline view.
+type MetricSeries struct {
+	Name   string        `json:"name"`
+	Label  string        `json:"label"`
+	Unit   string        `json:"unit"`
+	Points []MetricPoint `json:"points"`
+}
+
+// TraceMetrics is the trace-scoped engine resource metrics payload served by
+// GET /api/v1/traces/:traceID/metrics.
+type TraceMetrics struct {
+	TraceID     string         `json:"trace_id"`
+	StartTime   time.Time      `json:"start_time"`
+	EndTime     time.Time      `json:"end_time"`
+	StepSeconds int64          `json:"step_seconds"`
+	Series      []MetricSeries `json:"series"`
+}
+
+// MetricsQueryer runs one PromQL range query against the metrics backend and
+// returns the aggregate (summed across matched series) points.
+type MetricsQueryer interface {
+	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) ([]MetricPoint, error)
+}
+
 type TraceRepository interface {
 	GetTrace(traceID string) (*TraceInfo, error)
 }

@@ -8,6 +8,7 @@ metadata:
     {{- include "dagger-kubernetes.labels" . | nindent 4 }}
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.proxyBodySize | default "64m" | quote }}
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

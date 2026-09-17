@@ -159,6 +159,8 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("pipeline.stale_sweep.enabled", true)
 	v.SetDefault("pipeline.stale_sweep.schedule", time.Minute)
 	v.SetDefault("pipeline.stale_sweep.stale_after", 5*time.Minute)
+	v.SetDefault("pipeline.metrics.enabled", true)
+	v.SetDefault("pipeline.metrics.step", 15*time.Second)
 
 	v.SetDefault("fleet.namespace", "dagger-kubernetes")
 	v.SetDefault("fleet.max_replicas_per_version", 3)
@@ -223,6 +225,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("log_format", "json")
 
 	v.SetDefault("otel.otlp_endpoint", "")
+	v.SetDefault("otel.ingest_max_body_size", int64(64<<20)) // 64 MiB
 
 	v.AutomaticEnv()
 
@@ -280,6 +283,14 @@ func Load(configFile string) (*domain.Config, error) {
 
 	if err := validateCIConfig(&cfg); err != nil {
 		return nil, fmt.Errorf("validate ci config: %w", err)
+	}
+
+	if err := validateOTelConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate otel config: %w", err)
+	}
+
+	if err := validatePipelineMetricsConfig(&cfg); err != nil {
+		return nil, fmt.Errorf("validate pipeline metrics config: %w", err)
 	}
 
 	return &cfg, nil
@@ -815,6 +826,26 @@ func validateCIConfig(cfg *domain.Config) error {
 	}
 	if cfg.CI.Jenkins.StepsMaxDepth < 0 {
 		return fmt.Errorf("ci.jenkins.steps_max_depth must be >= 0")
+	}
+	return nil
+}
+
+// validateOTelConfig rejects a negative OTLP ingest body cap. 0 is valid and
+// means "use the handler default" (64 MiB); a negative value is a
+// misconfiguration that would otherwise be silently ignored.
+func validateOTelConfig(cfg *domain.Config) error {
+	if cfg.OTel.IngestMaxBodySize < 0 {
+		return fmt.Errorf("otel.ingest_max_body_size must be >= 0")
+	}
+	return nil
+}
+
+// validatePipelineMetricsConfig requires a positive query_range step when the
+// trace-scoped engine metrics endpoint is enabled (a 0 step would make every
+// VictoriaMetrics range query invalid).
+func validatePipelineMetricsConfig(cfg *domain.Config) error {
+	if cfg.Pipeline.Metrics.Enabled && cfg.Pipeline.Metrics.Step <= 0 {
+		return fmt.Errorf("pipeline.metrics.step must be > 0 when pipeline.metrics.enabled is true")
 	}
 	return nil
 }

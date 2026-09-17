@@ -379,8 +379,16 @@ supervisor:
 ## @param supervisor.config.logFormat Supervisor log format (json, text).
     logFormat: "json"
 ## @param supervisor.config.otel.otlpEndpoint Supervisor OTLP export endpoint (empty disables).
+## @param supervisor.config.otel.ingestMaxBodySize OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). Keep the ingress `proxyBodySize` and the collector `max_request_body_size` at least this large.
     otel:
       otlpEndpoint: ""
+      ingestMaxBodySize: 67108864
+## @param supervisor.config.pipeline.metrics.enabled Enable the trace-scoped engine resource metrics endpoint (GET /api/v1/traces/:id/metrics).
+## @param supervisor.config.pipeline.metrics.step query_range resolution for engine metrics (Go duration; must be > 0 when enabled).
+    pipeline:
+      metrics:
+        enabled: true
+        step: "15s"
 
 ## @section Local image cache (Zot mirror)
 
@@ -677,6 +685,7 @@ service:
 ## @param ingress.enabled Enable control-plane Ingress (web UI + API).
 ## @param ingress.className Ingress class name (empty = default ingress controller).
 ## @param ingress.annotations [object] Ingress annotations.
+## @param ingress.proxyBodySize nginx `proxy-body-size` annotation value. Must be >= the supervisor's `otel.ingestMaxBodySize` so large OTLP log batches are not rejected with 413 at the ingress.
 ## @param ingress.hosts [array] Ingress host rules.
 ## @param ingress.hosts[].host Hostname for the ingress rule.
 ## @param ingress.hosts[].paths[].path URL path for the ingress rule.
@@ -685,6 +694,7 @@ service:
 ingress:
   enabled: true
   className: ""
+  proxyBodySize: "64m"
   annotations: {}
   hosts:
     - host: supv.example.com
@@ -782,6 +792,9 @@ opentelemetry-collector:
         protocols:
           http:
             endpoint: 0.0.0.0:4318
+            # Match the supervisor's otel.ingestMaxBodySize (64 MiB) so large
+            # OTLP log batches are not rejected by the collector.
+            max_request_body_size: 67108864
     processors:
       batch: {}
       transform/logs:
@@ -972,6 +985,7 @@ loki:
 
 ## @skip victoria
 ## @param victoria.enabled Install VictoriaMetrics subchart (metrics).
+## @param victoria.server.scrape.enabled Enable VictoriaMetrics' built-in Prometheus scraper. The subchart's default scrape config already includes the `kubernetes-nodes-cadvisor` job (kubelet `/metrics/cadvisor`), which supplies the `container_*` series the pipeline-view engine-metrics card queries; the subchart's ClusterRole grants `nodes/metrics` when scraping is enabled. Do NOT add a second cAdvisor job: duplicate jobs double every summed series.
 victoria:
   enabled: true
   server:
@@ -986,6 +1000,8 @@ victoria:
       limits:
         cpu: 1000m
         memory: 1Gi
+    scrape:
+      enabled: true
 
 ## @skip grafana
 ## @param grafana.enabled Install Grafana subchart (dashboards with auto-provisioned datasources).

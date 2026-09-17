@@ -111,6 +111,28 @@ export interface ServiceInfo {
   logs: TraceLogEntry[]
 }
 
+// --- Trace-scoped engine resource metrics ---
+
+export interface MetricPoint {
+  t: number
+  v: number
+}
+
+export interface MetricSeries {
+  name: string
+  label: string
+  unit: string
+  points: MetricPoint[]
+}
+
+export interface TraceMetrics {
+  trace_id: string
+  start_time: string
+  end_time: string
+  step_seconds: number
+  series: MetricSeries[]
+}
+
 export interface Providers {
   internal: boolean
   oauth_github: boolean
