@@ -187,6 +187,11 @@ func (c *LogsClient) SearchTraceLogs(ctx context.Context, traceID string, req do
 		cursor = lastRawTs + 1
 	}
 
+	// Always return a non-nil slice so the JSON contract is `entries: []`
+	// rather than `entries: null` (the UI iterates the array directly).
+	if matches == nil {
+		matches = []domain.LogEntry{}
+	}
 	page := domain.LogSearchPage{Entries: matches}
 	if !exhausted {
 		page.Next = lastRawTs + 1

@@ -198,7 +198,10 @@ export async function fetchTraceMetrics(id: string): Promise<TraceMetrics> {
 }
 export async function fetchTraceSearch(id: string, params: LogSearchRequest): Promise<LogSearchPage> {
   const { data } = await api.get(`/api/v1/traces/${id}/search`, { params })
-  return data as LogSearchPage
+  const page = data as LogSearchPage
+  // The server may omit/null `entries` on an empty page; normalise so callers
+  // can always iterate the array.
+  return { entries: page.entries ?? [], next: page.next }
 }
 export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')

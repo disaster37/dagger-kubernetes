@@ -286,6 +286,9 @@ func TestSearchTraceLogsEmptyResult(t *testing.T) {
 	if len(page.Entries) != 0 {
 		t.Fatalf("entries = %d, want 0", len(page.Entries))
 	}
+	if page.Entries == nil {
+		t.Fatal("entries is nil, want an empty slice (JSON contract: entries: [])")
+	}
 	if page.Next != 0 {
 		t.Fatalf("next = %d, want 0", page.Next)
 	}
