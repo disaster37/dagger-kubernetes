@@ -109,6 +109,7 @@ export interface LogSearchRequest {
 export interface LogSearchPage {
   entries: TraceLogEntry[]
   next?: number
+  counts?: Record<string, number> // span_id -> matching log count (first page only)
 }
 
 // Frontend-only view model derived from span + logs; not part of any API contract.

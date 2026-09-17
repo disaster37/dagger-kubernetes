@@ -1680,11 +1680,18 @@ Features:
   currently focused level, aggregating the logs of that node **and all its
   descendants** (internal-span logs are dropped as noise). The panel pages
   beyond the 1000-line whole-trace cap via the server-side search endpoint.
+  Every log line carries a clickable **step badge** naming the visible row that
+  owns it; clicking the badge scrolls to and briefly flashes that row. Logs that
+  cannot be attributed (internal span, empty/unknown span, span outside the
+  current focus) show a muted "unattributed" badge. Each step row shows a
+  **matching-log count badge** (query-aware, from the first search page);
+  clicking it zooms into that step, and the breadcrumb zooms back out.
 - **Log search** — a keyword (contains) or regex search box scoped to the
   current level. Matching is server-side (`GET /api/v1/traces/:id/search`,
   RE2-safe) and results are highlighted with `<mark>` (never `v-html`); a
-  "Load more" button pages through further results. An invalid regex is
-  reported inline without calling the API.
+  "Load more" button pages through further results. The first page also returns
+  per-span matching `counts` that drive the step-row count badges. An invalid
+  regex is reported inline without calling the API.
 - **Services** — a summary card above the steps lists host-tunnel services
   (`dagger.Up()` / `service.Up()` / `--up`). Detection is robust: a span is a
   service when its name matches the tunable `SERVICE_SPAN_NAMES` set
@@ -1712,8 +1719,9 @@ Features:
   the list endpoint), with the raw value available as `duration_ns`
 - **Log viewer** — log lines correlated by span ID (the collector promotes
   `trace_id` and `span_id` to Loki labels) and rendered inline under the step
-  or sub-span that produced them (`GET /api/v1/traces/:id/logs`); logs with no
-  recognisable span are grouped under a collapsed "unmatched" section. Logs
+  or sub-span that produced them (`GET /api/v1/traces/:id/logs`); in the
+  drill-down tree's aggregated panel, logs with no recognisable span are labeled
+  "unattributed" inline (the separate "unmatched" section was removed). Logs
   attached to a passthrough/encapsulated span are attributed to the nearest
   visible ancestor, so `exec`/Dockerfile `RUN` stdout/stderr stays under the
   build step; logs attached to internal/name-internal spans are dropped as
@@ -1751,7 +1759,7 @@ Features:
 | `GET /api/v1/traces` | Scoped pipeline list. |
 | `GET /api/v1/traces/:id` | Reconstructed span tree + status/duration/owner. |
 | `GET /api/v1/traces/:id/logs` | Per-span logs (Loki). |
-| `GET /api/v1/traces/:id/search` | Subtree-scoped, text-filtered, paginated log search (`span_id`, `q`, `mode=contains\|regex`, `limit`, `cursor`). |
+| `GET /api/v1/traces/:id/search` | Subtree-scoped, text-filtered, paginated log search (`span_id`, `q`, `mode=contains\|regex`, `limit`, `cursor`). The first page also returns per-span matching `counts`. |
 | `GET /api/v1/traces/:id/live` | SSE re-fetch signal stream. |
 | `GET /api/v1/traces/:id/url` | Self-hosted pipeline-view URL. |
 | `GET /api/v1/traces/:id/metrics` | Trace-scoped engine resource metrics (cAdvisor). |

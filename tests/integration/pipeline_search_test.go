@@ -228,6 +228,15 @@ func TestPipelineSearchEndpoint(t *testing.T) {
 	if len(page.Entries) != 2 {
 		t.Fatalf("whole-trace entries = %d, want 2", len(page.Entries))
 	}
+	wantCounts := map[string]int64{"Y2hpbGQ=": 1, "Z3JhbmQ=": 1}
+	if len(page.Counts) != len(wantCounts) {
+		t.Fatalf("whole-trace counts = %v, want %v", page.Counts, wantCounts)
+	}
+	for spanID, want := range wantCounts {
+		if page.Counts[spanID] != want {
+			t.Fatalf("whole-trace counts[%q] = %d, want %d", spanID, page.Counts[spanID], want)
+		}
+	}
 
 	// Scoped to the compile child: only its subtree logs (compile + run).
 	resp, page = searchRequest(t, controlURL, token, "?span_id=Y2hpbGQ=&q=error")
@@ -272,6 +281,12 @@ func TestPipelineSearchEndpoint(t *testing.T) {
 	}
 	if second.Entries[0].Line == first.Entries[0].Line {
 		t.Fatalf("page2 repeated page1 entry %q", second.Entries[0].Line)
+	}
+	if len(first.Counts) == 0 {
+		t.Fatal("page1 counts empty, want per-span counts on the first page")
+	}
+	if len(second.Counts) != 0 {
+		t.Fatalf("page2 counts = %v, want none (first page only)", second.Counts)
 	}
 
 	// Invalid regex -> 400.

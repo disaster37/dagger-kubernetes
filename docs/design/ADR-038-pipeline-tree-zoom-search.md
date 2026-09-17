@@ -55,8 +55,11 @@ All query params are optional. `mode` defaults to `contains`; anything else is
 400. `limit` defaults to 500 and is capped at 2000. The window defaults to the
 last 24h.
 
-**Response.** `{"entries":[{"timestamp":"...","line":"...","span_id":"..."}],"next":<unixns>}`.
-`next` is omitted (0) when Loki is exhausted.
+**Response.** `{"entries":[{"timestamp":"...","line":"...","span_id":"..."}],"next":<unixns>,"counts":{"<span_id>":<n>}}`.
+`next` is omitted (0) when Loki is exhausted. `counts` maps each span ID to the
+number of matching logs in the scanned window and is returned **only on the
+first page** (`cursor == 0`); load-more pages omit it. The client rolls the raw
+per-span counts up to the visible tree rows (see §4).
 
 **RE2 safety.** Go's `regexp` is RE2 (linear-time, no catastrophic
 backtracking), so the server is authoritative and safe. An invalid pattern is
@@ -75,6 +78,12 @@ append is not globally sorted), filters by span set + text, and returns a
 `next` cursor of `lastExaminedTimestamp + 1ns`. It stops when the page is full,
 when Loki returns a short batch (exhausted), or after `logSearchMaxScan` (5000)
 raw entries scanned per call (CWE-400).
+
+On the first page (`IncludeCounts`) the scan keeps going past a full page — up
+to the same `logSearchMaxScan` bound — to count matching logs per span, while
+still returning only `limit` entries and anchoring the cursor at the last
+*returned* entry. Load-more pages keep the old fast path (stop as soon as the
+page fills) and omit `counts`.
 
 **Boundary limitation (documented).** If more than `limit` entries share the
 exact final nanosecond returned in a page, the overflow beyond the page is
@@ -97,8 +106,17 @@ Loki timestamps; this is the accepted, stateless pager trade-off.
   current focus, a debounced search box, a contains/regex toggle, match count,
   and a "Load more" button. It fetches `/search` with `span_id = focus.span_id`
   (omitted for the root = whole trace).
+- **Log → step.** Each log line carries a clickable step badge resolved from
+  `entry.span_id` via `computeRowOwners(focus)` (the same internal/transparent
+  ownership rules as the tree). Clicking a badge scrolls to and briefly flashes
+  the owning row. Logs that cannot be attributed (internal span, empty/unknown
+  span, span outside the focus subtree) render a muted "unattributed" badge.
+- **Step → logs.** The first search page returns per-span matching counts; the
+  client rolls them up to the visible rows and renders a count badge per row.
+  Clicking a count badge zooms into that step (the breadcrumb zooms back out).
+  Counts are query-aware and consistent with the panel (same server-side match).
 - **XSS.** Log text is rendered via `{{ }}` interpolation only; highlight uses
-  `<mark>` + text segments, never `v-html`.
+  `<mark>` + text segments, never `v-html`. Badge text is likewise interpolated.
 
 ## Alternatives considered
 
@@ -116,8 +134,12 @@ Loki timestamps; this is the accepted, stateless pager trade-off.
 ## Consequences
 
 - The pipeline view mirrors the Dagger function nesting and can drill to leaves.
-- Search is server-side and pages beyond the 1000-line cap; the Services and
-  Unmatched cards still use the whole-trace fetch (unchanged).
+- Logs and steps are linked in both directions: log lines carry a step badge
+  that scrolls to the owning row, and step rows carry a matching-log count badge
+  that zooms in. Un-attributable logs are labeled "unattributed" inline; the
+  separate "Unmatched / general logs" card is gone.
+- Search is server-side and pages beyond the 1000-line cap; the Services card
+  still uses the whole-trace fetch (unchanged).
 - Search matches the raw Loki JSON line (not the UI's `logText`-decoded body);
   JSON escaping (`\n`, quotes) can cause rare contains/regex misses. Accepted
   for v1.
@@ -126,7 +148,9 @@ Loki timestamps; this is the accepted, stateless pager trade-off.
 
 ## Open questions
 
-- Whether to also page the Services/Unmatched cards through `/search` (out of
-  scope for #21).
+- Whether to also page the Services card through `/search` (out of scope for
+  #21). The former Unmatched card was removed: un-attributable logs now render
+  inline in the panel with an "unattributed" badge, so there is nothing left to
+  page separately.
 - Whether to match the decoded log body instead of the raw JSON line (would
   require decoding server-side).

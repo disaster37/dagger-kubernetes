@@ -55,45 +55,61 @@ func TestHandleTracesSearch(t *testing.T) {
 	bearer := env.loginAsAdmin(t)
 
 	tests := []struct {
-		name       string
-		query      string
-		trace      *domain.TraceInfo
-		traceErr   error
-		repoPage   domain.LogSearchPage
-		repoErr    error
-		wantCode   int
-		wantCalls  int
-		wantSpanID []string
-		wantLimit  int
-		wantNext   int64
+		name              string
+		query             string
+		trace             *domain.TraceInfo
+		traceErr          error
+		repoPage          domain.LogSearchPage
+		repoErr           error
+		wantCode          int
+		wantCalls         int
+		wantSpanID        []string
+		wantLimit         int
+		wantNext          int64
+		wantIncludeCounts bool
+		wantCounts        map[string]int64
 	}{
 		{
-			name:      "whole trace passthrough",
-			query:     "?q=error",
-			trace:     searchTraceTree(),
-			repoPage:  domain.LogSearchPage{Entries: []domain.LogEntry{{Line: "an error"}}, Next: 42},
-			wantCode:  http.StatusOK,
-			wantCalls: 1,
-			wantLimit: defaultTraceSearchLimit,
-			wantNext:  42,
+			name:              "whole trace passthrough",
+			query:             "?q=error",
+			trace:             searchTraceTree(),
+			repoPage:          domain.LogSearchPage{Entries: []domain.LogEntry{{Line: "an error"}}, Next: 42, Counts: map[string]int64{"child": 1}},
+			wantCode:          http.StatusOK,
+			wantCalls:         1,
+			wantLimit:         defaultTraceSearchLimit,
+			wantNext:          42,
+			wantIncludeCounts: true,
+			wantCounts:        map[string]int64{"child": 1},
 		},
 		{
-			name:       "scoped span resolves descendants",
-			query:      "?span_id=root",
-			trace:      searchTraceTree(),
-			repoPage:   domain.LogSearchPage{},
-			wantCode:   http.StatusOK,
-			wantCalls:  1,
-			wantSpanID: nil, // root focus = whole trace
+			name:              "cursor page omits counts",
+			query:             "?q=error&cursor=123",
+			trace:             searchTraceTree(),
+			repoPage:          domain.LogSearchPage{Entries: []domain.LogEntry{{Line: "an error"}}},
+			wantCode:          http.StatusOK,
+			wantCalls:         1,
+			wantLimit:         defaultTraceSearchLimit,
+			wantIncludeCounts: false,
 		},
 		{
-			name:       "scoped child span",
-			query:      "?span_id=child",
-			trace:      searchTraceTree(),
-			repoPage:   domain.LogSearchPage{},
-			wantCode:   http.StatusOK,
-			wantCalls:  1,
-			wantSpanID: []string{"child"},
+			name:              "scoped span resolves descendants",
+			query:             "?span_id=root",
+			trace:             searchTraceTree(),
+			repoPage:          domain.LogSearchPage{},
+			wantCode:          http.StatusOK,
+			wantCalls:         1,
+			wantSpanID:        nil, // root focus = whole trace
+			wantIncludeCounts: true,
+		},
+		{
+			name:              "scoped child span",
+			query:             "?span_id=child",
+			trace:             searchTraceTree(),
+			repoPage:          domain.LogSearchPage{},
+			wantCode:          http.StatusOK,
+			wantCalls:         1,
+			wantSpanID:        []string{"child"},
+			wantIncludeCounts: true,
 		},
 		{
 			name:      "unknown span",
@@ -131,38 +147,42 @@ func TestHandleTracesSearch(t *testing.T) {
 			wantCalls: 0,
 		},
 		{
-			name:      "invalid regex",
-			query:     "?mode=regex&q=%28%5B",
-			trace:     searchTraceTree(),
-			repoErr:   fmt.Errorf("%w: bad", domain.ErrInvalidRegex),
-			wantCode:  http.StatusBadRequest,
-			wantCalls: 1,
+			name:              "invalid regex",
+			query:             "?mode=regex&q=%28%5B",
+			trace:             searchTraceTree(),
+			repoErr:           fmt.Errorf("%w: bad", domain.ErrInvalidRegex),
+			wantCode:          http.StatusBadRequest,
+			wantCalls:         1,
+			wantIncludeCounts: true,
 		},
 		{
-			name:      "backend error",
-			query:     "?q=x",
-			trace:     searchTraceTree(),
-			repoErr:   errors.New("loki down"),
-			wantCode:  http.StatusBadGateway,
-			wantCalls: 1,
+			name:              "backend error",
+			query:             "?q=x",
+			trace:             searchTraceTree(),
+			repoErr:           errors.New("loki down"),
+			wantCode:          http.StatusBadGateway,
+			wantCalls:         1,
+			wantIncludeCounts: true,
 		},
 		{
-			name:      "limit clamp",
-			query:     "?limit=99999",
-			trace:     searchTraceTree(),
-			repoPage:  domain.LogSearchPage{},
-			wantCode:  http.StatusOK,
-			wantCalls: 1,
-			wantLimit: maxTraceSearchLimit,
+			name:              "limit clamp",
+			query:             "?limit=99999",
+			trace:             searchTraceTree(),
+			repoPage:          domain.LogSearchPage{},
+			wantCode:          http.StatusOK,
+			wantCalls:         1,
+			wantLimit:         maxTraceSearchLimit,
+			wantIncludeCounts: true,
 		},
 		{
-			name:      "limit default on garbage",
-			query:     "?limit=abc",
-			trace:     searchTraceTree(),
-			repoPage:  domain.LogSearchPage{},
-			wantCode:  http.StatusOK,
-			wantCalls: 1,
-			wantLimit: defaultTraceSearchLimit,
+			name:              "limit default on garbage",
+			query:             "?limit=abc",
+			trace:             searchTraceTree(),
+			repoPage:          domain.LogSearchPage{},
+			wantCode:          http.StatusOK,
+			wantCalls:         1,
+			wantLimit:         defaultTraceSearchLimit,
+			wantIncludeCounts: true,
 		},
 	}
 
@@ -187,6 +207,9 @@ func TestHandleTracesSearch(t *testing.T) {
 			if tc.wantLimit != 0 && repo.lastReq.Limit != tc.wantLimit {
 				t.Fatalf("limit = %d, want %d", repo.lastReq.Limit, tc.wantLimit)
 			}
+			if repo.lastReq.IncludeCounts != tc.wantIncludeCounts {
+				t.Fatalf("includeCounts = %v, want %v", repo.lastReq.IncludeCounts, tc.wantIncludeCounts)
+			}
 			if len(repo.lastReq.SpanIDs) != len(tc.wantSpanID) {
 				t.Fatalf("spanIDs = %v, want %v", repo.lastReq.SpanIDs, tc.wantSpanID)
 			}
@@ -204,6 +227,14 @@ func TestHandleTracesSearch(t *testing.T) {
 			}
 			if page.Next != tc.wantNext {
 				t.Fatalf("next = %d, want %d", page.Next, tc.wantNext)
+			}
+			if len(page.Counts) != len(tc.wantCounts) {
+				t.Fatalf("counts = %v, want %v", page.Counts, tc.wantCounts)
+			}
+			for spanID, want := range tc.wantCounts {
+				if page.Counts[spanID] != want {
+					t.Fatalf("counts[%q] = %d, want %d", spanID, page.Counts[spanID], want)
+				}
 			}
 		})
 	}

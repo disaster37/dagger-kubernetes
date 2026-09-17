@@ -269,6 +269,84 @@ func TestSearchTraceLogsLimitCap(t *testing.T) {
 	}
 }
 
+func TestSearchTraceLogsCounts(t *testing.T) {
+	base := time.Now().Add(-time.Hour).UnixNano()
+	records := []searchRecord{
+		{ts: base + 100, spanID: "span-a", line: "error one"},
+		{ts: base + 200, spanID: "span-a", line: "ok"},
+		{ts: base + 300, spanID: "span-b", line: "error two"},
+		{ts: base + 400, spanID: "span-c", line: "error three"},
+		{ts: base + 500, spanID: "", line: "error orphan"},
+	}
+	srv := lokiSearchServer(t, records)
+	defer srv.Close()
+
+	tests := []struct {
+		name        string
+		req         domain.LogSearchRequest
+		wantEntries int
+		wantCounts  map[string]int64
+		wantNext    bool
+	}{
+		{
+			name:        "first page counts matching logs per span",
+			req:         domain.LogSearchRequest{Query: "error", Mode: domain.LogSearchContains, Limit: 10, IncludeCounts: true},
+			wantEntries: 4,
+			wantCounts:  map[string]int64{"span-a": 1, "span-b": 1, "span-c": 1},
+		},
+		{
+			name:        "load-more page omits counts",
+			req:         domain.LogSearchRequest{Query: "error", Mode: domain.LogSearchContains, Limit: 10, Cursor: base + 50, IncludeCounts: false},
+			wantEntries: 4,
+			wantCounts:  map[string]int64{},
+		},
+		{
+			name:        "span filter narrows counts",
+			req:         domain.LogSearchRequest{SpanIDs: []string{"span-a"}, Query: "error", Mode: domain.LogSearchContains, Limit: 10, IncludeCounts: true},
+			wantEntries: 1,
+			wantCounts:  map[string]int64{"span-a": 1},
+		},
+		{
+			name:        "query filter narrows counts",
+			req:         domain.LogSearchRequest{Query: "two", Mode: domain.LogSearchContains, Limit: 10, IncludeCounts: true},
+			wantEntries: 1,
+			wantCounts:  map[string]int64{"span-b": 1},
+		},
+		{
+			name:        "page full still counts full matching set",
+			req:         domain.LogSearchRequest{Query: "error", Mode: domain.LogSearchContains, Limit: 1, IncludeCounts: true},
+			wantEntries: 1,
+			wantCounts:  map[string]int64{"span-a": 1, "span-b": 1, "span-c": 1},
+			wantNext:    true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := tc.req
+			req.Start = time.Unix(0, base)
+			req.End = time.Unix(0, base+1000)
+			page, err := NewLogsClient(srv.URL).SearchTraceLogs(context.Background(), searchTraceID, req)
+			if err != nil {
+				t.Fatalf("SearchTraceLogs: %v", err)
+			}
+			if len(page.Entries) != tc.wantEntries {
+				t.Fatalf("entries = %d, want %d", len(page.Entries), tc.wantEntries)
+			}
+			if len(page.Counts) != len(tc.wantCounts) {
+				t.Fatalf("counts = %v, want %v", page.Counts, tc.wantCounts)
+			}
+			for spanID, want := range tc.wantCounts {
+				if page.Counts[spanID] != want {
+					t.Fatalf("counts[%q] = %d, want %d (all=%v)", spanID, page.Counts[spanID], want, page.Counts)
+				}
+			}
+			if tc.wantNext && page.Next == 0 {
+				t.Fatal("next = 0, want a cursor")
+			}
+		})
+	}
+}
+
 func TestSearchTraceLogsEmptyResult(t *testing.T) {
 	base := time.Now().Add(-time.Hour).UnixNano()
 	srv := lokiSearchServer(t, nil)

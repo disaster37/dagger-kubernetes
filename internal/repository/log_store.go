@@ -151,10 +151,9 @@ func (c *LogsClient) SearchTraceLogs(ctx context.Context, traceID string, req do
 		cursor = req.Start.UnixNano()
 	}
 
-	var matches []domain.LogEntry
+	st := searchScanState{counts: make(map[string]int64)}
 	scanned := 0
 	exhausted := false
-	var lastRawTs int64
 
 	for scanned < logSearchMaxScan {
 		raw, err := c.queryRawLogs(ctx, traceID, cursor, req.End, logSearchBatch)
@@ -172,40 +171,51 @@ func (c *LogsClient) SearchTraceLogs(ctx context.Context, traceID string, req do
 			return raw[i].Timestamp.Before(raw[j].Timestamp)
 		})
 
-		matches, lastRawTs = appendMatches(matches, raw, spanSet, &req, re, limit)
-		scanned += len(raw)
-
-		if len(matches) >= limit {
-			// Stopped early because the page is full: more matches may follow,
-			// so return a cursor even when this raw batch was short.
+		if st.scanBatch(raw, spanSet, &req, re, limit) {
 			break
 		}
+		scanned += len(raw)
+
 		if len(raw) < logSearchBatch {
 			exhausted = true
 			break
 		}
-		cursor = lastRawTs + 1
+		cursor = st.lastRawTs + 1
 	}
 
 	// Always return a non-nil slice so the JSON contract is `entries: []`
 	// rather than `entries: null` (the UI iterates the array directly).
-	if matches == nil {
-		matches = []domain.LogEntry{}
+	if st.matches == nil {
+		st.matches = []domain.LogEntry{}
 	}
-	page := domain.LogSearchPage{Entries: matches}
-	if !exhausted {
-		page.Next = lastRawTs + 1
+	page := domain.LogSearchPage{Entries: st.matches, Counts: st.counts}
+	if st.pageFull {
+		// The page filled before the scan ended: anchor the cursor at the last
+		// *returned* entry so counting past the page does not skip entries.
+		page.Next = st.pageAnchorTs + 1
+	} else if !exhausted {
+		page.Next = st.lastRawTs + 1
 	}
 	return page, nil
 }
 
-// appendMatches filters one sorted raw batch by span set + text match, appending
-// the matches to dst and returning the timestamp of the last raw entry examined
-// (the cursor anchor). It stops early once dst reaches limit.
-func appendMatches(dst, raw []domain.LogEntry, spanSet map[string]struct{}, req *domain.LogSearchRequest, re *regexp.Regexp, limit int) (out []domain.LogEntry, lastRawTs int64) {
-	out = dst
+// searchScanState accumulates one SearchTraceLogs scan: the returned page, the
+// per-span matching counts, and the cursor anchors.
+type searchScanState struct {
+	matches      []domain.LogEntry
+	counts       map[string]int64
+	lastRawTs    int64 // timestamp of the last raw entry examined
+	pageAnchorTs int64 // timestamp of the last entry appended to the page
+	pageFull     bool
+}
+
+// scanBatch filters one sorted raw batch by span set + text match, appending
+// matches up to limit and counting matching logs per span when req.IncludeCounts
+// is set. It returns true when the page filled and counting is off, so the
+// caller can stop scanning early (the load-more fast path).
+func (st *searchScanState) scanBatch(raw []domain.LogEntry, spanSet map[string]struct{}, req *domain.LogSearchRequest, re *regexp.Regexp, limit int) (stop bool) {
 	for _, entry := range raw {
-		lastRawTs = entry.Timestamp.UnixNano()
+		st.lastRawTs = entry.Timestamp.UnixNano()
 		if len(spanSet) > 0 {
 			if _, ok := spanSet[entry.SpanID]; !ok {
 				continue
@@ -214,12 +224,22 @@ func appendMatches(dst, raw []domain.LogEntry, spanSet map[string]struct{}, req 
 		if !matchLogLine(entry.Line, req.Query, req.Mode, re) {
 			continue
 		}
-		out = append(out, entry)
-		if len(out) >= limit {
-			break
+		if req.IncludeCounts && entry.SpanID != "" {
+			st.counts[entry.SpanID]++
+		}
+		if st.pageFull {
+			continue
+		}
+		st.matches = append(st.matches, entry)
+		st.pageAnchorTs = st.lastRawTs
+		if len(st.matches) >= limit {
+			st.pageFull = true
+			if !req.IncludeCounts {
+				return true
+			}
 		}
 	}
-	return out, lastRawTs
+	return false
 }
 
 // queryRawLogs runs one forward Loki query_range for traceID over

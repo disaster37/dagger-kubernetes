@@ -18,7 +18,13 @@
       </div>
 
       <div v-if="rows.length === 0" class="empty">No steps for this level</div>
-      <div v-for="row in rows" :key="row.node.span_id" class="step">
+      <div
+        v-for="row in rows"
+        :key="row.node.span_id"
+        class="step"
+        :class="{ 'step-highlight': highlightedSpanID === row.node.span_id }"
+        :ref="(el) => setRowRef(row.node.span_id, el as HTMLElement | null)"
+      >
         <div class="step-row">
           <span
             v-if="row.hasChildren"
@@ -29,6 +35,12 @@
           <span :class="['dot', `dot-${row.node.status}`]"></span>
           <button class="step-name" @click="zoomIn(row.node)">{{ row.node.name || row.node.span_id }}</button>
           <span class="step-duration">{{ formatDuration(liveSpanDuration(row.node, now)) }}</span>
+          <button
+            v-if="rowCounts.get(row.node.span_id)"
+            class="step-logs-badge"
+            :title="`${rowCounts.get(row.node.span_id)} matching logs — click to zoom in`"
+            @click.stop="zoomIn(row.node)"
+          >{{ formatCount(rowCounts.get(row.node.span_id)!) }}</button>
           <span v-if="row.hiddenCount > 0" class="step-hidden">{{ row.hiddenCount }} hidden</span>
         </div>
         <div v-if="expanded.has(row.node.span_id)" class="step-detail">
@@ -54,21 +66,31 @@
         :error="error"
         :has-more="nextCursor !== null"
         :total-shown="entries.length"
+        :attribution="attribution"
         @update:query="onQueryChange"
         @update:mode="onModeChange"
         @load-more="loadMore"
         @retry="reload"
+        @select-span="selectSpan"
       />
     </template>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { fetchTraceSearch } from '@/api/client'
 import type { LogSearchMode, SpanNode, TraceDetail, TraceLogEntry } from '@/api/types'
 import LogPanel from '@/pipeline/LogPanel.vue'
-import { findSpanByID, flattenVisibleChildren, formatDuration, liveSpanDuration, visibleChildren } from '@/pipeline/spanTree'
+import {
+  computeRowOwners,
+  findSpanByID,
+  flattenVisibleChildren,
+  formatCount,
+  formatDuration,
+  liveSpanDuration,
+  visibleChildren,
+} from '@/pipeline/spanTree'
 
 const props = defineProps<{
   traceId: string
@@ -88,6 +110,13 @@ const entries = ref<TraceLogEntry[]>([])
 const nextCursor = ref<number | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
+
+// Per-span matching-log counts from the first search page, rolled up to the
+// visible rows for the count badges.
+const counts = ref<Record<string, number>>({})
+const highlightedSpanID = ref<string | null>(null)
+let highlightTimer: number | undefined
+const rowEls: Record<string, HTMLElement> = {}
 
 // Live-ticking clock so running durations increase (mirrors PipelineView).
 const now = ref<number>(Date.now())
@@ -114,6 +143,33 @@ const rows = computed<Row[]>(() => {
       hasChildren: flat.spans.length > 0,
     }
   })
+})
+
+// rowOwners maps every span in the focus subtree to the visible row that owns
+// its logs (see computeRowOwners).
+const rowOwners = computed(() => (focus.value ? computeRowOwners(focus.value) : new Map<string, string>()))
+
+// rowCounts rolls the raw per-span counts up to the visible rows.
+const rowCounts = computed<Map<string, number>>(() => {
+  const m = new Map<string, number>()
+  for (const [spanID, n] of Object.entries(counts.value)) {
+    const owner = rowOwners.value.get(spanID)
+    if (owner !== undefined) m.set(owner, (m.get(owner) ?? 0) + n)
+  }
+  return m
+})
+
+// attribution maps every span in the focus subtree to the step badge shown on
+// its log lines (label + the row to scroll to on click).
+const attribution = computed<Map<string, { label: string; ownerSpanID: string }>>(() => {
+  const name = new Map<string, string>()
+  if (focus.value) name.set(focus.value.span_id, focus.value.name || focus.value.span_id)
+  for (const r of rows.value) name.set(r.node.span_id, r.node.name || r.node.span_id)
+  const out = new Map<string, { label: string; ownerSpanID: string }>()
+  for (const [spanID, ownerID] of rowOwners.value) {
+    out.set(spanID, { label: name.get(ownerID) ?? ownerID, ownerSpanID: ownerID })
+  }
+  return out
 })
 
 // Re-resolve the breadcrumb whenever the trace root changes (e.g. first load
@@ -166,6 +222,7 @@ onMounted(() => {
 onUnmounted(() => {
   if (nowTimer) window.clearInterval(nowTimer)
   if (refreshDebounce) window.clearTimeout(refreshDebounce)
+  if (highlightTimer) window.clearTimeout(highlightTimer)
 })
 
 function zoomIn(node: SpanNode) {
@@ -187,6 +244,24 @@ function toggleExpanded(spanID: string) {
   expanded.value = next
 }
 
+function setRowRef(spanID: string, el: HTMLElement | null) {
+  if (el) rowEls[spanID] = el
+  else delete rowEls[spanID]
+}
+
+// selectSpan scrolls to and briefly flashes the row that owns a clicked log
+// line's span. The row is always visible at the current focus level.
+function selectSpan(ownerSpanID: string) {
+  highlightedSpanID.value = ownerSpanID
+  void nextTick(() => {
+    rowEls[ownerSpanID]?.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  })
+  if (highlightTimer) window.clearTimeout(highlightTimer)
+  highlightTimer = window.setTimeout(() => {
+    highlightedSpanID.value = null
+  }, 1500)
+}
+
 function onQueryChange(value: string) {
   query.value = value
   void reload()
@@ -201,14 +276,13 @@ async function reload() {
   // Pre-validate a regex client-side so an invalid pattern shows an inline
   // error without a round-trip (the server would 400 anyway). The server stays
   // authoritative; this is a UX shortcut.
+  entries.value = []
+  nextCursor.value = null
+  counts.value = {}
   if (mode.value === 'regex' && query.value && !isValidRegex(query.value)) {
-    entries.value = []
-    nextCursor.value = null
     error.value = 'Invalid regex'
     return
   }
-  entries.value = []
-  nextCursor.value = null
   await fetchPage(undefined)
 }
 
@@ -239,6 +313,7 @@ async function fetchPage(cursor: number | undefined) {
     })
     entries.value = cursor === undefined ? page.entries : [...entries.value, ...page.entries]
     nextCursor.value = page.next ?? null
+    if (cursor === undefined) counts.value = page.counts ?? {}
   } catch (e) {
     error.value = 'Failed to search logs'
     console.error('Failed to search trace logs', e)
@@ -292,6 +367,25 @@ async function fetchPage(cursor: number | undefined) {
 
 .step-row:hover {
   background: #1c2128;
+}
+
+.step-highlight .step-row {
+  background: #1f2a3a;
+  box-shadow: inset 0 0 0 1px #58a6ff;
+}
+
+.step-logs-badge {
+  font-size: 11px;
+  color: #58a6ff;
+  background: #1f2a3a;
+  border: none;
+  border-radius: 10px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.step-logs-badge:hover {
+  background: #26374d;
 }
 
 .chevron {

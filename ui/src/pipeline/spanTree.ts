@@ -53,6 +53,38 @@ export function visibleChildren(nodes: SpanNode[]): SpanNode[] {
   return out
 }
 
+// computeRowOwners maps every span in focus's subtree to the span_id of the
+// visible row (a direct visible child of focus) that owns its logs. Spans that
+// roll up to focus itself map to focus.span_id. Internal spans are omitted
+// (their logs are "unattributed"). Mirrors the old ownerBySpanID/passthrough
+// rules (internal first, then transparent).
+export function computeRowOwners(focus: SpanNode): Map<string, string> {
+  const map = new Map<string, string>()
+  map.set(focus.span_id, focus.span_id)
+  const assign = (n: SpanNode, rowOwner: string) => {
+    if (isInternalSpan(n)) {
+      for (const c of n.children) assign(c, rowOwner)
+      return
+    }
+    if (isTransparentSpan(n)) {
+      map.set(n.span_id, rowOwner)
+      for (const c of n.children) assign(c, rowOwner)
+      return
+    }
+    map.set(n.span_id, n.span_id)
+    for (const c of n.children) assign(c, n.span_id)
+  }
+  for (const c of focus.children) assign(c, focus.span_id)
+  return map
+}
+
+// formatCount renders a badge count compactly for large values.
+export function formatCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`
+  if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
+  return String(n)
+}
+
 // flattenVisibleChildren walks a node's direct children, promoting passthrough
 // spans and hiding internal/encapsulated spans (counting the latter as hidden).
 // Unlike flattenVisible it does not include the node itself, so it is the right

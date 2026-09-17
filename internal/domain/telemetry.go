@@ -100,19 +100,21 @@ const (
 
 // LogSearchRequest is a subtree-scoped, text-filtered, paginated log query.
 type LogSearchRequest struct {
-	SpanIDs []string      // descendant span IDs (base64) to include; nil/empty = all spans
-	Query   string        // text to match; empty = no text filter
-	Mode    LogSearchMode // LogSearchContains | LogSearchRegex
-	Start   time.Time     // inclusive window start (handler defaults to last 24h)
-	End     time.Time     // inclusive window end (handler defaults to now)
-	Limit   int           // max matching entries to return this page
-	Cursor  int64         // unix nanos; return entries strictly after this timestamp
+	SpanIDs       []string      // descendant span IDs (base64) to include; nil/empty = all spans
+	Query         string        // text to match; empty = no text filter
+	Mode          LogSearchMode // LogSearchContains | LogSearchRegex
+	Start         time.Time     // inclusive window start (handler defaults to last 24h)
+	End           time.Time     // inclusive window end (handler defaults to now)
+	Limit         int           // max matching entries to return this page
+	Cursor        int64         // unix nanos; return entries strictly after this timestamp
+	IncludeCounts bool          // compute per-span matching counts (first page only)
 }
 
 // LogSearchPage is one page of subtree-scoped search results.
 type LogSearchPage struct {
-	Entries []LogEntry `json:"entries"`
-	Next    int64      `json:"next,omitempty"` // cursor for the next page; 0 = no more
+	Entries []LogEntry       `json:"entries"`
+	Next    int64            `json:"next,omitempty"`   // cursor for the next page; 0 = no more
+	Counts  map[string]int64 `json:"counts,omitempty"` // span_id -> matching log count (first page only)
 }
 
 type LogRepository interface {

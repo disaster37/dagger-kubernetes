@@ -37,6 +37,13 @@
       <template v-for="(entry, i) in rendered" :key="`log-${i}`">
         <div class="log-line">
           <span class="log-ts">{{ formatTime(entry.timestamp) }}</span>
+          <span
+            v-if="entry.badge"
+            class="log-step"
+            :title="entry.badge.label"
+            @click="$emit('select-span', entry.badge.ownerSpanID)"
+          >{{ entry.badge.label }}</span>
+          <span v-else class="log-step log-step-unattributed">unattributed</span>
           <span class="log-msg">
             <template v-for="(seg, j) in entry.segments" :key="`seg-${j}`">
               <mark v-if="seg.match">{{ seg.text }}</mark>
@@ -66,6 +73,7 @@ const props = defineProps<{
   error: string | null
   hasMore: boolean
   totalShown: number
+  attribution: Map<string, { label: string; ownerSpanID: string }>
 }>()
 
 const emit = defineEmits<{
@@ -73,6 +81,7 @@ const emit = defineEmits<{
   (e: 'update:mode', value: LogSearchMode): void
   (e: 'load-more'): void
   (e: 'retry'): void
+  (e: 'select-span', ownerSpanID: string): void
 }>()
 
 // Local mirror of the query so typing stays responsive; the debounced emit
@@ -96,6 +105,7 @@ function onQueryInput(event: Event) {
 interface RenderedLine {
   timestamp: string
   segments: { text: string; match: boolean }[]
+  badge: { label: string; ownerSpanID: string } | null
 }
 
 const rendered = computed<RenderedLine[]>(() => {
@@ -103,7 +113,11 @@ const rendered = computed<RenderedLine[]>(() => {
   for (const entry of props.entries) {
     const text = logText(entry.line)
     if (text === null) continue
-    out.push({ timestamp: entry.timestamp, segments: highlightSegments(text, props.query, props.mode) })
+    out.push({
+      timestamp: entry.timestamp,
+      segments: highlightSegments(text, props.query, props.mode),
+      badge: (entry.span_id && props.attribution.get(entry.span_id)) || null,
+    })
   }
   return out
 })
@@ -202,6 +216,31 @@ function formatTime(ts: string): string {
 .log-ts {
   color: #8b949e;
   flex-shrink: 0;
+}
+
+.log-step {
+  flex-shrink: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+  font-size: 11px;
+  color: #58a6ff;
+  background: #1f2a3a;
+  border-radius: 10px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.log-step:hover {
+  background: #26374d;
+}
+
+.log-step-unattributed {
+  color: #8b949e;
+  background: #21262d;
+  cursor: default;
 }
 
 .log-msg {

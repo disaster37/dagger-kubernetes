@@ -200,8 +200,8 @@ export async function fetchTraceSearch(id: string, params: LogSearchRequest): Pr
   const { data } = await api.get(`/api/v1/traces/${id}/search`, { params })
   const page = data as LogSearchPage
   // The server may omit/null `entries` on an empty page; normalise so callers
-  // can always iterate the array.
-  return { entries: page.entries ?? [], next: page.next }
+  // can always iterate the array. `counts` is only present on the first page.
+  return { entries: page.entries ?? [], next: page.next, counts: page.counts ?? {} }
 }
 export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')

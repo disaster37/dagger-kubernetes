@@ -83,20 +83,6 @@
       <StepTree :trace-id="traceId" :trace="trace" :refresh-key="searchRefreshKey" />
     </div>
 
-    <details class="card" :open="unmatchedLogs.length > 0 && logs.length > 0 && unmatchedLogs.length === logs.length">
-      <summary>Unmatched / general logs ({{ unmatchedLogs.length }})</summary>
-      <div v-follow-logs class="logs">
-        <template v-for="(log, i) in unmatchedLogs" :key="i">
-          <div v-if="logText(log.line) !== null" class="log-line">
-            <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
-            <span class="log-msg">{{ logText(log.line) }}</span>
-          </div>
-        </template>
-        <p v-if="logsLoading" class="empty">Loading logs...</p>
-        <p v-else-if="unmatchedLogs.length === 0" class="empty">No unmatched logs</p>
-      </div>
-    </details>
-
     <div class="card">
       <h3>Details</h3>
       <table>
@@ -143,7 +129,6 @@ const trace = ref<TraceDetail>({
   version: '',
 })
 const logs = ref<TraceLogEntry[]>([])
-const logsLoading = ref(true)
 const metrics = ref<TraceMetrics | null>(null)
 
 // Bumped on every live logs_update / poll so StepTree refreshes its search
@@ -232,10 +217,6 @@ const logsByOwner = computed<Map<string, TraceLogEntry[]>>(() => {
   }
   return map
 })
-
-const unmatchedLogs = computed<TraceLogEntry[]>(() =>
-  logs.value.filter((l) => !l.span_id || !ownerBySpanID.value.has(l.span_id))
-)
 
 onMounted(async () => {
   await loadAll()
@@ -341,8 +322,6 @@ async function loadLogs() {
     recomputeServices()
   } catch (e) {
     console.error('Failed to fetch logs', e)
-  } finally {
-    logsLoading.value = false
   }
 }
 

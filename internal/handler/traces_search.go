@@ -61,13 +61,14 @@ func (s *Server) handleTracesSearch(_ context.Context, c *app.RequestContext) {
 
 	start, end := searchWindow(c)
 	page, err := s.logs.SearchTraceLogs(context.Background(), traceID, domain.LogSearchRequest{
-		SpanIDs: spanIDs,
-		Query:   c.Query("q"),
-		Mode:    mode,
-		Start:   start,
-		End:     end,
-		Limit:   clampSearchLimit(c.Query("limit")),
-		Cursor:  cursor,
+		SpanIDs:       spanIDs,
+		Query:         c.Query("q"),
+		Mode:          mode,
+		Start:         start,
+		End:           end,
+		Limit:         clampSearchLimit(c.Query("limit")),
+		Cursor:        cursor,
+		IncludeCounts: cursor == 0,
 	})
 	if err != nil {
 		if errors.Is(err, domain.ErrInvalidRegex) {
