@@ -16,6 +16,19 @@
       </div>
     </div>
 
+    <div v-if="metrics" class="card metrics-card">
+      <h3>Engine metrics</h3>
+      <div v-if="metrics.series.length === 0" class="empty">No metrics</div>
+      <div v-else class="metrics-grid">
+        <MetricChart
+          v-for="s in metrics.series"
+          :key="s.name"
+          :series="s"
+          :unit="s.unit"
+        />
+      </div>
+    </div>
+
     <div class="card services-card">
       <h3>Services <span v-if="services.length" class="count-badge">{{ services.length }}</span></h3>
       <div v-if="services.length === 0" class="empty">No services</div>
@@ -163,9 +176,10 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { fetchTrace, fetchTraceLogs, connectLiveTrace } from '@/api/client'
-import type { ServiceInfo, SpanNode, TraceDetail, TraceLogEntry } from '@/api/types'
+import { fetchTrace, fetchTraceLogs, fetchTraceMetrics, connectLiveTrace } from '@/api/client'
+import type { ServiceInfo, SpanNode, TraceDetail, TraceLogEntry, TraceMetrics } from '@/api/types'
 import { vFollowLogs } from '@/directives/followLogs'
+import MetricChart from '@/pipeline/MetricChart.vue'
 
 const route = useRoute()
 const traceId = route.params.id as string
@@ -184,6 +198,7 @@ const logsLoading = ref(true)
 const traceLoading = ref(true)
 const traceError = ref(false)
 const steps = ref<Step[]>([])
+const metrics = ref<TraceMetrics | null>(null)
 
 // Live-ticking clock: refreshed every 250ms while mounted so running durations
 // visibly increase (see liveSpanDuration/liveTraceDuration below).
@@ -193,8 +208,40 @@ const now = ref<number>(Date.now())
 // inspection without touching logic.
 const SERVICE_LOG_BODY = 'tunnel started'
 const SERVICE_URL_ATTRS = ['http_url', 'https_url'] as const
+// Span names that indicate a host-tunnel service (verify on a live trace).
+const SERVICE_SPAN_NAMES = new Set<string>(['up', 'host.tunnel', 'Service.Up', 'service.Up'])
 
 const SERVICE_TAIL_LINES = 50
+
+// Internal-span name rules, ported from internal/service/ci_steps.go
+// (internalSpanPrefixes/internalSpanExact) so the pipeline UI folds the same
+// engine transport spans the CI step builder does. Kept in sync manually.
+const INTERNAL_SPAN_PREFIXES = [
+  'GET ', 'POST ', 'PUT ', 'DELETE ', 'PATCH ', 'HEAD ', 'OPTIONS ',
+  'Read ', 'Write ', 'Query.', 'Address.', 'parsing ',
+] as const
+const INTERNAL_SPAN_EXACT = new Set<string>(['connect'])
+
+function isInternalSpanName(name: string): boolean {
+  return INTERNAL_SPAN_PREFIXES.some((p) => name.startsWith(p)) || INTERNAL_SPAN_EXACT.has(name)
+}
+
+// A span is internal noise (its logs are dropped) when Dagger marks it
+// internal or its name matches the CI internal-span rules.
+function isInternalSpan(n: SpanNode): boolean {
+  return attrBool(n, 'dagger.io/ui.internal') || isInternalSpanName(n.name)
+}
+
+// A span is hidden from the tree when it is internal noise or encapsulated.
+function isHiddenSpan(n: SpanNode): boolean {
+  return isInternalSpan(n) || attrBool(n, 'dagger.io/ui.encapsulated')
+}
+
+// A transparent span is hidden but its logs belong to the nearest visible
+// ancestor (passthrough promotes children; encapsulated hides the node).
+function isTransparentSpan(n: SpanNode): boolean {
+  return attrBool(n, 'dagger.io/ui.passthrough') || attrBool(n, 'dagger.io/ui.encapsulated')
+}
 
 interface ServiceRow extends ServiceInfo {
   expanded: boolean
@@ -238,19 +285,49 @@ const logsBySpan = computed<Map<string, TraceLogEntry[]>>(() => {
   return map
 })
 
-const allSpanIDs = computed<Set<string>>(() => {
-  const ids = new Set<string>()
-  const walk = (n: SpanNode | null) => {
+// ownerBySpanID maps every span in the tree to the span ID that owns its logs:
+//   - a visible span owns its own logs;
+//   - a passthrough/encapsulated span is transparent, so its logs belong to the
+//     nearest visible ancestor (RUN/exec output stays under the step);
+//   - an internal/name-internal span is noise, so its logs are dropped (null).
+// Children of a hidden span inherit the same owner, so user-relevant children
+// of an internal span still surface under the nearest visible ancestor.
+const ownerBySpanID = computed<Map<string, string | null>>(() => {
+  const map = new Map<string, string | null>()
+  const walk = (n: SpanNode | null, owner: string) => {
     if (!n) return
-    ids.add(n.span_id)
-    for (const c of n.children) walk(c)
+    let nextOwner = owner
+    if (isInternalSpan(n)) {
+      map.set(n.span_id, null)
+    } else if (isTransparentSpan(n)) {
+      map.set(n.span_id, owner)
+    } else {
+      map.set(n.span_id, n.span_id)
+      nextOwner = n.span_id
+    }
+    for (const c of n.children) walk(c, nextOwner)
   }
-  walk(trace.value.root_span)
-  return ids
+  walk(trace.value.root_span, '')
+  return map
+})
+
+// logsByOwner buckets logs by their resolved visible owner. Logs whose span is
+// internal (owner null) or absent from the tree (unmatched) are not bucketed.
+const logsByOwner = computed<Map<string, TraceLogEntry[]>>(() => {
+  const map = new Map<string, TraceLogEntry[]>()
+  for (const log of logs.value) {
+    if (!log.span_id) continue
+    const owner = ownerBySpanID.value.get(log.span_id)
+    if (owner === undefined || owner === null) continue
+    const bucket = map.get(owner)
+    if (bucket) bucket.push(log)
+    else map.set(owner, [log])
+  }
+  return map
 })
 
 const unmatchedLogs = computed<TraceLogEntry[]>(() =>
-  logs.value.filter((l) => !l.span_id || !allSpanIDs.value.has(l.span_id))
+  logs.value.filter((l) => !l.span_id || !ownerBySpanID.value.has(l.span_id))
 )
 
 onMounted(async () => {
@@ -318,7 +395,17 @@ function scheduleLogsRefetch() {
 }
 
 async function loadAll() {
-  await Promise.all([loadTrace(), loadLogs()])
+  await Promise.all([loadTrace(), loadLogs(), loadMetrics()])
+}
+
+async function loadMetrics() {
+  try {
+    metrics.value = await fetchTraceMetrics(traceId)
+  } catch (e) {
+    // Metrics are best-effort: a disabled/unconfigured backend must not break
+    // the pipeline view.
+    console.error('Failed to fetch trace metrics', e)
+  }
 }
 
 async function loadTrace() {
@@ -357,14 +444,14 @@ async function loadLogs() {
 }
 
 function logsForSpan(node: SpanNode): TraceLogEntry[] {
-  const l = logsBySpan.value.get(node.span_id) ?? []
+  const l = logsByOwner.value.get(node.span_id) ?? []
   return l.slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
 }
 
 function logsForSubtree(node: SpanNode): TraceLogEntry[] {
   const out: TraceLogEntry[] = []
   const walk = (n: SpanNode) => {
-    const l = logsBySpan.value.get(n.span_id)
+    const l = logsByOwner.value.get(n.span_id)
     if (l) out.push(...l)
     for (const c of n.children) walk(c)
   }
@@ -397,7 +484,7 @@ function attrBool(n: SpanNode, key: string): boolean {
 function topLevelSpans(nodes: SpanNode[]): SpanNode[] {
   const out: SpanNode[] = []
   for (const n of nodes) {
-    if (attrBool(n, 'dagger.io/ui.passthrough')) {
+    if (attrBool(n, 'dagger.io/ui.passthrough') || isInternalSpan(n)) {
       out.push(...topLevelSpans(n.children))
     } else {
       out.push(n)
@@ -441,7 +528,7 @@ function flattenVisible(node: SpanNode, depth: number): { spans: DisplaySpan[]; 
     }
     return result
   }
-  if (attrBool(node, 'dagger.io/ui.internal') || attrBool(node, 'dagger.io/ui.encapsulated')) {
+  if (isHiddenSpan(node)) {
     const result = { spans: [] as DisplaySpan[], hidden: 1 }
     for (const child of node.children) {
       const r = flattenVisible(child, depth)
@@ -513,6 +600,23 @@ function liveTraceDuration(): number {
 // The up span stays running for the pipeline lifetime, so we detect services
 // by their log signal and surface them in a dedicated top-level summary.
 
+// attrValue normalizes an OTLP attribute that may reach Loki either flat
+// (`attributes.http_url = "..."`) or as an OTLP AnyValue object
+// (`{ stringValue: "..." }` / `{ intValue: 80 }`). Returns null when absent or
+// empty.
+function attrValue(a: Record<string, unknown>, k: string): string | null {
+  const v = a[k]
+  if (v == null) return null
+  if (typeof v === 'string') return v === '' ? null : v
+  if (typeof v === 'object' && v !== null) {
+    const o = v as Record<string, unknown>
+    if (typeof o.stringValue === 'string') return o.stringValue
+    if (typeof o.intValue === 'number') return String(o.intValue)
+    if (typeof o.doubleValue === 'number') return String(o.doubleValue)
+  }
+  return null
+}
+
 // serviceLogAttrs parses a log line once and returns its attributes map when
 // the line carries a service signal ("tunnel started" body or a non-empty
 // http_url/https_url attribute), otherwise null. Sharing a single parse keeps
@@ -522,7 +626,7 @@ function serviceLogAttrs(entry: TraceLogEntry): Record<string, unknown> | null {
     const obj = JSON.parse(entry.line) as { body?: unknown; attributes?: Record<string, unknown> }
     const attrs = obj.attributes ?? {}
     if (obj.body === SERVICE_LOG_BODY) return attrs
-    if (SERVICE_URL_ATTRS.some((k) => attrs[k] != null && attrs[k] !== '')) return attrs
+    if (SERVICE_URL_ATTRS.some((k) => attrValue(attrs, k) !== null)) return attrs
   } catch {
     // not JSON / malformed — not a service signal
   }
@@ -538,6 +642,13 @@ function isServiceSpan(span: SpanNode, logsBySpan: Map<string, TraceLogEntry[]>)
   return logs.some(isServiceLog)
 }
 
+// isServiceSpanByName detects a host-tunnel service from the span identity
+// alone, so a service still appears when the engine's log signal differs from
+// the expected "tunnel started" body/attribute shape.
+function isServiceSpanByName(span: SpanNode): boolean {
+  return SERVICE_SPAN_NAMES.has(span.name)
+}
+
 function extractServiceMeta(logs: TraceLogEntry[]): {
   url: string | null
   port: number | null
@@ -549,19 +660,19 @@ function extractServiceMeta(logs: TraceLogEntry[]): {
   let protocol: string | null = null
   let description: string | null = null
 
-  const firstNonEmpty = (value: unknown): string | null =>
-    value != null && String(value) !== '' ? String(value) : null
-
   for (const entry of logs) {
     const attrs = serviceLogAttrs(entry)
     if (attrs === null) continue
-    if (url === null) url = firstNonEmpty(attrs.http_url) ?? firstNonEmpty(attrs.https_url)
-    if (port === null && attrs.port != null && attrs.port !== '') {
-      const p = Number(attrs.port)
-      if (Number.isFinite(p)) port = p
+    if (url === null) url = attrValue(attrs, 'http_url') ?? attrValue(attrs, 'https_url')
+    if (port === null) {
+      const rawPort = attrValue(attrs, 'port')
+      if (rawPort !== null) {
+        const p = Number(rawPort)
+        if (Number.isFinite(p)) port = p
+      }
     }
-    if (protocol === null) protocol = firstNonEmpty(attrs.protocol)
-    if (description === null) description = firstNonEmpty(attrs.description)
+    if (protocol === null) protocol = attrValue(attrs, 'protocol')
+    if (description === null) description = attrValue(attrs, 'description')
   }
   return { url, port, protocol, description }
 }
@@ -570,7 +681,7 @@ function computeServices(root: SpanNode | null, logsBySpan: Map<string, TraceLog
   if (!root) return []
   const rows: ServiceRow[] = []
   const walk = (n: SpanNode) => {
-    if (isServiceSpan(n, logsBySpan)) {
+    if (isServiceSpan(n, logsBySpan) || isServiceSpanByName(n)) {
       const svcLogs = logsForSubtree(n)
       const meta = extractServiceMeta(svcLogs)
       rows.push({
@@ -654,36 +765,28 @@ function ciLabel(value?: string): string {
 
 interface LogJSON {
   body?: unknown
-  attributes?: { stdio?: { eof?: boolean } }
+  attributes?: { stdio?: { stream?: number; eof?: boolean } }
 }
 
 // Loki stores each log record as a JSON object; extract the human-readable
-// `body` field when present and strip ANSI colour escapes. Returns null for
-// stdio marker records that carry no content so the renderer can skip them.
+// `body` field when present, strip ANSI colour escapes and a leading
+// "Stdout:"/"Stderr:" stream prefix, and keep the payload. Returns null only
+// for empty/whitespace-only records (including stdio.eof markers) so the
+// renderer can skip them without hiding content-bearing exec/RUN output.
 function logText(line: string): string | null {
   let text = line
-  let obj: LogJSON | null = null
   try {
-    obj = JSON.parse(line)
+    const obj = JSON.parse(line) as LogJSON
     if (obj && typeof obj.body === 'string') text = obj.body
   } catch {
     // not JSON; render the raw line
   }
 
-  // stdio markers: the Dagger engine emits empty/"Stdout:"/"Stderr:" records
-  // that carry no content (e.g. {"body":"Stdout:\n","attributes":{"stdio.stream":2}}
-  // and {"body":"","attributes":{"stdio.eof":true}}). Skip them and strip the
-  // stream prefixes from records that do carry content.
-  if (obj && typeof obj.body === 'string') {
-    const body = obj.body
-    if (body.trim() === '' && obj.attributes?.stdio?.eof === true) return null
-    if (body !== body.replace(/^(Stdout|Stderr):\s*\n/, '')) {
-      text = body.replace(/^(Stdout|Stderr):\s*\n/, '')
-      if (text.trim() === '') return null
-    }
-  }
-
   text = text.replace(/\u001b\[[0-9;]*m/g, '')
+  text = text.replace(/^(Stdout|Stderr):\s*\n?/, '')
+
+  if (text.trim() === '') return null
+
   text = text.replace(/\n+$/, '')
 
   // The Dagger engine serialises verbose progress payloads (module schemas,
@@ -917,6 +1020,19 @@ function decodeBase64UTF8(s: string): string | null {
   color: #f0f6fc;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* --- Engine metrics section --- */
+
+.metrics-card {
+  border-left: 3px solid #3fb950;
+}
+
+.metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 10px;
+  padding: 8px 0;
 }
 
 /* --- Services section --- */

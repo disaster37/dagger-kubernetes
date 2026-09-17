@@ -287,6 +287,12 @@ func run(c *cli.Context) error {
 	// --- History / status wiring ---
 	metricsClient := repository.NewMetricsClient(cfg.Telemetry.VictoriaURL)
 
+	// Trace-scoped engine resource metrics (cAdvisor container_* series).
+	var engineMetricsSvc *service.EngineMetricsService
+	if cfg.Pipeline.Metrics.Enabled {
+		engineMetricsSvc = service.NewEngineMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, logger)
+	}
+
 	// Shared S3 client for the S3-backed CLI cache.
 	var s3Client *minio.Client
 	if cfg.Cache.S3.Endpoint == "" {
@@ -336,14 +342,15 @@ func run(c *cli.Context) error {
 	}
 
 	server := handler.NewServer(&handler.ServerConfig{
-		ControlAddr:  cfg.Server.ControlAddr,
-		DataAddr:     cfg.Server.DataAddr,
-		DataHost:     cfg.Server.DataHost,
-		CollectorURL: cfg.Telemetry.CollectorURL,
-		VictoriaURL:  cfg.Telemetry.VictoriaURL,
-		CertPath:     controlTLSCertPath,
-		KeyPath:      controlTLSKeyPath,
-		PipelineURL:  cfg.Server.PublicURL,
+		ControlAddr:      cfg.Server.ControlAddr,
+		DataAddr:         cfg.Server.DataAddr,
+		DataHost:         cfg.Server.DataHost,
+		CollectorURL:     cfg.Telemetry.CollectorURL,
+		VictoriaURL:      cfg.Telemetry.VictoriaURL,
+		CertPath:         controlTLSCertPath,
+		KeyPath:          controlTLSKeyPath,
+		PipelineURL:      cfg.Server.PublicURL,
+		OTelMaxBodyBytes: cfg.OTel.IngestMaxBodySize,
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -380,6 +387,7 @@ func run(c *cli.Context) error {
 		CLI:                  cliSvc,
 		CIWrapperPath:        cfg.CLI.CIWrapperPath,
 		ImageCache:           imageCacheSvc,
+		EngineMetrics:        engineMetricsSvc,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {

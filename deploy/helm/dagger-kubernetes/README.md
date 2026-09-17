@@ -689,6 +689,9 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.logLevel` | string | `"info"` | Supervisor log level. |
 | `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
 | `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |
+| `supervisor.config.otel.ingestMaxBodySize` | int | `67108864` | OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). Keep the ingress `proxyBodySize` and the collector `max_request_body_size` at least this large. |
+| `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
+| `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 
 ### Local image cache (Zot mirror)
 
@@ -798,6 +801,7 @@ Configure it under `supervisor.config.history`:
 |---|---|---|---|
 | `ingress.enabled` | bool | `true` | Enable control-plane Ingress (web UI + API). |
 | `ingress.className` | string | `""` | Ingress class name (empty = default ingress controller). |
+| `ingress.proxyBodySize` | string | `"64m"` | nginx `proxy-body-size` annotation value. Must be >= the supervisor's `otel.ingestMaxBodySize` so large OTLP log batches are not rejected with 413 at the ingress. |
 | `ingress.annotations` | object | `{}` | Ingress annotations. |
 | `ingress.hosts` | array | see `values.yaml` | Ingress host rules. |
 | `ingress.hosts[].host` | string | `supv.example.com` | Hostname for the ingress rule. |
@@ -846,6 +850,8 @@ Configure it under `supervisor.config.history`:
 | `tempo.tempo.retention` | string | `720h` | Trace retention duration. Set to match (or exceed) `supervisor.config.history.gc.maxAge`. |
 | `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |
 | `victoria.enabled` | bool | `true` | Install VictoriaMetrics subchart (metrics). |
+| `victoria.server.scrape.enabled` | bool | `true` | Enable VictoriaMetrics' built-in Prometheus scraper (required for the kubelet cAdvisor job). |
+| `victoria.server.scrape.extraScrapeConfigs` | array | see `values.yaml` | Extra scrape jobs appended to the subchart's default scrape config. The `kubelet-cadvisor` job scrapes `container_*` metrics for the engine pods; the subchart's ClusterRole already grants `nodes/metrics` when scraping is enabled. |
 | `grafana.enabled` | bool | `true` | Install Grafana subchart (dashboards with auto-provisioned datasources). |
 
 ## Upgrading

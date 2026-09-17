@@ -447,6 +447,76 @@ func TestPipelineEnvOverride(t *testing.T) {
 	}
 }
 
+func TestPipelineMetricsDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !cfg.Pipeline.Metrics.Enabled {
+		t.Fatal("pipeline.metrics.enabled default should be true")
+	}
+	if cfg.Pipeline.Metrics.Step != 15*time.Second {
+		t.Fatalf("pipeline.metrics.step default = %v, want 15s", cfg.Pipeline.Metrics.Step)
+	}
+}
+
+func TestPipelineMetricsEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_ENABLED", "false")
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_STEP", "30s")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.Pipeline.Metrics.Enabled {
+		t.Fatal("env override pipeline.metrics.enabled = true, want false")
+	}
+	if cfg.Pipeline.Metrics.Step != 30*time.Second {
+		t.Fatalf("env override pipeline.metrics.step = %v, want 30s", cfg.Pipeline.Metrics.Step)
+	}
+}
+
+func TestLoadRejectsInvalidPipelineMetrics(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_ENABLED", "true")
+	t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_STEP", "0s")
+
+	_, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "pipeline.metrics.step must be > 0") {
+		t.Fatalf("err = %v, want pipeline.metrics.step must be > 0", err)
+	}
+}
+
+func TestOTelIngestDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OTel.IngestMaxBodySize != 64<<20 {
+		t.Fatalf("otel.ingest_max_body_size default = %d, want %d", cfg.OTel.IngestMaxBodySize, int64(64<<20))
+	}
+}
+
+func TestOTelIngestEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_OTEL_INGEST_MAX_BODY_SIZE", "1048576")
+
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.OTel.IngestMaxBodySize != 1<<20 {
+		t.Fatalf("env override otel.ingest_max_body_size = %d, want %d", cfg.OTel.IngestMaxBodySize, int64(1<<20))
+	}
+}
+
+func TestLoadRejectsNegativeOTelIngest(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_OTEL_INGEST_MAX_BODY_SIZE", "-1")
+
+	_, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err == nil || !strings.Contains(err.Error(), "otel.ingest_max_body_size must be >= 0") {
+		t.Fatalf("err = %v, want otel.ingest_max_body_size must be >= 0", err)
+	}
+}
+
 func TestValidateAuthConfig(t *testing.T) {
 	githubSet := func(cfg *domain.Config) {
 		cfg.Auth.OAuth.ClientID = "cid"

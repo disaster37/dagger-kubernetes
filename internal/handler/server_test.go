@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -213,6 +214,40 @@ func TestHandleEnginesBodyTooLarge(t *testing.T) {
 
 	if resp.Result().StatusCode() != http.StatusRequestEntityTooLarge {
 		t.Fatalf("expected 413, got %d", resp.Result().StatusCode())
+	}
+}
+
+// TestHandleOTelBodyLimit verifies the OTLP ingest path uses the dedicated
+// (configurable) body cap rather than the 4 MiB control-API cap.
+func TestHandleOTelBodyLimit(t *testing.T) {
+	s, bearer := newTestServer(t)
+
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+	s.otelProxy = s.newHertzProxy(collector.URL, nil, "collector")
+	s.cfg.OTelMaxBodyBytes = 1024
+
+	e := route.NewEngine(config.NewOptions(nil))
+	e.POST("/v1/logs", s.handleOTel("logs"))
+
+	over := bytes.Repeat([]byte("x"), 2048)
+	resp := ut.PerformRequest(e, "POST", "/v1/logs", &ut.Body{
+		Body: bytes.NewReader(over),
+		Len:  len(over),
+	}, ut.Header{Key: "Authorization", Value: bearer})
+	if resp.Result().StatusCode() != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over limit: status %d, want 413", resp.Result().StatusCode())
+	}
+
+	under := bytes.Repeat([]byte("x"), 512)
+	resp = ut.PerformRequest(e, "POST", "/v1/logs", &ut.Body{
+		Body: bytes.NewReader(under),
+		Len:  len(under),
+	}, ut.Header{Key: "Authorization", Value: bearer})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("under limit: status %d, want 200", resp.Result().StatusCode())
 	}
 }
 

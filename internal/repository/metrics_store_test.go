@@ -7,6 +7,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func TestDeleteSeries(t *testing.T) {
@@ -108,5 +111,102 @@ func TestDeleteTraceSeriesUnconfigured(t *testing.T) {
 	err := client.DeleteTraceSeries(context.Background(), "401ccb197124a8ff2028720fcb5eaa06")
 	if err == nil || !strings.Contains(err.Error(), "victoria URL not configured") {
 		t.Fatalf("err = %v, want victoria URL not configured", err)
+	}
+}
+
+func TestQueryRangeSumsAndSorts(t *testing.T) {
+	var gotPath, gotQuery, gotStart, gotEnd, gotStep string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.Query().Get("query")
+		gotStart = r.URL.Query().Get("start")
+		gotEnd = r.URL.Query().Get("end")
+		gotStep = r.URL.Query().Get("step")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[` +
+			`{"metric":{"pod":"a"},"values":[[100,"1.5"],[110,"2"]]},` +
+			`{"metric":{"pod":"b"},"values":[[100,"0.5"],[120,"3"]]}]}}`))
+	}))
+	defer srv.Close()
+
+	client := NewMetricsClient(srv.URL)
+	start := time.Unix(100, 0)
+	end := time.Unix(200, 0)
+	points, err := client.QueryRange(context.Background(), `up`, start, end, 15*time.Second)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if gotPath != "/api/v1/query_range" {
+		t.Fatalf("path = %s, want /api/v1/query_range", gotPath)
+	}
+	if gotQuery != "up" || gotStart != "100" || gotEnd != "200" || gotStep != "15" {
+		t.Fatalf("query params = query=%q start=%q end=%q step=%q", gotQuery, gotStart, gotEnd, gotStep)
+	}
+	want := []domain.MetricPoint{{T: 100, V: 2}, {T: 110, V: 2}, {T: 120, V: 3}}
+	if len(points) != len(want) {
+		t.Fatalf("points = %v, want %v", points, want)
+	}
+	for i := range want {
+		if points[i] != want[i] {
+			t.Fatalf("points[%d] = %v, want %v", i, points[i], want[i])
+		}
+	}
+}
+
+func TestQueryRangeEmptyResult(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer srv.Close()
+
+	client := NewMetricsClient(srv.URL)
+	points, err := client.QueryRange(context.Background(), `up`, time.Unix(0, 0), time.Unix(1, 0), time.Second)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	if len(points) != 0 {
+		t.Fatalf("points = %v, want empty", points)
+	}
+}
+
+func TestQueryRangeUnconfigured(t *testing.T) {
+	client := NewMetricsClient("")
+	_, err := client.QueryRange(context.Background(), `up`, time.Unix(0, 0), time.Unix(1, 0), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "victoria URL not configured") {
+		t.Fatalf("err = %v, want victoria URL not configured", err)
+	}
+}
+
+func TestQueryRangeEmptyQuery(t *testing.T) {
+	client := NewMetricsClient("http://victoria:8428")
+	_, err := client.QueryRange(context.Background(), "", time.Unix(0, 0), time.Unix(1, 0), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "query must not be empty") {
+		t.Fatalf("err = %v, want query must not be empty", err)
+	}
+}
+
+func TestQueryRangeNon200(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	client := NewMetricsClient(srv.URL)
+	_, err := client.QueryRange(context.Background(), `up`, time.Unix(0, 0), time.Unix(1, 0), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "502") {
+		t.Fatalf("err = %v, want containing 502", err)
+	}
+}
+
+func TestQueryRangeInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`not-json`))
+	}))
+	defer srv.Close()
+
+	client := NewMetricsClient(srv.URL)
+	_, err := client.QueryRange(context.Background(), `up`, time.Unix(0, 0), time.Unix(1, 0), time.Second)
+	if err == nil || !strings.Contains(err.Error(), "decode victoria query_range response") {
+		t.Fatalf("err = %v, want decode error", err)
 	}
 }

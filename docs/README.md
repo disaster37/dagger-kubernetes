@@ -439,6 +439,8 @@ inline comments. The sections below summarise the most important ones.
 |                 | `stale_sweep.enabled`                     | `true`                                                   | Master switch for the pipeline stale-trace sweeper.                                                                                           |
 |                 | `stale_sweep.schedule`                    | `1m`                                                     | Stale sweeper ticker interval.                                                                                                                |
 |                 | `stale_sweep.stale_after`                 | `5m`                                                     | Mark running traces with no active lease failed once older than this.                                                                         |
+|                 | `metrics.enabled`                         | `true`                                                   | Serve `GET /api/v1/traces/:id/metrics` (engine resource charts).                                                                              |
+|                 | `metrics.step`                            | `15s`                                                    | `query_range` resolution; must be > 0 when enabled.                                                                                           |
 | `fleet`         | `namespace`                               | `dagger-kubernetes`                                      | K8s namespace for engine pods.                                                                                                                |
 |                 | `max_replicas_per_version`                | `3`                                                      | Autoscaler ceiling per version.                                                                                                               |
 |                 | `max_sessions_per_replica`                | `8`                                                      | Sessions pinned per pod.                                                                                                                      |
@@ -475,6 +477,7 @@ inline comments. The sections below summarise the most important ones.
 | `log_level`     | —                                         | `info`                                                   | `debug`/`info`/`warn`/`error`.                                                                                                                |
 | `log_format`    | —                                         | `json`                                                   | Supervisor log format: `json` / `text`.                                                                                                       |
 | `otel`          | `otlp_endpoint`                           | `""`                                                     | If set, the Supervisor exports its own OTLP here.                                                                                             |
+|                 | `ingest_max_body_size`                    | `67108864` (64 MiB)                                      | OTLP ingest request-body cap in bytes (`0` = default). Separate from the 4 MiB control-API cap.                                               |
 
 Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 
@@ -911,10 +914,31 @@ pipeline:
     enabled: true           # supervisor-restart / crash recovery sweeper.
     schedule: "1m"
     stale_after: "5m"
+  metrics:
+    enabled: true           # serve GET /api/v1/traces/:id/metrics (engine resource charts).
+    step: "15s"             # query_range resolution; must be > 0 when enabled.
 ```
 
 `GET /api/v1/traces/:id` returns the `failure_reason` field on the merged
 `TraceMeta` so the UI can render why a pipeline failed.
+
+### Engine resource metrics (trace-scoped)
+
+`GET /api/v1/traces/:id/metrics` returns the engine pod's CPU, memory, disk
+read/write and network rx/tx over the trace's time window, as a curated set of
+series (`{name,label,unit,points:[{t,v}]}`). The supervisor builds the scoped
+PromQL server-side (the UI never writes PromQL) and queries VictoriaMetrics;
+the window is `[started_at, started_at+duration_ms]` (or `[started_at, now]`
+while running, last 24h when unknown), bounded to 24h. The pod selector is
+`{namespace="<fleet.namespace>",pod=~"<engine-statefulset>-.*",container="engine"}`.
+
+The data source is kubelet **cAdvisor** `container_*` metrics, scraped into
+VictoriaMetrics by the chart's `kubelet-cadvisor` scrape job
+(`victoria.server.scrape.extraScrapeConfigs`; the subchart's ClusterRole grants
+`nodes/metrics`). The endpoint is auth-gated by the same visibility rules as the
+trace detail endpoint; a missing `trace_meta` or absent cAdvisor data yields an
+empty-but-valid payload (HTTP 200), and a disabled/unconfigured backend returns
+`501`. See [ADR-037](design/ADR-037-pipeline-view-observability.md).
 
 ---
 
@@ -1605,6 +1629,24 @@ on the supervisor; see `CONTRIBUTING.md`):
 To export the Supervisor's *own* OTLP (e.g. to the same collector), set
 `otel.otlp_endpoint`. Leave it empty to disable.
 
+### OTLP ingest body size
+
+Large OTLP log batches (e.g. a verbose `RUN` step) can exceed nginx's default
+`client_max_body_size` (1 MiB) and be rejected with `413` before reaching the
+supervisor. Three limits must agree, and the chart sets all three to 64 MiB by
+default:
+
+| Layer | Setting | Chart default |
+|---|---|---|
+| nginx ingress | `nginx.ingress.kubernetes.io/proxy-body-size` (`ingress.proxyBodySize`) | `64m` |
+| Supervisor | `otel.ingest_max_body_size` (`supervisor.config.otel.ingestMaxBodySize`) | `67108864` |
+| OTel collector | `receivers.otlp.protocols.http.max_request_body_size` | `67108864` |
+
+The supervisor's OTLP cap is deliberately separate from the 4 MiB control-API
+cap (`maxControlBody`), which is unchanged. A chunked OTLP body (no
+`Content-Length`) bypasses the supervisor's up-front check and is bounded by the
+collector's own limit.
+
 ---
 
 ## Pipeline UI
@@ -1623,11 +1665,27 @@ Features:
   children of the root span, with Dagger `dagger.io/ui.passthrough` spans
   promoted) showing status and wall-clock duration. Sub-spans are collapsed
   and summarised as a hidden count; click a step to expand. `dagger.io/ui.*`
-  boolean span attributes drive the collapse/passthrough grouping.
+  boolean span attributes drive the collapse/passthrough grouping, and engine
+  internal transport spans (`POST /query`, `GET /blobs`, `connect`, …) are
+  folded away by the same name rules the CI step builder uses
+  (`internalSpanPrefixes`/`internalSpanExact`, ADR-024) so they never surface
+  as steps or sub-spans.
   The trace viewer header shows an `@username` chip (or `anonymous` for
   legacy/anonymous runs) next to the status badge, and the Details table
   includes a "User" row — so the pipeline owner is always visible on the
   detail view, matching the list view's `@username · org/repo` identity.
+- **Services** — a summary card above the steps lists host-tunnel services
+  (`dagger.Up()` / `service.Up()` / `--up`). Detection is robust: a span is a
+  service when its name matches the tunable `SERVICE_SPAN_NAMES` set
+  (`up`, `host.tunnel`, `Service.Up`, `service.Up`) **or** it carries a
+  `tunnel started` log / non-empty `http_url`/`https_url` attribute. OTLP
+  attributes are normalized whether they arrive flat (`attributes.http_url`)
+  or as OTLP `AnyValue` objects (`{stringValue: ...}` / `{intValue: ...}`).
+  Each row shows running state, port, URL and a collapsible log preview.
+- **Engine metrics** — a card above Services charts the engine pod's CPU,
+  memory, disk read/write and network rx/tx over the trace window
+  (`GET /api/v1/traces/:id/metrics`, hand-rolled SVG, no charting dependency).
+  The card shows "No metrics" when cAdvisor data is absent.
 - **Live updates** — the viewer subscribes to the `/api/v1/traces/:id/live`
   SSE stream. As the supervisor ingests each OTLP trace/log batch it extracts
   the affected trace IDs and broadcasts a lightweight `trace_update` or
@@ -1645,12 +1703,17 @@ Features:
   `trace_id` and `span_id` to Loki labels) and rendered inline under the step
   or sub-span that produced them (`GET /api/v1/traces/:id/logs`); logs with no
   recognisable span are grouped under a collapsed "unmatched" section. Logs
-  load on open and auto-refresh every few seconds while the pipeline is still
-  running. Each log container auto-scrolls to the end when opened and sticks
-  to the bottom while new lines stream in; scrolling up unpins, scrolling back
-  to the bottom re-pins (with a small hysteresis so jitter does not flap the
-  state). Dagger engine verbose progress payloads (base64 protobufs) are
-  collapsed to a placeholder rather than rendered as base64.
+  attached to a passthrough/encapsulated span are attributed to the nearest
+  visible ancestor, so `exec`/Dockerfile `RUN` stdout/stderr stays under the
+  build step; logs attached to internal/name-internal spans are dropped as
+  noise, and empty/whitespace-only records (including `stdio.eof` markers) are
+  skipped. Logs load on open and auto-refresh every few seconds while the
+  pipeline is still running. Each log container auto-scrolls to the end when
+  opened and sticks to the bottom while new lines stream in; scrolling up
+  unpins, scrolling back to the bottom re-pins (with a small hysteresis so
+  jitter does not flap the state). Dagger engine verbose progress payloads
+  (base64 protobufs) are collapsed to a placeholder rather than rendered as
+  base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
 - **History dashboard** (`/history`) — pipeline-history trace count + oldest
   update, auto-purge (GC) rules with last/next run summary, and admin-only
@@ -1669,6 +1732,17 @@ Features:
 - **Header status indicator** — a colored dot in the navbar (green/amber/red/
   grey) polling `/api/v1/status` every 10s; clicking navigates to `/services`
 - **Cache status** — S3 cache health, cache hit rates
+
+### Pipeline API
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/v1/traces` | Scoped pipeline list. |
+| `GET /api/v1/traces/:id` | Reconstructed span tree + status/duration/owner. |
+| `GET /api/v1/traces/:id/logs` | Per-span logs (Loki). |
+| `GET /api/v1/traces/:id/live` | SSE re-fetch signal stream. |
+| `GET /api/v1/traces/:id/url` | Self-hosted pipeline-view URL. |
+| `GET /api/v1/traces/:id/metrics` | Trace-scoped engine resource metrics (cAdvisor). |
 
 ### Pipeline view URL
 

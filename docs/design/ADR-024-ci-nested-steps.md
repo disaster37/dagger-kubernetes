@@ -77,6 +77,13 @@ children + logs are attributed to the nearest non-internal ancestor (the root
 is never filtered, preserving a single emitted root). Span names are matched by
 HTTP-method prefix (`GET `/`POST `/`PUT `/`DELETE `/`PATCH `/`HEAD `/`OPTIONS `).
 
+> **Note (ADR-037):** the pipeline UI now shares these same
+> `internalSpanPrefixes`/`internalSpanExact` name rules (ported to
+> `isInternalSpanName` in `ui/src/pipeline/PipelineView.vue`) so the UI step
+> tree and the CI step stream fold the same internal spans. The two rule sets
+> are a single source of truth for internal-span names and must be kept in
+> sync.
+
 ### 3. Wire format: NDJSON on stdout
 
 An `NDJSONEventSink` writes one JSON object per line — a stable, CI-agnostic

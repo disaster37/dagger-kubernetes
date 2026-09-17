@@ -323,8 +323,17 @@ type HistoryGCConfig struct {
 // trace has no active lease beyond a staleness threshold, the supervisor
 // transitions the trace to "failed" with a recorded reason.
 type PipelineConfig struct {
-	DisconnectGrace time.Duration      `mapstructure:"disconnect_grace"`
-	StaleSweep      PipelineStaleSweep `mapstructure:"stale_sweep"`
+	DisconnectGrace time.Duration         `mapstructure:"disconnect_grace"`
+	StaleSweep      PipelineStaleSweep    `mapstructure:"stale_sweep"`
+	Metrics         PipelineMetricsConfig `mapstructure:"metrics"`
+}
+
+// PipelineMetricsConfig governs the trace-scoped engine resource metrics
+// endpoint (GET /api/v1/traces/:traceID/metrics) that queries cAdvisor
+// container_* series from VictoriaMetrics.
+type PipelineMetricsConfig struct {
+	Enabled bool          `mapstructure:"enabled"`
+	Step    time.Duration `mapstructure:"step"` // query_range step; default 15s
 }
 
 // PipelineStaleSweep governs the background staleness sweeper that recovers
@@ -421,6 +430,10 @@ type DroneConfig struct {
 
 type OTelConfig struct {
 	OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+	// IngestMaxBodySize caps OTLP ingest request bodies (bytes). It is
+	// deliberately separate from the 4 MiB control-API cap: OTLP log/trace
+	// batches are legitimately large. 0 = use the handler default (64 MiB).
+	IngestMaxBodySize int64 `mapstructure:"ingest_max_body_size"`
 }
 
 // CLIConfig configures the on-the-fly Dagger CLI provisioning addon.
