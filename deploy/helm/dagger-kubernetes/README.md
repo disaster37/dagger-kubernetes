@@ -850,8 +850,7 @@ Configure it under `supervisor.config.history`:
 | `tempo.tempo.retention` | string | `720h` | Trace retention duration. Set to match (or exceed) `supervisor.config.history.gc.maxAge`. |
 | `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |
 | `victoria.enabled` | bool | `true` | Install VictoriaMetrics subchart (metrics). |
-| `victoria.server.scrape.enabled` | bool | `true` | Enable VictoriaMetrics' built-in Prometheus scraper (required for the kubelet cAdvisor job). |
-| `victoria.server.scrape.extraScrapeConfigs` | array | see `values.yaml` | Extra scrape jobs appended to the subchart's default scrape config. The `kubelet-cadvisor` job scrapes `container_*` metrics for the engine pods; the subchart's ClusterRole already grants `nodes/metrics` when scraping is enabled. |
+| `victoria.server.scrape.enabled` | bool | `true` | Enable VictoriaMetrics' built-in Prometheus scraper. The subchart's default scrape config already includes the `kubernetes-nodes-cadvisor` job (kubelet `/metrics/cadvisor`), which supplies the `container_*` series the pipeline-view engine-metrics card queries; the subchart's ClusterRole grants `nodes/metrics` when scraping is enabled. Do not add a second cAdvisor job — duplicate jobs double every summed series. |
 | `grafana.enabled` | bool | `true` | Install Grafana subchart (dashboards with auto-provisioned datasources). |
 
 ## Upgrading

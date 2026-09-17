@@ -67,11 +67,13 @@ isolated for one-line tuning after a live-trace inspection.
 ### 4. Trace-scoped engine metrics: cAdvisor → VictoriaMetrics → curated endpoint
 
 **Data path.** kubelet **cAdvisor** `container_*` metrics are scraped into
-VictoriaMetrics by the chart's `kubelet-cadvisor` job
-(`victoria.server.scrape.extraScrapeConfigs`; the subchart's ClusterRole grants
-`nodes/metrics`). The Dagger engine's own OTLP metrics are BuildKit/engine
-aggregates and do not include the engine pod's CPU/memory/disk/network, so
-cAdvisor is the canonical source.
+VictoriaMetrics by the subchart's default `kubernetes-nodes-cadvisor` job
+(enabled via `victoria.server.scrape.enabled`; the subchart's ClusterRole grants
+`nodes/metrics`). No extra scrape job is added: the default job already covers
+kubelet `/metrics/cadvisor`, and a duplicate job would double every summed
+series. The Dagger engine's own OTLP metrics are BuildKit/engine aggregates and
+do not include the engine pod's CPU/memory/disk/network, so cAdvisor is the
+canonical source.
 
 **Query path.** A new, auth-gated `GET /api/v1/traces/:traceID/metrics`
 endpoint builds scoped PromQL server-side and queries VictoriaMetrics; the UI
@@ -117,8 +119,8 @@ collector's `max_request_body_size` to match. The control-API cap is unchanged.
   tolerant of missing cAdvisor data.
 - The cAdvisor metric names/labels and the VictoriaMetrics subchart scrape key
   shape are isolated constants/config, verified against the installed chart
-  (`victoria.server.scrape.extraScrapeConfigs`) and tunable after a live
-  inspection.
+  (`victoria.server.scrape.enabled`, whose default config already scrapes
+  kubelet cAdvisor) and tunable after a live inspection.
 - The 4 MiB control-API cap is untouched; OTLP ingest is bounded by the
   collector's own limit for chunked bodies.
 

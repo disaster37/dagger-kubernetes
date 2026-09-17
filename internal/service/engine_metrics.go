@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 
@@ -15,6 +16,24 @@ import (
 // so a malformed/absurd duration cannot trigger an unbounded VictoriaMetrics
 // query (CWE-400).
 const maxMetricsWindow = 24 * time.Hour
+
+// safeVersionRe bounds the engine version interpolated into the PromQL pod
+// selector. trace_meta.version is client-supplied via OTLP, so a hostile value
+// must not be able to break out of the {pod=~"..."} matcher and inject
+// arbitrary PromQL (CWE-89/CWE-943). Legitimate Dagger versions are
+// semver-ish (v0.21.4, 0.21, v0.21.4-rc1).
+var safeVersionRe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
+
+// promQLLabelReplacer escapes the two characters that terminate a PromQL
+// double-quoted label value. Applied to the namespace and StatefulSet name as
+// defense-in-depth even though both are normally trusted/validated.
+var promQLLabelReplacer = strings.NewReplacer(`\`, `\\`, `"`, `\"`)
+
+// escapePromQLLabelValue escapes a value interpolated inside a PromQL
+// double-quoted label matcher.
+func escapePromQLLabelValue(v string) string {
+	return promQLLabelReplacer.Replace(v)
+}
 
 // defaultMetricQueries are the cAdvisor container_* series surfaced for an
 // engine pod. Template vars: {ns} namespace, {pod} engine StatefulSet name.
@@ -71,16 +90,28 @@ func (s *EngineMetricsService) TraceMetrics(ctx context.Context, meta *domain.Tr
 	if s.queryer == nil || meta.Version == "" {
 		return result, nil
 	}
+	// Reject a version that could break out of the PromQL label matcher before
+	// it reaches the query builder (CWE-89/CWE-943). An invalid version yields
+	// an empty-but-valid payload rather than an error.
+	if !safeVersionRe.MatchString(meta.Version) {
+		s.logger.WithFields(logrus.Fields{
+			"trace_id": meta.TraceID,
+			"version":  meta.Version,
+		}).Warn("engine metrics: rejecting unsafe engine version")
+		return result, nil
+	}
 
 	start, end := metricsWindow(meta, time.Now())
 	result.StartTime = start
 	result.EndTime = end
 
 	stsName := domain.StsName(meta.Version)
+	ns := escapePromQLLabelValue(s.namespace)
+	pod := escapePromQLLabelValue(stsName)
 	var lastErr error
 	for _, q := range defaultMetricQueries {
-		promql := strings.ReplaceAll(q.promql, "{ns}", s.namespace)
-		promql = strings.ReplaceAll(promql, "{pod}", stsName)
+		promql := strings.ReplaceAll(q.promql, "{ns}", ns)
+		promql = strings.ReplaceAll(promql, "{pod}", pod)
 		points, err := s.queryer.QueryRange(ctx, promql, start, end, s.step)
 		if err != nil {
 			lastErr = err

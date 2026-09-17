@@ -611,7 +611,9 @@ function attrValue(a: Record<string, unknown>, k: string): string | null {
   if (typeof v === 'object' && v !== null) {
     const o = v as Record<string, unknown>
     if (typeof o.stringValue === 'string') return o.stringValue
+    // OTLP/JSON encodes int64 as a string (proto3 JSON mapping), so accept both.
     if (typeof o.intValue === 'number') return String(o.intValue)
+    if (typeof o.intValue === 'string') return o.intValue === '' ? null : o.intValue
     if (typeof o.doubleValue === 'number') return String(o.doubleValue)
   }
   return null

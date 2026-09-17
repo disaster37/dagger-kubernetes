@@ -933,9 +933,10 @@ while running, last 24h when unknown), bounded to 24h. The pod selector is
 `{namespace="<fleet.namespace>",pod=~"<engine-statefulset>-.*",container="engine"}`.
 
 The data source is kubelet **cAdvisor** `container_*` metrics, scraped into
-VictoriaMetrics by the chart's `kubelet-cadvisor` scrape job
-(`victoria.server.scrape.extraScrapeConfigs`; the subchart's ClusterRole grants
-`nodes/metrics`). The endpoint is auth-gated by the same visibility rules as the
+VictoriaMetrics by the subchart's default `kubernetes-nodes-cadvisor` scrape job
+(enabled via `victoria.server.scrape.enabled`; the subchart's ClusterRole grants
+`nodes/metrics`). Do not add a second cAdvisor job — duplicate jobs double every
+summed series. The endpoint is auth-gated by the same visibility rules as the
 trace detail endpoint; a missing `trace_meta` or absent cAdvisor data yields an
 empty-but-valid payload (HTTP 200), and a disabled/unconfigured backend returns
 `501`. See [ADR-037](design/ADR-037-pipeline-view-observability.md).

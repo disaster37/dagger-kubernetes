@@ -985,8 +985,7 @@ loki:
 
 ## @skip victoria
 ## @param victoria.enabled Install VictoriaMetrics subchart (metrics).
-## @param victoria.server.scrape.enabled Enable VictoriaMetrics' built-in Prometheus scraper (required for the kubelet cAdvisor job below).
-## @param victoria.server.scrape.extraScrapeConfigs Extra scrape jobs appended to the subchart's default scrape config. The kubelet-cadvisor job scrapes `container_*` metrics for the engine pods; the subchart's ClusterRole already grants `nodes/metrics` when scraping is enabled.
+## @param victoria.server.scrape.enabled Enable VictoriaMetrics' built-in Prometheus scraper. The subchart's default scrape config already includes the `kubernetes-nodes-cadvisor` job (kubelet `/metrics/cadvisor`), which supplies the `container_*` series the pipeline-view engine-metrics card queries; the subchart's ClusterRole grants `nodes/metrics` when scraping is enabled. Do NOT add a second cAdvisor job: duplicate jobs double every summed series.
 victoria:
   enabled: true
   server:
@@ -1003,20 +1002,6 @@ victoria:
         memory: 1Gi
     scrape:
       enabled: true
-      extraScrapeConfigs:
-        - job_name: kubelet-cadvisor
-          scheme: https
-          kubernetes_sd_configs:
-            - role: node
-          bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
-          tls_config:
-            ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-            insecure_skip_verify: true
-          metrics_path: /metrics/cadvisor
-          relabel_configs:
-            - source_labels: [__meta_kubernetes_node_name]
-              target_label: node
-              replacement: ${1}
 
 ## @skip grafana
 ## @param grafana.enabled Install Grafana subchart (dashboards with auto-provisioned datasources).

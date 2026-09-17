@@ -33,8 +33,19 @@ const WIDTH = 300
 const HEIGHT = 60
 const PAD = 4
 
-const min = computed(() => Math.min(...props.series.points.map((p) => p.v)))
-const max = computed(() => Math.max(...props.series.points.map((p) => p.v)))
+// Reduce rather than Math.min(...points): a 24h window at a 1s step can hold
+// 86 400 points, which exceeds the JS engine's spread-argument limit and would
+// throw a RangeError.
+const min = computed(() => {
+  let m = Infinity
+  for (const p of props.series.points) if (p.v < m) m = p.v
+  return m
+})
+const max = computed(() => {
+  let m = -Infinity
+  for (const p of props.series.points) if (p.v > m) m = p.v
+  return m
+})
 const range = computed(() => max.value - min.value || 1)
 
 function x(i: number): number {

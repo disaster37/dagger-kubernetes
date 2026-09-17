@@ -169,6 +169,26 @@ func TestQueryRangeEmptyResult(t *testing.T) {
 	}
 }
 
+// TestQueryRangeSkipsNonFinite verifies NaN/Inf samples (which PromQL can
+// legitimately produce) are dropped rather than poisoning the JSON response.
+func TestQueryRangeSkipsNonFinite(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[` +
+			`{"metric":{},"values":[[100,"NaN"],[110,"+Inf"],[120,"2"]]}]}}`))
+	}))
+	defer srv.Close()
+
+	client := NewMetricsClient(srv.URL)
+	points, err := client.QueryRange(context.Background(), `up`, time.Unix(0, 0), time.Unix(200, 0), time.Second)
+	if err != nil {
+		t.Fatalf("QueryRange: %v", err)
+	}
+	want := []domain.MetricPoint{{T: 120, V: 2}}
+	if len(points) != len(want) || points[0] != want[0] {
+		t.Fatalf("points = %v, want %v", points, want)
+	}
+}
+
 func TestQueryRangeUnconfigured(t *testing.T) {
 	client := NewMetricsClient("")
 	_, err := client.QueryRange(context.Background(), `up`, time.Unix(0, 0), time.Unix(1, 0), time.Second)

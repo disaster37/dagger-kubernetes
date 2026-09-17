@@ -123,6 +123,51 @@ func TestEngineMetricsPromQLSubstitution(t *testing.T) {
 	}
 }
 
+// TestEngineMetricsRejectsUnsafeVersion verifies a client-supplied engine
+// version cannot break out of the PromQL pod selector (CWE-89/CWE-943).
+func TestEngineMetricsRejectsUnsafeVersion(t *testing.T) {
+	q := &stubMetricsQueryer{points: []domain.MetricPoint{{T: 1, V: 2}}}
+	svc := NewEngineMetricsService(q, "ns", 15*time.Second, testMetricsLogger())
+
+	meta := &domain.TraceMeta{
+		TraceID: "abc",
+		Version: `v0.21.4"}[5m]) or vector(1) or rate(up{pod=~"x`,
+	}
+	tm, err := svc.TraceMetrics(context.Background(), meta)
+	if err != nil {
+		t.Fatalf("TraceMetrics: %v", err)
+	}
+	if len(tm.Series) != 0 {
+		t.Fatalf("series = %v, want empty", tm.Series)
+	}
+	if len(q.queries) != 0 {
+		t.Fatalf("queries = %v, want none", q.queries)
+	}
+}
+
+// TestEngineMetricsEscapesNamespace verifies the namespace label value is
+// escaped before interpolation (defense-in-depth).
+func TestEngineMetricsEscapesNamespace(t *testing.T) {
+	q := &stubMetricsQueryer{points: []domain.MetricPoint{{T: 1, V: 2}}}
+	svc := NewEngineMetricsService(q, `ns"evil`, 15*time.Second, testMetricsLogger())
+
+	meta := &domain.TraceMeta{TraceID: "abc", Version: "v0.21.4", StartedAt: time.Unix(1000, 0), DurationMS: 1000}
+	if _, err := svc.TraceMetrics(context.Background(), meta); err != nil {
+		t.Fatalf("TraceMetrics: %v", err)
+	}
+	if len(q.queries) == 0 {
+		t.Fatal("expected queries")
+	}
+	for _, query := range q.queries {
+		if strings.Contains(query, `namespace="ns"evil"`) {
+			t.Fatalf("query %q contains unescaped namespace", query)
+		}
+		if !strings.Contains(query, `namespace="ns\"evil"`) {
+			t.Fatalf("query %q missing escaped namespace", query)
+		}
+	}
+}
+
 func TestEngineMetricsStepClamp(t *testing.T) {
 	svc := NewEngineMetricsService(&stubMetricsQueryer{}, "ns", 0, testMetricsLogger())
 	if svc.step != time.Second {

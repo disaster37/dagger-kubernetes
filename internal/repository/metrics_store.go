@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"sort"
@@ -129,6 +130,12 @@ func (c *MetricsClient) QueryRange(ctx context.Context, query string, start, end
 			}
 			val, err := strconv.ParseFloat(raw, 64)
 			if err != nil {
+				continue
+			}
+			// PromQL rate()/aggregations can legitimately yield NaN/Inf (e.g.
+			// a single sample in the window). Those are not JSON-encodable and
+			// would make writeJSON panic, so drop them (CWE-400/robustness).
+			if math.IsNaN(val) || math.IsInf(val, 0) {
 				continue
 			}
 			sums[int64(ts)] += val
