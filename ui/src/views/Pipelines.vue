@@ -177,11 +177,13 @@ function identity(trace: TraceRow): string {
   return '-'
 }
 
-// The CLI reports "dagger.io/ci" as "true"/"false" (whether a CI is detected),
-// not a provider name. Render a human-friendly label for the CI column.
-function ciLabel(ci: string): string {
-  if (!ci || ci === 'false') return '-'
-  if (ci === 'true') return 'CI'
+// ciLabel maps the stored ci_provider value to a human-readable label. Local
+// (manual) runs store "" or "false" (and the JSON field is omitted via
+// omitempty, so it may also be undefined at runtime); a bare "true" is shown as
+// "ci"; otherwise the provider name is shown verbatim. Mirrors PipelineView.vue.
+function ciLabel(ci?: string): string {
+  if (!ci || ci === 'false') return 'manual'
+  if (ci === 'true') return 'ci'
   return ci
 }
 </script>
