@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -92,10 +93,10 @@ func fakeLoki(t *testing.T) *httptest.Server {
 		for _, st := range streams {
 			result = append(result, fmt.Sprintf(
 				`{"stream":{"trace_id":%q,"span_id":%q},"values":[%s]}`,
-				searchTraceID, st.spanID, joinStrings(st.values, ",")))
+				searchTraceID, st.spanID, strings.Join(st.values, ",")))
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = fmt.Fprintf(w, `{"data":{"result":[%s]}}`, joinStrings(result, ","))
+		_, _ = fmt.Fprintf(w, `{"data":{"result":[%s]}}`, strings.Join(result, ","))
 	}))
 }
 
@@ -108,17 +109,6 @@ func parseInt64Default(s string, def int64) int64 {
 		return def
 	}
 	return n
-}
-
-func joinStrings(parts []string, sep string) string {
-	out := ""
-	for i, p := range parts {
-		if i > 0 {
-			out += sep
-		}
-		out += p
-	}
-	return out
 }
 
 // startPipelineSearchServer boots a supervisor wired to the fake Tempo + Loki

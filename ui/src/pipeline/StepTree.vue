@@ -68,7 +68,7 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { fetchTraceSearch } from '@/api/client'
 import type { LogSearchMode, SpanNode, TraceDetail, TraceLogEntry } from '@/api/types'
 import LogPanel from '@/pipeline/LogPanel.vue'
-import { flattenVisible, formatDuration, liveSpanDuration, visibleChildren } from '@/pipeline/spanTree'
+import { findSpanByID, flattenVisibleChildren, formatDuration, liveSpanDuration, visibleChildren } from '@/pipeline/spanTree'
 
 const props = defineProps<{
   traceId: string
@@ -106,7 +106,7 @@ const rows = computed<Row[]>(() => {
   const f = focus.value
   if (!f) return []
   return visibleChildren(f.children).map((node) => {
-    const flat = flattenVisible(node, 0)
+    const flat = flattenVisibleChildren(node)
     return {
       node,
       children: flat.spans,
@@ -116,11 +116,27 @@ const rows = computed<Row[]>(() => {
   })
 })
 
-// Reset the breadcrumb whenever the trace root changes (e.g. first load).
+// Re-resolve the breadcrumb whenever the trace root changes (e.g. first load
+// or a live refresh). The tree is rebuilt on every poll/SSE update, so the
+// nodes held in focusPath become stale; map each crumb back to the refreshed
+// tree by span_id to preserve the user's focus while showing new spans.
 watch(
   root,
   (r) => {
-    if (r && focusPath.value.length === 0) focusPath.value = [r]
+    if (!r) return
+    if (focusPath.value.length === 0) {
+      focusPath.value = [r]
+      return
+    }
+    const resolved: SpanNode[] = []
+    let scope: SpanNode | null = r
+    for (const crumb of focusPath.value) {
+      const match = findSpanByID(scope, crumb.span_id)
+      if (!match) break
+      resolved.push(match)
+      scope = match
+    }
+    focusPath.value = resolved.length > 0 ? resolved : [r]
   },
   { immediate: true }
 )
@@ -182,9 +198,27 @@ function onModeChange(value: LogSearchMode) {
 }
 
 async function reload() {
+  // Pre-validate a regex client-side so an invalid pattern shows an inline
+  // error without a round-trip (the server would 400 anyway). The server stays
+  // authoritative; this is a UX shortcut.
+  if (mode.value === 'regex' && query.value && !isValidRegex(query.value)) {
+    entries.value = []
+    nextCursor.value = null
+    error.value = 'Invalid regex'
+    return
+  }
   entries.value = []
   nextCursor.value = null
   await fetchPage(undefined)
+}
+
+function isValidRegex(pattern: string): boolean {
+  try {
+    new RegExp(pattern)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function loadMore() {

@@ -53,6 +53,33 @@ export function visibleChildren(nodes: SpanNode[]): SpanNode[] {
   return out
 }
 
+// flattenVisibleChildren walks a node's direct children, promoting passthrough
+// spans and hiding internal/encapsulated spans (counting the latter as hidden).
+// Unlike flattenVisible it does not include the node itself, so it is the right
+// helper for an in-place "expand this row" view.
+export function flattenVisibleChildren(node: SpanNode): { spans: DisplaySpan[]; hidden: number } {
+  const result = { spans: [] as DisplaySpan[], hidden: 0 }
+  for (const child of node.children) {
+    const r = flattenVisible(child, 0)
+    result.spans.push(...r.spans)
+    result.hidden += r.hidden
+  }
+  return result
+}
+
+// findSpanByID returns the first node with the given span ID in the subtree
+// rooted at node (depth-first), or null when absent. Used to re-resolve the
+// breadcrumb against a refreshed tree so live updates keep the user's focus.
+export function findSpanByID(node: SpanNode | null, spanID: string): SpanNode | null {
+  if (!node) return null
+  if (node.span_id === spanID) return node
+  for (const child of node.children) {
+    const found = findSpanByID(child, spanID)
+    if (found) return found
+  }
+  return null
+}
+
 // flattenVisible walks a node's subtree, promoting passthrough spans and
 // hiding internal/encapsulated spans (counting the latter as hidden).
 export function flattenVisible(node: SpanNode, depth: number): { spans: DisplaySpan[]; hidden: number } {
