@@ -40,6 +40,22 @@ function onScroll(e: Event): void {
   else if (!s.pinned && d <= FOLLOW_PIN_THRESHOLD) s.pinned = true
 }
 
+// followLogsPinned reports whether the directive considers the element pinned
+// to the bottom (user at/near the bottom). Used by LogPanel to surface the
+// autofollow state to StepTree for the pause/resume refresh policy.
+export function followLogsPinned(el: HTMLElement | null): boolean {
+  if (!el) return true
+  return readState(el).pinned
+}
+
+// followLogsPin forces the element back into the pinned state and scrolls it to
+// the bottom. Used when the user clicks the "N new logs" affordance to resume.
+export function followLogsPin(el: HTMLElement | null): void {
+  if (!el) return
+  readState(el).pinned = true
+  scrollToBottom(el)
+}
+
 export const vFollowLogs: Directive<HTMLElement> = {
   mounted(el: HTMLElement) {
     const s: FollowLogsState = { pinned: true, programmatic: false, raf: null, ro: null }

@@ -14,6 +14,8 @@ import type {
   ImageCachePruneAllResult,
   ImageCachePruneRef,
   ImageCachePruneResult,
+  LogSearchPage,
+  LogSearchRequest,
   PlatformStatus,
   Project,
   Providers,
@@ -193,6 +195,13 @@ export async function fetchTraceLogs(id: string): Promise<TraceLogEntry[]> {
 export async function fetchTraceMetrics(id: string): Promise<TraceMetrics> {
   const { data } = await api.get(`/api/v1/traces/${id}/metrics`)
   return data as TraceMetrics
+}
+export async function fetchTraceSearch(id: string, params: LogSearchRequest): Promise<LogSearchPage> {
+  const { data } = await api.get(`/api/v1/traces/${id}/search`, { params })
+  const page = data as LogSearchPage
+  // The server may omit/null `entries` on an empty page; normalise so callers
+  // can always iterate the array. `counts` is only present on the first page.
+  return { entries: page.entries ?? [], next: page.next, counts: page.counts ?? {} }
 }
 export async function fetchFleetInfo(): Promise<FleetInfo[]> {
   const { data } = await api.get('/api/v1/fleet')

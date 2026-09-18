@@ -41,7 +41,7 @@
           <span v-if="svc.port != null" class="service-port">:{{ svc.port }}</span>
           <span v-if="svc.url" class="service-url">{{ svc.url }}</span>
           <span v-else-if="!svc.running && svc.port == null" class="service-noport">no port</span>
-          <span class="service-duration">{{ formatDuration(liveSpanDuration(svc.span)) }}</span>
+          <span class="service-duration">{{ formatDuration(liveSpanDuration(svc.span, now)) }}</span>
         </div>
         <div v-if="svc.expanded" class="service-detail">
           <div class="service-meta">
@@ -80,75 +80,8 @@
 
     <div class="card">
       <h3>Steps</h3>
-      <div v-if="traceLoading && steps.length === 0" class="empty">Loading steps...</div>
-      <div v-else-if="traceError && steps.length === 0" class="empty">
-        <p>Failed to load steps.</p>
-        <button class="btn" @click="loadTrace()">Retry</button>
-      </div>
-      <div v-else-if="steps.length === 0" class="empty">
-        {{ trace.status === 'running' ? 'No steps yet — waiting for spans...' : 'No steps for this pipeline' }}
-      </div>
-      <template v-else>
-        <div v-for="step in steps" :key="step.span.span_id" class="step">
-          <div class="step-row" @click="step.expanded = !step.expanded">
-            <span class="chevron">{{ step.expanded ? '▾' : '▸' }}</span>
-            <span :class="['dot', `dot-${step.span.status}`]"></span>
-            <span class="step-name">{{ step.span.name }}</span>
-            <span class="step-duration">{{ formatDuration(liveSpanDuration(step.span)) }}</span>
-            <span v-if="stepLogCount(step) > 0" class="step-logs-badge">{{ stepLogCount(step) }} logs</span>
-            <span v-if="step.hiddenCount > 0" class="step-hidden">{{ step.hiddenCount }} hidden</span>
-          </div>
-          <div v-if="step.expanded" class="step-detail">
-            <div v-if="logsForSpan(step.span).length > 0" v-follow-logs class="logs">
-              <template v-for="(log, i) in logsForSpan(step.span)" :key="`s-${i}`">
-                <div v-if="logText(log.line) !== null" class="log-line">
-                  <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
-                  <span class="log-msg">{{ logText(log.line) }}</span>
-                </div>
-              </template>
-            </div>
-            <div class="subspans">
-              <div v-if="step.subSpans.length === 0" class="empty">No sub-spans</div>
-              <div v-else v-follow-logs class="logs">
-                <template v-for="s in step.subSpans" :key="s.node.span_id">
-                  <div
-                    class="subspan-block"
-                    :style="{ paddingLeft: (12 + s.depth * 16) + 'px' }"
-                  >
-                    <div class="subspan">
-                      <span :class="['dot', `dot-${s.node.status}`]"></span>
-                      <span class="subspan-name">{{ s.node.name }}</span>
-                      <span class="subspan-duration">{{ formatDuration(liveSpanDuration(s.node)) }}</span>
-                    </div>
-                    <template v-for="(log, i) in logsForSubtree(s.node)" :key="`ss-${i}`">
-                      <div v-if="logText(log.line) !== null" class="log-line subspan-log">
-                        <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
-                        <span class="log-msg">{{ logText(log.line) }}</span>
-                      </div>
-                    </template>
-                  </div>
-                </template>
-              </div>
-            </div>
-            <div v-if="stepLogCount(step) === 0" class="empty">No logs for this step</div>
-          </div>
-        </div>
-      </template>
+      <StepTree :trace-id="traceId" :trace="trace" :refresh-key="searchRefreshKey" />
     </div>
-
-    <details class="card" :open="unmatchedLogs.length > 0 && logs.length > 0 && unmatchedLogs.length === logs.length">
-      <summary>Unmatched / general logs ({{ unmatchedLogs.length }})</summary>
-      <div v-follow-logs class="logs">
-        <template v-for="(log, i) in unmatchedLogs" :key="i">
-          <div v-if="logText(log.line) !== null" class="log-line">
-            <span class="log-ts">{{ formatTime(log.timestamp) }}</span>
-            <span class="log-msg">{{ logText(log.line) }}</span>
-          </div>
-        </template>
-        <p v-if="logsLoading" class="empty">Loading logs...</p>
-        <p v-else-if="unmatchedLogs.length === 0" class="empty">No unmatched logs</p>
-      </div>
-    </details>
 
     <div class="card">
       <h3>Details</h3>
@@ -180,6 +113,8 @@ import { fetchTrace, fetchTraceLogs, fetchTraceMetrics, connectLiveTrace } from 
 import type { ServiceInfo, SpanNode, TraceDetail, TraceLogEntry, TraceMetrics } from '@/api/types'
 import { vFollowLogs } from '@/directives/followLogs'
 import MetricChart from '@/pipeline/MetricChart.vue'
+import StepTree from '@/pipeline/StepTree.vue'
+import { formatDuration, isInternalSpan, isTransparentSpan, liveSpanDuration, logText, spanStartMs } from '@/pipeline/spanTree'
 
 const route = useRoute()
 const traceId = route.params.id as string
@@ -194,11 +129,11 @@ const trace = ref<TraceDetail>({
   version: '',
 })
 const logs = ref<TraceLogEntry[]>([])
-const logsLoading = ref(true)
-const traceLoading = ref(true)
-const traceError = ref(false)
-const steps = ref<Step[]>([])
 const metrics = ref<TraceMetrics | null>(null)
+
+// Bumped on every live logs_update / poll so StepTree refreshes its search
+// results (debounced there) while preserving focus + query.
+const searchRefreshKey = ref(0)
 
 // Live-ticking clock: refreshed every 250ms while mounted so running durations
 // visibly increase (see liveSpanDuration/liveTraceDuration below).
@@ -213,36 +148,6 @@ const SERVICE_SPAN_NAMES = new Set<string>(['up', 'host.tunnel', 'Service.Up', '
 
 const SERVICE_TAIL_LINES = 50
 
-// Internal-span name rules, ported from internal/service/ci_steps.go
-// (internalSpanPrefixes/internalSpanExact) so the pipeline UI folds the same
-// engine transport spans the CI step builder does. Kept in sync manually.
-const INTERNAL_SPAN_PREFIXES = [
-  'GET ', 'POST ', 'PUT ', 'DELETE ', 'PATCH ', 'HEAD ', 'OPTIONS ',
-  'Read ', 'Write ', 'Query.', 'Address.', 'parsing ',
-] as const
-const INTERNAL_SPAN_EXACT = new Set<string>(['connect'])
-
-function isInternalSpanName(name: string): boolean {
-  return INTERNAL_SPAN_PREFIXES.some((p) => name.startsWith(p)) || INTERNAL_SPAN_EXACT.has(name)
-}
-
-// A span is internal noise (its logs are dropped) when Dagger marks it
-// internal or its name matches the CI internal-span rules.
-function isInternalSpan(n: SpanNode): boolean {
-  return attrBool(n, 'dagger.io/ui.internal') || isInternalSpanName(n.name)
-}
-
-// A span is hidden from the tree when it is internal noise or encapsulated.
-function isHiddenSpan(n: SpanNode): boolean {
-  return isInternalSpan(n) || attrBool(n, 'dagger.io/ui.encapsulated')
-}
-
-// A transparent span is hidden but its logs belong to the nearest visible
-// ancestor (passthrough promotes children; encapsulated hides the node).
-function isTransparentSpan(n: SpanNode): boolean {
-  return attrBool(n, 'dagger.io/ui.passthrough') || attrBool(n, 'dagger.io/ui.encapsulated')
-}
-
 interface ServiceRow extends ServiceInfo {
   expanded: boolean
 }
@@ -255,19 +160,6 @@ let traceDebounce: number | undefined
 let logsDebounce: number | undefined
 let nowTimer: number | undefined
 let disposed = false
-
-interface DisplaySpan {
-  node: SpanNode
-  depth: number
-}
-
-interface Step {
-  span: SpanNode
-  durationMs: number
-  subSpans: DisplaySpan[]
-  hiddenCount: number
-  expanded: boolean
-}
 
 const shortId = computed(() => (traceId.length > 12 ? `${traceId.slice(0, 12)}…` : traceId))
 
@@ -326,10 +218,6 @@ const logsByOwner = computed<Map<string, TraceLogEntry[]>>(() => {
   return map
 })
 
-const unmatchedLogs = computed<TraceLogEntry[]>(() =>
-  logs.value.filter((l) => !l.span_id || !ownerBySpanID.value.has(l.span_id))
-)
-
 onMounted(async () => {
   await loadAll()
 
@@ -346,6 +234,7 @@ onMounted(async () => {
   pollTimer = window.setInterval(async () => {
     if (trace.value.status === 'success' || trace.value.status === 'failed') return
     await loadAll()
+    searchRefreshKey.value++
   }, 5000)
 
   // Live SSE updates: the supervisor broadcasts a lightweight re-fetch signal
@@ -391,6 +280,7 @@ function scheduleLogsRefetch() {
   if (logsDebounce) window.clearTimeout(logsDebounce)
   logsDebounce = window.setTimeout(() => {
     void loadLogs()
+    searchRefreshKey.value++
   }, 300)
 }
 
@@ -409,24 +299,18 @@ async function loadMetrics() {
 }
 
 async function loadTrace() {
-  traceLoading.value = true
-  traceError.value = false
   try {
     trace.value = await fetchTrace(traceId)
     if (trace.value.root_span) normalizeChildren(trace.value.root_span)
-    recomputeSteps()
     recomputeServices()
   } catch (e) {
-    traceError.value = true
     console.error('Failed to fetch trace', e)
-  } finally {
-    traceLoading.value = false
   }
 }
 
 // The backend emits leaf spans with `children: null` (Go nil slice); guard
-// against that so every node has an iterable `children` array before the step
-// grouping walks the tree.
+// against that so every node has an iterable `children` array before the tree
+// walks it.
 function normalizeChildren(node: SpanNode): void {
   if (!node.children) node.children = []
   for (const c of node.children) normalizeChildren(c)
@@ -438,14 +322,7 @@ async function loadLogs() {
     recomputeServices()
   } catch (e) {
     console.error('Failed to fetch logs', e)
-  } finally {
-    logsLoading.value = false
   }
-}
-
-function logsForSpan(node: SpanNode): TraceLogEntry[] {
-  const l = logsByOwner.value.get(node.span_id) ?? []
-  return l.slice().sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
 }
 
 function logsForSubtree(node: SpanNode): TraceLogEntry[] {
@@ -459,130 +336,10 @@ function logsForSubtree(node: SpanNode): TraceLogEntry[] {
   return out.sort((a, b) => Date.parse(a.timestamp) - Date.parse(b.timestamp))
 }
 
-function stepLogCount(step: Step): number {
-  return logsForSubtree(step.span).length
-}
-
 // --- Step grouping --------------------------------------------------------
 //
-// Dagger emits OpenTelemetry spans carrying `dagger.io/ui.*` attributes that
-// describe how the trace tree should be presented:
-//   - `dagger.io/ui.passthrough`  : hide this span, promote its children
-//   - `dagger.io/ui.internal`     : implementation detail, hide it
-//   - `dagger.io/ui.encapsulated` : child of an encapsulated span, hide it
-//   - `dagger.io/ui.encapsulate`  : collapse this span (kept as one row)
-//
-// We surface the root span's direct children as high-level "steps" (after
-// applying passthrough promotion), then collapse every sub-span underneath a
-// step. Expanding a step reveals its sub-spans with passthrough/internal spans
-// filtered out and counted in "hidden".
-
-function attrBool(n: SpanNode, key: string): boolean {
-  return n.attributes?.[key] === 'true'
-}
-
-function topLevelSpans(nodes: SpanNode[]): SpanNode[] {
-  const out: SpanNode[] = []
-  for (const n of nodes) {
-    if (attrBool(n, 'dagger.io/ui.passthrough') || isInternalSpan(n)) {
-      out.push(...topLevelSpans(n.children))
-    } else {
-      out.push(n)
-    }
-  }
-  return out
-}
-
-function computeSteps(root: SpanNode | null): Step[] {
-  if (!root) return []
-  const top = topLevelSpans(root.children).slice().sort((a, b) => spanStartMs(a) - spanStartMs(b))
-  return top.map((span) => {
-    const visible = flattenVisibleChildren(span)
-    return {
-      span,
-      durationMs: subtreeDuration(span),
-      subSpans: visible.spans,
-      hiddenCount: visible.hidden,
-      expanded: false,
-    }
-  })
-}
-
-function flattenVisibleChildren(span: SpanNode): { spans: DisplaySpan[]; hidden: number } {
-  const result = { spans: [] as DisplaySpan[], hidden: 0 }
-  for (const child of span.children) {
-    const r = flattenVisible(child, 0)
-    result.spans.push(...r.spans)
-    result.hidden += r.hidden
-  }
-  return result
-}
-
-function flattenVisible(node: SpanNode, depth: number): { spans: DisplaySpan[]; hidden: number } {
-  if (attrBool(node, 'dagger.io/ui.passthrough')) {
-    const result = { spans: [] as DisplaySpan[], hidden: 0 }
-    for (const child of node.children) {
-      const r = flattenVisible(child, depth)
-      result.spans.push(...r.spans)
-      result.hidden += r.hidden
-    }
-    return result
-  }
-  if (isHiddenSpan(node)) {
-    const result = { spans: [] as DisplaySpan[], hidden: 1 }
-    for (const child of node.children) {
-      const r = flattenVisible(child, depth)
-      result.spans.push(...r.spans)
-      result.hidden += r.hidden
-    }
-    return result
-  }
-  const result = { spans: [{ node, depth } as DisplaySpan], hidden: 0 }
-  for (const child of node.children) {
-    const r = flattenVisible(child, depth + 1)
-    result.spans.push(...r.spans)
-    result.hidden += r.hidden
-  }
-  return result
-}
-
-function spanStartMs(n: SpanNode): number {
-  const t = Date.parse(n.start_time)
-  return Number.isNaN(t) ? 0 : t
-}
-
-function spanEndMs(n: SpanNode): number {
-  const start = spanStartMs(n)
-  const duration = n.duration_ms || (n.duration_ns ? n.duration_ns / 1e6 : 0)
-  return start ? start + duration : 0
-}
-
-// subtreeDuration measures the wall-clock time spanned by a node and all of
-// its descendants (some Dagger spans, e.g. "connect", have no end time but
-// their children do).
-function subtreeDuration(node: SpanNode): number {
-  let minStart = Infinity
-  let maxEnd = 0
-  const walk = (n: SpanNode) => {
-    const s = spanStartMs(n)
-    if (s) minStart = Math.min(minStart, s)
-    const e = spanEndMs(n)
-    if (e) maxEnd = Math.max(maxEnd, e)
-    for (const c of n.children) walk(c)
-  }
-  walk(node)
-  if (minStart === Infinity || maxEnd <= minStart) return node.duration_ms || 0
-  return Math.round(maxEnd - minStart)
-}
-
-// liveSpanDuration ticks upward for a running span (now − start_time) and
-// freezes at the stored subtree wall-clock once finished. Returns ms.
-function liveSpanDuration(node: SpanNode): number {
-  if (node.status !== 'running') return subtreeDuration(node)
-  const start = spanStartMs(node)
-  if (!start) return node.duration_ms || 0
-  return Math.max(0, now.value - start)
-}
+// The drill-down step tree lives in StepTree.vue; the shared span-visibility
+// and duration helpers are in spanTree.ts.
 
 // liveTraceDuration ticks upward while the trace is running and freezes at the
 // server duration_ms once finished. Returns ms.
@@ -708,20 +465,6 @@ function serviceTailLogs(svc: ServiceRow): TraceLogEntry[] {
 // service's expanded state across refetches (SSE logs_update / the 5s poll
 // otherwise collapse any service the user expanded) and keeps the live preview
 // in sync when only logs change (logs_update does not carry new span data).
-// Recompute the Steps list from the current trace, preserving each step's
-// expanded state across refetches. Without this, every SSE trace_update (or the
-// 5s poll) rebuilds the steps with expanded=false, collapsing the step whose
-// logs the user is reading.
-function recomputeSteps() {
-  const expanded = new Set(
-    steps.value.filter((s) => s.expanded).map((s) => s.span.span_id)
-  )
-  steps.value = computeSteps(trace.value.root_span)
-  for (const step of steps.value) {
-    if (expanded.has(step.span.span_id)) step.expanded = true
-  }
-}
-
 function recomputeServices() {
   const expanded = new Set(
     services.value.filter((s) => s.expanded).map((s) => s.span.span_id)
@@ -733,14 +476,6 @@ function recomputeServices() {
 }
 
 // --- Formatting -----------------------------------------------------------
-
-function formatDuration(ms: number | null | undefined): string {
-  if (!ms || ms <= 0) return '-'
-  const s = ms / 1000
-  if (s < 60) return `${s.toFixed(1)}s`
-  const m = Math.floor(s / 60)
-  return `${m}m ${(s % 60).toFixed(0)}s`
-}
 
 function formatTime(ts: string): string {
   const d = new Date(ts)
@@ -763,68 +498,6 @@ function ciLabel(value?: string): string {
   if (!value || value === 'false') return 'manual'
   if (value === 'true') return 'ci'
   return value
-}
-
-interface LogJSON {
-  body?: unknown
-  attributes?: { stdio?: { stream?: number; eof?: boolean } }
-}
-
-// Loki stores each log record as a JSON object; extract the human-readable
-// `body` field when present, strip ANSI colour escapes and a leading
-// "Stdout:"/"Stderr:" stream prefix, and keep the payload. Returns null only
-// for empty/whitespace-only records (including stdio.eof markers) so the
-// renderer can skip them without hiding content-bearing exec/RUN output.
-function logText(line: string): string | null {
-  let text = line
-  try {
-    const obj = JSON.parse(line) as LogJSON
-    if (obj && typeof obj.body === 'string') text = obj.body
-  } catch {
-    // not JSON; render the raw line
-  }
-
-  text = text.replace(/\u001b\[[0-9;]*m/g, '')
-  text = text.replace(/^(Stdout|Stderr):\s*\n?/, '')
-
-  if (text.trim() === '') return null
-
-  text = text.replace(/\n+$/, '')
-
-  // The Dagger engine serialises verbose progress payloads (module schemas,
-  // telemetry graphs) as JSON-quoted base64 protobufs in the log body. Those
-  // are binary, not human-readable, so decode base64 that is valid UTF-8 text
-  // and collapse binary payloads to a placeholder instead of rendering base64.
-  let candidate = text.trim()
-  if (candidate.length > 2 && candidate.startsWith('"') && candidate.endsWith('"')) {
-    try {
-      const inner = JSON.parse(candidate)
-      if (typeof inner === 'string') candidate = inner
-    } catch {
-      // keep the quoted candidate as-is
-    }
-  }
-  if (isBase64(candidate)) {
-    const decoded = decodeBase64UTF8(candidate)
-    return decoded !== null ? decoded : '[binary log data]'
-  }
-  return text
-}
-
-function isBase64(s: string): boolean {
-  if (s.length < 8 || s.length % 4 !== 0) return false
-  return /^[A-Za-z0-9+/]+={0,2}$/.test(s)
-}
-
-function decodeBase64UTF8(s: string): string | null {
-  try {
-    const bin = atob(s)
-    const bytes = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-  } catch {
-    return null
-  }
 }
 </script>
 

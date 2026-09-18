@@ -618,6 +618,7 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	h.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
 	h.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
+	h.GET("/api/v1/traces/:traceID/search", s.handleTracesSearch)
 	h.GET("/api/v1/traces/:traceID/live", s.handleTracesLive)
 	h.GET("/api/v1/traces/:traceID/metrics", s.handleTraceMetrics)
 

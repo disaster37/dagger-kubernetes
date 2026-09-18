@@ -1662,19 +1662,39 @@ Features:
   duration, and engine version; the raw trace ID is shown as a secondary
   reference under the name. The list auto-refreshes every 10s while any run is
   in flight, and the per-row duration ticks live every 1s until the run finishes
-- **Trace viewer** — compact step view: one row per high-level step (direct
-  children of the root span, with Dagger `dagger.io/ui.passthrough` spans
-  promoted) showing status and wall-clock duration. Sub-spans are collapsed
-  and summarised as a hidden count; click a step to expand. `dagger.io/ui.*`
+- **Trace viewer** — drill-down step tree: the root's direct children are shown
+  as high-level levels (with Dagger `dagger.io/ui.passthrough` spans promoted),
+  each with status and wall-clock duration. Click a level's name to **zoom in**
+  (a breadcrumb bar above the list tracks root ▸ … ▸ focus and lets you zoom
+  back out), or its chevron to expand its sub-spans in place. `dagger.io/ui.*`
   boolean span attributes drive the collapse/passthrough grouping, and engine
   internal transport spans (`POST /query`, `GET /blobs`, `connect`, …) are
   folded away by the same name rules the CI step builder uses
   (`internalSpanPrefixes`/`internalSpanExact`, ADR-024) so they never surface
-  as steps or sub-spans.
+  as levels or sub-spans.
   The trace viewer header shows an `@username` chip (or `anonymous` for
   legacy/anonymous runs) next to the status badge, and the Details table
   includes a "User" row — so the pipeline owner is always visible on the
   detail view, matching the list view's `@username · org/repo` identity.
+- **Aggregated logs per level** — the step tree shows a log panel for the
+  currently focused level, aggregating the logs of that node **and all its
+  descendants** (internal-span logs are dropped as noise). The panel is
+  dedicated to the focus: it sits directly under a focused-step header (status
+  dot, name, live duration, "logs for this step and its descendants" subtitle)
+  and above the child rows, and the header's chevron collapses it. The panel
+  pages beyond the 1000-line whole-trace cap via the server-side search endpoint.
+  Every log line carries a clickable **step badge** naming the visible row that
+  owns it; clicking the badge scrolls to and briefly flashes that row. Logs that
+  cannot be attributed (internal span, empty/unknown span, span outside the
+  current focus) show a muted "unattributed" badge. Each step row shows a
+  **matching-log count badge** (query-aware, from the first search page);
+  clicking it zooms into that step, and the breadcrumb zooms back out.
+- **Log search** — a keyword (contains) or regex search box scoped to the
+  current level. Matching is server-side (`GET /api/v1/traces/:id/search`,
+  RE2-safe) and results are highlighted with `<mark>` (never `v-html`); a
+  "Load more" button pages through further results. The first page also returns
+  per-span matching `counts` that drive the step-row count badges. An invalid
+  regex is reported inline without calling the API.
 - **Services** — a summary card above the steps lists host-tunnel services
   (`dagger.Up()` / `service.Up()` / `--up`). Detection is robust: a span is a
   service when its name matches the tunable `SERVICE_SPAN_NAMES` set
@@ -1692,7 +1712,16 @@ Features:
   the affected trace IDs and broadcasts a lightweight `trace_update` or
   `logs_update` event; the viewer debounces these into an immediate re-fetch
   of steps/logs so new spans and log lines appear as the pipeline runs. A 5s
-  polling fallback remains for resilience.
+  polling fallback remains for resilience. Log refresh is **non-disruptive**:
+  it fetches only the strictly-newer tail via a forward cursor and appends it
+  (deduped by timestamp + span + line), so the list is never cleared and the
+  scroll position never jumps. Auto-scroll pauses while the user is scrolled up
+  reading or a search is active; new lines then surface a "↓ N new logs"
+  affordance, and scrolling to the bottom, clicking it, or clearing the search
+  resumes. The SPA shell (`index.html` and extension-less routes) is served
+  `Cache-Control: no-cache` so a new deploy's hashed asset names are picked up,
+  while content-hashed `/assets/*` are served `public, max-age=31536000,
+  immutable`.
 - **Duration** — shown prominently in the viewer header next to the status and
   in the details table; while a pipeline or step is `running`, the displayed
   duration ticks live every 250ms (Details) / 1s (list) from the
@@ -1702,8 +1731,9 @@ Features:
   the list endpoint), with the raw value available as `duration_ns`
 - **Log viewer** — log lines correlated by span ID (the collector promotes
   `trace_id` and `span_id` to Loki labels) and rendered inline under the step
-  or sub-span that produced them (`GET /api/v1/traces/:id/logs`); logs with no
-  recognisable span are grouped under a collapsed "unmatched" section. Logs
+  or sub-span that produced them (`GET /api/v1/traces/:id/logs`); in the
+  drill-down tree's aggregated panel, logs with no recognisable span are labeled
+  "unattributed" inline (the separate "unmatched" section was removed). Logs
   attached to a passthrough/encapsulated span are attributed to the nearest
   visible ancestor, so `exec`/Dockerfile `RUN` stdout/stderr stays under the
   build step; logs attached to internal/name-internal spans are dropped as
@@ -1712,7 +1742,9 @@ Features:
   pipeline is still running. Each log container auto-scrolls to the end when
   opened and sticks to the bottom while new lines stream in; scrolling up
   unpins, scrolling back to the bottom re-pins (with a small hysteresis so
-  jitter does not flap the state). Dagger engine verbose progress payloads
+  jitter does not flap the state). While unpinned (or while a search is active)
+  a live refresh appends new lines below the viewport and shows a "↓ N new
+  logs" button instead of moving the view. Dagger engine verbose progress payloads
   (base64 protobufs) are collapsed to a placeholder rather than rendered as
   base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts
@@ -1741,6 +1773,7 @@ Features:
 | `GET /api/v1/traces` | Scoped pipeline list. |
 | `GET /api/v1/traces/:id` | Reconstructed span tree + status/duration/owner. |
 | `GET /api/v1/traces/:id/logs` | Per-span logs (Loki). |
+| `GET /api/v1/traces/:id/search` | Subtree-scoped, text-filtered, paginated log search (`span_id`, `q`, `mode=contains\|regex`, `limit`, `cursor`). The first page also returns per-span matching `counts`. |
 | `GET /api/v1/traces/:id/live` | SSE re-fetch signal stream. |
 | `GET /api/v1/traces/:id/url` | Self-hosted pipeline-view URL. |
 | `GET /api/v1/traces/:id/metrics` | Trace-scoped engine resource metrics (cAdvisor). |

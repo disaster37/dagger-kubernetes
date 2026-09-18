@@ -8,11 +8,22 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
+)
+
+// Search batching bounds. logSearchBatch is the raw Loki page size per internal
+// query_range; logSearchMaxScan caps the total raw entries examined per
+// SearchTraceLogs call so a broad query cannot scan an unbounded stream
+// (CWE-400).
+const (
+	logSearchBatch   = 1000
+	logSearchMaxScan = 5000
 )
 
 type LogsClient struct {
@@ -100,6 +111,208 @@ func (c *LogsClient) QueryTraceLogs(traceID string, start, end time.Time, limit 
 	}
 
 	return entries, nil
+}
+
+// SearchTraceLogs returns one page of trace logs filtered by the request's
+// span set and text match, ascending by timestamp, strictly after req.Cursor.
+// It pages Loki forward in bounded batches and returns a Next cursor for the
+// following page (0 when Loki is exhausted).
+//
+//nolint:gocritic // req is passed by value to satisfy domain.LogRepository.
+func (c *LogsClient) SearchTraceLogs(ctx context.Context, traceID string, req domain.LogSearchRequest) (domain.LogSearchPage, error) {
+	if !hexTraceID.MatchString(traceID) {
+		return domain.LogSearchPage{}, fmt.Errorf("invalid trace ID format")
+	}
+	if c.lokiURL == "" {
+		return domain.LogSearchPage{}, fmt.Errorf("loki URL not configured")
+	}
+
+	var re *regexp.Regexp
+	if req.Mode == domain.LogSearchRegex && req.Query != "" {
+		compiled, err := regexp.Compile(req.Query)
+		if err != nil {
+			return domain.LogSearchPage{}, fmt.Errorf("%w: %v", domain.ErrInvalidRegex, err)
+		}
+		re = compiled
+	}
+
+	limit := req.Limit
+	if limit <= 0 {
+		limit = logSearchBatch
+	}
+
+	spanSet := make(map[string]struct{}, len(req.SpanIDs))
+	for _, id := range req.SpanIDs {
+		spanSet[id] = struct{}{}
+	}
+
+	cursor := req.Cursor
+	if cursor == 0 {
+		cursor = req.Start.UnixNano()
+	}
+
+	st := searchScanState{counts: make(map[string]int64)}
+	scanned := 0
+	exhausted := false
+
+	for scanned < logSearchMaxScan {
+		raw, err := c.queryRawLogs(ctx, traceID, cursor, req.End, logSearchBatch)
+		if err != nil {
+			return domain.LogSearchPage{}, err
+		}
+		if len(raw) == 0 {
+			exhausted = true
+			break
+		}
+
+		// The per-stream append in queryRawLogs is not globally sorted; sort
+		// ascending (stable) so the cursor advances monotonically.
+		sort.SliceStable(raw, func(i, j int) bool {
+			return raw[i].Timestamp.Before(raw[j].Timestamp)
+		})
+
+		if st.scanBatch(raw, spanSet, &req, re, limit) {
+			break
+		}
+		scanned += len(raw)
+
+		if len(raw) < logSearchBatch {
+			exhausted = true
+			break
+		}
+		cursor = st.lastRawTs + 1
+	}
+
+	// Always return a non-nil slice so the JSON contract is `entries: []`
+	// rather than `entries: null` (the UI iterates the array directly).
+	if st.matches == nil {
+		st.matches = []domain.LogEntry{}
+	}
+	page := domain.LogSearchPage{Entries: st.matches, Counts: st.counts}
+	if st.pageFull {
+		// The page filled before the scan ended: anchor the cursor at the last
+		// *returned* entry so counting past the page does not skip entries.
+		page.Next = st.pageAnchorTs + 1
+	} else if !exhausted {
+		page.Next = st.lastRawTs + 1
+	}
+	return page, nil
+}
+
+// searchScanState accumulates one SearchTraceLogs scan: the returned page, the
+// per-span matching counts, and the cursor anchors.
+type searchScanState struct {
+	matches      []domain.LogEntry
+	counts       map[string]int64
+	lastRawTs    int64 // timestamp of the last raw entry examined
+	pageAnchorTs int64 // timestamp of the last entry appended to the page
+	pageFull     bool
+}
+
+// scanBatch filters one sorted raw batch by span set + text match, appending
+// matches up to limit and counting matching logs per span when req.IncludeCounts
+// is set. It returns true when the page filled and counting is off, so the
+// caller can stop scanning early (the load-more fast path).
+func (st *searchScanState) scanBatch(raw []domain.LogEntry, spanSet map[string]struct{}, req *domain.LogSearchRequest, re *regexp.Regexp, limit int) (stop bool) {
+	for _, entry := range raw {
+		st.lastRawTs = entry.Timestamp.UnixNano()
+		if len(spanSet) > 0 {
+			if _, ok := spanSet[entry.SpanID]; !ok {
+				continue
+			}
+		}
+		if !matchLogLine(entry.Line, req.Query, req.Mode, re) {
+			continue
+		}
+		if req.IncludeCounts && entry.SpanID != "" {
+			st.counts[entry.SpanID]++
+		}
+		if st.pageFull {
+			continue
+		}
+		st.matches = append(st.matches, entry)
+		st.pageAnchorTs = st.lastRawTs
+		if len(st.matches) >= limit {
+			st.pageFull = true
+			if !req.IncludeCounts {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// queryRawLogs runs one forward Loki query_range for traceID over
+// [startNanos, end] and returns the decoded entries (unsorted).
+func (c *LogsClient) queryRawLogs(ctx context.Context, traceID string, startNanos int64, end time.Time, limit int) ([]domain.LogEntry, error) {
+	sanitized := sanitizeLogQLValue(traceID)
+
+	params := url.Values{}
+	params.Set("query", fmt.Sprintf(`{trace_id="%s"}`, sanitized))
+	params.Set("start", fmt.Sprintf("%d", startNanos))
+	params.Set("end", fmt.Sprintf("%d", end.UnixNano()))
+	params.Set("limit", fmt.Sprintf("%d", limit))
+	params.Set("direction", "forward")
+
+	queryURL := fmt.Sprintf("%s/loki/api/v1/query_range?%s", c.lokiURL, params.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, http.NoBody)
+	if err != nil {
+		return nil, fmt.Errorf("loki search request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("loki query failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("loki returned status %d", resp.StatusCode)
+	}
+
+	var result struct {
+		Data struct {
+			Result []struct {
+				Stream map[string]string `json:"stream"`
+				Values [][]string        `json:"values"`
+			} `json:"result"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("loki decode failed: %w", err)
+	}
+
+	var entries []domain.LogEntry
+	for _, stream := range result.Data.Result {
+		spanID := normalizeSpanID(stream.Stream["span_id"])
+		for _, v := range stream.Values {
+			if len(v) < 2 {
+				continue
+			}
+			ts, err := parseNanos(v[0])
+			if err != nil {
+				continue
+			}
+			entries = append(entries, domain.LogEntry{
+				Timestamp: ts,
+				Line:      v[1],
+				SpanID:    spanID,
+			})
+		}
+	}
+	return entries, nil
+}
+
+// matchLogLine reports whether line matches query under mode. re is precompiled
+// for regex mode; nil for contains mode. An empty query matches every line.
+func matchLogLine(line, query string, mode domain.LogSearchMode, re *regexp.Regexp) bool {
+	if query == "" {
+		return true
+	}
+	if mode == domain.LogSearchRegex {
+		return re != nil && re.MatchString(line)
+	}
+	return strings.Contains(line, query)
 }
 
 // DeleteTraceLogs requests deletion of all log streams for traceID from Loki.
