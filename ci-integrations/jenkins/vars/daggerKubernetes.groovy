@@ -53,7 +53,13 @@ def call(Map params = [:], Closure body = null) {
 
 		// Stage 2: Run the dagger command with real-time plaintext streaming.
 		stage("Dagger") {
-			String traceIdFile = "/tmp/dagger-trace-${env.BUILD_NUMBER}.id"
+			// Private temp dir (0700) so a local user on a shared agent cannot
+			// pre-create or replace the trace-id file with a symlink
+			// (CWE-59/CWE-377). The wrapper writes the file inside it; the
+			// finally block removes the whole dir.
+			String traceDir = sh(script: 'mktemp -d /tmp/dagger-trace-XXXXXX', returnStdout: true).trim()
+			assertShellSafe(traceDir, 'trace-id dir path')
+			String traceIdFile = "${traceDir}/trace.id"
 			assertShellSafe(traceIdFile, 'trace-id file path')
 			withEnv([
 				"DAGGER_CLOUD_URL=${serverUrl}",
@@ -64,10 +70,10 @@ def call(Map params = [:], Closure body = null) {
 			] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : [])) {
 				if (timeoutMinutes > 0) {
 					timeout(time: timeoutMinutes, unit: 'MINUTES') {
-						runDaggerCommand(daggerCommand, serverUrl, uiUrl, traceIdFile)
+						runDaggerCommand(daggerCommand, serverUrl, uiUrl, traceIdFile, traceDir)
 					}
 				} else {
-					runDaggerCommand(daggerCommand, serverUrl, uiUrl, traceIdFile)
+					runDaggerCommand(daggerCommand, serverUrl, uiUrl, traceIdFile, traceDir)
 				}
 			}
 		}
@@ -110,7 +116,7 @@ def call(Map params = [:], Closure body = null) {
 // end-of-stage link, falling back to /traces/latest. --ui-url is passed so the
 // wrapper's links use the correct base (otherwise the wrapper falls back to the
 // compiled-in server.public_url because --config /dev/null "exists").
-void runDaggerCommand(String daggerCommand, String serverUrl, String uiUrl, String traceIdFile) {
+void runDaggerCommand(String daggerCommand, String serverUrl, String uiUrl, String traceIdFile, String traceDir) {
     try {
         String ciBin = sh(script: "which dagger-kubernetes-ci 2>/dev/null || true", returnStdout: true).trim()
         if (ciBin) {
@@ -137,7 +143,7 @@ void runDaggerCommand(String daggerCommand, String serverUrl, String uiUrl, Stri
         throw e
     } finally {
         String traceId = sh(script: "cat '${traceIdFile}' 2>/dev/null || true", returnStdout: true).trim()
-        sh "rm -f '${traceIdFile}'"
+        sh "rm -rf '${traceDir}'"
         if (traceId) {
             echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${traceId}"
         } else {
@@ -176,8 +182,8 @@ boolean parseBool(String s, boolean deflt) {
 
 // resolveTimeoutMinutes returns a positive integer timeout in minutes, or 0
 // (no timeout) when unset, zero, negative, or not a plain non-negative integer.
-// A non-numeric value is a warning, not an error — Groovy `as int` would crash
-// the build on a typo.
+// A non-numeric or out-of-range value is a warning, not an error — Groovy
+// `as int` would crash the build on a typo or an oversized number.
 int resolveTimeoutMinutes(def value) {
     if (value == null || value == '') return 0
     String s = value.toString().trim()
@@ -185,8 +191,14 @@ int resolveTimeoutMinutes(def value) {
         echo "daggerKubernetes: ignoring non-numeric timeoutMinutes '${s}'"
         return 0
     }
-    int m = s as int
-    return m > 0 ? m : 0
+    try {
+        long m = s as long
+        if (m <= 0) return 0
+        return m > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) m
+    } catch (NumberFormatException ignored) {
+        echo "daggerKubernetes: ignoring out-of-range timeoutMinutes '${s}'"
+        return 0
+    }
 }
 
 // isShellUnsafe reports whether value contains a character that could break

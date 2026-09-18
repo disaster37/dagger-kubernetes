@@ -74,6 +74,13 @@ Users who want a kill set `timeoutMinutes: N` or use Jenkins' native
   (exit non-zero → build fails); the env-var form is backward compatible.
 - **File format:** plain trace ID, no trailing newline, mode `0600`, written
   with a single `os.WriteFile`. The reader trims whitespace.
+- **Location:** the Jenkins library creates a private `mktemp -d` directory
+  (mode `0700`) and points `DAGGER_KUBERNETES_TRACE_ID_FILE` at
+  `<dir>/trace.id`. A predictable path in world-writable `/tmp` would let a
+  local user on a shared agent pre-create or replace the file with a symlink,
+  redirecting the wrapper's write (CWE-59/CWE-377) or making the `finally`
+  `cat` echo an arbitrary file into the build log. The private directory is
+  removed with `rm -rf` in `finally`.
 - **When written:** (1) immediately in the discovery goroutine after
   `discoveredID` is set; (2) idempotently at final flush with the resolved
   `traceID` (discovered or regex fallback). Both writes are non-fatal

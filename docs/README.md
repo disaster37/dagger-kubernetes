@@ -1902,7 +1902,7 @@ daggerKubernetes(serverUrl: 'https://supv.example.com',
 The Dagger command is interpolated into the `sh` step as-is: it is the
 deliberate exception to the library's shell-safety validation, because it *is*
 the shell command, authored by the trusted pipeline author. Every other
-interpolated value (`serverUrl`, `version`, temp paths) goes
+interpolated value (`serverUrl`, `uiUrl`, `version`, temp paths) goes
 through `assertShellSafe`.
 
 Config keys:
