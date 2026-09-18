@@ -132,6 +132,12 @@ const pinned = ref(true)
 const newCount = ref(0)
 const seen = new Set<string>() // entryKey dedupe set for merge/append
 
+// Monotonic request generation. resetAndLoad() bumps it; every in-flight
+// fetch/refresh captures the value it started under and discards its response
+// when the generation moved on (focus/query/mode changed mid-flight), so a
+// stale response can never append another step's logs into the current panel.
+let loadSeq = 0
+
 const searchActive = computed(() => query.value !== '')
 const paused = computed(() => !pinned.value || searchActive.value)
 
@@ -310,6 +316,7 @@ function onResume() {
 
 // resetAndLoad — full reset + page-1 fetch (navigation / retry only).
 async function resetAndLoad() {
+  const seq = ++loadSeq
   // Pre-validate a regex client-side so an invalid pattern shows an inline
   // error without a round-trip (the server would 400 anyway). The server stays
   // authoritative; this is a UX shortcut.
@@ -320,17 +327,19 @@ async function resetAndLoad() {
   newCount.value = 0
   if (mode.value === 'regex' && query.value && !isValidRegex(query.value)) {
     error.value = 'Invalid regex'
+    loading.value = false
     return
   }
-  await fetchPage(undefined)
+  await fetchPage(undefined, seq)
 }
 
 // refresh — non-disruptive live update on refreshKey bump. Fetches only the
 // strictly-newer tail (forward cursor) and appends it, so the list is never
 // cleared and the scroll position never jumps.
 async function refresh() {
+  const seq = loadSeq
   if (entries.value.length === 0) {
-    await fetchPage(undefined) // first load
+    await fetchPage(undefined, seq) // first load
     return
   }
   const cursor = maxEntryTimestampNanos(entries.value) + 1
@@ -338,14 +347,20 @@ async function refresh() {
   error.value = null
   try {
     const page = await searchPage(cursor)
+    if (seq !== loadSeq) return // focus/query changed mid-flight; discard
     const appended = mergeEntries(page.entries)
+    // refresh() continues from the max loaded timestamp, so the returned page is
+    // the next contiguous page and page.next is the correct forward continuation
+    // (it can only advance, never point backwards). Keep it in sync so "Load
+    // more" does not re-fetch an already-merged page.
     nextCursor.value = page.next ?? null
     if (paused.value && appended > 0) newCount.value += appended
   } catch (e) {
+    if (seq !== loadSeq) return
     // Non-disruptive: keep the current list on a failed background refresh.
     console.error('Failed to refresh logs', e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 
@@ -387,11 +402,12 @@ function searchPage(cursor: number | undefined) {
   })
 }
 
-async function fetchPage(cursor: number | undefined) {
+async function fetchPage(cursor: number | undefined, seq: number = loadSeq) {
   loading.value = true
   error.value = null
   try {
     const page = await searchPage(cursor)
+    if (seq !== loadSeq) return // superseded by a newer navigation/query
     if (cursor === undefined) {
       entries.value = page.entries
       seen.clear()
@@ -402,10 +418,11 @@ async function fetchPage(cursor: number | undefined) {
     }
     nextCursor.value = page.next ?? null
   } catch (e) {
+    if (seq !== loadSeq) return
     error.value = 'Failed to search logs'
     console.error('Failed to search trace logs', e)
   } finally {
-    loading.value = false
+    if (seq === loadSeq) loading.value = false
   }
 }
 </script>
