@@ -1,4 +1,4 @@
-import type { LogSearchMode, SpanNode } from '@/api/types'
+import type { LogSearchMode, SpanNode, TraceLogEntry } from '@/api/types'
 
 // Internal-span name rules, ported from internal/service/ci_steps.go
 // (internalSpanPrefixes/internalSpanExact) so the pipeline UI folds the same
@@ -88,6 +88,27 @@ export function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`
   if (n >= 1000) return `${(n / 1000).toFixed(1)}k`
   return String(n)
+}
+
+// --- Log entry helpers ----------------------------------------------------
+
+// entryKey returns a stable dedupe key for a log entry. Timestamp alone is not
+// unique enough (same-nanosecond lines, the refresh cursor re-sending a boundary
+// line), so key on the full identity: timestamp + span_id + raw line.
+export function entryKey(e: TraceLogEntry): string {
+  return `${e.timestamp}\u0000${e.span_id ?? ''}\u0000${e.line}`
+}
+
+// maxEntryTimestampNanos returns the max timestamp among entries as unix nanos
+// (0 when empty). JS Date.parse has millisecond precision, so the caller adds
+// +1ns and relies on entryKey dedupe to drop any boundary re-fetch.
+export function maxEntryTimestampNanos(entries: TraceLogEntry[]): number {
+  let max = 0
+  for (const e of entries) {
+    const t = Date.parse(e.timestamp)
+    if (!Number.isNaN(t)) max = Math.max(max, t * 1_000_000)
+  }
+  return max
 }
 
 // flattenVisibleChildren walks a node's direct children, promoting passthrough

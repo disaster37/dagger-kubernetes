@@ -17,6 +17,35 @@
         </template>
       </div>
 
+      <div class="focus-header">
+        <span :class="['dot', `dot-${focus?.status ?? 'unset'}`]"></span>
+        <span class="focus-name">{{ focus?.name || focus?.span_id }}</span>
+        <span class="focus-duration">{{ focus ? formatDuration(liveSpanDuration(focus, now)) : '' }}</span>
+        <span class="focus-sub">logs for this step and its descendants</span>
+        <button class="chevron" @click="panelOpen = !panelOpen">{{ panelOpen ? '▾' : '▸' }}</button>
+      </div>
+
+      <LogPanel
+        v-if="panelOpen"
+        :key="focus?.span_id ?? 'none'"
+        :entries="entries"
+        :query="query"
+        :mode="mode"
+        :loading="loading"
+        :error="error"
+        :has-more="nextCursor !== null"
+        :total-shown="entries.length"
+        :attribution="attribution"
+        :new-count="newCount"
+        @update:query="onQueryChange"
+        @update:mode="onModeChange"
+        @load-more="loadMore"
+        @retry="resetAndLoad"
+        @select-span="selectSpan"
+        @pinned-change="onPinnedChange"
+        @resume="onResume"
+      />
+
       <div v-if="rows.length === 0" class="empty">No steps for this level</div>
       <div
         v-for="row in rows"
@@ -57,22 +86,6 @@
           </div>
         </div>
       </div>
-
-      <LogPanel
-        :entries="entries"
-        :query="query"
-        :mode="mode"
-        :loading="loading"
-        :error="error"
-        :has-more="nextCursor !== null"
-        :total-shown="entries.length"
-        :attribution="attribution"
-        @update:query="onQueryChange"
-        @update:mode="onModeChange"
-        @load-more="loadMore"
-        @retry="reload"
-        @select-span="selectSpan"
-      />
     </template>
   </div>
 </template>
@@ -84,11 +97,13 @@ import type { LogSearchMode, SpanNode, TraceDetail, TraceLogEntry } from '@/api/
 import LogPanel from '@/pipeline/LogPanel.vue'
 import {
   computeRowOwners,
+  entryKey,
   findSpanByID,
   flattenVisibleChildren,
   formatCount,
   formatDuration,
   liveSpanDuration,
+  maxEntryTimestampNanos,
   visibleChildren,
 } from '@/pipeline/spanTree'
 
@@ -110,6 +125,15 @@ const entries = ref<TraceLogEntry[]>([])
 const nextCursor = ref<number | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
+
+// Dedicated focused-step panel state.
+const panelOpen = ref(true)
+const pinned = ref(true)
+const newCount = ref(0)
+const seen = new Set<string>() // entryKey dedupe set for merge/append
+
+const searchActive = computed(() => query.value !== '')
+const paused = computed(() => !pinned.value || searchActive.value)
 
 // Per-span matching-log counts from the first search page, rolled up to the
 // visible rows for the count badges.
@@ -198,15 +222,15 @@ watch(
 )
 
 // Live refresh: the parent bumps refreshKey on logs_update / the 5s poll.
-// Debounce so a burst of events collapses into a single reload, preserving the
-// current focus + query.
+// Debounce so a burst of events collapses into a single non-disruptive refresh,
+// preserving the current focus + query and the user's scroll position.
 let refreshDebounce: number | undefined
 watch(
   () => props.refreshKey,
   () => {
     if (refreshDebounce) window.clearTimeout(refreshDebounce)
     refreshDebounce = window.setTimeout(() => {
-      void reload()
+      void refresh()
     }, 300)
   }
 )
@@ -215,7 +239,7 @@ onMounted(() => {
   nowTimer = window.setInterval(() => {
     now.value = Date.now()
   }, 250)
-  void reload()
+  void resetAndLoad()
 })
 
 // Clear the live-duration timer when the view unmounts.
@@ -228,13 +252,15 @@ onUnmounted(() => {
 function zoomIn(node: SpanNode) {
   focusPath.value = [...focusPath.value, node]
   expanded.value = new Set()
-  void reload()
+  panelOpen.value = true
+  void resetAndLoad()
 }
 
 function zoomTo(index: number) {
   focusPath.value = focusPath.value.slice(0, index + 1)
   expanded.value = new Set()
-  void reload()
+  panelOpen.value = true
+  void resetAndLoad()
 }
 
 function toggleExpanded(spanID: string) {
@@ -264,26 +290,76 @@ function selectSpan(ownerSpanID: string) {
 
 function onQueryChange(value: string) {
   query.value = value
-  void reload()
+  void resetAndLoad()
 }
 
 function onModeChange(value: LogSearchMode) {
   mode.value = value
-  void reload()
+  void resetAndLoad()
 }
 
-async function reload() {
+function onPinnedChange(p: boolean) {
+  pinned.value = p
+  if (p && !searchActive.value) newCount.value = 0
+}
+
+function onResume() {
+  pinned.value = true
+  newCount.value = 0
+}
+
+// resetAndLoad — full reset + page-1 fetch (navigation / retry only).
+async function resetAndLoad() {
   // Pre-validate a regex client-side so an invalid pattern shows an inline
   // error without a round-trip (the server would 400 anyway). The server stays
   // authoritative; this is a UX shortcut.
   entries.value = []
   nextCursor.value = null
   counts.value = {}
+  seen.clear()
+  newCount.value = 0
   if (mode.value === 'regex' && query.value && !isValidRegex(query.value)) {
     error.value = 'Invalid regex'
     return
   }
   await fetchPage(undefined)
+}
+
+// refresh — non-disruptive live update on refreshKey bump. Fetches only the
+// strictly-newer tail (forward cursor) and appends it, so the list is never
+// cleared and the scroll position never jumps.
+async function refresh() {
+  if (entries.value.length === 0) {
+    await fetchPage(undefined) // first load
+    return
+  }
+  const cursor = maxEntryTimestampNanos(entries.value) + 1
+  loading.value = true
+  error.value = null
+  try {
+    const page = await searchPage(cursor)
+    const appended = mergeEntries(page.entries)
+    nextCursor.value = page.next ?? null
+    if (paused.value && appended > 0) newCount.value += appended
+  } catch (e) {
+    // Non-disruptive: keep the current list on a failed background refresh.
+    console.error('Failed to refresh logs', e)
+  } finally {
+    loading.value = false
+  }
+}
+
+// mergeEntries appends + dedupes, returning the number of entries actually added.
+function mergeEntries(newEntries: TraceLogEntry[]): number {
+  let added = 0
+  for (const e of newEntries) {
+    const k = entryKey(e)
+    if (seen.has(k)) continue
+    seen.add(k)
+    entries.value.push(e)
+    added++
+  }
+  return added
 }
 
 function isValidRegex(pattern: string): boolean {
@@ -300,20 +376,31 @@ async function loadMore() {
   await fetchPage(nextCursor.value)
 }
 
+// searchPage issues the subtree-scoped search for the current focus/query/mode.
+function searchPage(cursor: number | undefined) {
+  return fetchTraceSearch(props.traceId, {
+    span_id: focus.value?.span_id,
+    q: query.value || undefined,
+    mode: mode.value,
+    limit: PAGE_SIZE,
+    cursor,
+  })
+}
+
 async function fetchPage(cursor: number | undefined) {
   loading.value = true
   error.value = null
   try {
-    const page = await fetchTraceSearch(props.traceId, {
-      span_id: focus.value?.span_id,
-      q: query.value || undefined,
-      mode: mode.value,
-      limit: PAGE_SIZE,
-      cursor,
-    })
-    entries.value = cursor === undefined ? page.entries : [...entries.value, ...page.entries]
+    const page = await searchPage(cursor)
+    if (cursor === undefined) {
+      entries.value = page.entries
+      seen.clear()
+      for (const e of page.entries) seen.add(entryKey(e))
+      counts.value = page.counts ?? {}
+    } else {
+      mergeEntries(page.entries)
+    }
     nextCursor.value = page.next ?? null
-    if (cursor === undefined) counts.value = page.counts ?? {}
   } catch (e) {
     error.value = 'Failed to search logs'
     console.error('Failed to search trace logs', e)
@@ -351,6 +438,38 @@ async function fetchPage(cursor: number | undefined) {
 
 .crumb-sep {
   color: #8b949e;
+}
+
+.focus-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px 4px;
+}
+
+.focus-name {
+  font-family: monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: #f0f6fc;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focus-duration {
+  color: #c9d1d9;
+  font-size: 13px;
+}
+
+.focus-sub {
+  flex: 1;
+  color: #8b949e;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .step {

@@ -106,6 +106,22 @@ Loki timestamps; this is the accepted, stateless pager trade-off.
   current focus, a debounced search box, a contains/regex toggle, match count,
   and a "Load more" button. It fetches `/search` with `span_id = focus.span_id`
   (omitted for the root = whole trace).
+- **Dedicated focused-step panel.** `StepTree.vue` renders the breadcrumb, then
+  a focused-step header (status dot, name, live duration, "logs for this step
+  and its descendants" subtitle, collapse chevron), then the `LogPanel`, and
+  only then the child rows. The panel is keyed by `focus.span_id`, so a zoom
+  remounts it and re-pins to the latest logs. The header names the focus, so the
+  panel reads as that step's own log section rather than one global panel at the
+  end. Collapsing hides the panel only; the child rows remain.
+- **Non-disruptive live refresh.** The `refreshKey` bump (SSE `logs_update` /
+  5s poll) calls `refresh()`, which fetches only the strictly-newer tail
+  (`cursor = max loaded timestamp + 1ns`) and appends it, deduped by
+  `timestamp + span_id + line`. It never clears the list, resets the cursor, or
+  jumps the scroll position. Auto-scroll pauses while the user is scrolled up
+  (`followLogsPinned` false) or a search is active; appended lines then surface
+  a "↓ N new logs" affordance, and scrolling to the bottom, clicking it, or
+  clearing the search resumes. A full `resetAndLoad()` (page 1 + counts) runs
+  only on deliberate navigation: mount, zoom, query/mode change, retry.
 - **Log → step.** Each log line carries a clickable step badge resolved from
   `entry.span_id` via `computeRowOwners(focus)` (the same internal/transparent
   ownership rules as the tree). A non-transparent descendant that is not itself
@@ -146,8 +162,13 @@ Loki timestamps; this is the accepted, stateless pager trade-off.
 - Search matches the raw Loki JSON line (not the UI's `logText`-decoded body);
   JSON escaping (`\n`, quotes) can cause rare contains/regex misses. Accepted
   for v1.
-- Live search during streaming is kept simple (refresh on `logs_update`/poll);
-  a result may lag a few seconds behind a just-ingested line.
+- Live search during streaming is non-disruptive: `logs_update`/poll appends
+  only the new tail via a forward cursor, deduped, and pauses while the user is
+  scrolled up or searching (with a "↓ N new logs" affordance). A result may lag
+  a few seconds behind a just-ingested line.
+- The SPA shell (`index.html` and extension-less routes) is served
+  `Cache-Control: no-cache` so a new deploy's hashed asset names are picked up;
+  content-hashed `/assets/*` are served `public, max-age=31536000, immutable`.
 
 ## Open questions
 

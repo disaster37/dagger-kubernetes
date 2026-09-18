@@ -1678,8 +1678,11 @@ Features:
   detail view, matching the list view's `@username · org/repo` identity.
 - **Aggregated logs per level** — the step tree shows a log panel for the
   currently focused level, aggregating the logs of that node **and all its
-  descendants** (internal-span logs are dropped as noise). The panel pages
-  beyond the 1000-line whole-trace cap via the server-side search endpoint.
+  descendants** (internal-span logs are dropped as noise). The panel is
+  dedicated to the focus: it sits directly under a focused-step header (status
+  dot, name, live duration, "logs for this step and its descendants" subtitle)
+  and above the child rows, and the header's chevron collapses it. The panel
+  pages beyond the 1000-line whole-trace cap via the server-side search endpoint.
   Every log line carries a clickable **step badge** naming the visible row that
   owns it; clicking the badge scrolls to and briefly flashes that row. Logs that
   cannot be attributed (internal span, empty/unknown span, span outside the
@@ -1709,7 +1712,16 @@ Features:
   the affected trace IDs and broadcasts a lightweight `trace_update` or
   `logs_update` event; the viewer debounces these into an immediate re-fetch
   of steps/logs so new spans and log lines appear as the pipeline runs. A 5s
-  polling fallback remains for resilience.
+  polling fallback remains for resilience. Log refresh is **non-disruptive**:
+  it fetches only the strictly-newer tail via a forward cursor and appends it
+  (deduped by timestamp + span + line), so the list is never cleared and the
+  scroll position never jumps. Auto-scroll pauses while the user is scrolled up
+  reading or a search is active; new lines then surface a "↓ N new logs"
+  affordance, and scrolling to the bottom, clicking it, or clearing the search
+  resumes. The SPA shell (`index.html` and extension-less routes) is served
+  `Cache-Control: no-cache` so a new deploy's hashed asset names are picked up,
+  while content-hashed `/assets/*` are served `public, max-age=31536000,
+  immutable`.
 - **Duration** — shown prominently in the viewer header next to the status and
   in the details table; while a pipeline or step is `running`, the displayed
   duration ticks live every 250ms (Details) / 1s (list) from the
@@ -1730,7 +1742,9 @@ Features:
   pipeline is still running. Each log container auto-scrolls to the end when
   opened and sticks to the bottom while new lines stream in; scrolling up
   unpins, scrolling back to the bottom re-pins (with a small hysteresis so
-  jitter does not flap the state). Dagger engine verbose progress payloads
+  jitter does not flap the state). While unpinned (or while a search is active)
+  a live refresh appends new lines below the viewport and shows a "↓ N new
+  logs" button instead of moving the view. Dagger engine verbose progress payloads
   (base64 protobufs) are collapsed to a placeholder rather than rendered as
   base64.
 - **Fleet dashboard** — active engines, replicas per version, session counts

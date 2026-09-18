@@ -33,7 +33,11 @@
       <button class="btn" @click="$emit('retry')">Retry</button>
     </div>
 
-    <div v-follow-logs class="logs">
+    <button v-if="newCount > 0" class="new-logs" @click="onResume">
+      ↓ {{ newCount }} new logs
+    </button>
+
+    <div ref="logEl" v-follow-logs class="logs" @scroll="onScroll">
       <template v-for="(entry, i) in rendered" :key="`log-${i}`">
         <div class="log-line">
           <span class="log-ts">{{ formatTime(entry.timestamp) }}</span>
@@ -61,8 +65,9 @@
 </template>
 
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import type { LogSearchMode, TraceLogEntry } from '@/api/types'
+import { followLogsPin, followLogsPinned } from '@/directives/followLogs'
 import { highlightSegments, logText } from '@/pipeline/spanTree'
 
 const props = defineProps<{
@@ -74,6 +79,7 @@ const props = defineProps<{
   hasMore: boolean
   totalShown: number
   attribution: Map<string, { label: string; ownerSpanID: string }>
+  newCount: number
 }>()
 
 const emit = defineEmits<{
@@ -82,7 +88,25 @@ const emit = defineEmits<{
   (e: 'load-more'): void
   (e: 'retry'): void
   (e: 'select-span', ownerSpanID: string): void
+  (e: 'pinned-change', pinned: boolean): void
+  (e: 'resume'): void
 }>()
+
+const logEl = ref<HTMLElement | null>(null)
+
+function onScroll() {
+  // Defer one frame so the directive's own scroll handler has updated `pinned`
+  // before we read it (independent of listener registration order).
+  requestAnimationFrame(() => emit('pinned-change', followLogsPinned(logEl.value)))
+}
+
+function onResume() {
+  followLogsPin(logEl.value)
+  emit('pinned-change', true)
+  emit('resume')
+}
+
+onMounted(() => emit('pinned-change', followLogsPinned(logEl.value)))
 
 // Local mirror of the query so typing stays responsive; the debounced emit
 // drives the actual server request.
@@ -195,6 +219,23 @@ function formatTime(ts: string): string {
   border-radius: 4px;
   color: #f85149;
   font-size: 13px;
+}
+
+.new-logs {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  background: #1f2a3a;
+  border: 1px solid #58a6ff;
+  border-radius: 4px;
+  color: #58a6ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.new-logs:hover {
+  background: #26374d;
 }
 
 .logs {
