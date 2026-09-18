@@ -45,3 +45,4 @@ the decision.
 | 036  | [Config-driven project → group mapping](ADR-036-config-project-group-mapping.md) |
 | 037  | [Pipeline-view observability — internal-span filtering, service detection, exec logs, trace-scoped engine metrics](ADR-037-pipeline-view-observability.md) |
 | 038  | [Pipeline tree drill-down, zoom, and subtree-scoped log search](ADR-038-pipeline-tree-zoom-search.md) |
+| 039  | [CI timeout is opt-in, live Dagger output, and live pipeline-view URL](ADR-039-ci-timeout-live-streaming.md) |

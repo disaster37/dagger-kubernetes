@@ -2,6 +2,7 @@ package main
 
 import (
 	"archive/tar"
+	"bufio"
 	"bytes"
 	"compress/gzip"
 	"context"
@@ -13,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -668,5 +671,424 @@ func TestStreamStepsDefaultIntervalAndErrorRetry(t *testing.T) {
 
 	if len(sink.events) != 0 {
 		t.Fatalf("events = %d, want 0 (source always errors)", len(sink.events))
+	}
+}
+
+// --- timeout + trace-id-file + live pipeline-view URL tests (issue #19) ---
+
+// stubDaggerSleeping installs a fake `dagger` executable on PATH that sleeps
+// for the given number of seconds and exits 0. `exec` replaces the shell so the
+// sleep process is the direct child: when the wrapper's timeout kills it, the
+// stderr copy goroutine unblocks immediately instead of waiting for an orphaned
+// sleep to release the inherited pipe.
+func stubDaggerSleeping(t *testing.T, seconds int) {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "dagger")
+	content := fmt.Sprintf("#!/bin/sh\nexec sleep %d\n", seconds)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write sleeping dagger: %v", err)
+	}
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", dir, os.PathListSeparator, os.Getenv("PATH")))
+}
+
+// startTraceListServer serves GET /api/v1/traces with a single trace whose ID
+// is traceID, mimicking the supervisor's discovery endpoint.
+func startTraceListServer(t *testing.T, traceID string) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/traces" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = fmt.Fprintf(w, `[{"trace_id":%q}]`, traceID)
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// captureStderrAsync swaps os.Stderr for a pipe and runs fn in a goroutine. It
+// returns a channel that receives each stderr line as it is written (closed
+// when fn returns and the pipe drains) plus a wait func returning the full
+// captured output. Unlike captureStderr it does not block until fn returns, so
+// tests can assert on output emitted while fn is still running.
+func captureStderrAsync(t *testing.T, fn func()) (lines <-chan string, wait func() string) {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("pipe: %v", err)
+	}
+	os.Stderr = w
+
+	lineCh := make(chan string, 256)
+	var mu sync.Mutex
+	var buf strings.Builder
+	readerDone := make(chan struct{})
+	go func() {
+		defer close(readerDone)
+		defer close(lineCh)
+		sc := bufio.NewScanner(r)
+		for sc.Scan() {
+			line := sc.Text()
+			mu.Lock()
+			buf.WriteString(line)
+			buf.WriteByte('\n')
+			mu.Unlock()
+			lineCh <- line
+		}
+	}()
+
+	runDone := make(chan struct{})
+	go func() {
+		defer close(runDone)
+		fn()
+		_ = w.Close()
+		os.Stderr = old
+	}()
+
+	wait = func() string {
+		<-runDone
+		for range lineCh {
+		}
+		<-readerDone
+		mu.Lock()
+		defer mu.Unlock()
+		return buf.String()
+	}
+	return lineCh, wait
+}
+
+func TestRunTimeoutNoneByDefault(t *testing.T) {
+	stubDaggerOnPath(t, testTraceID)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"call", "foo",
+	)
+
+	stderr := captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "timeout=none") {
+		t.Fatalf("stderr = %q, want containing timeout=none", stderr)
+	}
+}
+
+func TestRunZeroTimeoutAccepted(t *testing.T) {
+	stubDaggerOnPath(t, testTraceID)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--timeout", "0",
+		"call", "foo",
+	)
+
+	stderr := captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "timeout=none") {
+		t.Fatalf("stderr = %q, want containing timeout=none", stderr)
+	}
+}
+
+func TestRunTimeoutKillsLongRunningCommand(t *testing.T) {
+	stubDaggerSleeping(t, 5)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--timeout", "100ms",
+		"call", "foo",
+	)
+
+	var runErr error
+	captureStderr(t, func() {
+		done := make(chan error, 1)
+		go func() { done <- run(ctx) }()
+		select {
+		case runErr = <-done:
+		case <-time.After(2 * time.Second):
+			t.Fatal("run did not return within 2s; timeout not enforced")
+		}
+	})
+
+	if runErr == nil {
+		t.Fatal("run = nil, want timeout error")
+	}
+}
+
+func TestRunNegativeTimeoutRejected(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "ran")
+	dir := t.TempDir()
+	script := filepath.Join(dir, "dagger")
+	content := fmt.Sprintf("#!/bin/sh\ntouch '%s'\nexit 0\n", marker)
+	if err := os.WriteFile(script, []byte(content), 0o755); err != nil {
+		t.Fatalf("write marker dagger: %v", err)
+	}
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", dir, os.PathListSeparator, os.Getenv("PATH")))
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--timeout", "-1s",
+		"call", "foo",
+	)
+
+	err := run(ctx)
+	if err == nil || !strings.Contains(err.Error(), "--timeout must be >= 0") {
+		t.Fatalf("run err = %v, want --timeout must be >= 0", err)
+	}
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatal("dagger was executed despite a negative timeout")
+	}
+}
+
+func TestTraceIDFileWrittenFromRegexFallback(t *testing.T) {
+	stubDaggerOnPath(t, testTraceID)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	idFile := filepath.Join(t.TempDir(), "trace.id")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--trace-id-file", idFile,
+		"call", "foo",
+	)
+
+	captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	got, err := os.ReadFile(idFile)
+	if err != nil {
+		t.Fatalf("read trace-id file: %v", err)
+	}
+	if string(got) != testTraceID {
+		t.Fatalf("trace-id file = %q, want %q (no trailing newline)", got, testTraceID)
+	}
+}
+
+func TestTraceIDFileNotWrittenWhenNoTraceID(t *testing.T) {
+	stubDaggerOnPath(t, "no trace id here")
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	idFile := filepath.Join(t.TempDir(), "trace.id")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--trace-id-file", idFile,
+		"call", "foo",
+	)
+
+	captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	if _, err := os.Stat(idFile); !os.IsNotExist(err) {
+		t.Fatalf("trace-id file exists (err=%v), want absent when no trace ID", err)
+	}
+}
+
+func TestTraceIDFileEnvVar(t *testing.T) {
+	stubDaggerOnPath(t, testTraceID)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	idFile := filepath.Join(t.TempDir(), "trace.id")
+	t.Setenv("DAGGER_KUBERNETES_TRACE_ID_FILE", idFile)
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"call", "foo",
+	)
+
+	captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	got, err := os.ReadFile(idFile)
+	if err != nil {
+		t.Fatalf("read trace-id file: %v", err)
+	}
+	if string(got) != testTraceID {
+		t.Fatalf("trace-id file = %q, want %q", got, testTraceID)
+	}
+}
+
+func TestTraceIDFileWriteErrorNonFatal(t *testing.T) {
+	stubDaggerOnPath(t, testTraceID)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	badPath := filepath.Join(t.TempDir(), "does-not-exist", "trace.id")
+	ctx := newTestCLIContext(t,
+		"--server", "https://supv.example.com",
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--trace-id-file", badPath,
+		"call", "foo",
+	)
+
+	stderr := captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "Pipeline View:") {
+		t.Fatalf("stderr = %q, want Pipeline View line despite write failure", stderr)
+	}
+}
+
+func TestTraceIDFileWrittenOnDiscovery(t *testing.T) {
+	const supervisorID = "11111111111111111111111111111111"
+	srv := startTraceListServer(t, supervisorID)
+	stubDaggerSleeping(t, 2)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	idFile := filepath.Join(t.TempDir(), "trace.id")
+	ctx := newTestCLIContext(t,
+		"--server", srv.URL,
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"--trace-id-file", idFile,
+		"call", "foo",
+	)
+
+	var runErr error
+	var runReturned atomic.Bool
+	done := make(chan struct{})
+	go func() {
+		runErr = run(ctx)
+		runReturned.Store(true)
+		close(done)
+	}()
+
+	var content []byte
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if b, err := os.ReadFile(idFile); err == nil {
+			if runReturned.Load() {
+				t.Fatal("trace-id file appeared only after run returned")
+			}
+			content = b
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if content == nil {
+		t.Fatal("trace-id file never appeared before run returned")
+	}
+	<-done
+	if runErr != nil {
+		t.Fatalf("run: %v", runErr)
+	}
+	if string(content) != supervisorID {
+		t.Fatalf("trace-id file = %q, want supervisor id %q", content, supervisorID)
+	}
+}
+
+func TestPipelineViewURLLiveOnDiscovery(t *testing.T) {
+	const supervisorID = "22222222222222222222222222222222"
+	srv := startTraceListServer(t, supervisorID)
+	stubDaggerSleeping(t, 2)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	ctx := newTestCLIContext(t,
+		"--server", srv.URL,
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"call", "foo",
+	)
+
+	var runErr error
+	var runReturned atomic.Bool
+	lines, wait := captureStderrAsync(t, func() {
+		runErr = run(ctx)
+		runReturned.Store(true)
+	})
+
+	wantLive := fmt.Sprintf("[dagger-kubernetes-ci] Pipeline View (live): https://supv.example.com/pipelines/%s", supervisorID)
+	liveSeen, liveBeforeReturn := false, false
+	timeout := time.After(1500 * time.Millisecond)
+loop:
+	for {
+		select {
+		case line := <-lines:
+			if line == wantLive {
+				liveSeen = true
+				liveBeforeReturn = !runReturned.Load()
+				break loop
+			}
+		case <-timeout:
+			break loop
+		}
+	}
+	full := wait()
+
+	if runErr != nil {
+		t.Fatalf("run: %v", runErr)
+	}
+	if !liveSeen {
+		t.Fatalf("live pipeline-view line not seen; stderr=%q", full)
+	}
+	if !liveBeforeReturn {
+		t.Fatal("live pipeline-view line emitted only after run returned")
+	}
+	if got := strings.Count(full, wantLive); got != 1 {
+		t.Fatalf("live line count = %d, want 1; stderr=%q", got, full)
+	}
+	wantFinal := fmt.Sprintf("Pipeline View: https://supv.example.com/pipelines/%s", supervisorID)
+	if !strings.Contains(full, wantFinal) {
+		t.Fatalf("stderr = %q, want end-of-run summary %q", full, wantFinal)
+	}
+}
+
+func TestPipelineViewURLLiveErrorNonFatal(t *testing.T) {
+	const badID = "bad id!"
+	srv := startTraceListServer(t, badID)
+	stubDaggerSleeping(t, 2)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+	ctx := newTestCLIContext(t,
+		"--server", srv.URL,
+		"--token", "tok",
+		"--ui-url", "https://supv.example.com",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"call", "foo",
+	)
+
+	stderr := captureStderr(t, func() {
+		if err := run(ctx); err != nil {
+			t.Fatalf("run: %v", err)
+		}
+	})
+
+	if !strings.Contains(stderr, "discovered trace "+badID) {
+		t.Fatalf("stderr = %q, want discovered trace line", stderr)
+	}
+	if strings.Contains(stderr, "Pipeline View (live):") {
+		t.Fatalf("stderr = %q, want no live line for an invalid trace ID", stderr)
 	}
 }

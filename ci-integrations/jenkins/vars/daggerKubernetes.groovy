@@ -30,7 +30,7 @@ def call(Map params = [:], Closure body = null) {
     }
 
     boolean dynamicStages = envTruthy(params.dynamicStages, env.DAGGER_KUBERNETES_DYNAMIC_STAGES, false)
-    int timeoutMinutes = (params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES ?: 30) as int
+    int timeoutMinutes = resolveTimeoutMinutes(params.timeoutMinutes ?: env.DAGGER_KUBERNETES_TIMEOUT_MINUTES)
 
     if (!serverUrl || !token) {
         error "daggerKubernetes: serverUrl and token are required"
@@ -53,57 +53,27 @@ def call(Map params = [:], Closure body = null) {
 
 		// Stage 2: Run the dagger command with real-time plaintext streaming.
 		stage("Dagger") {
-			String stderrFile = "/tmp/dagger-stderr-${env.BUILD_NUMBER}.log"
+			// Private temp dir (0700) so a local user on a shared agent cannot
+			// pre-create or replace the trace-id file with a symlink
+			// (CWE-59/CWE-377). The wrapper writes the file inside it; the
+			// finally block removes the whole dir.
+			String traceDir = sh(script: 'mktemp -d /tmp/dagger-trace-XXXXXX', returnStdout: true).trim()
+			assertShellSafe(traceDir, 'trace-id dir path')
+			String traceIdFile = "${traceDir}/trace.id"
+			assertShellSafe(traceIdFile, 'trace-id file path')
 			withEnv([
 				"DAGGER_CLOUD_URL=${serverUrl}",
 				"DAGGER_CLOUD_TOKEN=${token}",
 				"DAGGER_KUBERNETES_TOKEN=${token}",
+				"DAGGER_KUBERNETES_TRACE_ID_FILE=${traceIdFile}",
 				"_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self"
 			] + (version ? ["_EXPERIMENTAL_DAGGER_TAG=${version}"] : [])) {
-				timeout(time: timeoutMinutes, unit: 'MINUTES') {
-					try {
-						// Prefer dagger-kubernetes-ci for correct trace
-						// discovery (supervisor API, not regex) and real-time
-						// plaintext streaming. Falls back to running dagger
-						// directly when the CI wrapper is not available.
-						String ciBin = sh(script: "which dagger-kubernetes-ci 2>/dev/null || true", returnStdout: true).trim()
-						if (ciBin) {
-							// Strip leading "dagger" from the command — the
-							// CI wrapper takes positional args after flags and
-							// strips "dagger" itself, but we pass clean args.
-							String daggerArgs = daggerCommand.replaceFirst(/^dagger\s*/, '')
-							assertShellSafe(serverUrl, 'serverUrl')
-							sh """
-								dagger-kubernetes-ci --steps --steps-format plain \
-									--server '${serverUrl}' \
-									--config /dev/null \
-									${daggerArgs} \
-									2>'${stderrFile}'
-							"""
-						} else {
-							// Fallback: run dagger directly. Trace ID
-							// extraction from stderr is best-effort via the
-							// structured [dagger-kubernetes-ci] prefix, which
-							// won't appear here; link will point to
-							// /traces/latest.
-							sh "${daggerCommand} 2>'${stderrFile}'"
-						}
-					} catch (e) {
-						echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
-						throw e
-					} finally {
-						String stderr = sh(script: "cat '${stderrFile}' 2>/dev/null || true", returnStdout: true).trim()
-						if (stderr) {
-							echo stderr
-						}
-						String traceId = extractTraceId(stderr)
-						if (traceId) {
-							echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${traceId}"
-						} else {
-							echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/traces/latest"
-						}
-						sh "rm -f '${stderrFile}'"
+				if (timeoutMinutes > 0) {
+					timeout(time: timeoutMinutes, unit: 'MINUTES') {
+						runDaggerCommand(daggerCommand, serverUrl, uiUrl, traceIdFile, traceDir)
 					}
+				} else {
+					runDaggerCommand(daggerCommand, serverUrl, uiUrl, traceIdFile, traceDir)
 				}
 			}
 		}
@@ -138,6 +108,50 @@ def call(Map params = [:], Closure body = null) {
     }
 }
 
+// runDaggerCommand runs the dagger command with stderr/stdout streaming live to
+// the console. The wrapper (when present) prints
+// "[dagger-kubernetes-ci] Pipeline View (live): <url>" as soon as it discovers
+// the trace ID, and writes the ID to traceIdFile (via
+// DAGGER_KUBERNETES_TRACE_ID_FILE); the finally block reads it to print the
+// end-of-stage link, falling back to /traces/latest. --ui-url is passed so the
+// wrapper's links use the correct base (otherwise the wrapper falls back to the
+// compiled-in server.public_url because --config /dev/null "exists").
+void runDaggerCommand(String daggerCommand, String serverUrl, String uiUrl, String traceIdFile, String traceDir) {
+    try {
+        String ciBin = sh(script: "which dagger-kubernetes-ci 2>/dev/null || true", returnStdout: true).trim()
+        if (ciBin) {
+            // Strip leading "dagger" from the command — the CI wrapper takes
+            // positional args after flags and strips "dagger" itself, but we
+            // pass clean args.
+            String daggerArgs = daggerCommand.replaceFirst(/^dagger\s*/, '')
+            assertShellSafe(serverUrl, 'serverUrl')
+            assertShellSafe(uiUrl, 'uiUrl')
+            sh """
+                dagger-kubernetes-ci --steps --steps-format plain \
+                    --server '${serverUrl}' \
+                    --ui-url '${uiUrl}' \
+                    --config /dev/null \
+                    ${daggerArgs}
+            """
+        } else {
+            // Fallback: run dagger directly, live. No trace discovery is
+            // possible here, so the end-of-stage link points to /traces/latest.
+            sh daggerCommand
+        }
+    } catch (e) {
+        echo "[dagger-kubernetes] Pipeline failed. View: ${uiUrl}/traces/latest"
+        throw e
+    } finally {
+        String traceId = sh(script: "cat '${traceIdFile}' 2>/dev/null || true", returnStdout: true).trim()
+        sh "rm -rf '${traceDir}'"
+        if (traceId) {
+            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/pipelines/${traceId}"
+        } else {
+            echo "[dagger-kubernetes] Pipeline View: ${uiUrl}/traces/latest"
+        }
+    }
+}
+
 // envTruthy resolves a flag that may come from a map param or an env var. Env
 // vars are always strings, so "false"/"0"/"no"/"off" must count as false —
 // Groovy's default truthiness would treat any non-empty string as true.
@@ -166,20 +180,25 @@ boolean parseBool(String s, boolean deflt) {
     return deflt
 }
 
-// extractTraceId extracts the trace id from dagger's stderr output for the
-// pipeline-view link. It first looks for the structured format emitted by
-// dagger-kubernetes-ci ("discovered trace <hex> from supervisor"), which is
-// authoritative because it comes from the supervisor's trace-meta API. Falls
-// back to matching any 32+ char hex string (unreliable — may match Docker
-// digests and other hashes) for backwards compatibility with raw dagger runs.
-String extractTraceId(String stderr) {
-	if (!stderr) return ''
-	// Prefer the CI wrapper's structured discovery output.
-	def m = (stderr =~ /\[dagger-kubernetes-ci\] discovered trace ([a-fA-F0-9]{16,128})/)
-	if (m) return m[0][1]
-	// Fallback: any hex string (best-effort, may be wrong).
-	m = (stderr =~ /[a-f0-9]{32,}/)
-	return m ? m[0] : ''
+// resolveTimeoutMinutes returns a positive integer timeout in minutes, or 0
+// (no timeout) when unset, zero, negative, or not a plain non-negative integer.
+// A non-numeric or out-of-range value is a warning, not an error — Groovy
+// `as int` would crash the build on a typo or an oversized number.
+int resolveTimeoutMinutes(def value) {
+    if (value == null || value == '') return 0
+    String s = value.toString().trim()
+    if (!(s ==~ /\d+/)) {
+        echo "daggerKubernetes: ignoring non-numeric timeoutMinutes '${s}'"
+        return 0
+    }
+    try {
+        long m = s as long
+        if (m <= 0) return 0
+        return m > Integer.MAX_VALUE ? Integer.MAX_VALUE : (int) m
+    } catch (NumberFormatException ignored) {
+        echo "daggerKubernetes: ignoring out-of-range timeoutMinutes '${s}'"
+        return 0
+    }
 }
 
 // isShellUnsafe reports whether value contains a character that could break

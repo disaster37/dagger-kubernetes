@@ -1873,15 +1873,20 @@ the Dagger command directly in exactly two stages:
 
 1. **Provision Dagger CLI** — only when `provisionCli: true`; downloads the
    verified CLI tarball from the supervisor and prepends it to `PATH`.
-2. **Dagger** — runs the `command` (or `env.DAGGER_COMMAND`) with `sh`: stdout
-   streams to the console while stderr is captured to a temp file, replayed
-   into the build log, and scanned for the trace ID. The stage prints the
-   pipeline-view link (`/pipelines/<traceID>`, falling back to
-   `/traces/latest` when no trace ID is found) and fails — failing the build —
-   when the command exits non-zero. The temp file is removed on success and
-   failure alike.
+2. **Dagger** — runs the `command` (or `env.DAGGER_COMMAND`) with `sh`. Both
+   stdout and stderr **stream live** to the console (nothing is buffered to a
+   temp file). When the `dagger-kubernetes-ci` wrapper is on `PATH`, it prints
+   `[dagger-kubernetes-ci] Pipeline View (live): <url>` as soon as it discovers
+   the trace ID (~1s after Dagger starts) and writes the ID to the file named
+   by `DAGGER_KUBERNETES_TRACE_ID_FILE`. The library reads that file in
+   `finally` to print the end-of-stage `/pipelines/<id>` link, falling back to
+   `/traces/latest` when no trace ID was captured. The library also passes
+   `--ui-url '${uiUrl}'` so both links use the correct base. The stage fails —
+   failing the build — when the command exits non-zero.
 
-The whole run is wrapped in a configurable `timeout(...)` (default 30 minutes).
+The run is **not** wrapped in a timeout by default. Set `timeoutMinutes: N` to
+add a Jenkins `timeout(...)` step, or use Jenkins' native
+`options { timeout(...) }`.
 
 ```groovy
 @Library('dagger-kubernetes') _
@@ -1891,13 +1896,13 @@ daggerKubernetes(serverUrl: 'https://supv.example.com',
             dynamicStages: true,
             command: 'dagger call github.com/org/ci@v1.0.0 build',
             provisionCli: true,        // optional; adds the provisioning stage
-            timeoutMinutes: 30)        // optional; default 30
+            timeoutMinutes: 30)        // optional; omit for no timeout
 ```
 
 The Dagger command is interpolated into the `sh` step as-is: it is the
 deliberate exception to the library's shell-safety validation, because it *is*
 the shell command, authored by the trusted pipeline author. Every other
-interpolated value (`serverUrl`, `version`, temp paths) goes
+interpolated value (`serverUrl`, `uiUrl`, `version`, temp paths) goes
 through `assertShellSafe`.
 
 Config keys:
@@ -1907,6 +1912,9 @@ Config keys:
 | `ci.jenkins.dynamic_stages` | `true` | Selects the dynamic-stages mode. |
 | `ci.jenkins.steps_poll_interval` | `2s` | Poll cadence for the CI step stream. |
 | `ci.jenkins.steps_max_depth` | `8` | Maximum nested step depth surfaced (0 = unlimited). |
+
+`timeoutMinutes` is a shared-library parameter (or the
+`DAGGER_KUBERNETES_TIMEOUT_MINUTES` env var), not a `ci.jenkins.*` config key.
 
 `steps_poll_interval` and `steps_max_depth` configure the
 `dagger-kubernetes-ci` wrapper's `--steps` NDJSON mode (consumed by other

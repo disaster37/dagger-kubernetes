@@ -178,6 +178,21 @@ func installFakeDagger(t *testing.T) {
 	t.Setenv("PATH", fmt.Sprintf("%s%c%s", fakeDir, os.PathListSeparator, os.Getenv("PATH")))
 }
 
+// installFakeDaggerWithStdout puts a fake `dagger` on PATH that prints a marker
+// to stdout (not stderr) and keeps running long enough for the wrapper's
+// trace-discovery poll to fire. Used to prove the wrapper streams the dagger
+// command's stdout to its own stderr in --steps mode.
+func installFakeDaggerWithStdout(t *testing.T, marker string) {
+	t.Helper()
+	fakeDir := t.TempDir()
+	fake := filepath.Join(fakeDir, "dagger")
+	script := fmt.Sprintf("#!/bin/sh\necho '%s'\nsleep 3\nexit 0\n", marker)
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake dagger: %v", err)
+	}
+	t.Setenv("PATH", fmt.Sprintf("%s%c%s", fakeDir, os.PathListSeparator, os.Getenv("PATH")))
+}
+
 func parseNDJSON(t *testing.T, out string) []domain.CIEvent {
 	t.Helper()
 	var events []domain.CIEvent
@@ -324,5 +339,90 @@ func TestCIWrapperStreamsNestedSteps(t *testing.T) {
 	wantLink := fmt.Sprintf("Pipeline View: https://supv.example.com/pipelines/%s", ciStepsTraceID)
 	if !strings.Contains(stderr2.String(), wantLink) {
 		t.Fatalf("stderr = %q, want containing %q", stderr2.String(), wantLink)
+	}
+}
+
+// TestCIWrapperWritesTraceIDFile proves the trace-ID handoff contract: the
+// wrapper writes the supervisor-discovered trace ID to --trace-id-file as soon
+// as it is known, prints the live pipeline-view URL to stderr, and still emits
+// the end-of-run summary. stdout stays clean NDJSON.
+func TestCIWrapperWritesTraceIDFile(t *testing.T) {
+	serverURL, adminToken := startCIStepsServer(t)
+	bin := buildCIWrapper(t)
+	installFakeDagger(t)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+
+	traceIDFile := filepath.Join(t.TempDir(), "trace.id")
+	cmd := exec.Command(bin,
+		"--server", serverURL,
+		"--token", adminToken,
+		"--ui-url", "https://supv.example.com",
+		"--steps",
+		"--steps-poll-interval", "50ms",
+		"--trace-id-file", traceIDFile,
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"call", "foo",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dagger-kubernetes-ci: %v\n%s", err, stderr.String())
+	}
+
+	got, err := os.ReadFile(traceIDFile)
+	if err != nil {
+		t.Fatalf("read trace-id file: %v", err)
+	}
+	if string(got) != ciStepsTraceID {
+		t.Fatalf("trace-id file = %q, want %q", got, ciStepsTraceID)
+	}
+
+	if events := parseNDJSON(t, stdout.String()); len(events) == 0 {
+		t.Fatalf("stdout empty, want NDJSON events; stderr=%q", stderr.String())
+	}
+
+	wantLive := fmt.Sprintf("[dagger-kubernetes-ci] Pipeline View (live): https://supv.example.com/pipelines/%s", ciStepsTraceID)
+	if !strings.Contains(stderr.String(), wantLive) {
+		t.Fatalf("stderr = %q, want live line %q", stderr.String(), wantLive)
+	}
+	wantFinal := fmt.Sprintf("Pipeline View: https://supv.example.com/pipelines/%s", ciStepsTraceID)
+	if !strings.Contains(stderr.String(), wantFinal) {
+		t.Fatalf("stderr = %q, want final summary %q", stderr.String(), wantFinal)
+	}
+}
+
+// TestCIWrapperStreamsDaggerStdoutToStderr proves the live-streaming path: in
+// --steps mode the dagger command's stdout is redirected to the wrapper's
+// stderr (keeping stdout clean for the NDJSON protocol), so a marker printed by
+// dagger to stdout appears on the wrapper's stderr and never on its stdout.
+func TestCIWrapperStreamsDaggerStdoutToStderr(t *testing.T) {
+	serverURL, adminToken := startCIStepsServer(t)
+	bin := buildCIWrapper(t)
+	const marker = "dagger-live-marker"
+	installFakeDaggerWithStdout(t, marker)
+	t.Setenv("DAGGER_KUBERNETES_CACHE_S3_BUCKET", "test-bucket")
+
+	cmd := exec.Command(bin,
+		"--server", serverURL,
+		"--token", adminToken,
+		"--ui-url", "https://supv.example.com",
+		"--steps",
+		"--steps-poll-interval", "50ms",
+		"--config", filepath.Join(t.TempDir(), "missing.yaml"),
+		"call", "foo",
+	)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("dagger-kubernetes-ci: %v\n%s", err, stderr.String())
+	}
+
+	if !strings.Contains(stderr.String(), marker) {
+		t.Fatalf("stderr = %q, want containing dagger stdout marker %q", stderr.String(), marker)
+	}
+	if strings.Contains(stdout.String(), marker) {
+		t.Fatalf("stdout = %q, must not contain dagger stdout marker (protocol channel)", stdout.String())
 	}
 }
