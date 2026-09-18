@@ -87,7 +87,8 @@ func ciFlags() []cli.Flag {
 		&cli.StringFlag{Name: "steps-format", Value: "ndjson", Usage: "output format for --steps: ndjson (default) or plain"},
 		&cli.DurationFlag{Name: "steps-poll-interval", Usage: "poll cadence for the CI step stream (default from ci.jenkins.steps_poll_interval)"},
 		&cli.IntFlag{Name: "steps-max-depth", Usage: "maximum nested step depth surfaced (0 = unlimited; default from ci.jenkins.steps_max_depth)"},
-		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "maximum time the dagger command is allowed to run"},
+		&cli.DurationFlag{Name: "timeout", Value: 0, Usage: "maximum time the dagger command is allowed to run (0 = no timeout)"},
+		&cli.StringFlag{Name: "trace-id-file", EnvVars: []string{"DAGGER_KUBERNETES_TRACE_ID_FILE"}, Usage: "write the discovered trace ID to this file as soon as it is known (empty = disabled)"},
 	}
 }
 
@@ -120,6 +121,7 @@ func run(c *cli.Context) error {
 
 	version := c.String("version")
 	ciMode := c.String("ci")
+	traceIDFile := c.String("trace-id-file")
 
 	steps, pollInterval, maxDepth := resolveSteps(c, cfg)
 
@@ -146,7 +148,14 @@ func run(c *cli.Context) error {
 	}
 
 	timeout := c.Duration("timeout")
-	cmdCtx, cmdCancel := context.WithTimeout(context.Background(), timeout)
+	if timeout < 0 {
+		return fmt.Errorf("--timeout must be >= 0")
+	}
+	var cmdCtx = context.Background()
+	var cmdCancel context.CancelFunc = func() {}
+	if timeout > 0 {
+		cmdCtx, cmdCancel = context.WithTimeout(context.Background(), timeout)
+	}
 	defer cmdCancel()
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
@@ -191,8 +200,12 @@ func run(c *cli.Context) error {
 
 	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
+	timeoutDisplay := "none"
+	if timeout > 0 {
+		timeoutDisplay = timeout.String()
+	}
 	fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] server=%s token=%t steps=%t version=%s timeout=%s\n",
-		serverURL, token != "", steps, version, timeout.String())
+		serverURL, token != "", steps, version, timeoutDisplay)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	stepsCancel = cancel
@@ -247,6 +260,18 @@ func run(c *cli.Context) error {
 					discoveredID = id
 					discoveredMu.Unlock()
 					fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] discovered trace %s from supervisor\n", id)
+					// Live pipeline-view URL: emitted the moment the trace is
+					// known (~1s after dagger starts) so the user can open the
+					// pipeline view without waiting for the run to finish.
+					// Non-fatal on error.
+					if liveURL, uerr := domain.PipelineViewURL(uiURL, id); uerr != nil {
+						logger.WithError(uerr).WithField("trace_id", id).Debug("live pipeline view url failed")
+					} else {
+						fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] Pipeline View (live): %s\n", liveURL)
+					}
+					if werr := writeTraceIDFile(traceIDFile, id); werr != nil {
+						logger.WithError(werr).WithField("trace_id", id).Debug("write trace-id file failed")
+					}
 					if steps {
 						streamSteps(ctx, stepsSrc, stepsBuilder, stepsSink, id, pollInterval, logger)
 					}
@@ -309,6 +334,12 @@ func run(c *cli.Context) error {
 	}
 
 	if traceID != "" {
+		// Idempotent final write: covers the regex-fallback path (discovery
+		// never succeeded) and re-writes the same ID when discovery already did.
+		if werr := writeTraceIDFile(traceIDFile, traceID); werr != nil {
+			logger.WithError(werr).Debug("write trace-id file failed")
+		}
+
 		traceURL, err := domain.PipelineViewURL(uiURL, traceID)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "\nPipeline View: <unavailable: %v>\n", err)
@@ -441,6 +472,16 @@ func resolveSteps(c *cli.Context, cfg *domain.Config) (steps bool, pollInterval 
 
 func extractTraceID(output string) string {
 	return traceIDRe.FindString(output)
+}
+
+// writeTraceIDFile writes the discovered trace ID to path (plain hex, no
+// trailing newline, 0600). Non-fatal by contract: CI integrations treat an
+// absent/empty file as "no trace ID" and fall back to /traces/latest.
+func writeTraceIDFile(path, id string) error {
+	if path == "" || id == "" {
+		return nil
+	}
+	return os.WriteFile(path, []byte(id), 0o600)
 }
 
 // newCIEventSink creates the output sink for --steps mode. ndjson (default)
