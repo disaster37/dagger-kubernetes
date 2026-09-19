@@ -18,6 +18,9 @@
         <template #status-cell="{ row }">
           <UBadge :color="statusColor(row.original.status)" variant="soft">{{ row.original.status }}</UBadge>
         </template>
+        <template #version-cell="{ row }">
+          {{ row.original.version || '-' }}
+        </template>
         <template #duration-cell="{ row }">
           {{ formatDuration(liveRowDuration(row.original)) }}
         </template>

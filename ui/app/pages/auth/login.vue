@@ -54,13 +54,17 @@
       />
       <div v-if="providers.oauth_github" class="mt-4 text-center">
         <USeparator class="mb-4" />
-        <UButton :to="githubLoginUrl" color="neutral" variant="outline" block>
+        <!-- `external` forces a full-page navigation: these are backend OAuth
+             endpoints that redirect to the provider, not SPA routes. Without it
+             NuxtLink would intercept the click and the auth middleware would
+             bounce back to /auth/login. -->
+        <UButton :to="githubLoginUrl" external color="neutral" variant="outline" block>
           Login with GitHub
         </UButton>
       </div>
       <div v-if="providers.oauth_oidc" class="mt-4 text-center">
         <USeparator class="mb-4" />
-        <UButton :to="oidcLoginUrl" color="neutral" variant="outline" block>
+        <UButton :to="oidcLoginUrl" external color="neutral" variant="outline" block>
           Login with OIDC
         </UButton>
       </div>
