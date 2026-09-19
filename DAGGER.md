@@ -12,7 +12,7 @@ The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](
 | `build`  | Delegated to `golang` module `Build` ×2 | Upstream handles CGO_ENABLED=0, ldflags, cross-compile |
 | `helm`   | Lint delegated to `helm` module; template matrix local | Upstream `Lint` = `helm dependency update` + `helm lint`; no `helm template` support. The local template matrix also covers the three data-plane TLS cases (embedded default, `dataCert.enabled`, `dataIngress.tls.secretName`) plus the external-provider keypair rendering, and a `minio.enabled=false` variant that renders the chart without the bundled S3 object store. |
 | `test`   | Local | Upstream hardcodes flags (no `-race`, `-vet=off`); `-race` requires CGO |
-| `ui`     | Local | Upstream has no UI support |
+| `ui`     | Local | Local Nuxt 4 + Nuxt UI v4 build (upstream has no UI support) |
 | `docker` | Local | Upstream has no Dockerfile support |
 
 ## Prerequisites
@@ -49,7 +49,7 @@ Outputs:
 |----------|---------|---------|
 | `lint` | `dagger call -m ./dagger --src . lint` | golangci-lint stdout |
 | `test` | `dagger call -m ./dagger --src . test export --path coverage.out` | `coverage.out` file |
-| `ui` | `dagger call -m ./dagger --src . ui export --path ui-dist` | `dist/` directory |
+| `ui` | `dagger call -m ./dagger --src . ui export --path ui-dist` | `.output/public/` directory |
 | `build` | `dagger call -m ./dagger --src . build export --path .` | `bin/` directory with both binaries (the returned directory already contains `bin/`, so export to `.`) |
 | `docker` | `dagger call -m ./dagger --src . docker` | built `Container` |
 | `helm` | `dagger call -m ./dagger --src . helm` | (no return value; fails on error) |
@@ -83,3 +83,4 @@ No secrets are required for CI. Helm `push` / `ci` release functions (not used h
 - **`helm dependency update` needs network:** The chart depends on 6 public Helm charts (see `Chart.yaml`); ensure outbound network access is available.
 - **golangci-lint version drift:** The local module pins golangci-lint **v2.12.2** via a custom base image. Bump deliberately when upgrading.
 - **`dagger/deps/golang/` is vendored:** It is a local copy of `github.com/disaster37/dagger-library-go/golang@2.0.10` with `"include": ["../lib"]` added to its `dagger.json` (upstream omission). To update, re-vendor from the upstream tag and re-apply the `include` fix.
+- **UI build is a static Nuxt SPA:** `ui` runs `nuxt generate` with `ssr: false` and returns `.output/public/` (not `dist/`). `app.buildAssetsDir` is pinned to `/assets/` so the Go handler's immutable-cache path (`internal/handler/ui.go`) stays unchanged. The build needs Node `20.19+`/`22.12+`; the module uses `node:22-alpine`.

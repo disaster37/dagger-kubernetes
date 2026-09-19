@@ -45,6 +45,12 @@ node_modules/
 npm-debug.log
 yarn-error.log
 
+# Nuxt build/dev artifacts
+ui/.nuxt
+ui/.output
+ui/.data
+ui/dist
+
 # Local build artifacts
 /dagger-kubernetes-ci
 /supervisor

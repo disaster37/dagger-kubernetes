@@ -27,4 +27,6 @@ docs/
 
 # Node
 ui/node_modules
-ui/dist
+ui/.nuxt
+ui/.output
+ui/.data
