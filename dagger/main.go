@@ -129,10 +129,10 @@ func (m *DaggerKubernetes) Test(ctx context.Context) (*dagger.File, error) {
 	return ctr.File("coverage.out"), nil
 }
 
-// Ui builds the Vue 3 SPA and returns the dist/ directory.
+// Ui builds the Nuxt 4 + Nuxt UI v4 SPA and returns the .output/public/ directory.
 //
 // Implemented locally because the upstream golang module has no UI support.
-// Mirrors the Dockerfile: npm ci || npm install, typecheck, build.
+// Mirrors the Dockerfile: npm ci, typecheck, build (nuxt generate).
 func (m *DaggerKubernetes) Ui(ctx context.Context) (*dagger.Directory, error) {
 	ctr := dag.Container().
 		From(nodeImage).
@@ -146,7 +146,7 @@ func (m *DaggerKubernetes) Ui(ctx context.Context) (*dagger.Directory, error) {
 		return nil, fmt.Errorf("ui build: %w", err)
 	}
 
-	return ctr.Directory("dist"), nil
+	return ctr.Directory(".output/public"), nil
 }
 
 // Build compiles both Go binaries (supervisor and dagger-kubernetes-ci) and returns

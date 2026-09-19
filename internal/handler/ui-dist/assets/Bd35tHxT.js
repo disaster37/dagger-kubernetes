@@ -1,0 +1,1 @@
+import{b as e,k as t,mt as n}from"./B8D2lM98.js";import{t as r}from"./CNs_Ozdc.js";var i=t({__name:`index`,setup(t){return r({redirect:`/pipelines`}),(t,r)=>(n(),e(`div`))}});export{i as default};

@@ -17,7 +17,7 @@ COPY go.mod go.sum ./
 RUN --mount=type=cache,target=/go/pkg/mod \
     go mod download
 COPY . .
-COPY --from=ui-builder /ui/dist ./internal/handler/ui-dist/
+COPY --from=ui-builder /ui/.output/public ./internal/handler/ui-dist/
 ENV CGO_ENABLED=0
 RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \

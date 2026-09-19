@@ -1,0 +1,427 @@
+@import "tailwindcss";
+@import "@nuxt/ui";
+
+/* Residual bespoke CSS retained only where Nuxt UI has no equivalent:
+   - status dots (header indicator + services page)
+   - live log tail (.logs / .log-line / .log-ts / .log-msg / .log-step / mark)
+   - hand-rolled SVG metrics chart (ADR-037)
+   - span-tree status dots
+   - connect-env inline code + snippets
+   - pipeline identity + service/step layout helpers */
+
+/* --- Status dots (header indicator + services page) --- */
+.status-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #8b949e;
+}
+.status-dot.status-ok { background: #3fb950; box-shadow: 0 0 6px rgba(63, 185, 80, 0.7); }
+.status-dot.status-degraded { background: #d29922; box-shadow: 0 0 6px rgba(210, 153, 34, 0.7); }
+.status-dot.status-down { background: #f85149; box-shadow: 0 0 6px rgba(248, 81, 73, 0.7); }
+.status-dot.status-unknown { background: #8b949e; }
+
+.status-ok { color: #3fb950; }
+.status-degraded { color: #d29922; }
+.status-down { color: #f85149; }
+.status-unknown { color: #8b949e; }
+
+/* --- Span-tree status dots --- */
+.dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.dot-success { background: #3fb950; }
+.dot-failed { background: #f85149; }
+.dot-running { background: #58a6ff; }
+.dot-unset { background: #8b949e; }
+
+/* --- Live log tail --- */
+.logs {
+  max-height: 500px;
+  overflow-y: auto;
+  font-family: monospace;
+  font-size: 12px;
+  background: #0d1117;
+  padding: 12px;
+  border-radius: 4px;
+}
+
+.log-line {
+  display: flex;
+  gap: 10px;
+  padding: 2px 0;
+}
+
+.log-ts {
+  color: #8b949e;
+  flex-shrink: 0;
+}
+
+.log-msg {
+  color: #f0f6fc;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.log-step {
+  flex-shrink: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+  font-size: 11px;
+  color: #58a6ff;
+  background: #1f2a3a;
+  border-radius: 10px;
+  padding: 1px 8px;
+  cursor: pointer;
+}
+
+.log-step:hover {
+  background: #26374d;
+}
+
+.log-step-unattributed {
+  color: #8b949e;
+  background: #21262d;
+  cursor: default;
+}
+
+mark {
+  background: #9e6a03;
+  color: #f0f6fc;
+  border-radius: 2px;
+}
+
+/* --- Hand-rolled SVG metrics chart (ADR-037) --- */
+.metric-chart {
+  background: #0d1117;
+  border: 1px solid #21262d;
+  border-radius: 4px;
+  padding: 8px 10px;
+}
+
+.metric-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.metric-label {
+  font-size: 12px;
+  color: #8b949e;
+}
+
+.metric-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: #f0f6fc;
+  font-family: monospace;
+}
+
+.metric-svg {
+  display: block;
+  width: 100%;
+  height: 60px;
+  margin-top: 4px;
+}
+
+.metric-area {
+  fill: rgba(88, 166, 255, 0.15);
+  stroke: none;
+}
+
+.metric-line {
+  fill: none;
+  stroke: #58a6ff;
+  stroke-width: 1.5;
+  vector-effect: non-scaling-stroke;
+}
+
+.metric-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10px;
+  color: #8b949e;
+  font-family: monospace;
+}
+
+.metric-empty {
+  padding: 18px 0;
+  text-align: center;
+  font-size: 12px;
+  color: #8b949e;
+}
+
+/* --- Connect-env inline code + snippets --- */
+.secret-value {
+  display: inline-block;
+  padding: 4px 8px;
+  background: #3a1b1b;
+  border: 1px solid #f85149;
+  border-radius: 6px;
+  word-break: break-all;
+}
+.env-value {
+  display: inline-block;
+  padding: 4px 8px;
+  background: #161b22;
+  border-radius: 6px;
+  word-break: break-all;
+}
+.snippet {
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 12px;
+  margin-top: 8px;
+  overflow-x: auto;
+  font-size: 13px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* --- Pipeline identity --- */
+.pipeline-identity {
+  font-weight: 600;
+  color: #f0f6fc;
+}
+
+.pipeline-trace-id {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: #8b949e;
+}
+
+/* --- Service / step layout helpers --- */
+.service-row,
+.step-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 8px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.service-row:hover,
+.step-row:hover {
+  background: #1c2128;
+}
+
+.service-detail,
+.step-detail {
+  padding: 0 8px 8px 28px;
+}
+
+.service-name,
+.step-name {
+  flex: 1;
+  font-weight: 600;
+  color: #f0f6fc;
+  font-family: monospace;
+  font-size: 13px;
+}
+
+.service-duration,
+.step-duration {
+  color: #c9d1d9;
+  font-size: 13px;
+}
+
+.service-running,
+.count-badge {
+  font-size: 11px;
+  color: #58a6ff;
+  background: #1f2a3a;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.step-hidden {
+  font-size: 11px;
+  color: #8b949e;
+  background: #21262d;
+  border-radius: 10px;
+  padding: 1px 8px;
+}
+
+.subspan {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 3px 8px;
+}
+
+.subspan-name {
+  flex: 1;
+  color: #c9d1d9;
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.subspan-duration {
+  color: #8b949e;
+  font-size: 12px;
+}
+
+.service-port {
+  color: #c9d1d9;
+  font-size: 13px;
+  font-family: monospace;
+}
+
+.service-url {
+  color: #58a6ff;
+  font-size: 12px;
+  font-family: monospace;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.service-noport {
+  font-size: 12px;
+  color: #8b949e;
+}
+
+.service-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 0;
+  font-size: 13px;
+  color: #c9d1d9;
+}
+
+.service-meta strong {
+  color: #8b949e;
+  font-weight: 600;
+}
+
+.service-meta code {
+  font-family: monospace;
+  color: #f0f6fc;
+}
+
+.service-preview {
+  padding: 0 8px 8px 28px;
+}
+
+.service-preview-log {
+  opacity: 0.75;
+}
+
+.service-more {
+  padding-top: 4px;
+  font-size: 12px;
+  color: #8b949e;
+}
+
+/* --- Step tree breadcrumb / focus header --- */
+.crumb {
+  background: none;
+  border: none;
+  color: #58a6ff;
+  font-family: monospace;
+  font-size: 13px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.crumb-current {
+  color: #f0f6fc;
+  font-weight: 600;
+  cursor: default;
+}
+
+.focus-name {
+  font-family: monospace;
+  font-size: 14px;
+  font-weight: 600;
+  color: #f0f6fc;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.focus-duration {
+  color: #c9d1d9;
+  font-size: 13px;
+}
+
+.focus-sub {
+  flex: 1;
+  color: #8b949e;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.step-highlight .step-row {
+  background: #1f2a3a;
+  box-shadow: inset 0 0 0 1px #58a6ff;
+}
+
+/* --- Log panel toolbar --- */
+.mode-toggle {
+  display: flex;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.mode-btn {
+  background: #161b22;
+  border: none;
+  color: #8b949e;
+  padding: 6px 10px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.mode-btn.mode-active {
+  background: #1f2a3a;
+  color: #58a6ff;
+}
+
+.match-count {
+  font-size: 12px;
+  color: #8b949e;
+  white-space: nowrap;
+}
+
+.new-logs {
+  display: block;
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 5px 10px;
+  background: #1f2a3a;
+  border: 1px solid #58a6ff;
+  border-radius: 4px;
+  color: #58a6ff;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.new-logs:hover {
+  background: #26374d;
+}
+
+.empty {
+  padding: 24px;
+  color: #8b949e;
+  text-align: center;
+  font-size: 13px;
+}

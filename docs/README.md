@@ -1652,7 +1652,7 @@ collector's own limit.
 
 ## Pipeline UI
 
-The UI is an embedded Vue 3 SPA (packaged in `ui-dist/` via `//go:embed`).
+The UI is an embedded Nuxt 4 + Nuxt UI v4 SPA (static, `ssr: false`, packaged in `ui-dist/` via `//go:embed`).
 It is always served by the control plane at `/` and single-pipeline views at
 `/pipelines/<id>`. No separate configuration is needed.
 
@@ -2202,7 +2202,7 @@ go test ./...
 # Run the dev stack
 cd deploy/docker && docker compose up -d --build
 
-# Build the UI
+# Build the UI (Nuxt 4 static SPA; output is ui/.output/public)
 cd ui && npm install && npm run build
 
 # Lint
