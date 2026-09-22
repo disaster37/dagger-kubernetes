@@ -139,6 +139,7 @@ func newTestEnv(t *testing.T) *testEnv {
 		Connect:        connectSvc,
 		LiveHub:        liveHub,
 		Lifecycle:      pipelineLifecycle,
+		LeaderInfo:     store,
 	})
 
 	return &testEnv{

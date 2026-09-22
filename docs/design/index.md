@@ -47,3 +47,4 @@ the decision.
 | 038  | [Pipeline tree drill-down, zoom, and subtree-scoped log search](ADR-038-pipeline-tree-zoom-search.md) |
 | 039  | [CI timeout is opt-in, live Dagger output, and live pipeline-view URL](ADR-039-ci-timeout-live-streaming.md) |
 | 040  | [Frontend is Nuxt 4 + Nuxt UI v4 (static SPA)](ADR-040-frontend-nuxt4-nuxt-ui.md) |
+| 041  | [Per-pod leader-forward proxy (drop label-based leader routing)](ADR-041-per-pod-leader-forward-proxy.md) |

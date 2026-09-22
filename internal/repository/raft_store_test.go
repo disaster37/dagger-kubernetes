@@ -162,11 +162,50 @@ func TestRaftStoreCloseIdempotent(t *testing.T) {
 	}
 }
 
-func TestRaftStoreLeaderCh(t *testing.T) {
+func TestRaftStoreLeaderAddress(t *testing.T) {
+	// In-memory transport: the leader address is an opaque inmem UUID, but it
+	// must be non-empty once a leader is elected.
+	inmem := newTestRaftStore(t)
+	if addr := inmem.LeaderAddress(); addr == "" {
+		t.Fatal("LeaderAddress should be non-empty once a leader is elected")
+	}
+
+	// Real TCP transport: the leader address is host:port.
+	store, err := NewRaftStore(&RaftStoreConfig{
+		Dir:      t.TempDir(),
+		BindAddr: freeTCPAddr(t),
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("NewRaftStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader: %v", err)
+	}
+	addr := store.LeaderAddress()
+	if addr == "" {
+		t.Fatal("LeaderAddress should be non-empty once a leader is elected")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("LeaderAddress %q is not host:port: %v", addr, err)
+	}
+	if host == "" || port == "" {
+		t.Fatalf("LeaderAddress %q missing host/port", addr)
+	}
+}
+
+func TestRaftStoreLeaderAddressNoLeader(t *testing.T) {
+	// A store whose raft instance has been shut down has no known leader.
 	store := newTestRaftStore(t)
-	ch := store.LeaderCh()
-	if ch == nil {
-		t.Fatal("LeaderCh should be non-nil")
+	if err := store.raft.Shutdown().Error(); err != nil {
+		t.Fatalf("shutdown: %v", err)
+	}
+	if addr := store.LeaderAddress(); addr != "" {
+		t.Fatalf("LeaderAddress after shutdown = %q, want empty", addr)
 	}
 }
 

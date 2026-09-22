@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -344,8 +345,12 @@ func TestFileCAProviderDelegatesMinting(t *testing.T) {
 }
 
 func TestEmbeddedProviderServerCertSANs(t *testing.T) {
+	const (
+		ownFQDN     = "sts-0.headless.ns.svc.cluster.local"
+		ownSvcShort = "sts-0.headless.ns.svc"
+	)
 	dir := t.TempDir()
-	p := NewEmbeddedProvider(dir, 2*time.Hour, "data.example.com")
+	p := NewEmbeddedProvider(dir, 2*time.Hour, "data.example.com", ownFQDN, ownSvcShort)
 	cert, err := p.ServerTLSCert()
 	if err != nil {
 		t.Fatalf("ServerTLSCert: %v", err)
@@ -356,7 +361,7 @@ func TestEmbeddedProviderServerCertSANs(t *testing.T) {
 	}
 
 	hostname, _ := os.Hostname()
-	requiredDNS := []string{"localhost", hostname, "data.example.com", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
+	requiredDNS := []string{"localhost", hostname, "data.example.com", ownFQDN, ownSvcShort, "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
 	for _, want := range requiredDNS {
 		found := false
 		for _, dns := range leaf.DNSNames {
@@ -369,6 +374,11 @@ func TestEmbeddedProviderServerCertSANs(t *testing.T) {
 			t.Fatalf("missing DNS SAN %q in %v", want, leaf.DNSNames)
 		}
 	}
+	for _, dns := range leaf.DNSNames {
+		if strings.HasPrefix(dns, "*.") {
+			t.Fatalf("embedded server cert must not carry a wildcard SAN, got %q", dns)
+		}
+	}
 
 	foundIP := false
 	for _, ip := range leaf.IPAddresses {
@@ -379,5 +389,85 @@ func TestEmbeddedProviderServerCertSANs(t *testing.T) {
 	}
 	if !foundIP {
 		t.Fatalf("missing 127.0.0.1 IP SAN in %v", leaf.IPAddresses)
+	}
+}
+
+// TestServerTLSCertReissuesOnSANGrowth proves the cached server certificate is
+// transparently re-issued (under the same minting CA) when the required SAN
+// set grows — the rollout path that picks up the own-FQDN SANs needed for the
+// leader-forward hop.
+func TestServerTLSCertReissuesOnSANGrowth(t *testing.T) {
+	const (
+		ownFQDN     = "sts-0.headless.ns.svc.cluster.local"
+		ownSvcShort = "sts-0.headless.ns.svc"
+	)
+	dir := t.TempDir()
+
+	// First boot: a cert without the own-FQDN SANs is cached.
+	p1 := NewEmbeddedProvider(dir, 2*time.Hour, "data.example.com")
+	first, err := p1.ServerTLSCert()
+	if err != nil {
+		t.Fatalf("first ServerTLSCert: %v", err)
+	}
+	firstLeaf, err := x509.ParseCertificate(first.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse first cert: %v", err)
+	}
+	for _, dns := range firstLeaf.DNSNames {
+		if dns == ownFQDN || dns == ownSvcShort {
+			t.Fatalf("precondition failed: first cert already has %q", dns)
+		}
+	}
+
+	// Second boot with the own-FQDN SANs added: the stale cache is re-issued.
+	p2 := NewEmbeddedProvider(dir, 2*time.Hour, "data.example.com", ownFQDN, ownSvcShort)
+	second, err := p2.ServerTLSCert()
+	if err != nil {
+		t.Fatalf("second ServerTLSCert: %v", err)
+	}
+	secondLeaf, err := x509.ParseCertificate(second.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse second cert: %v", err)
+	}
+	if bytes.Equal(firstLeaf.Raw, secondLeaf.Raw) {
+		t.Fatal("expected a fresh certificate after the SAN set grew, got the cached one")
+	}
+	for _, want := range []string{ownFQDN, ownSvcShort} {
+		found := false
+		for _, dns := range secondLeaf.DNSNames {
+			if dns == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("re-issued cert missing own-FQDN SAN %q in %v", want, secondLeaf.DNSNames)
+		}
+	}
+
+	// The re-issued cert must be signed by the same shared minting CA.
+	ca, err := p2.MintingCA()
+	if err != nil {
+		t.Fatalf("MintingCA: %v", err)
+	}
+	if _, err := secondLeaf.Verify(x509.VerifyOptions{
+		Roots:     ca.CertPool(),
+		DNSName:   ownFQDN,
+		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}); err != nil {
+		t.Fatalf("re-issued cert not trusted for %s: %v", ownFQDN, err)
+	}
+
+	// A third call with the same SAN set must reuse the fresh cert (no churn).
+	third, err := p2.ServerTLSCert()
+	if err != nil {
+		t.Fatalf("third ServerTLSCert: %v", err)
+	}
+	thirdLeaf, err := x509.ParseCertificate(third.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse third cert: %v", err)
+	}
+	if !bytes.Equal(secondLeaf.Raw, thirdLeaf.Raw) {
+		t.Fatal("expected the re-issued cert to be reused once the SAN set is covered")
 	}
 }

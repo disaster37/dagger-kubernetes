@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -449,4 +450,73 @@ func TestPodSANs(t *testing.T) {
 // typeName returns the dynamic type name of v for resolver-selection tests.
 func typeName(v interface{}) string {
 	return fmt.Sprintf("%T", v)
+}
+
+func TestServerCertFQDNSANs(t *testing.T) {
+	tests := []struct {
+		name     string
+		cfg      RaftDiscoveryConfig
+		hostname string
+		want     []string
+	}{
+		{
+			name: "fqdn and svc-short forms",
+			cfg: RaftDiscoveryConfig{
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "cluster.local",
+			},
+			hostname: "sts-0",
+			want:     []string{"sts-0.headless.ns.svc.cluster.local", "sts-0.headless.ns.svc"},
+		},
+		{
+			name: "empty cluster domain → svc-short form only",
+			cfg: RaftDiscoveryConfig{
+				HeadlessService: "headless",
+				Namespace:       "ns",
+				ClusterDomain:   "",
+			},
+			hostname: "sts-1",
+			want:     []string{"sts-1.headless.ns.svc"},
+		},
+		{
+			name:     "missing headless service → no SANs",
+			cfg:      RaftDiscoveryConfig{Namespace: "ns", ClusterDomain: "cluster.local"},
+			hostname: "sts-0",
+			want:     nil,
+		},
+		{
+			name:     "missing namespace → no SANs",
+			cfg:      RaftDiscoveryConfig{HeadlessService: "headless", ClusterDomain: "cluster.local"},
+			hostname: "sts-0",
+			want:     nil,
+		},
+		{
+			name:     "empty hostname → no SANs",
+			cfg:      RaftDiscoveryConfig{HeadlessService: "headless", Namespace: "ns"},
+			hostname: "",
+			want:     nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := ServerCertFQDNSANs(&tc.cfg, tc.hostname)
+			if len(got) != len(tc.want) {
+				t.Fatalf("ServerCertFQDNSANs = %v, want %v", got, tc.want)
+			}
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("ServerCertFQDNSANs[%d] = %q, want %q", i, got[i], tc.want[i])
+				}
+			}
+			for _, name := range got {
+				if strings.HasPrefix(name, "*.") {
+					t.Fatalf("ServerCertFQDNSANs must not emit a wildcard SAN, got %q", name)
+				}
+				if tc.hostname != "" && !strings.HasPrefix(name, tc.hostname+".") {
+					t.Fatalf("SAN %q must embed the hostname %q", name, tc.hostname)
+				}
+			}
+		})
+	}
 }

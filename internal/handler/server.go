@@ -164,6 +164,13 @@ type Deps struct {
 	StartupProvider      domain.StartupProvider
 	ImageCache           domain.ImageCacheService
 	EngineMetrics        *service.EngineMetricsService // nil = trace metrics endpoint disabled
+	// LeaderInfo is the Raft store view used by the leader-forward middleware
+	// and the data-plane relay. nil disables both (single-node / tests).
+	LeaderInfo leaderInfo
+	// LeaderForwardRootCAs verifies the leader's control-plane certificate on
+	// the internal forward hop. nil = system pool (cert-manager/external);
+	// embedded mode injects the shared minting CA pool.
+	LeaderForwardRootCAs *x509.CertPool
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -205,7 +212,13 @@ type Server struct {
 	logs            domain.LogRepository
 	hertz           *server.Hertz
 	tlsListener     net.Listener
+	relayListener   net.Listener
+	relayInPort     int
 	dataConnSem     chan struct{}
+	leaderInfo      leaderInfo
+	leaderProxy     *reverseproxy.ReverseProxy
+
+	leaderForwardRootCAs *x509.CertPool
 
 	// Auth + RBAC collaborators.
 	auth                *service.AuthService
@@ -256,6 +269,9 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		traces:          deps.Traces,
 		logs:            deps.Logs,
 		dataConnSem:     make(chan struct{}, maxDataConnections),
+		leaderInfo:      deps.LeaderInfo,
+
+		leaderForwardRootCAs: deps.LeaderForwardRootCAs,
 
 		auth:                deps.Auth,
 		internalAuthEnabled: deps.InternalAuthEnabled,
@@ -337,6 +353,10 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 
 	s.tlsListener = tlsLn
 
+	// Bind the relay-in listener before the data accept loop so a follower
+	// relay never races an unset relayInPort.
+	s.startRelayListener(tlsConfig)
+
 	go func() {
 		s.logger.WithField("addr", s.cfg.DataAddr).Info("data plane listening")
 		for {
@@ -346,6 +366,12 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 					return
 				}
 				s.logger.WithError(err).Error("tcp accept error")
+				continue
+			}
+			if s.leaderInfo != nil && !s.leaderInfo.IsLeader() {
+				// Follower: relay the raw mTLS tunnel to the leader. TLS
+				// terminates end-to-end on the leader.
+				go s.serveDataRelay(raw)
 				continue
 			}
 			s.serveTLSConn(raw, tlsConfig)
@@ -544,9 +570,14 @@ func (s *Server) configure() (*server.Hertz, error) {
 	}
 	h := server.Default(opts...)
 
+	if err := s.buildLeaderForward(); err != nil {
+		return nil, fmt.Errorf("build leader forward proxy: %w", err)
+	}
+
 	h.Use(s.requestLog())
 	h.Use(s.securityHeaders())
 	h.Use(s.corsMiddleware())
+	h.Use(s.leaderForward())
 
 	// Data-plane + telemetry endpoints.
 	h.POST("/v1/engines", s.handleEngines)
@@ -706,6 +737,9 @@ func (s *Server) newHertzProxy(targetURL string, director func(*protocol.Request
 
 // Shutdown stops both listeners.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.relayListener != nil {
+		_ = s.relayListener.Close()
+	}
 	if s.tlsListener != nil {
 		_ = s.tlsListener.Close()
 	}

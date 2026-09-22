@@ -314,3 +314,21 @@ func PodSANs(cfg *RaftDiscoveryConfig, hostname string) (dnsNames []string, ipAd
 	}
 	return deduped, []net.IP{net.ParseIP("127.0.0.1")}
 }
+
+// ServerCertFQDNSANs returns this pod's OWN exact DNS SANs (no wildcard) so any
+// follower can verify the leader's control-plane server cert when dialing the
+// leader's pod FQDN. The only host a follower ever dials is the leader's own
+// pod FQDN (from LeaderAddress()), so per-pod exact FQDNs are complete for
+// verification and strictly stronger than a wildcard (one key never covers
+// other names). Both the FQDN form and the ".svc"-short form (cluster_domain="")
+// are emitted, mirroring PodSANs. hostname is the pod name (os.Hostname()).
+func ServerCertFQDNSANs(cfg *RaftDiscoveryConfig, hostname string) []string {
+	if hostname == "" || cfg.HeadlessService == "" || cfg.Namespace == "" {
+		return nil
+	}
+	base := fmt.Sprintf("%s.%s.%s.svc", hostname, cfg.HeadlessService, cfg.Namespace)
+	if domain := clusterDomain(cfg); domain != "" {
+		return []string{fmt.Sprintf("%s.%s", base, domain), base}
+	}
+	return []string{base}
+}

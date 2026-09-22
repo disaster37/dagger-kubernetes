@@ -4,6 +4,17 @@
 - **Date:** 2026-08-27
 - **Deciders:** dagger-kubernetes maintainers
 
+> **Revision (2026-09-22, ADR-041):** decision 2 (leader-routed `-control` and
+> `-data` Services on the `dagger-kubernetes.io/raft-leader` label) is
+> **superseded**. The Services now select **all** pods. Leader-pinned
+> control-plane requests are forwarded per-request to the leader by a per-pod
+> middleware, and data-plane tunnels are relayed per-pod to the leader's
+> dedicated relay-in port. `observeLeadership`, the `raft-leader` label, and
+> the `pods patch` RBAC are removed. The session-lease replication in
+> decision 1 is unchanged and still required — it is what lets the follower
+> that accepts a tunnel resolve the replicated lease before relaying. See
+> ADR-041.
+
 ## Context
 
 The data plane routes Dagger CLI connections to engine pods by the client

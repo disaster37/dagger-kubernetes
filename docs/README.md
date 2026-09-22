@@ -290,10 +290,12 @@ regenerate them on the **Settings** page to enable full-snippet copy.
    fingerprint (ADR-026).
 3. CLI opens a TLS connection to `data_hostname` using the minted cert.
    The Supervisor's L4 proxy inspects SNI/cert, looks up the lease, and
-   pipes bytes to the live engine pod. On the Helm chart the `-control` and
-   `-data` Services select the current **Raft leader** pod (label
-   `dagger-kubernetes.io/raft-leader`), so the tunnel and its lease-touch
-   heartbeats always run where Raft writes can be applied.
+   pipes bytes to the live engine pod. On the Helm chart every pod serves the
+   `-control` and `-data` Services; a follower **forwards** leader-pinned
+   control-plane requests (writes + SSE) to the current Raft leader and
+   **relays** the raw mTLS tunnel to the leader's relay-in port, so the tunnel
+   and its lease-touch heartbeats always run where Raft writes can be applied
+   (ADR-041). Reads are served locally by any pod (stale reads, ADR-016 D6).
 4. Engines pull container images through the in-cluster Zot mirrors
    (cached in the same S3 store), while the supervisor uses the store for the
    verified CLI cache.
@@ -1327,6 +1329,16 @@ dependency has been removed from the project entirely.
   returns `ErrNotLeader` (HTTP 503) on writes — clients retry. The leader
   provisions the JWT secret and token-encryption key; followers wait for those
   meta keys to replicate to their local FSM before becoming Ready.
+- **Leader forwarding / relay (ADR-041):** the chart's `-control` and `-data`
+  Services select **all** pods (there is no leader label). A follower serves
+  reads locally, forwards leader-pinned control-plane requests (writes and the
+  SSE `/live` route) to the current leader over an HTTPS hop with full
+  certificate verification, and relays the raw mTLS data-plane tunnel to the
+  leader's internal relay-in port (`server.data_addr` port + 1 = 8444). The
+  embedded TLS provider auto-adds each pod's own exact FQDN SANs for the
+  forward hop; cert-manager/external deployments must add a wildcard SAN (see
+  the Helm README). During an election writes return 503 briefly and clients
+  retry; there is no zero-endpoint window.
 - **Scale-up / scale-down:** the leader runs a `joinLoop` that reconciles the
   cluster membership with the discovered voter list (`raft.AddVoter` /
   `raft.RemoveServer`). Scale-up: bump the chart's `supervisor.replicaCount`

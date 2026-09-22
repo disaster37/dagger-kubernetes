@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -75,10 +76,66 @@ func (p *EmbeddedProvider) ServerTLSCert() (tls.Certificate, error) {
 	serverKeyPath := filepath.Join(p.caPath, "server.key")
 
 	if fileExists(serverCertPath) && fileExists(serverKeyPath) {
-		return loadTLSKeyPair(serverCertPath, serverKeyPath)
+		cert, err := loadTLSKeyPair(serverCertPath, serverKeyPath)
+		if err == nil && len(cert.Certificate) > 0 {
+			leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
+			requiredDNS, requiredIPs := p.requiredServerSANs()
+			if parseErr == nil && coversRequiredServerSANs(leaf, requiredDNS, requiredIPs) {
+				return cert, nil
+			}
+		}
+		// The cached server certificate does not cover the current SAN set
+		// (e.g. it predates the own-FQDN SANs added for the leader-forward
+		// hop) or could not be parsed: re-issue it in place under the same
+		// minting CA, mirroring the raft leaf re-issue behavior (ADR-029).
 	}
 
 	return p.issueServerCert(ca, serverCertPath, serverKeyPath)
+}
+
+// requiredServerSANs returns the exact DNS + IP SAN set the embedded server
+// certificate must cover: the fixed base names, the injected extraSANs (the
+// engine-facing data host and this pod's own FQDN SANs), this pod's hostname,
+// and the loopback IP.
+func (p *EmbeddedProvider) requiredServerSANs() (dns []string, ips []net.IP) {
+	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
+	sans = append(sans, p.extraSANs...)
+	// Direct pod access (CWE-295): cover this pod's hostname and loopback so
+	// the data-plane cert verifies when dialed directly by pod name/IP. The
+	// engine-facing data host is already included via extraSANs.
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		sans = append(sans, hostname)
+	}
+	return dedupeStrings(sans), []net.IP{net.ParseIP("127.0.0.1")}
+}
+
+// coversRequiredServerSANs reports whether cert carries every required DNS
+// name and IP SAN. Matching is exact (set containment) — no wildcard
+// expansion, so a wildcard certificate does not satisfy an exact-name
+// requirement.
+func coversRequiredServerSANs(cert *x509.Certificate, dns []string, ips []net.IP) bool {
+	if cert == nil {
+		return false
+	}
+	haveDNS := make(map[string]bool, len(cert.DNSNames))
+	for _, name := range cert.DNSNames {
+		haveDNS[name] = true
+	}
+	for _, name := range dns {
+		if !haveDNS[name] {
+			return false
+		}
+	}
+	haveIP := make(map[string]bool, len(cert.IPAddresses))
+	for _, ip := range cert.IPAddresses {
+		haveIP[ip.String()] = true
+	}
+	for _, ip := range ips {
+		if ip == nil || !haveIP[ip.String()] {
+			return false
+		}
+	}
+	return true
 }
 
 // loadOrCreateCA returns the persistent minting CA, creating it on first use.
@@ -260,22 +317,14 @@ func (p *EmbeddedProvider) loadCA(certPath, keyPath string) (*MintingCA, error) 
 }
 
 func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
-	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
-	sans = append(sans, p.extraSANs...)
-	// Direct pod access (CWE-295): cover this pod's hostname and loopback so
-	// the data-plane cert verifies when dialed directly by pod name/IP. The
-	// engine-facing data host is already included via extraSANs.
-	if hostname, err := os.Hostname(); err == nil && hostname != "" {
-		sans = append(sans, hostname)
-	}
-	sans = dedupeStrings(sans)
+	sans, ipSANs := p.requiredServerSANs()
 	// IssuePeerCertificate supports IP SANs (IssueServerCertificate does not),
 	// so 127.0.0.1 is carried as an IP SAN. It also sets ExtKeyUsageServerAuth,
 	// so the cert remains a valid server cert.
 	certPEM, keyPEM, err := ca.IssuePeerCertificate(
 		"supervisor-server", "dagger-kubernetes",
 		sans,
-		[]net.IP{net.ParseIP("127.0.0.1")},
+		ipSANs,
 		5*365*24*time.Hour)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("issue server cert: %w", err)

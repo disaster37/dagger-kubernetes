@@ -738,6 +738,15 @@ func (s *RaftStore) IsLeader() bool {
 	return s.raft.State() == raft.Leader
 }
 
+// LeaderAddress returns the current leader's Raft transport address
+// (host:port, e.g. <pod>.<headless>.<ns>.svc.cluster.local:8081), or "" when
+// no leader is known. The host is a stable pod FQDN (ADR-029); the port is
+// the Raft transport port, NOT the control/data-plane port — callers
+// substitute the port they need.
+func (s *RaftStore) LeaderAddress() string {
+	return string(s.raft.Leader())
+}
+
 // followerLastContactThreshold is how long a follower may go without
 // hearing from the leader before IsCleanState reports false. Set to
 // 3 × the default election timeout (5 s with multiplier 5) to avoid
@@ -786,11 +795,6 @@ func (s *RaftStore) IsCleanState() bool {
 		}
 	}
 	return true
-}
-
-// LeaderCh returns raft.LeaderCh() for the leader-observation goroutine.
-func (s *RaftStore) LeaderCh() <-chan bool {
-	return s.raft.LeaderCh()
 }
 
 // Close shuts the raft node and closes the transport and bolt store. Idempotent.
