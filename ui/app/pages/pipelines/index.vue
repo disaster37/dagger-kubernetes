@@ -49,7 +49,7 @@ import type { TraceRow, Group } from '~/api/types'
 const auth = useAuthStore()
 const traces = ref<TraceRow[]>([])
 const groups = ref<Group[]>([])
-const groupFilter = ref('')
+const groupFilter = ref('__all__')
 
 const columns = [
   { id: 'pipeline', accessorKey: 'trace_id', header: 'Pipeline' },
@@ -63,7 +63,7 @@ const columns = [
 ]
 
 const groupOptions = computed(() => [
-  { label: 'All', value: '' },
+  { label: 'All', value: '__all__' },
   { label: 'Unassigned', value: 'unassigned' },
   ...groups.value.map((g) => ({ label: g.name, value: g.id })),
 ])
@@ -120,7 +120,7 @@ function onVisibilityChange() {
 
 async function load() {
   try {
-    traces.value = await fetchTraces(groupFilter.value || undefined)
+    traces.value = await fetchTraces(groupFilter.value === '__all__' ? undefined : groupFilter.value)
   } catch (e) {
     console.error('Failed to fetch traces', e)
   }

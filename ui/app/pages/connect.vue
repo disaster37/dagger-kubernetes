@@ -130,7 +130,7 @@ import { fetchConnectEnv, fetchProviders } from '~/api/client'
 import type { ConnectEnvSnapshot, ConnectEnvVar } from '~/api/types'
 
 const snap = ref<ConnectEnvSnapshot | null>(null)
-const version = ref('')
+const version = ref('__none__')
 const reveal = ref(false)
 const error = ref('')
 const copied = ref('')
@@ -145,8 +145,10 @@ const envColumns = [
 ]
 
 const versionOptions = computed(() => [
-  { label: 'No pin (use CLI default)', value: '' },
-  ...(snap.value?.allowed_versions ?? []).map((v) => ({ label: v, value: v })),
+  { label: 'No pin (use CLI default)', value: '__none__' },
+  ...(snap.value?.allowed_versions ?? [])
+    .filter((v) => v !== '')
+    .map((v) => ({ label: v, value: v })),
 ])
 
 const tokenValue = computed(() => {
@@ -205,7 +207,7 @@ const gitlabSnippet = computed(() => ciSnippet('variables:', ciTokenLine('$DAGGE
 async function load() {
   error.value = ''
   try {
-    snap.value = await fetchConnectEnv(version.value || undefined, reveal.value)
+    snap.value = await fetchConnectEnv(version.value === '__none__' ? undefined : version.value, reveal.value)
   } catch (e: any) {
     error.value = e.response?.data?.message || 'Failed to load connection environment'
   }

@@ -19,7 +19,7 @@
         </template>
         <template #group_id-cell="{ row }">
           <USelect
-            :model-value="row.original.group_id"
+            :model-value="row.original.group_id || '__unassigned__'"
             :items="groupOptions"
             @update:model-value="(v) => assign(row.original, String(v))"
           />
@@ -51,7 +51,7 @@ import type { Project, Group } from '~/api/types'
 const toast = useToast()
 const projects = ref<Project[]>([])
 const groups = ref<Group[]>([])
-const newProject = ref({ name: '', group_id: '' })
+const newProject = ref({ name: '', group_id: '__unassigned__' })
 const createError = ref('')
 
 const confirmOpen = ref(false)
@@ -66,7 +66,7 @@ const columns = [
 ]
 
 const groupOptions = computed(() => [
-  { label: 'Unassigned', value: '' },
+  { label: 'Unassigned', value: '__unassigned__' },
   ...groups.value.map((g) => ({ label: g.name, value: g.id })),
 ])
 
@@ -90,8 +90,8 @@ async function run(action: () => Promise<unknown>, failureMessage: string) {
 async function createProject() {
   createError.value = ''
   try {
-    await apiCreateProject(newProject.value.name, newProject.value.group_id)
-    newProject.value = { name: '', group_id: '' }
+    await apiCreateProject(newProject.value.name, newProject.value.group_id === '__unassigned__' ? '' : newProject.value.group_id)
+    newProject.value = { name: '', group_id: '__unassigned__' }
     await load()
   } catch (e: any) {
     createError.value = e.response?.data?.message || 'Failed to create project'
@@ -99,7 +99,7 @@ async function createProject() {
 }
 
 function assign(p: Project, groupId: string) {
-  run(() => updateProject(p.id, groupId), 'Failed to assign project')
+  run(() => updateProject(p.id, groupId === '__unassigned__' ? '' : groupId), 'Failed to assign project')
 }
 
 function askDeleteProject(p: Project) {
