@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -38,6 +39,107 @@ func listenerPort(t *testing.T, ln net.Listener) int {
 		t.Fatalf("listener address is not TCP: %T", ln.Addr())
 	}
 	return addr.Port
+}
+
+// freeRelayPortPair finds adjacent free TCP ports (data, relay) for
+// server.data_addr and its derived relay-in port, retrying to avoid the
+// inherent bind race.
+func freeRelayPortPair(t *testing.T) (dataPort, relayPort int) {
+	t.Helper()
+	for i := 0; i < 100; i++ {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			continue
+		}
+		port := listenerPort(t, ln)
+		_ = ln.Close()
+		if port < 1 || port+1 > 65534 {
+			continue
+		}
+		next, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port+1))
+		if err != nil {
+			continue
+		}
+		_ = next.Close()
+		return port, port + 1
+	}
+	t.Fatal("could not find an adjacent free port pair")
+	return 0, 0
+}
+
+func TestRelayPortFromDataAddr(t *testing.T) {
+	tests := []struct {
+		name     string
+		dataAddr string
+		want     int
+		wantErr  bool
+	}{
+		{"empty host", ":8443", 8444, false},
+		{"explicit host", "0.0.0.0:9000", 9001, false},
+		{"highest valid data port", "127.0.0.1:65534", 65535, false},
+		{"port zero", ":0", 0, true},
+		{"relay port out of range", "127.0.0.1:65535", 0, true},
+		{"non-numeric port", "127.0.0.1:abc", 0, true},
+		{"missing port", "127.0.0.1", 0, true},
+		{"empty address", "", 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := relayPortFromDataAddr(tc.dataAddr)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("relayPortFromDataAddr(%q) err = %v, wantErr %v", tc.dataAddr, err, tc.wantErr)
+			}
+			if !tc.wantErr && got != tc.want {
+				t.Fatalf("relayPortFromDataAddr(%q) = %d, want %d", tc.dataAddr, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestStartRelayListenerBindsAndFollowerRejects(t *testing.T) {
+	env := newTestEnv(t)
+	s := env.server
+	dataPort, relayPort := freeRelayPortPair(t)
+	s.cfg.DataAddr = fmt.Sprintf("127.0.0.1:%d", dataPort)
+	s.leaderInfo = &fakeLeaderInfo{leader: false, addr: ""}
+
+	s.startRelayListener(nil)
+	if s.relayListener == nil {
+		t.Fatal("relay listener must be bound for a valid data_addr")
+	}
+	t.Cleanup(func() {
+		if s.relayListener != nil {
+			_ = s.relayListener.Close()
+		}
+	})
+	if s.relayInPort != relayPort {
+		t.Fatalf("relayInPort = %d, want %d (data_addr port + 1)", s.relayInPort, relayPort)
+	}
+
+	// A pod that has stepped down must reject relay-in connections at accept
+	// so a stale follower can never re-relay.
+	conn, err := net.DialTimeout("tcp", s.relayListener.Addr().String(), 2*time.Second)
+	if err != nil {
+		t.Fatalf("dial relay-in: %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := conn.Read(make([]byte, 1)); err == nil {
+		t.Fatal("follower must close relay-in connections")
+	}
+}
+
+func TestStartRelayListenerInvalidDataAddr(t *testing.T) {
+	env := newTestEnv(t)
+	s := env.server
+	s.cfg.DataAddr = "not-a-hostport"
+	s.startRelayListener(nil)
+	if s.relayListener != nil {
+		t.Fatal("relay listener must not be bound for an invalid data_addr")
+	}
+	if s.relayInPort != 0 {
+		t.Fatalf("relayInPort = %d, want 0 for an invalid data_addr", s.relayInPort)
+	}
 }
 
 func TestServeDataRelayPumpsBothWays(t *testing.T) {

@@ -40,13 +40,18 @@ func isReadOnlyMethod(method string) bool {
 }
 
 // leaderPinnedRoute reports whether (method, path) must be served by the
-// leader. All mutating methods are leader-pinned; two GET routes are also
-// pinned because they read leader-local state:
+// leader. All mutating methods are leader-pinned; three GET route families are
+// also pinned because they read leader-local state or perform a Raft write
+// despite being read-only by method:
 //
 //   - /api/v1/traces/:traceID/live — SSE; the liveHub is per-pod and events
 //     are produced only on the leader.
 //   - /api/v1/fleet/:version/purge-cache — the purge-job status lives in the
 //     in-memory EngineCachePurgeService of the pod that accepted the POST.
+//   - /api/v1/auth/oauth/{github,oidc}/callback — a GET that runs the OAuth
+//     exchange and then completeOAuthLogin → EnsureOAuthUser / group
+//     reconciliation, all of which are Raft writes. A follower would return
+//     503, so ~2/3 of OAuth logins would fail on a 3-pod cluster without this.
 func leaderPinnedRoute(method, path string) bool {
 	if !isReadOnlyMethod(method) {
 		return true
@@ -55,6 +60,9 @@ func leaderPinnedRoute(method, path string) bool {
 		return true
 	}
 	if strings.HasPrefix(path, "/api/v1/fleet/") && strings.HasSuffix(path, "/purge-cache") {
+		return true
+	}
+	if strings.HasPrefix(path, "/api/v1/auth/oauth/") && strings.HasSuffix(path, "/callback") {
 		return true
 	}
 	return false

@@ -20,9 +20,10 @@
 
 A Hertz-native leader-forward middleware (new file `internal/handler/leader_forward.go`) using the already-vendored `github.com/hertz-contrib/reverseproxy`:
 
-- **Endpoint-aware classification, NOT merely method-based** (the #1 trap). Default: all mutating methods (`POST/PUT/DELETE/PATCH`) are leader-pinned. Two GET routes are *also* leader-pinned because they read leader-local state:
+- **Endpoint-aware classification, NOT merely method-based** (the #1 trap). Default: all mutating methods (`POST/PUT/DELETE/PATCH`) are leader-pinned. Three GET route families are *also* leader-pinned because they read leader-local state or perform a Raft write despite the read-only method:
   1. `GET /api/v1/traces/:traceID/live` — SSE; the `liveHub` is per-pod and events are produced **only on the leader** (`broadcastOTelUpdate` runs in `handleOTel`, which is forwarded). Confirmed: followers have no live events.
   2. `GET /api/v1/fleet/:version/purge-cache` — reads the in-memory purge-job status of `EngineCachePurgeService`, which is leader-local (the `POST .../purge-cache` is forwarded, so its status lives on the leader).
+  3. `GET /api/v1/auth/oauth/{github,oidc}/callback` — **a GET that writes through Raft**: `completeOAuthCallback` → `oauth.Complete` → `completeOAuthLogin` → `UserService.EnsureOAuthUser` + membership reconciliation (`internal/service/oauth_github.go`, `oauth_oidc.go`, `oauth.go`, `user_service.go`). A follower would 503, so ~2/3 of OAuth logins would fail on a 3-pod cluster. The provider `.../login` GETs are read-only (replicated `jwt_secret` state token) and remain follower-safe.
   Everything else that is read-only (`GET/HEAD/OPTIONS`) is **follower-safe** and served locally (stale reads): probes, SPA, traces list/detail/url/logs/search/metrics, fleet/history/status/image-cache/connect/cli/auth/tokens/users/groups/projects GETs.
 - **Loop-prevention header** `X-Dagger-Kubernetes-Leader-Forwarded: 1` (project-specific; does not clash with gohookbridge). A request already carrying it is served locally.
 - **Per-request leader lookup** via `leaderInfo.LeaderAddress()` + `IsLeader()` (an injected interface; `*repository.RaftStore` implements it). 503 `{"message":"no raft leader available"}` when no leader; 502 `{"message":"leader unreachable"}` on proxy transport error (matches `writeError`/`ErrorResponse` shape).
@@ -168,6 +169,9 @@ func leaderPinnedRoute(method, path string) bool {
     }
     if strings.HasPrefix(path, "/api/v1/fleet/") && strings.HasSuffix(path, "/purge-cache") {
         return true // purge-job status: leader-local
+    }
+    if strings.HasPrefix(path, "/api/v1/auth/oauth/") && strings.HasSuffix(path, "/callback") {
+        return true // OAuth callback: GET that writes through Raft (EnsureOAuthUser)
     }
     return false
 }
@@ -343,7 +347,7 @@ Project rules: stdlib `testing` only (no testify/ginkgo); table-driven; `logrus`
   The fake leader backend is a real `httptest.NewServer`/Hertz engine bound to `127.0.0.1:0` (no hardcoded port); `LeaderAddress()` is faked to `"127.0.0.1:<leader-port>"` so the middleware substitutes the control port from `ControlAddr`. TLS-verification cases (feasible with stdlib only): (9) **pool selection** — embedded mode injects `LeaderForwardRootCAs` and the proxy's `tls.Config.RootCAs` equals it; cert-manager/external mode (nil) yields nil `RootCAs` (system pool); (10) **ServerName derivation** — `controlForwardTarget`/director produce the leader FQDN host, and `tls.Config.ServerName` is left empty. A full end-to-end handshake is **optional**: if added, mint a CA + a leaf with exact SAN `leader.localhost` via the existing `repository.NewMintingCA`/`IssuePeerCertificate` (stdlib `crypto/x509`), stand up an `httptest.NewTLSServer`, and dial with `RootCAs` = that CA and `ServerName` set to `leader.localhost` — assert success and that a non-matching name fails. This proves exact-FQDN verification without a real cluster.
 - **`internal/handler/data_relay_test.go`** (new): use `net.Pipe()`/`freeListener` + `serveDataRelay` directly (as `data_conn_test.go` does for `serveDataTunnel`). Cases: (a) relay pumps bytes both ways to a local relay-in listener (echo/discard), (b) `LeaderAddress()==""` closes client without dialing, (c) dial failure closes client, (d) half-close propagates EOF in one direction without killing the other. No hardcoded ports.
 - **`internal/handler/test_helper_test.go`**: set `LeaderInfo: store` in `newTestEnv` so existing handler tests (single-node, always leader) keep serving locally.
-- **`cmd/api/main_test.go`**: remove/adjust any `observeLeadership`/`raftLeaderLabel` references (grep; none expected). Add a table-driven `leaderPinnedRoute` classification unit test (in the handler package test) locking in the exact leader-pinned set (all mutating methods; the two GET exceptions; all other GETs follower-safe).
+- **`cmd/api/main_test.go`**: remove/adjust any `observeLeadership`/`raftLeaderLabel` references (grep; none expected). Add a table-driven `leaderPinnedRoute` classification unit test (in the handler package test) locking in the exact leader-pinned set (all mutating methods; the three GET exceptions — traces `live`, fleet `purge-cache`, and both OAuth `callback` routes; all other GETs follower-safe).
 - **Existing tests that change**: `internal/repository/raft_store_test.go` (delete `TestRaftStoreLeaderCh`); `cmd/api/main_test.go` (if it references `observeLeadership`). Integration tests: no new integration test required; if one is added, use `freeListener` + timed `Shutdown`.
 
 ---

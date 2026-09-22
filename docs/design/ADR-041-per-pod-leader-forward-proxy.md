@@ -38,11 +38,15 @@ current leader and serves everything else locally.
 
 - **Classification (`leaderPinnedRoute`)** is endpoint-aware, not merely
   method-based. Every mutating method (`POST`/`PUT`/`DELETE`/`PATCH`) is
-  leader-pinned, plus two GET routes that read leader-local state:
+  leader-pinned, plus three GET route families that read leader-local state or
+  write through Raft despite the read-only method:
   - `GET /api/v1/traces/:traceID/live` — SSE; the `liveHub` is per-pod and
     events are produced only on the leader (OTLP ingest is forwarded there).
   - `GET /api/v1/fleet/:version/purge-cache` — the purge-job status lives in
     the leader-local `EngineCachePurgeService`.
+  - `GET /api/v1/auth/oauth/{github,oidc}/callback` — a GET that runs the OAuth
+    exchange and then `completeOAuthLogin` → `EnsureOAuthUser` + membership
+    reconciliation, all of which are Raft writes (a follower would return 503).
   All other `GET`/`HEAD`/`OPTIONS` routes are follower-safe and served locally
   (stale reads, ADR-016 D6): probes, SPA, traces list/detail/url/logs/search/
   metrics, fleet/history/status/image-cache/connect/cli/auth/tokens/users/
@@ -182,13 +186,14 @@ its mTLS listener on `server.data_addr` (8443).
   `TestEmbeddedProviderServerCertSANs` (own-FQDN SANs present, no wildcard) and
   `TestServerTLSCertReissuesOnSANGrowth` (cached cert re-issued when SANs grow;
   reissued cert verifies under the same CA; subsequent calls reuse it).
-- `internal/handler/leader_forward_test.go`: route classification; local
-  serving on the leader; follower read served locally; write/SSE/purge-cache
-  forwarded (method/path/body + loop header observed); 503 without a leader;
-  local serving when already forwarded; 502 on transport error;
-  `controlForwardTarget` scheme/port derivation; TLS pool selection + empty
-  `ServerName`; exact-FQDN verification against a real minted leaf; incremental
-  SSE streaming through the forward hop.
+- `internal/handler/leader_forward_test.go`: route classification (including
+  both OAuth callback routes as leader-pinned and both OAuth login routes as
+  follower-safe); local serving on the leader; follower read served locally;
+  write/SSE/purge-cache/OAuth-callback forwarded (method/path/body + loop header
+  observed); 503 without a leader; local serving when already forwarded; 502 on
+  transport error; `controlForwardTarget` scheme/port derivation; TLS pool
+  selection + empty `ServerName`; exact-FQDN verification against a real minted
+  leaf; incremental SSE streaming through the forward hop.
 - `internal/handler/data_relay_test.go`: byte pump both ways; no-leader closes
   the client; dial failure closes the client; half-close does not truncate the
   opposite direction.
