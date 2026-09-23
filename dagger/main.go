@@ -35,37 +35,95 @@ var binaries = []struct {
 	{main: "./cmd/ci/", out: "bin/dagger-kubernetes-ci"},
 }
 
+// helmVariant is one helm template matrix case: the --set arguments to render
+// with, plus substrings that must appear in the rendered manifests. A variant
+// with no expectations only has to render successfully; a variant with
+// expectations additionally proves the rendered auto-wired URLs are correct
+// (a successful render alone would mask a URL that silently points at a
+// renamed — or nonexistent — dependency Service). Substrings stop right after
+// the Service name (before the namespace) so they stay stable across
+// environments, because helm template picks up the kubeconfig's namespace.
+type helmVariant struct {
+	sets   []string
+	expect []string
+}
+
 // helmTemplateMatrix lists the --set combinations from the original CI.
 // The TLS variants exercise the three data-plane server-certificate cases
 // (embedded default, cert-manager via dataCert, custom secret via
 // dataIngress.tls.secretName) plus the external-provider keypair rendering.
-var helmTemplateMatrix = [][]string{
-	{},
-	{"--set", "supervisor.enabled=false"},
-	{"--set", "opentelemetry-collector.enabled=false", "--set", "minio.enabled=false"},
+// The default and subchart-rename variants assert the rendered URLs: the
+// default pins each dependency's fullname-derived default name (including
+// <release>-victoria-server), and the rename variant renames
+// tempo/loki/victoria/minio/opentelemetry-collector and, in lock step, sets
+// the global.daggerKubernetes.serviceNames.* keys the collector exporters
+// follow — proving the auto-wired URLs track each dependency's fullname rules.
+var helmTemplateMatrix = []helmVariant{
 	{
-		"--set", "opentelemetry-collector.enabled=false",
-		"--set", "minio.enabled=false",
-		"--set", "tempo.enabled=false",
-		"--set", "loki.enabled=false",
-		"--set", "victoria.enabled=false",
-		"--set", "grafana.enabled=false",
+		sets: []string{},
+		expect: []string{
+			`collector_url: "http://dagger-kubernetes-opentelemetry-collector.`,
+			`tempo_url: "http://dagger-kubernetes-tempo.`,
+			`loki_url: "http://dagger-kubernetes-loki.`,
+			`victoria_url: "http://dagger-kubernetes-victoria-server.`,
+			`endpoint: "dagger-kubernetes-minio.`,
+		},
+	},
+	{sets: []string{"--set", "supervisor.enabled=false"}},
+	{sets: []string{"--set", "opentelemetry-collector.enabled=false", "--set", "minio.enabled=false"}},
+	{
+		sets: []string{
+			"--set", "opentelemetry-collector.enabled=false",
+			"--set", "minio.enabled=false",
+			"--set", "tempo.enabled=false",
+			"--set", "loki.enabled=false",
+			"--set", "victoria.enabled=false",
+			"--set", "grafana.enabled=false",
+		},
 	},
 	{
-		"--set", "dataIngress.enabled=true",
-		"--set", "dataIngress.host=data.example.com",
-		"--set", "dataCert.enabled=true",
-		"--set", "dataCert.issuerName=letsencrypt-prod",
+		sets: []string{
+			"--set", "dataIngress.enabled=true",
+			"--set", "dataIngress.host=data.example.com",
+			"--set", "dataCert.enabled=true",
+			"--set", "dataCert.issuerName=letsencrypt-prod",
+		},
 	},
 	{
-		"--set", "dataIngress.enabled=true",
-		"--set", "dataIngress.host=data.example.com",
-		"--set", "dataIngress.tls.secretName=dataplane-certs",
+		sets: []string{
+			"--set", "dataIngress.enabled=true",
+			"--set", "dataIngress.host=data.example.com",
+			"--set", "dataIngress.tls.secretName=dataplane-certs",
+		},
 	},
 	{
-		"--set", "supervisor.dataplane.tls.provider=external",
-		"--set", "supervisor.dataplane.tls.crt=EXTERNAL_CRT",
-		"--set", "supervisor.dataplane.tls.key=EXTERNAL_KEY",
+		sets: []string{
+			"--set", "supervisor.dataplane.tls.provider=external",
+			"--set", "supervisor.dataplane.tls.crt=EXTERNAL_CRT",
+			"--set", "supervisor.dataplane.tls.key=EXTERNAL_KEY",
+		},
+	},
+	{
+		sets: []string{
+			"--set", "tempo.fullnameOverride=my-tempo",
+			"--set", "loki.fullnameOverride=my-loki",
+			"--set", "victoria.server.fullnameOverride=my-victoria",
+			"--set", "minio.fullnameOverride=my-minio",
+			"--set", "opentelemetry-collector.fullnameOverride=my-otel",
+			"--set", "global.daggerKubernetes.serviceNames.tempo=my-tempo",
+			"--set", "global.daggerKubernetes.serviceNames.loki=my-loki",
+			"--set", "global.daggerKubernetes.serviceNames.victoria=my-victoria",
+		},
+		expect: []string{
+			`collector_url: "http://my-otel.`,
+			`tempo_url: "http://my-tempo.`,
+			`loki_url: "http://my-loki.`,
+			`victoria_url: "http://my-victoria.`,
+			`endpoint: "my-minio.`,
+			`endpoint: http://my-tempo.`,
+			`endpoint: http://my-loki.`,
+			`endpoint: http://my-victoria.`,
+		},
 	},
 }
 
@@ -183,7 +241,8 @@ func (m *DaggerKubernetes) Docker(ctx context.Context) (*dagger.Container, error
 }
 
 // Helm lints the chart (delegated to the helm module) and runs the template
-// matrix locally with the three --set combos from the original CI.
+// matrix locally: every variant must render, and variants carrying
+// expectations must also contain the asserted URL substrings.
 func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 	chart := m.Src.Directory(chartDir)
 
@@ -199,10 +258,23 @@ func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 		WithWorkdir("/src").
 		WithExec([]string{"helm", "dependency", "update", chartDir})
 
-	for i, sets := range helmTemplateMatrix {
-		cmd := append([]string{"helm", "template", "dagger-kubernetes", chartDir, "--debug"}, sets...)
-		if _, err := base.WithExec(cmd).Sync(ctx); err != nil {
+	for i, variant := range helmTemplateMatrix {
+		cmd := append([]string{"helm", "template", "dagger-kubernetes", chartDir, "--debug"}, variant.sets...)
+		ctr := base.WithExec(cmd)
+		if _, err := ctr.Sync(ctx); err != nil {
 			return fmt.Errorf("helm template variant %d: %w", i, err)
+		}
+		if len(variant.expect) == 0 {
+			continue
+		}
+		out, err := ctr.Stdout(ctx)
+		if err != nil {
+			return fmt.Errorf("helm template variant %d output: %w", i, err)
+		}
+		for _, want := range variant.expect {
+			if !strings.Contains(out, want) {
+				return fmt.Errorf("helm template variant %d: rendered output does not contain %q", i, want)
+			}
 		}
 	}
 

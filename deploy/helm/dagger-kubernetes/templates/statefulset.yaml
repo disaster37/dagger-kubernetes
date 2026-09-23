@@ -132,7 +132,7 @@ spec:
               containerPort: 8444
             - name: raft
               containerPort: 8081
-            - name: internal-control
+            - name: internal-ctrl
               containerPort: 8082
           lifecycle:
             preStop:

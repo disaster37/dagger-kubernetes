@@ -12,6 +12,26 @@ fullnameOverride: ""
 ## @param namespace [string] Namespace for the supervisor and subchart dependencies. Defaults to the release namespace when empty.
 namespace: ""
 
+## @section Cross-subchart service names (collector exporters)
+
+## @descriptionStart
+## The OTel collector config is rendered by the opentelemetry-collector
+## subchart, whose template scope cannot see the parent's `tempo`/`loki`/
+## `victoria` values. To point the collector's exporters at a renamed backend,
+## set the matching value here *in addition to* the subchart's own
+## `fullnameOverride`. Empty = auto (`<release>-<default-name>`).
+## @descriptionEnd
+
+## @param global.daggerKubernetes.serviceNames.tempo Tempo Service name used by the collector's otlphttp/tempo exporter (empty = `<release>-tempo`).
+## @param global.daggerKubernetes.serviceNames.loki Loki Service name used by the collector's loki exporter (empty = `<release>-loki`).
+## @param global.daggerKubernetes.serviceNames.victoria VictoriaMetrics Service name used by the collector's prometheusremotewrite exporter (empty = `<release>-victoria-server`).
+global:
+  daggerKubernetes:
+    serviceNames:
+      tempo: ""
+      loki: ""
+      victoria: ""
+
 ## @section Supervisor (control-plane pod)
 
 ## @param supervisor.enabled Enable the supervisor (control plane + data plane) and its resources.
@@ -217,10 +237,10 @@ supervisor:
       join:
         retryInterval: "2s"
         maxConcurrent: 20
-## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled).
-## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled).
-## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled).
-## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled).
+## @param supervisor.config.telemetry.collectorUrl OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`).
+## @param supervisor.config.telemetry.tempoUrl Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`).
+## @param supervisor.config.telemetry.lokiUrl Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`).
+## @param supervisor.config.telemetry.victoriaUrl VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `server.fullnameOverride`).
 ## In-cluster endpoints must use the `<service>.<namespace>.svc` form — never bare service names or `.svc.<cluster-domain>` FQDNs — so a single `.svc` NO_PROXY entry covers every in-cluster component when HTTP_PROXY is set (see CONTRIBUTING.md).
     telemetry:
       collectorUrl: ""
@@ -229,7 +249,7 @@ supervisor:
       victoriaUrl: ""
 ## @param supervisor.config.cache.s3.bucket S3 bucket name. Defaults to the auto-created minio bucket when the minio subchart is enabled.
 ## @param supervisor.config.cache.s3.region S3 region (ignored by MinIO).
-## @param supervisor.config.cache.s3.endpoint S3-compatible endpoint for the shared S3 client (CLI cache). Auto-wired to `<release>-minio.<namespace>.svc:9000` when the minio subchart is enabled.
+## @param supervisor.config.cache.s3.endpoint S3-compatible endpoint for the shared S3 client (CLI cache). Auto-wired to `<release>-minio.<namespace>.svc:9000` when the minio subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`.
 ## @param supervisor.config.cache.s3.useSSL Use HTTPS for the S3 endpoint.
 ## @param supervisor.config.cache.s3.accessKey S3 access key. Leave empty in values: the supervisor reads it from the `engine-s3-auth` Secret via DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY (empty falls back to the AWS env credential chain).
 ## @param supervisor.config.cache.s3.secretKey S3 secret key. Leave empty in values: the supervisor reads it from the `engine-s3-auth` Secret via DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY.
@@ -412,7 +432,7 @@ supervisor:
 ## @param imageCache.storage.backend Mirror storage backend: "s3" (shared MinIO) or "pvc" (per-mirror PVC).
 ## @param imageCache.storage.s3.bucket S3 bucket for cached blobs (auto-created when minio.enabled).
 ## @param imageCache.storage.s3.region S3 region (ignored by MinIO).
-## @param imageCache.storage.s3.endpoint S3 endpoint; auto-wired to `<release>-minio.<namespace>.svc:9000` when minio.enabled.
+## @param imageCache.storage.s3.endpoint S3 endpoint; auto-wired to `<release>-minio.<namespace>.svc:9000` when minio.enabled (the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`).
 ## @param imageCache.storage.s3.forcePathStyle Use path-style S3 addressing (required by MinIO).
 ## @param imageCache.storage.s3.secure Use HTTPS for the S3 endpoint.
 ## @param imageCache.storage.pvc.storageClass StorageClass for per-mirror PVCs (empty = cluster default).
@@ -806,15 +826,15 @@ opentelemetry-collector:
               - set(attributes["loki.attribute.labels"], "trace_id,span_id")
     exporters:
       otlphttp/tempo:
-        endpoint: http://{{ .Release.Name }}-tempo.{{ .Release.Namespace }}.svc:4318
+        endpoint: http://{{ include "dagger-kubernetes.otelTempoService" . }}.{{ .Release.Namespace }}.svc:4318
         tls:
           insecure: true
       loki:
-        endpoint: http://{{ .Release.Name }}-loki.{{ .Release.Namespace }}.svc:3100/loki/api/v1/push
+        endpoint: http://{{ include "dagger-kubernetes.otelLokiService" . }}.{{ .Release.Namespace }}.svc:3100/loki/api/v1/push
         tls:
           insecure: true
       prometheusremotewrite:
-        endpoint: http://{{ .Release.Name }}-victoria-server.{{ .Release.Namespace }}.svc:8428/prometheus/api/v1/write
+        endpoint: http://{{ include "dagger-kubernetes.otelVictoriaService" . }}.{{ .Release.Namespace }}.svc:8428/prometheus/api/v1/write
         tls:
           insecure: true
     service:
