@@ -2231,6 +2231,39 @@ Integration tests (`tests/integration/api_test.go`) exercise the full
 provision → lease → data-plane flow against stubbed fleet/cache/CA
 providers, so they run without a cluster.
 
+### Publishing the image (GHCR)
+
+The local Dagger module builds the root `Dockerfile` (Dockerfile build +
+`-h` smoke test) and pushes it to GHCR — see [DAGGER.md](../../DAGGER.md) for
+details:
+
+```bash
+export GHCR_USERNAME="<github-username>"
+export GHCR_TOKEN="<personal-access-token with write:packages>"
+
+# Publish the mutable "last dev version" image:
+dagger call -m ./dagger --src . publish \
+  --tag dev \
+  --registry-username env:GHCR_USERNAME \
+  --registry-password env:GHCR_TOKEN
+
+# Same, but run the full quality gate (lint + test -race + UI) first:
+dagger call -m ./dagger --src . publish --tag dev --gates=true \
+  --registry-username env:GHCR_USERNAME \
+  --registry-password env:GHCR_TOKEN
+
+# Anonymous smoke publish to a throwaway registry (no credentials):
+dagger call -m ./dagger --src . publish \
+  --registry ttl.sh --image smoke/dagger-kubernetes --tag 1h
+```
+
+The image dependency normalizes semver tags: `--tag v0.1.0` publishes as
+`0.1.0` (no leading `v`); `dev`/SHA/duration tags pass through verbatim. The
+`dev` tag is mutable by design (the cluster runs `imagePullPolicy: Always`).
+Note that `.github/workflows/release.yml` remains the canonical **release**
+path: it publishes semver tags on tag pushes via
+`docker/build-push-action`; this Dagger `publish` is the dev/adhoc path.
+
 ## License
 
 See [LICENSE](../LICENSE).

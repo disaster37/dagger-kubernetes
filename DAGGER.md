@@ -2,9 +2,9 @@
 
 ## Overview
 
-The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](./dagger) (module name `dagger-kubernetes`). It delegates lint and build to the [`golang`](https://github.com/disaster37/dagger-library-go) module and helm lint to the [`helm`](https://github.com/disaster37/dagger-library-go) module, both pinned at `2.0.10`. Test, UI, docker, and the helm template matrix are implemented locally because the upstream modules cannot express them.
+The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](./dagger) (module name `dagger-kubernetes`). It delegates lint and build to the [`golang`](https://github.com/disaster37/dagger-library-go) module, helm lint to the [`helm`](https://github.com/disaster37/dagger-library-go) module, and the registry push to the [`image`](https://github.com/disaster37/dagger-library-go) module. **Dependency pins** (each independent, in [`dagger/dagger.json`](./dagger/dagger.json)): `golang` + `helm` at `2.0.12`, `image` at `2.0.19`. Test, UI, docker, and the helm template matrix are implemented locally because the upstream modules cannot express them.
 
-> **Note on the golang dependency:** The upstream `golang` module at tag `2.0.10` has a `replace ../lib/` directive in its `go.mod` but does not declare `"include": ["../lib"]` in its `dagger.json`, which breaks remote loading. The module is therefore vendored at `dagger/deps/golang/` (with the `include` fix applied) and referenced as a local dependency. The `helm` module works remotely and is fetched from GitHub.
+> **Note on the dependencies:** all dependencies load **remotely** from `github.com/disaster37/dagger-library-go`, pinned per-dependency in `dagger/dagger.json`. The formerly vendored copy at `dagger/deps/golang/` **no longer exists** — do not reference it.
 
 | Function | Delegated / Local | Why |
 |----------|-------------------|-----|
@@ -14,6 +14,7 @@ The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](
 | `test`   | Local | Upstream hardcodes flags (no `-race`, `-vet=off`); `-race` requires CGO |
 | `ui`     | Local | Local Nuxt 4 + Nuxt UI v4 build (upstream has no UI support) |
 | `docker` | Local | Upstream has no Dockerfile support |
+| `publish` | Delegated to the `image` module `Build`+`Push` (build container injected) | Build/push to GHCR |
 
 ## Prerequisites
 
@@ -53,16 +54,60 @@ Outputs:
 | `build` | `dagger call -m ./dagger --src . build export --path .` | `bin/` directory with both binaries (the returned directory already contains `bin/`, so export to `.`) |
 | `docker` | `dagger call -m ./dagger --src . docker` | built `Container` |
 | `helm` | `dagger call -m ./dagger --src . helm` | (no return value; fails on error) |
+| `publish` | `dagger call -m ./dagger --src . publish --tag dev --registry-username env:GHCR_USERNAME --registry-password env:GHCR_TOKEN` | image reference + digest (string) |
+
+## Publishing the image (GHCR)
+
+```bash
+export GHCR_USERNAME="<github-username>"
+export GHCR_TOKEN="<PAT with write:packages>"
+
+# Publish the mutable "last dev version" image:
+dagger call -m ./dagger --src . publish \
+  --tag dev \
+  --registry-username env:GHCR_USERNAME \
+  --registry-password env:GHCR_TOKEN
+
+# Same, but run the full quality gate (lint + test -race + UI) first:
+dagger call -m ./dagger --src . publish --tag dev --gates=true \
+  --registry-username env:GHCR_USERNAME --registry-password env:GHCR_TOKEN
+
+# Anonymous smoke publish to a throwaway registry (no credentials):
+dagger call -m ./dagger --src . publish \
+  --registry ttl.sh --image smoke/dagger-kubernetes --tag 1h
+```
+
+Flags:
+
+| Flag | Required | Default | Meaning |
+|------|----------|---------|---------|
+| `--tag` | yes | — | Image tag (`dev`, `v0.1.0`, git SHA, …) |
+| `--registry` | no | `ghcr.io` | Bare registry host (no scheme) |
+| `--image` | no | `disaster37/dagger-kubernetes` | Repository path (no registry host) |
+| `--registry-username` / `--registry-password` | for GHCR | none (anonymous) | Credentials as Secrets; pass **both** or neither |
+| `--gates` | no | `false` | Run Lint + Test + Ui before pushing |
+
+Secrets are passed with the `env:` prefix (`env:GHCR_USERNAME`), which resolves
+the value from the local environment without printing it. The PAT needs the
+`write:packages` scope.
+
+**Semver normalization:** the `image` module normalizes semver tags —
+`--tag v0.1.0` publishes as `0.1.0` (leading `v` stripped). Non-semver tags
+(`dev`, `1h`, a git SHA) pass through verbatim. Note this differs from
+`release.yml`, which pushes `ghcr.io/…:v0.1.0` *with* the `v`; `release.yml`
+stays the canonical release path, `publish` is the dev/adhoc path.
+
+**Mutable tags:** `dev` and `latest` are mutable by design — the cluster runs
+`imagePullPolicy: Always` and expects re-publishes under the same tag. Treat
+published semver tags as immutable (GHCR does not enforce this).
 
 ## Direct module usage (bypassing local module)
 
-The `golang` module can be called directly via the vendored copy at
-`dagger/deps/golang`. (The remote `github.com/disaster37/dagger-library-go/golang@2.0.10`
-reference cannot be used — it fails to load for the `include` reason noted
-above.) Because the repo root has no Go files, `--main` is required:
+The dependency modules can be called directly at their pinned tags. Because the
+repo root has no Go files, `--main` is required:
 
 ```bash
-dagger call -m ./dagger/deps/golang --src . ci --main ./cmd/api --out bin/supervisor export --path .
+dagger call -m github.com/disaster37/dagger-library-go/golang@2.0.12 --src . ci --main ./cmd/api --out bin/supervisor export --path .
 ```
 
 > **Caveat:** upstream `test` runs without `-race` (hardcoded flags). The local module's `Test` is used instead for parity with the original CI. Upstream `Build` omits `-trimpath` (release builds still use the Dockerfile / `release.yml` path, unaffected).
@@ -70,17 +115,21 @@ dagger call -m ./dagger/deps/golang --src . ci --main ./cmd/api --out bin/superv
 The upstream `helm` module:
 
 ```bash
-dagger call -m github.com/disaster37/dagger-library-go/helm@2.0.10 --src deploy/helm/dagger-kubernetes lint
+dagger call -m github.com/disaster37/dagger-library-go/helm@2.0.12 --src deploy/helm/dagger-kubernetes lint
 ```
 
 ## Secrets / env
 
-No secrets are required for CI. Helm `push` / `ci` release functions (not used here — releases stay in `release.yml`) would need registry username/password and a git token. An optional `DAGGER_CLOUD_TOKEN` enables Dagger Cloud trace observability.
+No secrets are required for CI. `publish` needs a registry username/password for GHCR (passed as `--registry-username env:GHCR_USERNAME --registry-password env:GHCR_TOKEN`; a PAT with `write:packages`). An optional `DAGGER_CLOUD_TOKEN` enables Dagger Cloud trace observability.
 
 ## Troubleshooting
 
 - **Engine startup on first run:** Dagger pulls the engine image on the first invocation; subsequent runs are faster.
 - **`helm dependency update` needs network:** The chart depends on 6 public Helm charts (see `Chart.yaml`); ensure outbound network access is available.
 - **golangci-lint version drift:** The local module pins golangci-lint **v2.12.2** via a custom base image. Bump deliberately when upgrading.
-- **`dagger/deps/golang/` is vendored:** It is a local copy of `github.com/disaster37/dagger-library-go/golang@2.0.10` with `"include": ["../lib"]` added to its `dagger.json` (upstream omission). To update, re-vendor from the upstream tag and re-apply the `include` fix.
+- **GHCR push fails with 401/403:** the PAT behind `env:GHCR_TOKEN` needs the `write:packages` scope (and the username must match the token owner). Both credentials must be passed together — see the next bullet.
+- **`publish` with only one credential:** the `image` module **silently skips auth** when only one of `WithRegistryUsername`/`WithRegistryPassword` is set; the local module therefore rejects a lone credential up front (`registryUsername and registryPassword must be provided together`). Pass both, or neither for anonymous registries (ttl.sh).
+- **Mutable `dev`/`latest` tags:** re-publishing over them is expected (`imagePullPolicy: Always`); do not re-publish a published semver tag.
+- **`go test` panics with `DAGGER_SESSION_PORT` unset:** the generated SDK panics at `init()` without a Dagger session, so tests must not import `package main` or `internal/dagger`. Pure logic lives in `dagger/internal/ref` (stdlib only) and runs under plain `go test`.
+- **Dependency pins:** dependencies are remote at `github.com/disaster37/dagger-library-go/{golang,helm}@2.0.12` and `.../image@2.0.19`, pinned in `dagger/dagger.json` (`dagger/deps/` no longer exists). Bump each independently; regenerate with `dagger develop -m ./dagger`.
 - **UI build is a static Nuxt SPA:** `ui` runs `nuxt generate` with `ssr: false` and returns `.output/public/` (not `dist/`). `app.buildAssetsDir` is pinned to `/assets/` so the Go handler's immutable-cache path (`internal/handler/ui.go`) stays unchanged. The build needs Node `20.19+`/`22.12+`; the module uses `node:22-alpine`.

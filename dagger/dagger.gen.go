@@ -239,11 +239,11 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 			if err != nil {
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
-			var version string
-			if inputArgs["version"] != nil {
-				err = json.Unmarshal([]byte(inputArgs["version"]), &version)
+			var tag string
+			if inputArgs["tag"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["tag"]), &tag)
 				if err != nil {
-					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg version", err))
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg tag", err))
 				}
 			}
 			var registry string
@@ -253,7 +253,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg registry", err))
 				}
 			}
-			var registryUsername string
+			var image string
+			if inputArgs["image"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["image"]), &image)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg image", err))
+				}
+			}
+			var registryUsername *dagger.Secret
 			if inputArgs["registryUsername"] != nil {
 				err = json.Unmarshal([]byte(inputArgs["registryUsername"]), &registryUsername)
 				if err != nil {
@@ -267,7 +274,14 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg registryPassword", err))
 				}
 			}
-			return (*DaggerKubernetes).Publish(&parent, ctx, version, registry, registryUsername, registryPassword)
+			var gates bool
+			if inputArgs["gates"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["gates"]), &gates)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg gates", err))
+				}
+			}
+			return (*DaggerKubernetes).Publish(&parent, ctx, tag, registry, image, registryUsername, registryPassword, gates)
 		case "Test":
 			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)
