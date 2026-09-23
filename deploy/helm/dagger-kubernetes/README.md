@@ -76,7 +76,8 @@ Service is exposed via LoadBalancer/NodePort without an ingress (the chart
 cannot know the LB hostname or the auto-assigned nodePort).
 
 Container paths and ports are fixed (control `:8080`, data `:8443`, raft
-`:8081`, and the internal pod-to-pod leader relay `:8444`, data dir
+`:8081`, the internal pod-to-pod control listener `:8082`, and the internal
+pod-to-pod leader relay `:8444`, data dir
 `/var/lib/dagger-kubernetes`) — only the Service ports are
 configurable (`service.control.port`, `service.data.port`).
 
@@ -159,7 +160,7 @@ require manual generation** in a standard Helm install:
 |---|---|---|
 | **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Set `supervisor.dataplane.tls.caCrt`/`caKey` only to bring an existing CA. |
 | **Raft transport CA** (`<release>-raft-ca`) | Yes | Internal mTLS for the Raft transport. Same bootstrap pattern (see [Raft](#raft-distributed-store)). |
-| **Server certificate** (control + data plane) | `embedded` (default) | Issued by the minting CA, self-signed. SANs cover the data host, cache vhost, pod names, and each pod's own exact FQDN SANs automatically (the leader-forward hop needs them — ADR-041). |
+| **Server certificate** (control + data plane) | `embedded` (default) | Issued by the minting CA, self-signed. SANs cover the data host, cache vhost, pod names, and each pod's own exact FQDN SANs automatically (the leader-forward hop needs them — ADR-041). The minting CA additionally issues a dedicated leaf for the internal-only control listener (port 8082) in every provider mode. |
 
 ### TLS providers
 
@@ -186,25 +187,18 @@ it manually.
 
 **Leader-forward hop trust (ADR-041).** A follower forwards leader-pinned
 requests to the leader's pod FQDN over HTTPS with **full certificate
-verification** — no `InsecureSkipVerify`. The trust source depends on the
-provider:
-
-- **`embedded` (default): no action required.** Each pod's server certificate
-  carries its **own exact** FQDN SANs
-  (`<pod>.<release>-headless.<ns>.svc.<clusterDomain>` and the `.svc` form),
-  and followers verify with the shared minting CA (the `<release>-minting-ca`
-  Secret). A cached `server.crt`/`server.key` that predates these SANs is
-  re-issued in place under the same CA on the first boot after the upgrade.
-- **`cert-manager` / `external`: operator action required.** The server
-  certificate is operator-managed, so add the wildcard SANs
-  `*.<release>-headless.<ns>.svc.<clusterDomain>` and
-  `*.<release>-headless.<ns>.svc` to the `Certificate` (or your own cert) so
-  every follower can verify the leader's FQDN. Wildcards from ACME require a
-  **DNS-01** solver (HTTP-01 cannot issue wildcards); a private CA adds the
-  SAN trivially. Followers verify with the system trust pool, so for a private
-  CA also mount its bundle into the pod trust store (or use a
-  publicly-trusted issuer). Until the wildcard SAN is present, follower→leader
-  forwards fail verification and return 502.
+verification** — no `InsecureSkipVerify`. The hop targets an **internal-only
+control listener** (`server.control_addr` port + 2 = **8082**, pod-to-pod only
+— no Service, no ingress) that serves a dedicated leaf minted by the shared
+goca minting CA (`<release>-minting-ca`) carrying each pod's **own exact** FQDN
+SANs (`<pod>.<release>-headless.<ns>.svc.<clusterDomain>` and the `.svc` form).
+This works identically in **every** provider (`embedded`, `cert-manager`,
+`external`): the public server certificate is never presented on the internal
+listener and cert-manager remains public-facing only. **No operator action is
+required** — no wildcard SAN, no DNS-01 solver. Followers verify with the
+minting-CA pool unconditionally. A cached `server-internal.crt`/`.key` whose
+SANs no longer match (e.g. a `clusterDomain` change) is re-issued in place
+under the same CA on the next boot.
 
 ### cert-manager example
 
@@ -338,7 +332,8 @@ grafana:
   [Raft (distributed store)](#raft-distributed-store) below. **Session leases
   are Raft-replicated** (ADR-026) and every pod serves the `-control`/`-data`
   Services. A follower forwards leader-pinned control-plane requests (writes
-  and the SSE `/live` route) to the current Raft leader and relays the raw
+  and the SSE `/live` route) to the current Raft leader over the internal-only
+  control listener (port 8082, pod-to-pod only) and relays the raw
   mTLS data-plane tunnel to the leader's internal relay-in port (8444), so the
   tunnel and its lease-touch heartbeats always run where Raft writes can be
   applied (ADR-041, which supersedes the old leader-label Service selector).
@@ -542,8 +537,12 @@ local reads; writes on a follower return `ErrNotLeader` (503) and clients retry.
 **Leader forwarding / relay (ADR-041):** the `-control` and `-data` Services
 select **all** pods. A follower serves reads locally, forwards leader-pinned
 control-plane requests (writes and the SSE `/live` route) to the current leader
-over an HTTPS hop with full certificate verification, and relays the raw mTLS
-data-plane tunnel to the leader's dedicated relay-in port
+over an HTTPS hop with full certificate verification against the shared
+minting CA — dialing the leader's **internal-only control listener**
+(`server.control_addr` port + 2 = **8082**, pod-to-pod only — no Service, no
+ingress), which serves a minting-CA leaf with each pod's own exact FQDN SANs
+in every TLS-provider mode (cert-manager stays public-only) — and relays the
+raw mTLS data-plane tunnel to the leader's dedicated relay-in port
 (`server.data_addr` port + 1 = **8444**, pod-to-pod only — no Service, no
 ingress). A pod that has stepped down rejects relay-in connections, so a stale
 follower only causes a dial failure the Dagger CLI already retries. There is no
