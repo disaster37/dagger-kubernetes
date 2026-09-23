@@ -325,17 +325,20 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 	}
 	s.hertz = h
 
+	// Boot the internal-only control listener (ADR-041) before the public
+	// control plane starts serving. It serves the same route table over a
+	// minting-CA leaf on control+2 and carries the leader-forward hop.
+	// Failures are log-only. Starting it first also publishes the derived
+	// internalControlPort before any request handler (on either listener) can
+	// read it, avoiding a data race on that field.
+	s.startInternalControlListener()
+
 	go func() {
 		s.logger.WithField("addr", s.cfg.ControlAddr).Info("control plane listening")
 		if err := s.hertz.Run(); err != nil {
 			s.logger.WithError(err).Error("control plane error")
 		}
 	}()
-
-	// Boot the internal-only control listener (ADR-041) right after the
-	// control plane. It serves the same route table over a minting-CA leaf on
-	// control+2 and carries the leader-forward hop. Failures are log-only.
-	s.startInternalControlListener()
 
 	// Log exactly which certificate the data plane is about to serve. When
 	// clients fail to trust it (or hang in "connecting to engine"), this is
