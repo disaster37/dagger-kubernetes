@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -114,19 +113,14 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("get minting CA: %w", err)
 	}
 
-	// The internal leader-forward hop verifies the leader's control-plane
-	// certificate with full trust. Embedded mode uses the shared minting CA
-	// pool (every pod's server cert carries its own exact FQDN SANs, no
-	// wildcard); cert-manager/external leave this nil (system pool) and the
-	// operator supplies a wildcard SAN on the Certificate.
-	var leaderForwardRootCAs *x509.CertPool
-	if cfg.Supervisor.Dataplane.TLS.Provider == "embedded" {
-		leaderForwardRootCAs = serverMintingCA.CertPool()
-	}
-
 	serverTLS, err := tlsProvider.ServerTLSCert()
 	if err != nil {
 		return fmt.Errorf("get server TLS cert: %w", err)
+	}
+
+	internalTLS, err := tlsProvider.InternalServerTLSCert()
+	if err != nil {
+		return fmt.Errorf("get internal server TLS cert: %w", err)
 	}
 
 	// Determine control plane TLS cert/key paths based on provider type.
@@ -360,6 +354,7 @@ func run(c *cli.Context) error {
 		KeyPath:          controlTLSKeyPath,
 		PipelineURL:      cfg.Server.PublicURL,
 		OTelMaxBodyBytes: cfg.OTel.IngestMaxBodySize,
+		InternalTLSCert:  &internalTLS,
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -398,7 +393,6 @@ func run(c *cli.Context) error {
 		ImageCache:           imageCacheSvc,
 		EngineMetrics:        engineMetricsSvc,
 		LeaderInfo:           raftStore,
-		LeaderForwardRootCAs: leaderForwardRootCAs,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {

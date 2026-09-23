@@ -191,6 +191,13 @@ type ServerConfig struct {
 	CertPath        string
 	KeyPath         string
 	PipelineURL     string // base for pipeline-view links (= server.public_url, absolute http(s))
+	// InternalListener optionally supplies a pre-bound listener for the
+	// internal-only control listener (tests). When nil the address derived
+	// from ControlAddr (+2) is bound.
+	InternalListener net.Listener
+	// InternalTLSCert is the minting-CA-signed leaf served by the
+	// internal-only control listener (ADR-041). nil = listener disabled.
+	InternalTLSCert *tls.Certificate
 	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
 	// (64 MiB). The control-API maxControlBody cap is unaffected.
 	OTelMaxBodyBytes int64
