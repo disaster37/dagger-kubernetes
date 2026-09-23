@@ -12,6 +12,13 @@
 > the `cluster.local` FQDN default (leaf certs lacking the FQDN SAN are
 > re-issued in place under the same CA). See ADR-029.
 
+> **Revision (2026-09-22, ADR-041):** risk R3 / open question OQ1 ("a
+> leader-only Service is a future enhancement") is **resolved** — and
+> superseded. There is no leader-only Service: every pod serves reads and
+> relays tunnels, and leader-pinned writes/SSE are forwarded per-request to the
+> leader. ADR-026's leader-routed Services (and the `pods patch` RBAC they
+> needed) are removed. See ADR-041.
+
 ## Context
 
 ADR-015 replaced SQLite with a single-node Hashicorp Raft store. Its review
@@ -173,7 +180,9 @@ advertises its pod FQDN, and followers serve stale reads while returning
   the Helm README; the loop is leader-only and idempotent.
 - **R3 — stale reads + 503 on writes behind a load-balanced Service**:
   acceptable at RBAC write frequency; a leader-only Service is a future
-  enhancement (OQ1).
+  enhancement (OQ1). **Resolved (and superseded) by ADR-041**, which removes
+  the leader-only Service entirely: per-request forwarding + a per-pod L4
+  relay replace it.
 - **R4 — 2-node cluster has no failure tolerance**: chart defaults
   `replicaCount: 3`.
 - **R5 — CA rotation out of scope**: the CA has a 10-year life (goca default).

@@ -128,8 +128,12 @@ spec:
               containerPort: 8080
             - name: data
               containerPort: 8443
+            - name: relay
+              containerPort: 8444
             - name: raft
               containerPort: 8081
+            - name: internal-control
+              containerPort: 8082
           lifecycle:
             preStop:
               exec:

@@ -164,6 +164,9 @@ type Deps struct {
 	StartupProvider      domain.StartupProvider
 	ImageCache           domain.ImageCacheService
 	EngineMetrics        *service.EngineMetricsService // nil = trace metrics endpoint disabled
+	// LeaderInfo is the Raft store view used by the leader-forward middleware
+	// and the data-plane relay. nil disables both (single-node / tests).
+	LeaderInfo leaderInfo
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -184,6 +187,13 @@ type ServerConfig struct {
 	CertPath        string
 	KeyPath         string
 	PipelineURL     string // base for pipeline-view links (= server.public_url, absolute http(s))
+	// InternalListener optionally supplies a pre-bound listener for the
+	// internal-only control listener (tests). When nil the address derived
+	// from ControlAddr (+2) is bound.
+	InternalListener net.Listener
+	// InternalTLSCert is the minting-CA-signed leaf served by the
+	// internal-only control listener (ADR-041). nil = listener disabled.
+	InternalTLSCert *tls.Certificate
 	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
 	// (64 MiB). The control-API maxControlBody cap is unaffected.
 	OTelMaxBodyBytes int64
@@ -191,21 +201,28 @@ type ServerConfig struct {
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
 type Server struct {
-	cfg             *ServerConfig
-	logger          *logrus.Logger
-	metrics         *observ.Metrics
-	mintingCA       domain.MintingCA
-	fleetManager    *service.Manager
-	sessions        domain.SessionStore
-	sessionRegistry domain.SessionRegistry
-	versionResolver domain.VersionResolver
-	liveHub         *repository.LiveHub
-	lifecycle       *service.PipelineLifecycle
-	traces          domain.TraceRepository
-	logs            domain.LogRepository
-	hertz           *server.Hertz
-	tlsListener     net.Listener
-	dataConnSem     chan struct{}
+	cfg                 *ServerConfig
+	logger              *logrus.Logger
+	metrics             *observ.Metrics
+	mintingCA           domain.MintingCA
+	fleetManager        *service.Manager
+	sessions            domain.SessionStore
+	sessionRegistry     domain.SessionRegistry
+	versionResolver     domain.VersionResolver
+	liveHub             *repository.LiveHub
+	lifecycle           *service.PipelineLifecycle
+	traces              domain.TraceRepository
+	logs                domain.LogRepository
+	hertz               *server.Hertz
+	internalHertz       *server.Hertz
+	internalListener    net.Listener
+	internalControlPort int
+	tlsListener         net.Listener
+	relayListener       net.Listener
+	relayInPort         int
+	dataConnSem         chan struct{}
+	leaderInfo          leaderInfo
+	leaderProxy         *reverseproxy.ReverseProxy
 
 	// Auth + RBAC collaborators.
 	auth                *service.AuthService
@@ -256,6 +273,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		traces:          deps.Traces,
 		logs:            deps.Logs,
 		dataConnSem:     make(chan struct{}, maxDataConnections),
+		leaderInfo:      deps.LeaderInfo,
 
 		auth:                deps.Auth,
 		internalAuthEnabled: deps.InternalAuthEnabled,
@@ -307,6 +325,14 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 	}
 	s.hertz = h
 
+	// Boot the internal-only control listener (ADR-041) before the public
+	// control plane starts serving. It serves the same route table over a
+	// minting-CA leaf on control+2 and carries the leader-forward hop.
+	// Failures are log-only. Starting it first also publishes the derived
+	// internalControlPort before any request handler (on either listener) can
+	// read it, avoiding a data race on that field.
+	s.startInternalControlListener()
+
 	go func() {
 		s.logger.WithField("addr", s.cfg.ControlAddr).Info("control plane listening")
 		if err := s.hertz.Run(); err != nil {
@@ -337,6 +363,10 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 
 	s.tlsListener = tlsLn
 
+	// Bind the relay-in listener before the data accept loop so a follower
+	// relay never races an unset relayInPort.
+	s.startRelayListener(tlsConfig)
+
 	go func() {
 		s.logger.WithField("addr", s.cfg.DataAddr).Info("data plane listening")
 		for {
@@ -346,6 +376,12 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 					return
 				}
 				s.logger.WithError(err).Error("tcp accept error")
+				continue
+			}
+			if s.leaderInfo != nil && !s.leaderInfo.IsLeader() {
+				// Follower: relay the raw mTLS tunnel to the leader. TLS
+				// terminates end-to-end on the leader.
+				go s.serveDataRelay(raw)
 				continue
 			}
 			s.serveTLSConn(raw, tlsConfig)
@@ -544,9 +580,24 @@ func (s *Server) configure() (*server.Hertz, error) {
 	}
 	h := server.Default(opts...)
 
+	if err := s.buildLeaderForward(); err != nil {
+		return nil, fmt.Errorf("build leader forward proxy: %w", err)
+	}
+
+	s.registerRoutes(h)
+
+	return h, nil
+}
+
+// registerRoutes registers the full middleware stack + route table on h. It
+// is shared by the public control listener and the internal-only control
+// listener (ADR-041), so both serve the identical stack (request log,
+// security headers, CORS, leaderForward, per-handler auth) with no drift.
+func (s *Server) registerRoutes(h *server.Hertz) {
 	h.Use(s.requestLog())
 	h.Use(s.securityHeaders())
 	h.Use(s.corsMiddleware())
+	h.Use(s.leaderForward())
 
 	// Data-plane + telemetry endpoints.
 	h.POST("/v1/engines", s.handleEngines)
@@ -631,8 +682,6 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/metrics", adaptor.HertzHandler(promhttp.Handler()))
 
 	h.NoRoute(s.handleNoRoute)
-
-	return h, nil
 }
 
 // buildProxies constructs the reverse proxies once at startup (B6) instead of
@@ -706,6 +755,15 @@ func (s *Server) newHertzProxy(targetURL string, director func(*protocol.Request
 
 // Shutdown stops both listeners.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.internalListener != nil {
+		_ = s.internalListener.Close()
+	}
+	if s.internalHertz != nil {
+		_ = s.internalHertz.Shutdown(ctx)
+	}
+	if s.relayListener != nil {
+		_ = s.relayListener.Close()
+	}
 	if s.tlsListener != nil {
 		_ = s.tlsListener.Close()
 	}

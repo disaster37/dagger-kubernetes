@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -75,10 +76,124 @@ func (p *EmbeddedProvider) ServerTLSCert() (tls.Certificate, error) {
 	serverKeyPath := filepath.Join(p.caPath, "server.key")
 
 	if fileExists(serverCertPath) && fileExists(serverKeyPath) {
-		return loadTLSKeyPair(serverCertPath, serverKeyPath)
+		cert, err := loadTLSKeyPair(serverCertPath, serverKeyPath)
+		if err == nil && len(cert.Certificate) > 0 {
+			leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
+			requiredDNS, requiredIPs := p.requiredServerSANs()
+			if parseErr == nil && coversRequiredServerSANs(leaf, requiredDNS, requiredIPs) {
+				return cert, nil
+			}
+		}
+		// The cached server certificate does not cover the current SAN set
+		// (e.g. it predates the own-FQDN SANs added for the leader-forward
+		// hop) or could not be parsed: re-issue it in place under the same
+		// minting CA, mirroring the raft leaf re-issue behavior (ADR-029).
 	}
 
 	return p.issueServerCert(ca, serverCertPath, serverKeyPath)
+}
+
+// InternalServerTLSCert returns the leaf served by the internal-only control
+// listener (ADR-041). It is minted by the shared minting CA in every provider
+// mode and carries this pod's own exact FQDN SANs (no wildcard), so any
+// follower can verify the leader's internal listener with the minting-CA pool.
+// Mirrors ServerTLSCert: the cached pair is reused while it covers the
+// current SAN set and re-issued in place otherwise.
+func (p *EmbeddedProvider) InternalServerTLSCert() (tls.Certificate, error) {
+	ca, err := p.loadOrCreateCA()
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("minting CA: %w", err)
+	}
+
+	internalCertPath := filepath.Join(p.caPath, "server-internal.crt")
+	internalKeyPath := filepath.Join(p.caPath, "server-internal.key")
+
+	if fileExists(internalCertPath) && fileExists(internalKeyPath) {
+		cert, err := loadTLSKeyPair(internalCertPath, internalKeyPath)
+		if err == nil && len(cert.Certificate) > 0 {
+			leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
+			if parseErr == nil && coversRequiredServerSANs(leaf, p.internalServerSANs(), nil) {
+				return cert, nil
+			}
+		}
+		// The cached internal leaf does not cover the current FQDN SAN set
+		// (e.g. cluster_domain/headless_service changed) or could not be
+		// parsed: re-issue it in place under the same minting CA.
+	}
+
+	return p.issueInternalServerCert(ca, internalCertPath, internalKeyPath)
+}
+
+// internalServerSANs returns the exact SAN set the internal-listener leaf must
+// cover: this pod's own FQDN SANs plus the engine-facing data host, already
+// computed by mintingProvider into extraSANs. No wildcard and no all-pod
+// enumeration — the only host a follower dials is the leader's own FQDN.
+func (p *EmbeddedProvider) internalServerSANs() []string {
+	return dedupeStrings(p.extraSANs)
+}
+
+// issueInternalServerCert mints and persists the internal-listener leaf under
+// the minting CA (0600 files, mirroring issueServerCert).
+func (p *EmbeddedProvider) issueInternalServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
+	certPEM, keyPEM, err := ca.IssueServerCertificate(
+		"supervisor-internal", "dagger-kubernetes",
+		p.internalServerSANs(),
+		5*365*24*time.Hour)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("issue internal server cert: %w", err)
+	}
+	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+		return tls.Certificate{}, fmt.Errorf("write internal server cert: %w", err)
+	}
+	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+		return tls.Certificate{}, fmt.Errorf("write internal server key: %w", err)
+	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// requiredServerSANs returns the exact DNS + IP SAN set the embedded server
+// certificate must cover: the fixed base names, the injected extraSANs (the
+// engine-facing data host and this pod's own FQDN SANs), this pod's hostname,
+// and the loopback IP.
+func (p *EmbeddedProvider) requiredServerSANs() (dns []string, ips []net.IP) {
+	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
+	sans = append(sans, p.extraSANs...)
+	// Direct pod access (CWE-295): cover this pod's hostname and loopback so
+	// the data-plane cert verifies when dialed directly by pod name/IP. The
+	// engine-facing data host is already included via extraSANs.
+	if hostname, err := os.Hostname(); err == nil && hostname != "" {
+		sans = append(sans, hostname)
+	}
+	return dedupeStrings(sans), []net.IP{net.ParseIP("127.0.0.1")}
+}
+
+// coversRequiredServerSANs reports whether cert carries every required DNS
+// name and IP SAN. Matching is exact (set containment) — no wildcard
+// expansion, so a wildcard certificate does not satisfy an exact-name
+// requirement.
+func coversRequiredServerSANs(cert *x509.Certificate, dns []string, ips []net.IP) bool {
+	if cert == nil {
+		return false
+	}
+	haveDNS := make(map[string]bool, len(cert.DNSNames))
+	for _, name := range cert.DNSNames {
+		haveDNS[name] = true
+	}
+	for _, name := range dns {
+		if !haveDNS[name] {
+			return false
+		}
+	}
+	haveIP := make(map[string]bool, len(cert.IPAddresses))
+	for _, ip := range cert.IPAddresses {
+		haveIP[ip.String()] = true
+	}
+	for _, ip := range ips {
+		if ip == nil || !haveIP[ip.String()] {
+			return false
+		}
+	}
+	return true
 }
 
 // loadOrCreateCA returns the persistent minting CA, creating it on first use.
@@ -260,22 +375,14 @@ func (p *EmbeddedProvider) loadCA(certPath, keyPath string) (*MintingCA, error) 
 }
 
 func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
-	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
-	sans = append(sans, p.extraSANs...)
-	// Direct pod access (CWE-295): cover this pod's hostname and loopback so
-	// the data-plane cert verifies when dialed directly by pod name/IP. The
-	// engine-facing data host is already included via extraSANs.
-	if hostname, err := os.Hostname(); err == nil && hostname != "" {
-		sans = append(sans, hostname)
-	}
-	sans = dedupeStrings(sans)
+	sans, ipSANs := p.requiredServerSANs()
 	// IssuePeerCertificate supports IP SANs (IssueServerCertificate does not),
 	// so 127.0.0.1 is carried as an IP SAN. It also sets ExtKeyUsageServerAuth,
 	// so the cert remains a valid server cert.
 	certPEM, keyPEM, err := ca.IssuePeerCertificate(
 		"supervisor-server", "dagger-kubernetes",
 		sans,
-		[]net.IP{net.ParseIP("127.0.0.1")},
+		ipSANs,
 		5*365*24*time.Hour)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("issue server cert: %w", err)
@@ -310,6 +417,13 @@ func (p *fileCAProvider) MintingCA() (domain.MintingCA, error) {
 
 func (p *fileCAProvider) ServerTLSCert() (tls.Certificate, error) {
 	return loadTLSKeyPair(p.certPath, p.keyPath)
+}
+
+// InternalServerTLSCert delegates to the embedded minting provider so the
+// internal listener always serves a minting-CA leaf, even when the public
+// server certificate comes from cert-manager or an external source.
+func (p *fileCAProvider) InternalServerTLSCert() (tls.Certificate, error) {
+	return p.minting.InternalServerTLSCert()
 }
 
 // NewCertManagerProvider returns a CA provider backed by cert-manager

@@ -23,8 +23,6 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -118,6 +116,11 @@ func run(c *cli.Context) error {
 	serverTLS, err := tlsProvider.ServerTLSCert()
 	if err != nil {
 		return fmt.Errorf("get server TLS cert: %w", err)
+	}
+
+	internalTLS, err := tlsProvider.InternalServerTLSCert()
+	if err != nil {
+		return fmt.Errorf("get internal server TLS cert: %w", err)
 	}
 
 	// Determine control plane TLS cert/key paths based on provider type.
@@ -351,6 +354,7 @@ func run(c *cli.Context) error {
 		KeyPath:          controlTLSKeyPath,
 		PipelineURL:      cfg.Server.PublicURL,
 		OTelMaxBodyBytes: cfg.OTel.IngestMaxBodySize,
+		InternalTLSCert:  &internalTLS,
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -388,6 +392,7 @@ func run(c *cli.Context) error {
 		CIWrapperPath:        cfg.CLI.CIWrapperPath,
 		ImageCache:           imageCacheSvc,
 		EngineMetrics:        engineMetricsSvc,
+		LeaderInfo:           raftStore,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
@@ -527,7 +532,6 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		return nil, nil, nil, fmt.Errorf("wait for raft leader: %w", err)
 	}
 
-	go observeLeadership(ctx, raftStore, clientset, cfg.Fleet.Namespace, logger)
 	go joinLoop(ctx, raftStore, resolver, logger)
 
 	// Startup barrier: the FSM must be caught up (Leader/Follower,
@@ -852,52 +856,6 @@ func validateMigrateTokensSingleNode(cfg *domain.Config) error {
 	return nil
 }
 
-// raftLeaderLabel marks the pod currently holding Raft leadership. The Helm
-// chart's -control and -data Services select on it, so all control-plane
-// requests and data-plane tunnels terminate on the leader (the only pod that
-// can apply Raft writes such as session-lease touches).
-const raftLeaderLabel = "dagger-kubernetes.io/raft-leader"
-
-// observeLeadership logs Raft leadership changes and labels this pod
-// (raftLeaderLabel=true/false) until ctx is cancelled. The Services that
-// route ingress traffic select on that label, which keeps them attached to
-// the current leader.
-func observeLeadership(ctx context.Context, store *repository.RaftStore, clientset kubernetes.Interface, namespace string, logger *logrus.Logger) {
-	hostname, _ := os.Hostname()
-	patchPodLabel := func(isLeader bool) {
-		if clientset == nil || hostname == "" || namespace == "" {
-			return
-		}
-		value := "false"
-		if isLeader {
-			value = "true"
-		}
-		patch := fmt.Sprintf(`{"metadata":{"labels":{%q:%q}}}`, raftLeaderLabel, value)
-		if _, err := clientset.CoreV1().Pods(namespace).Patch(context.Background(), hostname, types.MergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
-			logger.WithError(err).WithField("is_leader", isLeader).Warn("patch pod raft-leader label failed")
-		}
-	}
-
-	// Set the initial label before entering the event loop. LeaderCh() only
-	// fires on transitions — if leadership was already established before
-	// this goroutine started (the common case at boot), no event would fire
-	// and the label would never be set.
-	patchPodLabel(store.IsLeader())
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case isLeader, ok := <-store.LeaderCh():
-			if !ok {
-				return
-			}
-			logger.WithField("is_leader", isLeader).Info("raft leadership changed")
-			patchPodLabel(isLeader)
-		}
-	}
-}
-
 // joinLoop (leader only) periodically reconciles the running raft
 // configuration with the resolver's voter list: AddVoter for missing voters
 // and RemoveServer for removed voters (scale-up/scale-down, ADR-016 D7).
@@ -1107,12 +1065,18 @@ func selectTLSProvider(cfg *domain.Config, clientset kubernetes.Interface) (doma
 // internal CA — it never needs a public/cert-manager issuer, so it is
 // auto-bootstrapped for every server-TLS provider.
 func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *repository.EmbeddedProvider {
+	hostname, _ := os.Hostname()
+	discovery := raftDiscoveryConfig(cfg)
+	// The server cert must carry this pod's own exact FQDN SANs so any
+	// follower can verify the leader's control-plane cert on the internal
+	// forward hop (ADR-041). The engine-facing data host stays in the list.
+	extraSANs := repository.ServerCertFQDNSANs(&discovery, hostname)
+	extraSANs = append(extraSANs, cfg.Server.DataHost)
 	if clientset != nil && cfg.CA.MintingCASecret != "" {
 		namespace := cfg.Raft.Namespace
 		if namespace == "" {
 			namespace = cfg.Fleet.Namespace
 		}
-		hostname, _ := os.Hostname()
 		return repository.NewEmbeddedProviderWithSecret(
 			cfg.Supervisor.Dataplane.TLS.CAPath,
 			cfg.CA.ClientCertTTL,
@@ -1121,10 +1085,10 @@ func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *reposi
 			clientset,
 			mintingCABootstrap(cfg, hostname),
 			cfg.Raft.LeaderWaitTimeout,
-			cfg.Server.DataHost,
+			extraSANs...,
 		)
 	}
-	return repository.NewEmbeddedProvider(cfg.Supervisor.Dataplane.TLS.CAPath, cfg.CA.ClientCertTTL, cfg.Server.DataHost)
+	return repository.NewEmbeddedProvider(cfg.Supervisor.Dataplane.TLS.CAPath, cfg.CA.ClientCertTTL, extraSANs...)
 }
 
 // mintingCABootstrap reports whether this node should generate + share the

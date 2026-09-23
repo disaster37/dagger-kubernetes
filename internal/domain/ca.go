@@ -19,6 +19,10 @@ type MintingCA interface {
 type CAProvider interface {
 	MintingCA() (MintingCA, error)
 	ServerTLSCert() (tls.Certificate, error)
+	// InternalServerTLSCert returns the leaf served by the internal-only
+	// control listener (ADR-041): minted by the minting CA in every provider
+	// mode, carrying this pod's own exact FQDN SANs.
+	InternalServerTLSCert() (tls.Certificate, error)
 }
 
 func (sc *SerializableCertificate) Fingerprint() string {
