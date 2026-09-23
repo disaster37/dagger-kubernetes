@@ -4,11 +4,11 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
-	"crypto/x509"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -34,8 +34,11 @@ func (f *fakeLeaderInfo) IsLeader() bool        { return f.leader }
 func (f *fakeLeaderInfo) LeaderAddress() string { return f.addr }
 
 // leaderBackend is an httptest leader that records the last forwarded request.
+// It serves TLS with a leaf minted by mintingCA so tests can point the
+// forward hop's verification pool at the same CA (ADR-041).
 type leaderBackend struct {
-	srv *httptest.Server
+	srv       *httptest.Server
+	mintingCA *repository.MintingCA
 
 	mu        sync.Mutex
 	hits      int
@@ -45,10 +48,31 @@ type leaderBackend struct {
 	forwarded string
 }
 
+// newLeaderBackend builds a TLS leader backend: the leaf covers 127.0.0.1 +
+// localhost (the dialed host) and is signed by a fresh minting CA the test
+// injects via s.mintingCA.
 func newLeaderBackend(t *testing.T) *leaderBackend {
 	t.Helper()
-	lb := &leaderBackend{}
-	lb.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	ca, err := repository.NewMintingCA(time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+	certPEM, keyPEM, err := ca.IssuePeerCertificate(
+		"supervisor-internal", "dagger-kubernetes",
+		[]string{"localhost"},
+		[]net.IP{net.ParseIP("127.0.0.1")},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("IssuePeerCertificate: %v", err)
+	}
+	leaf, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+
+	lb := &leaderBackend{mintingCA: ca}
+	lb.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		b, _ := io.ReadAll(r.Body)
 		lb.mu.Lock()
 		lb.hits++
@@ -60,13 +84,15 @@ func newLeaderBackend(t *testing.T) *leaderBackend {
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("from-leader"))
 	}))
+	lb.srv.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}}
+	lb.srv.StartTLS()
 	t.Cleanup(lb.srv.Close)
 	return lb
 }
 
 // hostPort returns the backend's host:port.
 func (lb *leaderBackend) hostPort() string {
-	return strings.TrimPrefix(lb.srv.URL, "http://")
+	return strings.TrimPrefix(lb.srv.URL, "https://")
 }
 
 func (lb *leaderBackend) snapshot() (hits int, method, path, body, forwarded string) {
@@ -140,7 +166,6 @@ func TestLeaderForwardRouting(t *testing.T) {
 	if err != nil {
 		t.Fatalf("split backend host:port: %v", err)
 	}
-	controlAddr := ":" + backendPort
 
 	// A closed port for the transport-error case.
 	deadLn, err := net.Listen("tcp", "127.0.0.1:0")
@@ -149,10 +174,22 @@ func TestLeaderForwardRouting(t *testing.T) {
 	}
 	deadAddr := deadLn.Addr().String()
 	_ = deadLn.Close()
+	_, deadPortStr, err := net.SplitHostPort(deadAddr)
+	if err != nil {
+		t.Fatalf("split dead host:port: %v", err)
+	}
+	deadPort, err := strconv.Atoi(deadPortStr)
+	if err != nil {
+		t.Fatalf("parse dead port: %v", err)
+	}
 
 	env := newTestEnv(t)
 	s := env.server
-	s.cfg.ControlAddr = controlAddr
+	s.mintingCA = backend.mintingCA
+	s.internalControlPort, err = strconv.Atoi(backendPort)
+	if err != nil {
+		t.Fatalf("parse backend port: %v", err)
+	}
 	if err := s.buildLeaderForward(); err != nil {
 		t.Fatalf("buildLeaderForward: %v", err)
 	}
@@ -162,7 +199,7 @@ func TestLeaderForwardRouting(t *testing.T) {
 		name          string
 		leader        bool
 		addr          string
-		controlAddr   string
+		deadPort      bool
 		method        string
 		path          string
 		body          string
@@ -263,15 +300,15 @@ func TestLeaderForwardRouting(t *testing.T) {
 			wantBody:   `{"message":"no raft leader available"}`,
 		},
 		{
-			name:        "leader unreachable",
-			leader:      false,
-			addr:        deadAddr,
-			controlAddr: deadAddr,
-			method:      "POST",
-			path:        "/api/v1/users",
-			body:        "payload",
-			wantStatus:  http.StatusBadGateway,
-			wantBody:    `{"message":"leader unreachable"}`,
+			name:       "leader unreachable",
+			leader:     false,
+			addr:       deadAddr,
+			deadPort:   true,
+			method:     "POST",
+			path:       "/api/v1/users",
+			body:       "payload",
+			wantStatus: http.StatusBadGateway,
+			wantBody:   `{"message":"leader unreachable"}`,
 		},
 	}
 
@@ -279,11 +316,13 @@ func TestLeaderForwardRouting(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			backend.reset()
 			s.leaderInfo = &fakeLeaderInfo{leader: tc.leader, addr: tc.addr}
-			if tc.controlAddr != "" {
-				s.cfg.ControlAddr = tc.controlAddr
-				t.Cleanup(func() { s.cfg.ControlAddr = controlAddr })
+			if tc.deadPort {
+				s.internalControlPort = deadPort
+				t.Cleanup(func() {
+					s.internalControlPort, _ = strconv.Atoi(backendPort)
+				})
 			} else {
-				s.cfg.ControlAddr = controlAddr
+				s.internalControlPort, _ = strconv.Atoi(backendPort)
 			}
 
 			var body *ut.Body
@@ -328,57 +367,51 @@ func TestControlForwardTarget(t *testing.T) {
 	s := env.server
 
 	tests := []struct {
-		name        string
-		controlAddr string
-		certPath    string
-		keyPath     string
-		leaderAddr  string
-		wantScheme  string
-		wantHost    string
-		wantOK      bool
+		name       string
+		port       int
+		leaderAddr string
+		wantScheme string
+		wantHost   string
+		wantOK     bool
 	}{
 		{
-			name:        "bare dev http",
-			controlAddr: ":8080",
-			leaderAddr:  "pod-0.headless.ns.svc.cluster.local:8081",
-			wantScheme:  "http",
-			wantHost:    "pod-0.headless.ns.svc.cluster.local:8080",
-			wantOK:      true,
+			name:       "internal port https",
+			port:       8082,
+			leaderAddr: "pod-0.headless.ns.svc.cluster.local:8081",
+			wantScheme: "https",
+			wantHost:   "pod-0.headless.ns.svc.cluster.local:8082",
+			wantOK:     true,
 		},
 		{
-			name:        "tls configured https",
-			controlAddr: "0.0.0.0:8443",
-			certPath:    "/tls/tls.crt",
-			keyPath:     "/tls/tls.key",
-			leaderAddr:  "pod-1.headless.ns.svc:8081",
-			wantScheme:  "https",
-			wantHost:    "pod-1.headless.ns.svc:8443",
-			wantOK:      true,
+			name:       "svc-short leader address",
+			port:       8082,
+			leaderAddr: "pod-1.headless.ns.svc:8081",
+			wantScheme: "https",
+			wantHost:   "pod-1.headless.ns.svc:8082",
+			wantOK:     true,
 		},
 		{
-			name:        "no leader address",
-			controlAddr: ":8080",
-			leaderAddr:  "",
-			wantOK:      false,
+			name:       "no leader address",
+			port:       8082,
+			leaderAddr: "",
+			wantOK:     false,
 		},
 		{
-			name:        "malformed leader address",
-			controlAddr: ":8080",
-			leaderAddr:  "not-a-hostport",
-			wantOK:      false,
+			name:       "malformed leader address",
+			port:       8082,
+			leaderAddr: "not-a-hostport",
+			wantOK:     false,
 		},
 		{
-			name:        "malformed control address",
-			controlAddr: "not-a-hostport",
-			leaderAddr:  "pod-0.headless.ns.svc:8081",
-			wantOK:      false,
+			name:       "internal port not derived",
+			port:       0,
+			leaderAddr: "pod-0.headless.ns.svc:8081",
+			wantOK:     false,
 		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			s.cfg.ControlAddr = tc.controlAddr
-			s.cfg.CertPath = tc.certPath
-			s.cfg.KeyPath = tc.keyPath
+			s.internalControlPort = tc.port
 			scheme, host, ok := s.controlForwardTarget(tc.leaderAddr)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
@@ -397,11 +430,12 @@ func TestLeaderForwardTLSConfig(t *testing.T) {
 	env := newTestEnv(t)
 	s := env.server
 
-	pool := x509.NewCertPool()
-	s.leaderForwardRootCAs = pool
 	cfg := s.leaderForwardTLSConfig()
-	if cfg.RootCAs != pool {
-		t.Fatal("embedded mode must use the injected minting CA pool as RootCAs")
+	if cfg.RootCAs == nil {
+		t.Fatal("the forward hop must set a RootCAs pool")
+	}
+	if !cfg.RootCAs.Equal(s.mintingCA.CertPool()) {
+		t.Fatal("the forward hop must unconditionally use the minting CA pool as RootCAs")
 	}
 	if cfg.ServerName != "" {
 		t.Fatalf("ServerName = %q, want empty so Go derives it from the dialed leader FQDN", cfg.ServerName)
@@ -411,13 +445,6 @@ func TestLeaderForwardTLSConfig(t *testing.T) {
 	}
 	if cfg.InsecureSkipVerify {
 		t.Fatal("InsecureSkipVerify must never be enabled for the forward hop")
-	}
-
-	// cert-manager/external: nil pool = system pool.
-	s.leaderForwardRootCAs = nil
-	cfg = s.leaderForwardTLSConfig()
-	if cfg.RootCAs != nil {
-		t.Fatal("cert-manager/external mode must leave RootCAs nil (system pool)")
 	}
 }
 
@@ -467,7 +494,7 @@ func TestLeaderForwardTLSVerification(t *testing.T) {
 
 	env := newTestEnv(t)
 	s := env.server
-	s.leaderForwardRootCAs = ca.CertPool()
+	s.mintingCA = ca
 
 	good := s.leaderForwardTLSConfig()
 	good.ServerName = "leader.headless.ns.svc.cluster.local"
@@ -491,7 +518,24 @@ func TestLeaderForwardStreamsSSE(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseNow := func() { releaseOnce.Do(func() { close(release) }) }
-	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	ca, err := repository.NewMintingCA(time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+	certPEM, keyPEM, err := ca.IssuePeerCertificate(
+		"supervisor-internal", "dagger-kubernetes",
+		[]string{"localhost"},
+		[]net.IP{net.ParseIP("127.0.0.1")},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("IssuePeerCertificate: %v", err)
+	}
+	leaf, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		flusher, _ := w.(http.Flusher)
@@ -505,11 +549,13 @@ func TestLeaderForwardStreamsSSE(t *testing.T) {
 			flusher.Flush()
 		}
 	}))
+	backend.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}}
+	backend.StartTLS()
 	t.Cleanup(func() {
 		releaseNow()
 		backend.Close()
 	})
-	backendHostPort := strings.TrimPrefix(backend.URL, "http://")
+	backendHostPort := strings.TrimPrefix(backend.URL, "https://")
 	_, backendPort, err := net.SplitHostPort(backendHostPort)
 	if err != nil {
 		t.Fatalf("split backend: %v", err)
@@ -518,7 +564,11 @@ func TestLeaderForwardStreamsSSE(t *testing.T) {
 	env := newTestEnv(t)
 	s := env.server
 	s.leaderInfo = &fakeLeaderInfo{leader: false, addr: backendHostPort}
-	s.cfg.ControlAddr = ":" + backendPort
+	s.mintingCA = ca
+	s.internalControlPort, err = strconv.Atoi(backendPort)
+	if err != nil {
+		t.Fatalf("parse backend port: %v", err)
+	}
 	if err := s.buildLeaderForward(); err != nil {
 		t.Fatalf("buildLeaderForward: %v", err)
 	}

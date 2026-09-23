@@ -167,10 +167,6 @@ type Deps struct {
 	// LeaderInfo is the Raft store view used by the leader-forward middleware
 	// and the data-plane relay. nil disables both (single-node / tests).
 	LeaderInfo leaderInfo
-	// LeaderForwardRootCAs verifies the leader's control-plane certificate on
-	// the internal forward hop. nil = system pool (cert-manager/external);
-	// embedded mode injects the shared minting CA pool.
-	LeaderForwardRootCAs *x509.CertPool
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -205,27 +201,28 @@ type ServerConfig struct {
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
 type Server struct {
-	cfg             *ServerConfig
-	logger          *logrus.Logger
-	metrics         *observ.Metrics
-	mintingCA       domain.MintingCA
-	fleetManager    *service.Manager
-	sessions        domain.SessionStore
-	sessionRegistry domain.SessionRegistry
-	versionResolver domain.VersionResolver
-	liveHub         *repository.LiveHub
-	lifecycle       *service.PipelineLifecycle
-	traces          domain.TraceRepository
-	logs            domain.LogRepository
-	hertz           *server.Hertz
-	tlsListener     net.Listener
-	relayListener   net.Listener
-	relayInPort     int
-	dataConnSem     chan struct{}
-	leaderInfo      leaderInfo
-	leaderProxy     *reverseproxy.ReverseProxy
-
-	leaderForwardRootCAs *x509.CertPool
+	cfg                 *ServerConfig
+	logger              *logrus.Logger
+	metrics             *observ.Metrics
+	mintingCA           domain.MintingCA
+	fleetManager        *service.Manager
+	sessions            domain.SessionStore
+	sessionRegistry     domain.SessionRegistry
+	versionResolver     domain.VersionResolver
+	liveHub             *repository.LiveHub
+	lifecycle           *service.PipelineLifecycle
+	traces              domain.TraceRepository
+	logs                domain.LogRepository
+	hertz               *server.Hertz
+	internalHertz       *server.Hertz
+	internalListener    net.Listener
+	internalControlPort int
+	tlsListener         net.Listener
+	relayListener       net.Listener
+	relayInPort         int
+	dataConnSem         chan struct{}
+	leaderInfo          leaderInfo
+	leaderProxy         *reverseproxy.ReverseProxy
 
 	// Auth + RBAC collaborators.
 	auth                *service.AuthService
@@ -277,8 +274,6 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		logs:            deps.Logs,
 		dataConnSem:     make(chan struct{}, maxDataConnections),
 		leaderInfo:      deps.LeaderInfo,
-
-		leaderForwardRootCAs: deps.LeaderForwardRootCAs,
 
 		auth:                deps.Auth,
 		internalAuthEnabled: deps.InternalAuthEnabled,
@@ -336,6 +331,11 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 			s.logger.WithError(err).Error("control plane error")
 		}
 	}()
+
+	// Boot the internal-only control listener (ADR-041) right after the
+	// control plane. It serves the same route table over a minting-CA leaf on
+	// control+2 and carries the leader-forward hop. Failures are log-only.
+	s.startInternalControlListener()
 
 	// Log exactly which certificate the data plane is about to serve. When
 	// clients fail to trust it (or hang in "connecting to engine"), this is
@@ -581,6 +581,16 @@ func (s *Server) configure() (*server.Hertz, error) {
 		return nil, fmt.Errorf("build leader forward proxy: %w", err)
 	}
 
+	s.registerRoutes(h)
+
+	return h, nil
+}
+
+// registerRoutes registers the full middleware stack + route table on h. It
+// is shared by the public control listener and the internal-only control
+// listener (ADR-041), so both serve the identical stack (request log,
+// security headers, CORS, leaderForward, per-handler auth) with no drift.
+func (s *Server) registerRoutes(h *server.Hertz) {
 	h.Use(s.requestLog())
 	h.Use(s.securityHeaders())
 	h.Use(s.corsMiddleware())
@@ -669,8 +679,6 @@ func (s *Server) configure() (*server.Hertz, error) {
 	h.GET("/metrics", adaptor.HertzHandler(promhttp.Handler()))
 
 	h.NoRoute(s.handleNoRoute)
-
-	return h, nil
 }
 
 // buildProxies constructs the reverse proxies once at startup (B6) instead of
@@ -744,6 +752,12 @@ func (s *Server) newHertzProxy(targetURL string, director func(*protocol.Request
 
 // Shutdown stops both listeners.
 func (s *Server) Shutdown(ctx context.Context) error {
+	if s.internalListener != nil {
+		_ = s.internalListener.Close()
+	}
+	if s.internalHertz != nil {
+		_ = s.internalHertz.Shutdown(ctx)
+	}
 	if s.relayListener != nil {
 		_ = s.relayListener.Close()
 	}

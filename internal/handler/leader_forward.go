@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -98,38 +99,31 @@ func (s *Server) leaderForward() app.HandlerFunc {
 	}
 }
 
-// controlForwardTarget derives the scheme + host:port of the leader's control
-// plane from the leader's Raft address and this server's config. The leader's
-// Raft address carries the pod FQDN; the control port comes from ControlAddr
-// (all pods in a fleet use the same control port). The scheme is https when a
-// control-plane certificate is configured, http for a bare dev deployment.
+// controlForwardTarget derives the scheme + host:port of the leader's internal
+// control listener from the leader's Raft address and this server's derived
+// internal control port. The leader's Raft address carries the pod FQDN; the
+// port comes from internalControlPort (control_addr port + 2, all pods in a
+// fleet derive the same value). The scheme is always https: the internal
+// listener always carries a minting-CA-signed leaf (ADR-041).
 func (s *Server) controlForwardTarget(leaderAddress string) (scheme, hostPort string, ok bool) {
 	host, _, err := net.SplitHostPort(leaderAddress)
 	if err != nil || host == "" {
 		return "", "", false
 	}
-	_, controlPort, err := net.SplitHostPort(s.cfg.ControlAddr)
-	if err != nil || controlPort == "" {
+	if s.internalControlPort <= 0 {
 		return "", "", false
 	}
-	scheme = "http"
-	if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
-		scheme = "https"
-	}
-	return scheme, net.JoinHostPort(host, controlPort), true
+	return "https", net.JoinHostPort(host, strconv.Itoa(s.internalControlPort)), true
 }
 
 // leaderForwardTLSConfig builds the client TLS config for the internal forward
 // hop. Verification is full — certificate verification is never disabled:
-// RootCAs is the injected per-provider pool (nil = system pool for
-// cert-manager/external), and ServerName is left empty so Go's tls.Client
-// derives it from the dialed leader FQDN. Minimum version TLS 1.2.
+// RootCAs is unconditionally the shared minting-CA pool (the internal listener
+// always serves a minting-CA leaf in every provider mode), and ServerName is
+// left empty so Go's tls.Client derives it from the dialed leader FQDN.
+// Minimum version TLS 1.2.
 func (s *Server) leaderForwardTLSConfig() *tls.Config {
-	tlsCfg := &tls.Config{MinVersion: tls.VersionTLS12}
-	if s.leaderForwardRootCAs != nil {
-		tlsCfg.RootCAs = s.leaderForwardRootCAs
-	}
-	return tlsCfg
+	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: s.mintingCA.CertPool()}
 }
 
 // buildLeaderForward constructs the reverse proxy used by leaderForward. One
