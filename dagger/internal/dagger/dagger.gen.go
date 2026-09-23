@@ -257,6 +257,12 @@ type HelmID string
 type ID string
 
 // A unique identifier for an object.
+type ImageBuildID string
+
+// A unique identifier for an object.
+type ImageID string
+
+// A unique identifier for an object.
 type InputTypeDefID string
 
 // A unique identifier for an object.
@@ -13131,6 +13137,26 @@ func (r *Query) LoadHelmFromID(id HelmID) *Helm {
 	q = q.Arg("id", id)
 
 	return &Helm{
+		query: q,
+	}
+}
+
+// Load a ImageBuild from its ID.
+func (r *Query) LoadImageBuildFromID(id ImageBuildID) *ImageBuild {
+	q := r.query.Select("loadImageBuildFromID")
+	q = q.Arg("id", id)
+
+	return &ImageBuild{
+		query: q,
+	}
+}
+
+// Load a Image from its ID.
+func (r *Query) LoadImageFromID(id ImageID) *Image {
+	q := r.query.Select("loadImageFromID")
+	q = q.Arg("id", id)
+
+	return &Image{
 		query: q,
 	}
 }

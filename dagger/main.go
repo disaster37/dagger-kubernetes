@@ -1,10 +1,11 @@
 // dagger-kubernetes is the local Dagger CI module for the dagger-kubernetes project.
 //
-// It delegates lint and build to the golang module and helm lint to the helm
-// module from github.com/disaster37/dagger-library-go (pinned at 2.0.10). Test,
-// UI, docker, and the helm template matrix are implemented locally because the
-// upstream modules cannot express -race, the UI build, the Dockerfile smoke
-// test, or helm template.
+// It delegates lint and build to the golang module, helm lint to the helm
+// module, and the publish push to the image module, all from
+// github.com/disaster37/dagger-library-go (golang/helm pinned at 2.0.12, image
+// at 2.0.19). Test, UI, docker, and the helm template matrix are implemented
+// locally because the upstream modules cannot express -race, the UI build, the
+// Dockerfile smoke test, or helm template.
 package main
 
 import (
@@ -13,6 +14,7 @@ import (
 	"strings"
 
 	"dagger/dagger-kubernetes/internal/dagger"
+	"dagger/dagger-kubernetes/internal/ref"
 )
 
 const (
@@ -281,46 +283,80 @@ func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 	return nil
 }
 
-// Publish builds the Docker image and pushes it to GHCR with the given
-// version tag. Registry credentials are required for authentication.
+// Publish builds the root Docker image and pushes it to a container registry
+// (GHCR by default) under the given tag. It reuses Docker (Dockerfile build +
+// `-h` smoke test), optionally runs the full quality gate, then delegates the
+// push to the disaster37/dagger-library-go image module (2.0.19). Returns the
+// published image reference including its digest.
 //
-// Returns the fully-qualified image reference with digest on success.
+// For GHCR, pass --registry-username env:GHCR_USERNAME and
+// --registry-password env:GHCR_TOKEN (a PAT with write:packages).
 func (m *DaggerKubernetes) Publish(
 	ctx context.Context,
-	// semver release tag (e.g. "v0.0.1-alpha4")
+	// Image tag to publish under (e.g. "dev", "v0.1.0", or a git SHA). The image
+	// dependency normalizes semver tags ("v0.1.0" → "0.1.0"); non-semver tags
+	// pass through verbatim.
 	// +required
-	version string,
-	// registry address for authentication (e.g. "ghcr.io")
+	tag string,
+	// Registry host (no scheme) to push to (e.g. "ghcr.io").
 	// +optional
 	registry string,
-	// registry username for authentication
-	// +required
-	registryUsername string,
-	// registry password for authentication
-	// +required
+	// Image repository (no registry host), e.g. "disaster37/dagger-kubernetes".
+	// +optional
+	image string,
+	// Registry username (GHCR: your GitHub username), passed as a Secret.
+	// +optional
+	registryUsername *dagger.Secret,
+	// Registry password/token (GHCR: a PAT with write:packages), as a Secret.
+	// +optional
 	registryPassword *dagger.Secret,
+	// Run the full quality gate (Lint + Test + Ui) before pushing.
+	// +optional
+	gates bool,
 ) (string, error) {
-	const defaultRegistry = "ghcr.io"
+	const (
+		defaultRegistry = "ghcr.io"
+		defaultImage    = "disaster37/dagger-kubernetes"
+	)
 	if registry == "" {
 		registry = defaultRegistry
 	}
-	tag := strings.TrimPrefix(version, "v")
-	addr := fmt.Sprintf("%s/%s:%s", registry, "disaster/dagger-kubernetes", tag)
-
-	if _, err := m.Lint(ctx); err != nil {
-		return "", fmt.Errorf("lint: %w", err)
-	}
-	if _, err := m.Test(ctx); err != nil {
-		return "", fmt.Errorf("test: %w", err)
-	}
-	if _, err := m.Ui(ctx); err != nil {
-		return "", fmt.Errorf("ui: %w", err)
+	if image == "" {
+		image = defaultImage
 	}
 
-	ctr := m.Src.DockerBuild().
-		WithRegistryAuth(defaultRegistry, registryUsername, registryPassword)
+	if err := ref.Validate(registry, image, tag); err != nil {
+		return "", err
+	}
 
-	digest, err := ctr.Publish(ctx, addr)
+	if (registryUsername == nil) != (registryPassword == nil) {
+		return "", fmt.Errorf("registry credentials: registryUsername and registryPassword must be provided together")
+	}
+
+	if gates {
+		if _, err := m.Lint(ctx); err != nil {
+			return "", fmt.Errorf("lint: %w", err)
+		}
+		if _, err := m.Test(ctx); err != nil {
+			return "", fmt.Errorf("test: %w", err)
+		}
+		if _, err := m.Ui(ctx); err != nil {
+			return "", fmt.Errorf("ui: %w", err)
+		}
+	}
+
+	ctr, err := m.Docker(ctx)
+	if err != nil {
+		return "", fmt.Errorf("docker: %w", err)
+	}
+
+	build := dag.Image(dagger.ImageOpts{BuildContainer: ctr}).
+		Build(m.Src, dagger.ImageBuildOpts{Dockerfile: "Dockerfile"})
+
+	digest, err := build.Push(ctx, image, tag, registry, dagger.ImageBuildPushOpts{
+		WithRegistryUsername: registryUsername,
+		WithRegistryPassword: registryPassword,
+	})
 	if err != nil {
 		return "", fmt.Errorf("docker publish: %w", err)
 	}
