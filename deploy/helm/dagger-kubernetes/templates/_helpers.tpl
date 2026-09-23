@@ -32,12 +32,106 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- default .Release.Namespace .Values.namespace -}}
 {{- end -}}
 
+{{/* Compute a dependency subchart's Service name using that subchart's own
+fullname rule (the shared "contains" pattern of grafana/tempo, grafana/loki,
+minio, and opentelemetry-collector). Args (dict):
+  name    - the subchart's effective Chart.Name (Helm sets .Chart.Name to the
+            Chart.yaml alias when one is declared)
+  values  - the subchart's values dict (e.g. .Values.tempo, .Values.minio)
+  release - the release name
+*/}}
+{{- define "dagger-kubernetes.subchartServiceName" -}}
+{{- $values := .values | default dict -}}
+{{- if $values.fullnameOverride -}}
+{{- $values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default .name $values.nameOverride -}}
+{{- if contains $name .release -}}
+{{- .release | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- printf "%s-%s" .release $name | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.tempoServiceName" -}}
+{{- include "dagger-kubernetes.subchartServiceName" (dict "name" "tempo" "values" .Values.tempo "release" .Release.Name) -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.lokiServiceName" -}}
+{{- $name := "loki" -}}
+{{- $enterprise := ((.Values.loki | default dict).enterprise | default dict) -}}
+{{- if $enterprise.enabled -}}{{- $name = "enterprise-logs" -}}{{- end -}}
+{{- include "dagger-kubernetes.subchartServiceName" (dict "name" $name "values" .Values.loki "release" .Release.Name) -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.minioServiceName" -}}
+{{- include "dagger-kubernetes.subchartServiceName" (dict "name" "minio" "values" .Values.minio "release" .Release.Name) -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.otelCollectorServiceName" -}}
+{{- include "dagger-kubernetes.subchartServiceName" (dict "name" "opentelemetry-collector" "values" (index .Values "opentelemetry-collector") "release" .Release.Name) -}}
+{{- end -}}
+
+{{/* VictoriaMetrics server Service name (victoria-metrics-single 0.44.0,
+aliased "victoria" in Chart.yaml — Helm sets .Chart.Name to the alias inside
+the subchart, so vm.fullname builds from "victoria"). Replicates
+vm.plain.fullname: server.fullnameOverride wins, then the legacy
+"<release>-victoria-server" name (default), or "vmvictoria-<release>" when
+useLegacyNaming is false (vm.operator.kind derives the prefix from the aliased
+chart name); server.useLegacyNaming overrides the chart-level key. */}}
+{{- define "dagger-kubernetes.victoriaServerServiceName" -}}
+{{- $sub := .Values.victoria | default dict -}}
+{{- $server := $sub.server | default dict -}}
+{{- if $server.fullnameOverride -}}
+{{- $server.fullnameOverride | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $legacy := true -}}
+{{- if hasKey $sub "useLegacyNaming" -}}
+{{- $legacy = ne (toString $sub.useLegacyNaming) "false" -}}
+{{- end -}}
+{{- if hasKey $server "useLegacyNaming" -}}
+{{- $legacy = ne (toString $server.useLegacyNaming) "false" -}}
+{{- end -}}
+{{- if not $legacy -}}
+{{- printf "vmvictoria-%s" .Release.Name | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $fo := default (($sub.global | default dict).fullnameOverride) $sub.fullnameOverride -}}
+{{- if $fo -}}
+{{- printf "%s-server" $fo | trunc 63 | trimSuffix "-" -}}
+{{- else -}}
+{{- $name := default "victoria" $sub.nameOverride -}}
+{{- $base := "" -}}
+{{- if contains $name .Release.Name -}}{{- $base = .Release.Name -}}{{- else -}}{{- $base = printf "%s-%s" .Release.Name $name -}}{{- end -}}
+{{- printf "%s-server" $base | trunc 63 | trimSuffix "-" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Service names for the OTel collector's exporters. The collector config is
+rendered by the opentelemetry-collector subchart's tpl, whose scope sees only
+its own .Values plus .Values.global and .Release — so the names come from
+global.daggerKubernetes.serviceNames.* (set in lock-step with a subchart
+fullnameOverride), defaulting to the subcharts' real Service names. */}}
+{{- define "dagger-kubernetes.otelTempoService" -}}
+{{- default (printf "%s-tempo" .Release.Name) (.Values.global.daggerKubernetes.serviceNames.tempo) -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.otelLokiService" -}}
+{{- default (printf "%s-loki" .Release.Name) (.Values.global.daggerKubernetes.serviceNames.loki) -}}
+{{- end -}}
+
+{{- define "dagger-kubernetes.otelVictoriaService" -}}
+{{- default (printf "%s-victoria-server" .Release.Name) (.Values.global.daggerKubernetes.serviceNames.victoria) -}}
+{{- end -}}
+
 {{/* Resolve the OTLP collector URL: use the dependency Service when enabled.
 Always the <service>.<namespace>.svc form (see CONTRIBUTING.md): a single
 `.svc` NO_PROXY entry exempts every in-cluster component from the proxy. */}}
 {{- define "dagger-kubernetes.collectorUrl" -}}
 {{- $ns := include "dagger-kubernetes.namespace" . -}}
-{{- $auto := printf "http://%s-opentelemetry-collector.%s.svc:4318" .Release.Name $ns -}}
+{{- $auto := printf "http://%s.%s.svc:4318" (include "dagger-kubernetes.otelCollectorServiceName" .) $ns -}}
 {{- if index .Values "opentelemetry-collector" "enabled" -}}
 {{- $auto -}}
 {{- else -}}
@@ -62,7 +156,7 @@ service. */}}
 {{- if .Values.supervisor.config.cache.s3.endpoint -}}
 {{- .Values.supervisor.config.cache.s3.endpoint -}}
 {{- else if .Values.minio.enabled -}}
-{{- printf "%s-minio.%s.svc:%v" .Release.Name (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
+{{- printf "%s.%s.svc:%v" (include "dagger-kubernetes.minioServiceName" .) (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
 {{- else -}}
 {{- "" -}}
 {{- end -}}
@@ -107,7 +201,7 @@ otherwise the in-cluster MinIO service when the subchart is enabled. */}}
 {{- if .Values.imageCache.storage.s3.endpoint -}}
 {{- .Values.imageCache.storage.s3.endpoint -}}
 {{- else if .Values.minio.enabled -}}
-{{- printf "%s-minio.%s.svc:%v" .Release.Name (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
+{{- printf "%s.%s.svc:%v" (include "dagger-kubernetes.minioServiceName" .) (include "dagger-kubernetes.namespace" .) (.Values.minio.service.port | default 9000) -}}
 {{- else -}}
 {{- "" -}}
 {{- end -}}
@@ -188,7 +282,7 @@ image-cache mirror addresses (one per enabled upstream). */}}
 <service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.tempoUrl" -}}
 {{- $ns := include "dagger-kubernetes.namespace" . -}}
-{{- $auto := printf "http://%s-tempo.%s.svc:3200" .Release.Name $ns -}}
+{{- $auto := printf "http://%s.%s.svc:3200" (include "dagger-kubernetes.tempoServiceName" .) $ns -}}
 {{- if .Values.tempo.enabled -}}
 {{- $auto -}}
 {{- else -}}
@@ -200,7 +294,7 @@ image-cache mirror addresses (one per enabled upstream). */}}
 <service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.lokiUrl" -}}
 {{- $ns := include "dagger-kubernetes.namespace" . -}}
-{{- $auto := printf "http://%s-loki.%s.svc:3100" .Release.Name $ns -}}
+{{- $auto := printf "http://%s.%s.svc:3100" (include "dagger-kubernetes.lokiServiceName" .) $ns -}}
 {{- if .Values.loki.enabled -}}
 {{- $auto -}}
 {{- else -}}
@@ -212,7 +306,7 @@ image-cache mirror addresses (one per enabled upstream). */}}
 in the <service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- define "dagger-kubernetes.victoriaUrl" -}}
 {{- $ns := include "dagger-kubernetes.namespace" . -}}
-{{- $auto := printf "http://%s-victoria-server.%s.svc:8428" .Release.Name $ns -}}
+{{- $auto := printf "http://%s.%s.svc:8428" (include "dagger-kubernetes.victoriaServerServiceName" .) $ns -}}
 {{- if .Values.victoria.enabled -}}
 {{- $auto -}}
 {{- else -}}

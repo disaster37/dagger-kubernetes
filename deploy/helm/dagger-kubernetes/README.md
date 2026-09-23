@@ -463,6 +463,13 @@ service names or `.svc.<cluster-domain>` FQDNs — so a single `.svc` entry in
 `NO_PROXY` covers every in-cluster component when `HTTP_PROXY` is set on the
 supervisor (e.g. to download the Dagger CLI). See `CONTRIBUTING.md`.
 
+The `<release>-<svc>` names in the table are defaults: every dependency
+Service name is derived from that subchart's own fullname rules, so setting
+`fullnameOverride` or `nameOverride` on a subchart is honored automatically.
+The one exception is the collector's exporters, which are rendered in the
+subchart's scope and follow `global.daggerKubernetes.serviceNames.*` — see
+[Cross-subchart service names](#cross-subchart-service-names-collector-exporters).
+
 ### Raft (distributed store)
 
 The supervisor persists RBAC state, trace metadata, and the cache routing tables
@@ -628,6 +635,21 @@ Configure it under `supervisor.config.history`:
 | `fullnameOverride` | string | `""` | Override the full name of the release. |
 | `namespace` | string | `""` | Namespace for the supervisor and subchart dependencies. Defaults to the release namespace when empty. |
 
+### Cross-subchart service names (collector exporters)
+
+The OTel collector config is rendered by the `opentelemetry-collector`
+subchart, whose template scope cannot see the parent's `tempo`/`loki`/`victoria`
+values. To point the collector's exporters at a renamed backend, set the
+matching value here *in addition to* the subchart's own `fullnameOverride`
+(keep both in lock step — the collector exporters are the one place a subchart
+rename is not auto-derived). Empty = auto (`<release>-<default-name>`).
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `global.daggerKubernetes.serviceNames.tempo` | string | `""` | Tempo Service name used by the collector's `otlphttp/tempo` exporter (empty = `<release>-tempo`). |
+| `global.daggerKubernetes.serviceNames.loki` | string | `""` | Loki Service name used by the collector's `loki` exporter (empty = `<release>-loki`). |
+| `global.daggerKubernetes.serviceNames.victoria` | string | `""` | VictoriaMetrics Service name used by the collector's `prometheusremotewrite` exporter (empty = `<release>-victoria-server`). |
+
 ### Supervisor
 
 | Name | Type | Default | Description |
@@ -670,13 +692,13 @@ Configure it under `supervisor.config.history`:
 | `supervisor.config.raft.tls.enabled` | bool | `true` | Enable mTLS for the Raft transport. |
 | `supervisor.config.raft.tls.clientAuth` | bool | `true` | Require and verify peer client certs (mTLS). |
 | `supervisor.config.raft.clusterDomain` | string | `"cluster.local"` | Cluster DNS suffix appended to peer addresses (`<pod>.<headless>.<ns>.svc.<clusterDomain>`). Default `"cluster.local"` produces fully-qualified names that bypass CoreDNS negative-cache poisoning (short `.svc` names go through the cache plugin which can serve stale NXDOMAIN for up to 30 s during bootstrap). Set to `""` only when your cluster DNS does not serve the `cluster.local` suffix. |
-| `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled). |
-| `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled). |
-| `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled). |
-| `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled). |
+| `supervisor.config.telemetry.collectorUrl` | string | `""` | OTel collector URL (auto-wired to `<release>-opentelemetry-collector.<namespace>.svc:4318` when the opentelemetry-collector subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`). |
+| `supervisor.config.telemetry.tempoUrl` | string | `""` | Tempo URL for trace queries (auto-wired to `<release>-tempo.<namespace>.svc:3200` when the tempo subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`). |
+| `supervisor.config.telemetry.lokiUrl` | string | `""` | Loki URL for log queries (auto-wired to `<release>-loki.<namespace>.svc:3100` when the loki subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`). |
+| `supervisor.config.telemetry.victoriaUrl` | string | `""` | VictoriaMetrics URL for metric queries (auto-wired to `<release>-victoria-server.<namespace>.svc:8428` when the victoria subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `server.fullnameOverride`). |
 | `supervisor.config.cache.s3.bucket` | string | `""` | S3 bucket name (empty = auto-created MinIO bucket, `dagger-cache`). |
 | `supervisor.config.cache.s3.region` | string | `"us-east-1"` | S3 region (ignored by MinIO). |
-| `supervisor.config.cache.s3.endpoint` | string | `""` | S3-compatible endpoint for the shared S3 client (CLI cache). Auto-wired to `<release>-minio.<namespace>.svc:9000` when the minio subchart is enabled. |
+| `supervisor.config.cache.s3.endpoint` | string | `""` | S3-compatible endpoint for the shared S3 client (CLI cache). Auto-wired to `<release>-minio.<namespace>.svc:9000` when the minio subchart is enabled; the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`. |
 | `supervisor.config.cache.s3.useSSL` | bool | `false` | Use HTTPS for the S3 endpoint. |
 | `supervisor.config.cache.s3.accessKey` | string | `""` | S3 access key. Leave empty: the supervisor reads it from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY`. |
 | `supervisor.config.cache.s3.secretKey` | string | `""` | S3 secret key. Leave empty: the supervisor reads it from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY`. |
@@ -739,7 +761,7 @@ Configure it under `supervisor.config.history`:
 | `imageCache.storage.backend` | string | `"s3"` | Mirror storage backend: `s3` (shared MinIO) or `pvc` (per-mirror PVC). |
 | `imageCache.storage.s3.bucket` | string | `"image-cache"` | S3 bucket for cached blobs (auto-created when `minio.enabled`). |
 | `imageCache.storage.s3.region` | string | `"us-east-1"` | S3 region (ignored by MinIO). |
-| `imageCache.storage.s3.endpoint` | string | `""` | S3 endpoint; auto-wired to `<release>-minio.<namespace>.svc:9000` when `minio.enabled`. |
+| `imageCache.storage.s3.endpoint` | string | `""` | S3 endpoint; auto-wired to `<release>-minio.<namespace>.svc:9000` when `minio.enabled` (the Service name follows the subchart's own fullname rules and honors its `fullnameOverride`/`nameOverride`). |
 | `imageCache.storage.s3.forcePathStyle` | bool | `true` | Use path-style S3 addressing (required by MinIO). |
 | `imageCache.storage.s3.secure` | bool | `false` | Use HTTPS for the S3 endpoint. |
 | `imageCache.storage.pvc.storageClass` | string | `""` | StorageClass for per-mirror PVCs (empty = cluster default). |

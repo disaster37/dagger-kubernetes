@@ -1642,6 +1642,12 @@ on the supervisor; see `CONTRIBUTING.md`):
 | Loki | `telemetry.loki_url` | `<release>-loki.<namespace>.svc:3100` |
 | VictoriaMetrics | `telemetry.victoria_url` | `<release>-victoria-server.<namespace>.svc:8428` |
 
+These names are the defaults: each Service name is derived from the
+corresponding subchart's own fullname rules at render time, so a subchart's
+`fullnameOverride`/`nameOverride` is honored automatically (the collector's
+exporters follow `global.daggerKubernetes.serviceNames.*` instead — see the
+chart README).
+
 To export the Supervisor's *own* OTLP (e.g. to the same collector), set
 `otel.otlp_endpoint`. Leave it empty to disable.
 
