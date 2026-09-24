@@ -968,6 +968,15 @@ more **groups**; groups carry engine-session quotas and project visibility.
   groups-claim allowlist (`allowed_orgs` remains a deprecated alias; the
   effective allowlist is their union). Covers Dex, Keycloak, Google, Auth0, etc.
 
+Internal (username/password) auth and an OAuth/OIDC provider can be enabled
+**concurrently** (`auth.internal.enabled: true` **and**
+`auth.oauth.enabled: true`): the sign-in screen offers both login paths,
+`GET /api/v1/auth/providers` reports `internal`, `oauth_github` and `oauth_oidc`
+independently, and only OAuth users are subject to IdP membership
+revalidation — internal users carry no `oauth_provider` and bypass the
+revalidator entirely (ADR-042). The only hard failure is disabling *both*:
+the supervisor refuses to start.
+
 Both providers support **regex group mapping** via `group_mappings`: an ordered
 list of `{pattern, replacement}` rules applied to the upstream provider groups
 (GitHub orgs + `"org/team"` teams; OIDC `groups_claim`). The first matching
@@ -1155,6 +1164,41 @@ oauth2:
 Pair it with `auth.oauth.session_max_age` (e.g. `"720h"`) as the hard backstop
 that forces a full re-login — and therefore a fresh allowlist evaluation — on a
 bounded schedule.
+
+**Bundled test IdP (Dex + OpenLDAP subcharts).** The Helm chart ships Dex and
+OpenLDAP as optional, condition-gated dependencies (`dex.enabled` /
+`openldap.enabled`, both `false` by default; ADR-042). Enabling both installs
+Dex behind `https://dex-test.home.webcenter.fr` (nginx ingress, cert-manager
+Let's Encrypt — publicly trusted, so `auth.oauth.ca_cert_path` is not needed)
+plus an in-cluster OpenLDAP seeded with a test user (`jane`) and group (`devs`)
+via `customLdifFiles`; Dex's LDAP connector is what provides `groups` +
+refresh tokens (the Dex `local`/passwordDB connector has **no** groups). The
+revalidation knobs are chart-settable as `auth.oauth.revalidateInterval`,
+`revalidateGrace`, `revalidateFailOpen` and `sessionMaxAge` (rendered to
+`revalidate_interval` / `revalidate_grace` / `revalidate_fail_open` /
+`session_max_age`). Two hard invariants: the Dex static-client secret must be
+**identical** to `auth.oauth.clientSecret` (a mismatch fails with
+`invalid_client` at the token endpoint), and issuer URLs must have **no
+trailing slash** (go-oidc discovery is trailing-slash-sensitive).
+
+**Short-expiry test tuning vs production tuning.** The bundled test IdP
+deliberately runs *tight* windows so the issue #30 expiry scenario plays out
+in minutes: Dex `refreshTokens.absoluteLifetime: 10m` / `validIfNotUsedFor:
+5m` / `reuseInterval: 5m`, `expiry.idTokens: 1m`, memory storage (a stateless
+Dex restart invalidating every refresh token **is** the intended #30
+trigger), supervisor `revalidate_interval: 30s` / `revalidate_grace: 2m`.
+`expiry.idTokens` matters for de-provisioning speed: Dex bakes the `groups`
+claim into the access token **at issuance** (default validity **24h**) and the
+supervisor refreshes a credential only once the access token is nearly
+expired — so with Dex defaults a group removal reaches the allowlist check
+only at the next refresh, up to a day later. At `1m` (oauth2's expiry delta
+is 60s) every revalidation refreshes, Dex's LDAP connector re-queries the
+directory, and removals are detected within `revalidate_interval`. This is
+test tuning only — it forces periodic re-auth. Production keeps the recipe
+above instead: persistent Dex storage (`kubernetes`), no `absoluteLifetime`,
+generous `validIfNotUsedFor`, `reuseInterval > revalidate_interval`, a finite
+`session_max_age` backstop, and an `expiry.idTokens` aligned with your
+required de-provisioning latency.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
   at most one token; the plaintext is shown once at creation/regeneration.
   Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext

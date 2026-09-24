@@ -629,6 +629,15 @@ auth:
     scopes: ["openid", "profile", "email"]
     usernameClaim: "preferred_username"
     groupsClaim: "groups"
+    ## @param auth.oauth.revalidateInterval IdP revalidation cache TTL (Go duration). Default 5m.
+    revalidateInterval: "5m"
+    ## @param auth.oauth.revalidateGrace Serve last-known-good membership for this long when the IdP is
+    ##   unreachable or the OIDC credential is unusable. Default 1h.
+    revalidateGrace: "1h"
+    ## @param auth.oauth.revalidateFailOpen After grace: false = deny (fail-closed), true = allow (fail-open).
+    revalidateFailOpen: false
+    ## @param auth.oauth.sessionMaxAge Hard bound on an OAuth session (refresh-token age); 0 = disabled.
+    sessionMaxAge: "0"
   cookie:
     accessName: "dagger_kubernetes_access"
     refreshName: "dagger_kubernetes_refresh"
@@ -1047,3 +1056,154 @@ grafana:
 podDisruptionBudget:
   enabled: true
   maxUnavailable: 1
+
+## @section Dex (OIDC identity provider, optional subchart)
+
+## @param dex.enabled Install the Dex OIDC IdP subchart. Off by default. When enabled, the
+##   supervisor's auth.oauth (provider "oidc") must point at the issuer URL below. Pair with
+##   openldap.enabled to obtain group membership (the Dex "local" passwordDB connector has no groups).
+dex:
+  enabled: false
+  image:
+    repository: ghcr.io/dexidp/dex
+    tag: "v2.44.0"
+  https:
+    enabled: false          # TLS terminates at the ingress
+  replicaCount: 1
+  # config is passed verbatim to Dex as config.yaml (configSecret.create defaults true).
+  config:
+    issuer: "https://dex-test.home.webcenter.fr"
+    storage:
+      type: memory          # in-memory: a stateless Dex restart invalidates all refresh tokens (#30 trigger)
+    web:
+      http: "0.0.0.0:5556"
+    oauth2:
+      skipApprovalScreen: true
+      refreshTokens:
+        # Short expiry to exercise issue #30 quickly on the test release. This is
+        # TEST tuning — the production "never re-auth" recipe lives in docs/README.md.
+        absoluteLifetime: "10m"
+        validIfNotUsedFor: "5m"
+        # Must comfortably exceed auth.oauth.revalidateInterval (30s): Dex rotates
+        # the refresh token on every grant, but only the Raft leader can persist a
+        # rotation (followers log "not the raft leader"). If the leader does not
+        # revalidate within reuseInterval of a follower-side rotation, the stored
+        # token generation is superseded and the credential strands until the next
+        # Dex login. Live validation missed a 1m window by 5s; 5m gives headroom.
+        reuseInterval: "5m"
+    expiry:
+      # Dex bakes the groups claim into the access token at issuance and the
+      # default id/access-token validity is 24h — a group removal would only
+      # surface at the next credential refresh (up to a day). Shortening it to
+      # 1m makes oauth2 refresh on every revalidation (expiry delta is 60s), so
+      # Dex re-queries LDAP and group changes are detected within
+      # auth.oauth.revalidateInterval. TEST tuning only.
+      idTokens: "1m"
+    staticClients:
+      - id: dagger-kubernetes
+        name: Dagger Kubernetes
+        secret: ""          # MUST equal auth.oauth.clientSecret (mismatch -> invalid_client at the token endpoint)
+        redirectURIs:
+          - "https://dagger-test.home.webcenter.fr/api/v1/auth/oauth/oidc/callback"
+    connectors:
+      - type: ldap
+        id: ldap
+        name: OpenLDAP
+        config:
+          host: "dagger-kubernetes-openldap:389"   # set via --set to <release>-openldap.<ns>.svc:389 on a named release
+          insecureNoSSL: true                      # in-cluster plaintext LDAP (dev/test only)
+          bindDN: "cn=admin,dc=example,dc=org"
+          bindPW: "admin"                          # MUST equal openldap.adminPassword
+          usernamePrompt: "Email Address"
+          userSearch:
+            baseDN: "ou=users,dc=example,dc=org"
+            filter: "(objectClass=inetOrgPerson)"
+            username: mail
+            idAttr: uid
+            emailAttr: mail
+            nameAttr: cn
+            preferredUsernameAttr: uid
+          groupSearch:
+            baseDN: "ou=groups,dc=example,dc=org"
+            filter: "(objectClass=groupOfNames)"
+            userMatchers:
+              # groupOfNames members are DNs, so the matcher must be "DN" (Dex then
+              # filters (member=<user DN>)). userAttr: uid would filter (member=jane)
+              # and never match DN-valued members (dex v2.44.0 connector/ldap/ldap.go).
+              - userAttr: DN
+                groupAttr: member
+            nameAttr: cn
+  ingress:
+    enabled: true
+    className: nginx
+    annotations:
+      cert-manager.io/cluster-issuer: letsencrypt-prod
+    hosts:
+      - host: dex-test.home.webcenter.fr
+        paths:
+          - path: /
+            pathType: Prefix
+    tls:
+      - secretName: dex-tls
+        hosts: ["dex-test.home.webcenter.fr"]
+
+## @section OpenLDAP (LDAP backend for Dex, optional subchart)
+
+## @param openldap.enabled Install an in-cluster OpenLDAP that Dex's ldap connector authenticates
+##   against (provides groups + refresh tokens + preferred_username). Off by default.
+##   Dev/test only: plaintext LDAP, example credentials. Uses the community jp-gouin
+##   openldap chart (bitnami/openldap was removed from the bitnami repo).
+openldap:
+  enabled: false
+  replicaCount: 1
+  # cn=admin,dc=example,dc=org bind password; MUST equal dex.config.connectors[0].config.bindPW.
+  adminPassword: "admin"
+  configPassword: "admin"
+  image:
+    # Must render a NON-empty name: an empty value renders the subchart's
+    # `imagePullSecrets: [- name:]` as null, which poisons Helm's 3-way patch
+    # for every later upgrade ("map[] does not contain declared merge key:
+    # name"). A missing secret is only a kubelet warning for a public image.
+    pullSecret: "openldap-pull"
+  env:
+    LDAP_TLS: "false"         # plaintext LDAP on :389 (Dex insecureNoSSL; dev/test only)
+  tls:
+    enabled: false            # no TLS secret mounted
+  replication:
+    enabled: false            # single test instance
+  ltb-passwd:
+    enabled: false            # chart defaults true (extra UI + ingress) — not wanted
+  phpldapadmin:
+    enabled: false            # chart defaults true (extra UI + ingress) — not wanted
+  # Seed the directory Dex authenticates against: user jane (jane@example.com /
+  # password) in ou=users,dc=example,dc=org and group "devs" (cn=devs) in
+  # ou=groups,dc=example,dc=org with jane as member (DN-valued member, matched
+  # by the Dex ldap connector's userAttr: DN matcher).
+  customLdifFiles:
+    01-test-users.ldif: |-
+      dn: ou=users,dc=example,dc=org
+      objectClass: top
+      objectClass: organizationalUnit
+      ou: users
+
+      dn: ou=groups,dc=example,dc=org
+      objectClass: top
+      objectClass: organizationalUnit
+      ou: groups
+
+      dn: uid=jane,ou=users,dc=example,dc=org
+      objectClass: top
+      objectClass: person
+      objectClass: organizationalPerson
+      objectClass: inetOrgPerson
+      uid: jane
+      cn: Jane Doe
+      sn: Doe
+      mail: jane@example.com
+      userPassword: password
+
+      dn: cn=devs,ou=groups,dc=example,dc=org
+      objectClass: top
+      objectClass: groupOfNames
+      cn: devs
+      member: uid=jane,ou=users,dc=example,dc=org
