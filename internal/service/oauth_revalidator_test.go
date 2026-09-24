@@ -12,7 +12,11 @@ import (
 
 // fakeRevalidateProvider is an OAuthProvider stub for revalidator tests.
 type fakeRevalidateProvider struct {
-	mu        sync.Mutex
+	mu sync.Mutex
+	// rotateTo, when set, mutates u.OAuthTokenCiphertext on every successful
+	// Revalidate — emulating the OIDC refreshingSource rotating and persisting
+	// the credential mid-check.
+	rotateTo  string
 	groups    []string
 	err       error
 	callCount int
@@ -28,6 +32,9 @@ func (f *fakeRevalidateProvider) Revalidate(ctx context.Context, u *domain.User)
 	f.callCount++
 	if f.err != nil {
 		return nil, f.err
+	}
+	if f.rotateTo != "" {
+		u.OAuthTokenCiphertext = f.rotateTo
 	}
 	out := make([]string, len(f.groups))
 	copy(out, f.groups)
@@ -276,6 +283,79 @@ func TestRevalidatorExpiredRecoversAfterRelogin(t *testing.T) {
 	}
 	if u.DeactivatedAt != nil {
 		t.Fatal("user must stay active")
+	}
+}
+
+// TestRevalidatorRefreshResnapshotsRotatedCredential: Revalidate's
+// refreshingSource may rotate and persist the credential mid-check; the
+// success block must re-snapshot entry.credential so a later stateExpired
+// entry does not look like it has a "changed credential" and force one
+// spurious re-check (issue #30 follow-up).
+func TestRevalidatorRefreshResnapshotsRotatedCredential(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeRevalidateProvider{groups: []string{"g1"}, rotateTo: "rotated"}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	now := base
+	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
+	ctx := context.Background()
+
+	// The successful Revalidate rotated the credential from the fixture's
+	// "cred-v1" to "rotated"; the entry must snapshot the rotated value.
+	gids, err := rv.Check(ctx, u)
+	if err != nil || len(gids) == 0 {
+		t.Fatalf("check: gids=%v err=%v", gids, err)
+	}
+	if u.OAuthTokenCiphertext != "rotated" {
+		t.Fatalf("user credential = %q, want %q", u.OAuthTokenCiphertext, "rotated")
+	}
+	if got := rv.cache[u.ID].credential; got != "rotated" {
+		t.Fatalf("entry.credential = %q, want %q (re-snapshot after mid-check rotation)", got, "rotated")
+	}
+
+	// A same-TTL follow-up Check must be a cache hit: the rotated credential
+	// must not be mistaken for a re-login and force a second IdP call.
+	now = base.Add(time.Minute)
+	if gids, err := rv.Check(ctx, u); err != nil || len(gids) == 0 {
+		t.Fatalf("second check: gids=%v err=%v", gids, err)
+	}
+	if provider.callCount != 1 {
+		t.Fatalf("provider calls = %d, want 1 (rotated credential must not force a re-check)", provider.callCount)
+	}
+}
+
+// TestRevalidatorColdStartExpiredFailOpenDenies: a cold-start stateExpired
+// entry (never a successful check → zero lastGood, no cached groups) must be
+// denied even with FailOpen=true — fail-open can only serve last-known-good,
+// and there is none (issue #30 residual-risk test).
+func TestRevalidatorColdStartExpiredFailOpenDenies(t *testing.T) {
+	provider := &fakeRevalidateProvider{err: errors.New("idp down")}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour, FailOpen: true}
+	rv := newTestRevalidator(t, provider, cfg)
+
+	r := newServiceDB(t)
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, OAuthProvider: "oidc", OAuthTokenCiphertext: "cred-v1"}
+	if err := r.users.Create(context.Background(), u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	rv.users = NewUserService(r.users, r.groups, testLogger())
+
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	rv.cache["u1"] = &revalidationEntry{
+		state:      stateExpired,
+		groupIDs:   nil,
+		lastGood:   time.Time{},
+		checkedAt:  base,
+		expiresAt:  base.Add(5 * time.Minute), // fresh: served directly
+		credential: u.OAuthTokenCiphertext,
+	}
+	rv.clock = func() time.Time { return base }
+
+	_, err := rv.Check(context.Background(), u)
+	if !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("err = %v, want ErrUnauthenticated (cold-start fail-open denies: no last-known-good)", err)
+	}
+	if provider.callCount != 0 {
+		t.Fatalf("provider calls = %d, want 0 (fresh entry is served, not refreshed)", provider.callCount)
 	}
 }
 

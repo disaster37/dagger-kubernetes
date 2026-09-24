@@ -42,3 +42,14 @@ dependencies:
     version: "10.5.15"
     repository: https://grafana.github.io/helm-charts
     condition: grafana.enabled
+  - name: dex
+    version: "0.24.1"
+    repository: https://charts.dexidp.io
+    condition: dex.enabled
+  # bitnami/openldap was removed from https://charts.bitnami.com/bitnami (no
+  # longer in the index, .tgz fetches 403), so the community jp-gouin openldap
+  # chart (customLdifFiles LDIF seeding) is pinned instead.
+  - name: openldap
+    version: "2.0.4"
+    repository: https://jp-gouin.github.io/helm-openldap/
+    condition: openldap.enabled

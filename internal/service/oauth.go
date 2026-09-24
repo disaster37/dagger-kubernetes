@@ -18,9 +18,12 @@ type OAuthProvider interface {
 	Complete(ctx context.Context, code string) (access, refresh string, u *domain.User, err error)
 	// Revalidate re-checks the user's current IdP group membership using the
 	// stored credential and returns the current provider group names. Returns
-	// domain.ErrSessionRevoked when the credential is invalid/expired beyond
-	// refresh (user must re-login) and domain.ErrForbidden when membership no
-	// longer satisfies the allowlist.
+	// errOAuthCredentialExpired (OIDC: the credential is unusable — expired,
+	// rotated, or revoked are indistinguishable, so this is "cannot verify",
+	// not proof of revocation) or domain.ErrSessionRevoked (GitHub: 401/404 on
+	// its never-expiring access token = genuine revocation) when the credential
+	// can no longer be used, and domain.ErrForbidden when membership no longer
+	// satisfies the allowlist.
 	Revalidate(ctx context.Context, u *domain.User) ([]string, error)
 }
 
