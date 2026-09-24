@@ -98,55 +98,6 @@ without deactivation (bounded by `session_max_age` if configured). During rollou
 operators should set `session_max_age: "24h"` to force re-login for these users,
 which then captures a credential and enables revalidation.
 
-## Revision (issue #30): `invalid_grant` is not definitive revocation
-
-Originally, any OIDC credential failure during revalidation — a refresh
-rejected with `invalid_grant`/`invalid_token` or a userinfo 401 — was returned
-as `domain.ErrSessionRevoked` and mapped to the destructive revoke path
-(deactivate the user **and** permanently delete their `dct_` API token). That
-classification is wrong: per RFC 6749 §5.2 `invalid_grant` also means the
-refresh token **expired** or was **rotated** (Dex
-`oauth2.refreshTokens.absoluteLifetime`/`validIfNotUsedFor`, a stateless Dex
-restart invalidating all refresh tokens, or the per-pod single-flight refresh
-race with `replicaCount: 3`) — the supervisor cannot distinguish these from
-genuine revocation. Valid OIDC users were deactivated "after some time" and
-their tokens died until a UI re-auth cleared `DeactivatedAt` (issue #30).
-
-The fix reclassifies ambiguous credential failures as "cannot verify":
-
-- `OIDCOAuthService.Revalidate` returns the package-private sentinel
-  `errOAuthCredentialExpired` (instead of `domain.ErrSessionRevoked`) for the
-  credential-unusable cases: decrypt failure, refresh
-  `invalid_grant`/`invalid_token`, and a userinfo 401 refresh cannot recover.
-- `OAuthRevalidator` gains a new `stateExpired` state. It is served exactly
-  like `stateUnavailable` — cached groups within `revalidate_grace`, then
-  `revalidate_fail_open`/fail-closed — but it **never** calls `revoke()`:
-  the user is never deactivated and the API token is never deleted. The cache
-  entry snapshots the credential it was built from, so a UI re-login (fresh
-  ciphertext) forces an immediate re-check instead of waiting for
-  `revalidate_interval`; `stateExpired` retries on the full
-  `revalidate_interval` so a dead credential is not hammered against the IdP.
-- **Positive revocation stays destructive**: `domain.ErrForbidden` (userinfo
-  succeeds but `allowed_groups`/`admin_groups` no longer match) still
-  deactivates + revokes, as does GitHub's `domain.ErrSessionRevoked` (401/404
-  on an access token that never expires).
-
-Behaviour matrix after the revision:
-
-| Revalidation outcome | State | Side effects |
-|---|---|---|
-| userinfo OK | `stateOK` | reconcile memberships/role |
-| userinfo OK, groups fail allowlist | `stateRevoked` | **deactivate + revoke API token** (unchanged) |
-| refresh `invalid_grant`/`invalid_token`/401 (expired/rotated/revoked) | `stateExpired` | serve cache within grace, then fail policy; **never deactivate/delete** |
-| IdP unreachable (transport) | `stateUnavailable` | existing grace/fail policy (unchanged) |
-
-No config keys changed; the existing `revalidate_grace` /
-`revalidate_fail_open` knobs express the expiry policy. Operators who want
-"never re-auth" should configure Dex with persistent storage, no
-`absoluteLifetime`, a generous `validIfNotUsedFor`, `reuseInterval >
-revalidate_interval`, and use `session_max_age` as the hard backstop (see
-`docs/README.md`).
-
 ### References
 
 - ADR-017: Auth always enforced + multi-provider OAuth

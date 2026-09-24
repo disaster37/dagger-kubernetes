@@ -94,29 +94,8 @@ auth:
     # --- IdP group-membership revalidation (ADR-027) -----------------------
     # Detects when a user is removed from the allowed OAuth group (or deleted
     # from the IdP) while already holding tokens, and revokes their access.
-    # Outcomes (behaviour matrix, issue #30):
-    #   - userinfo OK                          -> membership reconciled.
-    #   - userinfo OK but groups fail allowed_groups/admin_groups
-    #                                            -> deactivation + dct_ API-token revoke.
-    #   - OIDC refresh invalid_grant/invalid_token/401 (refresh token expired,
-    #     rotated, stateless Dex restart, or genuinely revoked — RFC 6749 §5.2
-    #     does not let the supervisor distinguish these)
-    #                                            -> "cannot verify", NEVER treated
-    #     as revocation: cached groups keep being served within revalidate_grace,
-    #     then revalidate_fail_open/fail-closed applies; the user is never
-    #     deactivated and the API token is never deleted. Re-auth on the UI
-    #     stores a fresh credential and recovers on the very next check.
-    #   - IdP unreachable (transport)          -> same grace/fail policy as above.
-    # Dex recipe for "never force re-auth while keeping revocation polling":
-    #   - persistent storage (kubernetes/sqlite3/postgres) so refresh tokens
-    #     survive Dex restarts,
-    #   - oauth2.refreshTokens: unset/large absoluteLifetime, generous
-    #     validIfNotUsedFor,
-    #   - reuseInterval > revalidate_interval (the supervisor polls per user;
-    #     also avoids multi-pod refresh races),
-    #   - session_max_age below as the hard backstop forcing periodic re-login.
     revalidate_interval: "5m"   # per-user cache TTL for successful IdP re-checks; bounds the detection delay.
-    revalidate_grace: "1h"      # serve last-known-good membership for this long when the IdP is unreachable or the OIDC credential is unusable.
+    revalidate_grace: "1h"      # serve last-known-good membership for this long when the IdP is unreachable.
     revalidate_fail_open: false # after grace, false = deny (fail-closed), true = allow (fail-open).
     session_max_age: "0"        # optional hard bound on an OAuth session (refresh-token age); 0 = disabled.
                                 #   Set e.g. "24h" during rollout to bound sessions issued before this change.

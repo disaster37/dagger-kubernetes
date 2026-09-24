@@ -1068,57 +1068,25 @@ The mechanism works as follows:
    the supervisor re-validates the user's current IdP group membership using
    the stored credential. Results are cached behind a TTL-bounded, single-flight
    cache (default interval: 5m).
-3. On **positive revocation** — userinfo succeeds but the groups no longer
-   satisfy `allowed_groups`/`admin_groups` (`domain.ErrForbidden`), or GitHub
-   answers 401/404 on its never-expiring token — the user is marked
-   **deactivated** cluster-wide (Raft-replicated) and their API token is
-   revoked. All pods reject their JWTs within the revalidation interval.
-4. An **unusable OIDC credential** (refresh rejected with
-   `invalid_grant`/`invalid_token`, or a userinfo 401 that refresh cannot
-   recover — i.e. the refresh token expired, was rotated, Dex restarted
-   statelessly, a multi-pod refresh raced, or it was genuinely revoked; per
-   RFC 6749 §5.2 these are indistinguishable) is classified as
-   `stateExpired` — **"cannot verify", never "revoked"** (issue #30): the
-   same grace window as an unreachable IdP serves last-known-good membership,
-   then `revalidate_fail_open`/fail-closed applies. The user is **never**
-   deactivated and their `dct_` API token is **never** deleted; a UI re-login
-   stores a fresh credential and is picked up on the very next check (no
-   waiting for `revalidate_interval`).
-5. When the IdP is unreachable (transport error, `stateUnavailable`), the same
-   configurable **grace window** (default 1h) serves last-known-good
-   membership. After grace expires, behavior is fail-closed (deny) by default,
-   or fail-open if `revalidate_fail_open: true`.
-6. An optional `session_max_age` forces full re-login for OAuth users whose
+3. On revocation (user removed from allowed groups, or IdP returns 401/404),
+   the user is marked **deactivated** cluster-wide (Raft-replicated) and their
+   API token is revoked. All pods reject their JWTs within the revalidation
+   interval.
+4. When the IdP is unreachable, a configurable **grace window** (default 1h)
+   serves last-known-good membership. After grace expires, behavior is
+   fail-closed (deny) by default, or fail-open if `revalidate_fail_open: true`.
+5. An optional `session_max_age` forces full re-login for OAuth users whose
    session exceeds the bound, closing the window even for pre-upgrade users
    without stored credentials.
-
-Behaviour matrix:
-
-| Revalidation outcome | State | Side effects |
-|---|---|---|
-| userinfo OK | `stateOK` | reconcile memberships/role |
-| userinfo OK, groups fail allowlist | `stateRevoked` | **deactivate + revoke API token** |
-| refresh `invalid_grant`/`invalid_token`/401 (expired/rotated/revoked) | `stateExpired` | serve cache within grace, then fail policy; **never deactivate/delete** |
-| IdP unreachable (transport) | `stateUnavailable` | same grace/fail policy |
 
 Config keys:
 
 | Key | Default | Description |
 |---|---|---|
 | `auth.oauth.revalidate_interval` | `5m` | Per-user cache TTL for successful IdP re-checks. |
-| `auth.oauth.revalidate_grace` | `1h` | Serve last-known-good when the IdP is unreachable or the OIDC credential is unusable. |
+| `auth.oauth.revalidate_grace` | `1h` | Serve last-known-good when IdP is unreachable. |
 | `auth.oauth.revalidate_fail_open` | `false` | After grace: false = deny, true = allow. |
 | `auth.oauth.session_max_age` | `0` | Hard bound on OAuth session age; 0 = disabled. |
-
-**Tradeoff: revocation speed vs re-auth frequency.** `revalidate_interval`
-bounds how long a removed member keeps access; `revalidate_fail_open: false`
-(default) denies once `revalidate_grace` passes an unverifiable check. On the
-other side, an OIDC provider that expires refresh tokens forces users through
-re-auth whenever a credential lapses — which the supervisor now tolerates
-(serving cache within grace) instead of deactivating the user. Operators who
-want "never re-auth" keep polling-based revocation by configuring the IdP
-persistently (see the Dex recipe below) and setting `session_max_age` as the
-periodic hard re-login backstop.
 
 During rollout, set `session_max_age: "24h"` to force re-login for pre-upgrade
 users, which then captures a credential and enables revalidation.
@@ -1126,25 +1094,6 @@ users, which then captures a credential and enables revalidation.
 For OIDC providers, the service now requests `offline_access` scope
 (automatically appended when missing) so a refresh token is returned for later
 revalidation. Operators may need to enable it for the client on the IdP.
-
-**Dex configuration recipe** (avoid refresh-token expiry while keeping
-revocation polling):
-
-```yaml
-storage:
-  type: kubernetes     # persistent — a stateless Dex restart invalidates every
-                       # refresh token when storage is in-memory.
-oauth2:
-  refreshTokens:
-    # absoluteLifetime: unset (or very large) — no hard refresh-token expiry.
-    validIfNotUsedFor: 90d    # generous idle window, comfortably > revalidate_grace.
-    reuseInterval: 10m        # > auth.oauth.revalidate_interval; also defuses
-                              # multi-pod refresh-token rotation races.
-```
-
-Pair it with `auth.oauth.session_max_age` (e.g. `"720h"`) as the hard backstop
-that forces a full re-login — and therefore a fresh allowlist evaluation — on a
-bounded schedule.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
   at most one token; the plaintext is shown once at creation/regeneration.
   Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext
