@@ -397,7 +397,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `default_group`                           | `""`                                                     | Auto-join group for new OAuth users (must exist); empty = none.                                                                               |
 |                 | `admin_groups`                            | `[]`                                                     | Upstream IdP group names granting the **admin role** on login/revalidation (exact, case-sensitive, checked pre-mapping); empty = disabled.     |
 |                 | `issuer_url`                              | `""`                                                     | OIDC issuer; required for `provider: oidc`.                                                                                                   |
-|                 | `scopes`                                  | `["openid","profile","email"]`                           | OIDC scopes; `openid` always included.                                                                                                        |
+|                 | `scopes`                                  | `["openid","profile","email","groups","offline_access"]` | OIDC scopes; `groups` requests the groups claim and `offline_access` requests a refresh token; `openid` and `offline_access` auto-appended when omitted. |
 |                 | `username_claim`                          | `preferred_username`                                     | OIDC username claim; fallback `email`.                                                                                                        |
 |                 | `groups_claim`                            | `groups`                                                 | OIDC groups claim (array or single string).                                                                                                   |
 |                 | `cookie_secure`                           | `false`                                                  | Set `true` when TLS terminates in front of the supervisor so the `oauth_state` cookie is marked `Secure`.                                     |
@@ -1180,7 +1180,7 @@ auth:
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/oidc/callback"
     allowed_groups: ["devs"]   # canonical groups-claim allowlist (empty = allow all)
     default_group: ""
-    scopes: ["openid", "profile", "email", "groups"]
+    scopes: ["openid", "profile", "email", "groups", "offline_access"]  # offline_access -> refresh token (auto-appended anyway)
     username_claim: "preferred_username"
     groups_claim: "groups"
     group_mappings:            # optional regex group mapping (always anchor: ^...$)

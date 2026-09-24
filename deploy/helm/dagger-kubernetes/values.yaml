@@ -571,7 +571,7 @@ imageCache:
 ## @param auth.oauth.defaultGroup Default group for OAuth users.
 ## @param auth.oauth.cookieSecure Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).
 ## @param auth.oauth.issuerUrl (oidc) OIDC issuer URL (e.g. https://dex.example.com).
-## @param auth.oauth.scopes [array] (oidc) OIDC scopes; "openid" is always appended.
+## @param auth.oauth.scopes [array] (oidc) OIDC scopes. Default requests "groups" (groups claim) and "offline_access" (refresh token for IdP revalidation); "openid" and "offline_access" are auto-appended when omitted.
 ## @param auth.oauth.usernameClaim (oidc) OIDC username claim (fallback: email).
 ## @param auth.oauth.groupsClaim (oidc) OIDC groups claim (array or single string).
 ## @param auth.cookie.accessName Access-JWT session cookie name (httpOnly).
@@ -626,7 +626,7 @@ auth:
     # adminGroups: ["HM_ADM_ETL_Outils", "platform-admins"]
     cookieSecure: false
     issuerUrl: ""
-    scopes: ["openid", "profile", "email"]
+    scopes: ["openid", "profile", "email", "groups", "offline_access"]
     usernameClaim: "preferred_username"
     groupsClaim: "groups"
   cookie:
@@ -662,7 +662,7 @@ auth:
 #     clientId: "dagger-kubernetes"
 #     clientSecretRef: { name: "dex-oauth", key: "client_secret" }
 #     redirectUrl: "https://supv.example.com/api/v1/auth/oauth/oidc/callback"
-#     scopes: ["openid", "profile", "email", "groups"]
+#     scopes: ["openid", "profile", "email", "groups", "offline_access"]
 #     usernameClaim: "preferred_username"
 #     groupsClaim: "groups"
 #     allowedGroups: ["devs"]         # optional allowlist

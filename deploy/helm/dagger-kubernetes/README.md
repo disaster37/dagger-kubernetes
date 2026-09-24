@@ -817,7 +817,7 @@ rename is not auto-derived). Empty = auto (`<release>-<default-name>`).
 | `auth.oauth.adminGroups` | array | `[]` | Upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, checked pre-mapping); empty = disabled. |
 | `auth.oauth.cookieSecure` | bool | `false` | Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor). |
 | `auth.oauth.issuerUrl` | string | `""` | (oidc) OIDC issuer URL (e.g. https://dex.example.com). |
-| `auth.oauth.scopes` | array | `["openid", "profile", "email"]` | (oidc) OIDC scopes; "openid" is always appended. |
+| `auth.oauth.scopes` | array | `["openid", "profile", "email", "groups", "offline_access"]` | (oidc) OIDC scopes; "groups" requests the groups claim and "offline_access" requests a refresh token; "openid" and "offline_access" are auto-appended when omitted. |
 | `auth.oauth.usernameClaim` | string | `"preferred_username"` | (oidc) OIDC username claim (fallback: email). |
 | `auth.oauth.groupsClaim` | string | `"groups"` | (oidc) OIDC groups claim (array or single string). |
 | `auth.cookie.accessName` | string | `"dagger_kubernetes_access"` | Access-JWT session cookie name (httpOnly). |
