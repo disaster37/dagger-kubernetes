@@ -59,3 +59,4 @@ bin/
 out/
 /ui-dist/
 ci
+.opencode
