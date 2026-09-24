@@ -112,8 +112,14 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.OAuth.IssuerURL != "" {
 		t.Fatalf("auth.oauth.issuer_url default should be empty, got %q", cfg.Auth.OAuth.IssuerURL)
 	}
-	if len(cfg.Auth.OAuth.Scopes) != 3 || cfg.Auth.OAuth.Scopes[0] != "openid" || cfg.Auth.OAuth.Scopes[1] != "profile" || cfg.Auth.OAuth.Scopes[2] != "email" {
-		t.Fatalf("auth.oauth.scopes default = %v, want [openid profile email]", cfg.Auth.OAuth.Scopes)
+	wantScopes := []string{"openid", "profile", "email", "groups", "offline_access"}
+	if len(cfg.Auth.OAuth.Scopes) != len(wantScopes) {
+		t.Fatalf("auth.oauth.scopes default = %v, want %v", cfg.Auth.OAuth.Scopes, wantScopes)
+	}
+	for i := range wantScopes {
+		if cfg.Auth.OAuth.Scopes[i] != wantScopes[i] {
+			t.Fatalf("auth.oauth.scopes default = %v, want %v", cfg.Auth.OAuth.Scopes, wantScopes)
+		}
 	}
 	if cfg.Auth.OAuth.UsernameClaim != "preferred_username" {
 		t.Fatalf("auth.oauth.username_claim default = %q, want preferred_username", cfg.Auth.OAuth.UsernameClaim)

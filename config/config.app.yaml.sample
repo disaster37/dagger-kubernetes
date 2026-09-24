@@ -88,7 +88,7 @@ auth:
     cookie_secure: false               # force the Secure flag on the oauth_state cookie; set true when TLS terminates at an ingress/proxy in front of the supervisor.
     # OIDC-only fields (provider: oidc). Ignored when provider: github.
     issuer_url: ""                     # e.g. "https://dex.example.com" or "http://localhost:5556" (loopback http allowed for dev).
-    scopes: ["openid", "profile", "email"]  # "openid" is always included.
+    scopes: ["openid", "profile", "email", "groups", "offline_access"]  # "groups" requests the groups claim; "offline_access" requests a refresh token (for IdP revalidation). "openid" and "offline_access" are auto-appended when omitted.
     username_claim: "preferred_username"   # fallback: "email"; error if both absent.
     groups_claim: "groups"              # claim holding group names; array or single string; absent = no groups.
     # --- IdP group-membership revalidation (ADR-027) -----------------------

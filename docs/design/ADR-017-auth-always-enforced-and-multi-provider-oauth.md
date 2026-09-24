@@ -123,8 +123,10 @@ The flag is never inferred from `X-Forwarded-Proto` (spoofable).
   `allowed_orgs` (non-empty) must intersect the normalized groups
   (`orgsIntersect`), mirroring github semantics; `default_group` auto-join is
   unchanged (group-name lookup, not claim-based).
-- **Scopes**: default `["openid","profile","email"]`; `openid` is always
-  appended when missing.
+- **Scopes**: default `["openid","profile","email","groups","offline_access"]`;
+  `openid` and `offline_access` are always appended when missing. `groups`
+  requests the groups claim; `offline_access` requests a refresh token for the
+  revalidation flow (ADR-027).
 
 ### 5. User identity across providers
 

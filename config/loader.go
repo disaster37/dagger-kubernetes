@@ -49,7 +49,7 @@ func Load(configFile string) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.default_group", "")
 	v.SetDefault("auth.oauth.cookie_secure", false)
 	v.SetDefault("auth.oauth.issuer_url", "")
-	v.SetDefault("auth.oauth.scopes", []string{"openid", "profile", "email"})
+	v.SetDefault("auth.oauth.scopes", []string{"openid", "profile", "email", "groups", "offline_access"})
 	v.SetDefault("auth.oauth.username_claim", "preferred_username")
 	v.SetDefault("auth.oauth.groups_claim", "groups")
 	v.SetDefault("auth.oauth.ca_cert_path", "")

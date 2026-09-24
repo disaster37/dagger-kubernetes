@@ -110,7 +110,7 @@ type OAuthConfig struct {
 
 	// OIDC-only fields (ignored when provider: github).
 	IssuerURL     string   `mapstructure:"issuer_url"`     // required for provider: oidc
-	Scopes        []string `mapstructure:"scopes"`         // default ["openid","profile","email"]
+	Scopes        []string `mapstructure:"scopes"`         // default ["openid","profile","email","groups","offline_access"]
 	UsernameClaim string   `mapstructure:"username_claim"` // default "preferred_username"; fallback "email"
 	GroupsClaim   string   `mapstructure:"groups_claim"`   // default "groups"
 	CACertPath    string   `mapstructure:"ca_cert_path"`   // optional PEM CA cert for verifying the OIDC issuer TLS

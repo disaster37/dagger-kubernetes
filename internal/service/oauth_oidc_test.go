@@ -465,6 +465,42 @@ func TestOIDCLoginURLAppendsOpenIDScope(t *testing.T) {
 	}
 }
 
+func TestOIDCScopesNormalization(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []string
+		want []string
+	}{
+		{name: "appends openid and offline_access when missing",
+			in:   []string{"profile", "email"},
+			want: []string{"profile", "email", "openid", "offline_access"}},
+		{name: "default already contains both - no duplicates",
+			in:   []string{"openid", "profile", "email", "groups", "offline_access"},
+			want: []string{"openid", "profile", "email", "groups", "offline_access"}},
+		{name: "openid present offline_access missing",
+			in:   []string{"openid", "groups"},
+			want: []string{"openid", "groups", "offline_access"}},
+		{name: "offline_access present openid missing",
+			in:   []string{"offline_access", "groups"},
+			want: []string{"offline_access", "groups", "openid"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc, _ := newOIDCService(t, oidcCfg("http://localhost:5556", func(c *domain.OAuthConfig) {
+				c.Scopes = tt.in
+			}))
+			if len(svc.scopes) != len(tt.want) {
+				t.Fatalf("scopes = %v, want %v", svc.scopes, tt.want)
+			}
+			for i := range tt.want {
+				if svc.scopes[i] != tt.want[i] {
+					t.Fatalf("scopes = %v, want %v", svc.scopes, tt.want)
+				}
+			}
+		})
+	}
+}
+
 func TestOIDCIssuerTrailingSlashTrimmed(t *testing.T) {
 	svc, _ := newOIDCService(t, oidcCfg("http://localhost:5556/", nil))
 	if svc.issuerURL != "http://localhost:5556" {
