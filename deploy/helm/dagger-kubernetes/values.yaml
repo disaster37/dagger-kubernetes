@@ -868,11 +868,16 @@ minio:
   mode: standalone
   ## @param minio.replicas Number of MinIO replicas (standalone mode = 1).
   replicas: 1
-  ## @param minio.image.repository MinIO container image repository.
+  ## @param minio.image.repository MinIO container image repository. pgsty/silo, the maintained MinIO fork (https://silo.pgsty.com) — MinIO itself archived the open-source projects and no longer publishes anonymously pullable images.
   ## @param minio.image.tag MinIO container image tag.
   image:
-    repository: quay.io/minio/minio
-    tag: RELEASE.2024-12-18T13-15-44Z
+    repository: docker.io/pgsty/silo
+    tag: RELEASE.2026-09-16T00-00-00Z
+  ## @param minio.mcImage.repository mc (MinIO client) container image repository. The silo image bundles the mc binary and a shell, so it also serves as the provisioning-job image.
+  ## @param minio.mcImage.tag mc container image tag.
+  mcImage:
+    repository: docker.io/pgsty/silo
+    tag: RELEASE.2026-09-16T00-00-00Z
   ## @param minio.resources.requests.cpu MinIO CPU request.
   ## @param minio.resources.requests.memory MinIO memory request.
   ## @param minio.resources.limits.cpu MinIO CPU limit.

@@ -171,7 +171,11 @@ The chart never asks for URLs: `server.public_url` (UI + API) and
 The chart also bundles the **S3 cache store**: MinIO is installed as an
 optional subchart (`minio.enabled`, default `true`) — a standalone server
 backed by a 50 GiB PVC — and the `dagger-cache` bucket is created by the
-subchart's post-install hook. The supervisor's cache endpoint, bucket, and
+subchart's post-install hook. The server image is
+`docker.io/pgsty/silo`, the maintained MinIO fork
+(https://silo.pgsty.com) — MinIO itself archived the open-source projects and
+no longer publishes anonymously pullable images. The supervisor's cache
+endpoint, bucket, and
 region are auto-wired to the in-cluster MinIO Service, and engine cache
 credentials live in the `engine-s3-auth` Secret (rendered from the MinIO root
 credentials). To use an external S3-compatible store, disable the subchart and
