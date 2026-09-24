@@ -94,7 +94,7 @@ services:
       - dagger-kubernetes
 
   minio:
-    image: quay.io/minio/minio:RELEASE.2024-12-18T13-15-44Z
+    image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     command: server /data --console-address ":9001"
     ports:
       - "9000:9000"
@@ -108,7 +108,7 @@ services:
       - dagger-kubernetes
 
   minio-init:
-    image: minio/mc:RELEASE.2024-11-21T17-21-54Z
+    image: docker.io/pgsty/silo:RELEASE.2026-09-16T00-00-00Z
     depends_on:
       - minio
     entrypoint:
