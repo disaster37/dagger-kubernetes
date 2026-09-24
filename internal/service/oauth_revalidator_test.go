@@ -118,13 +118,200 @@ func TestRevalidatorRevokes(t *testing.T) {
 		t.Fatalf("create user: %v", err)
 	}
 	rv.users = NewUserService(r.users, r.groups, testLogger())
+	tokenSvc := NewTokenService(r.tokens, testLogger(), nil)
+	rv.tokens = tokenSvc
+	plaintext, _, err := tokenSvc.Generate(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("generate api token: %v", err)
+	}
 
-	_, err := rv.Check(context.Background(), u)
-	if !errors.Is(err, domain.ErrSessionRevoked) {
+	if _, err := rv.Check(context.Background(), u); !errors.Is(err, domain.ErrSessionRevoked) {
 		t.Fatalf("expected ErrSessionRevoked, got %v", err)
 	}
 	if !u.Deactivated() {
 		t.Fatal("expected user to be deactivated")
+	}
+	// Regression (issue #30): positive revocation (ErrForbidden) still deletes
+	// the API token — only credential expiry became non-destructive.
+	if _, err := tokenSvc.Validate(context.Background(), plaintext); err == nil {
+		t.Fatal("expected API token to be revoked on ErrForbidden")
+	}
+}
+
+// newExpiredFixture builds a revalidator with a healthy baseline: a user that
+// is a member of group g1, an API token, and one successful cached check at
+// base. clockVar is captured by the returned revalidator's clock so tests can
+// advance time by reassigning it.
+func newExpiredFixture(t *testing.T, provider *fakeRevalidateProvider, cfg OAuthRevalidatorConfig, now *time.Time) (*OAuthRevalidator, *domain.User, *TokenService) {
+	t.Helper()
+	r := newServiceDB(t)
+	logger := testLogger()
+	usersSvc := NewUserService(r.users, r.groups, logger)
+	ctx := context.Background()
+
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, OAuthProvider: "oidc", OAuthTokenCiphertext: "cred-v1"}
+	if err := r.users.Create(ctx, u); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	g := &domain.Group{ID: "g1", Name: "group1"}
+	if err := r.groups.Create(ctx, g); err != nil {
+		t.Fatalf("create group: %v", err)
+	}
+	if err := r.groups.SetMembers(ctx, g.ID, []string{u.ID}); err != nil {
+		t.Fatalf("set members: %v", err)
+	}
+	tokenSvc := NewTokenService(r.tokens, logger, nil)
+	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, tokenSvc, logger, cfg)
+	rv.clock = func() time.Time { return *now }
+	return rv, u, tokenSvc
+}
+
+// TestRevalidatorExpiredGracePolicy covers stateExpired (issue #30): an
+// unusable credential serves cached groups within revalidate_grace, then
+// fail-open/fail-closed applies — the user is never deactivated and the API
+// token is never deleted.
+func TestRevalidatorExpiredGracePolicy(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name     string
+		at       time.Time
+		failOpen bool
+		wantDeny bool
+	}{
+		{name: "within grace serves cached groups", at: base.Add(10 * time.Minute), failOpen: false, wantDeny: false},
+		{name: "past grace fail-closed denies", at: base.Add(2 * time.Hour), failOpen: false, wantDeny: true},
+		{name: "past grace fail-open serves cached groups", at: base.Add(2 * time.Hour), failOpen: true, wantDeny: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			provider := &fakeRevalidateProvider{groups: []string{"g1"}}
+			cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour, FailOpen: tt.failOpen}
+			now := base
+			rv, u, tokenSvc := newExpiredFixture(t, provider, cfg, &now)
+			ctx := context.Background()
+
+			plaintext, _, err := tokenSvc.Generate(ctx, u.ID)
+			if err != nil {
+				t.Fatalf("generate api token: %v", err)
+			}
+
+			// 1) Healthy baseline: cache one successful check.
+			gids, err := rv.Check(ctx, u)
+			if err != nil || len(gids) == 0 {
+				t.Fatalf("baseline check: gids=%v err=%v", gids, err)
+			}
+
+			// 2) The stored credential becomes unusable.
+			provider.err = errOAuthCredentialExpired
+			provider.groups = nil
+			now = tt.at
+			gids, err = rv.Check(ctx, u)
+			if tt.wantDeny {
+				if !errors.Is(err, domain.ErrUnauthenticated) {
+					t.Fatalf("err = %v, want ErrUnauthenticated past grace (fail-closed)", err)
+				}
+			} else {
+				if err != nil {
+					t.Fatalf("err = %v, want cached groups served", err)
+				}
+				if len(gids) == 0 {
+					t.Fatal("expected cached group IDs")
+				}
+			}
+			if entry := rv.cache[u.ID]; entry.state != stateExpired {
+				t.Fatalf("state = %v, want stateExpired", entry.state)
+			}
+			if u.DeactivatedAt != nil {
+				t.Fatal("user must not be deactivated on stateExpired")
+			}
+			if _, err := tokenSvc.Validate(ctx, plaintext); err != nil {
+				t.Fatalf("API token must not be revoked on stateExpired: %v", err)
+			}
+		})
+	}
+}
+
+// TestRevalidatorExpiredRecoversAfterRelogin: re-login stores a fresh
+// credential, which must force an immediate re-check (fresh() == false) instead
+// of serving the stateExpired entry until revalidate_interval elapses.
+func TestRevalidatorExpiredRecoversAfterRelogin(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeRevalidateProvider{groups: []string{"g1"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	now := base
+	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
+	ctx := context.Background()
+
+	// 1) Healthy baseline (1 provider call).
+	if gids, err := rv.Check(ctx, u); err != nil || len(gids) == 0 {
+		t.Fatalf("baseline check: gids=%v err=%v", gids, err)
+	}
+
+	// 2) Credential expires -> stateExpired, still within its TTL (2 calls).
+	provider.err = errOAuthCredentialExpired
+	provider.groups = nil
+	now = base.Add(10 * time.Minute)
+	if gids, err := rv.Check(ctx, u); err != nil || len(gids) == 0 {
+		t.Fatalf("expired check: gids=%v err=%v", gids, err)
+	}
+
+	// 3) Re-login writes a fresh credential: the very next check must re-query
+	// the IdP (within the stateExpired entry TTL) and recover to stateOK.
+	u.OAuthTokenCiphertext = "cred-v2-after-relogin"
+	provider.err = nil
+	provider.groups = []string{"g1"}
+	now = base.Add(11 * time.Minute)
+	gids, err := rv.Check(ctx, u)
+	if err != nil {
+		t.Fatalf("check after re-login: %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("expected group IDs after re-login")
+	}
+	if provider.callCount != 3 {
+		t.Fatalf("provider calls = %d, want 3 (re-login must force a re-check)", provider.callCount)
+	}
+	if entry := rv.cache[u.ID]; entry.state != stateOK {
+		t.Fatalf("state = %v, want stateOK after re-login", entry.state)
+	}
+	if u.DeactivatedAt != nil {
+		t.Fatal("user must stay active")
+	}
+}
+
+// TestJitteredTTLStateExpiredUsesFullInterval: stateExpired retries on the full
+// revalidate_interval (never min(interval, grace)) so a permanently-dead
+// credential is not hammered against the IdP token endpoint; stateUnavailable
+// keeps the shorter degraded retry window.
+func TestJitteredTTLStateExpiredUsesFullInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		state    revalidationState
+		interval time.Duration
+		grace    time.Duration
+		wantMin  time.Duration
+		wantMax  time.Duration
+	}{
+		{
+			name:     "stateExpired uses full interval",
+			state:    stateExpired,
+			interval: 5 * time.Minute, grace: time.Minute,
+			wantMin: 4*time.Minute + 30*time.Second, wantMax: 5*time.Minute + 30*time.Second,
+		},
+		{
+			name:     "stateUnavailable shrinks to grace",
+			state:    stateUnavailable,
+			interval: 5 * time.Minute, grace: time.Minute,
+			wantMin: 54 * time.Second, wantMax: 66 * time.Second,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := jitteredTTL(tt.state, tt.interval, tt.grace)
+			if got < tt.wantMin || got > tt.wantMax {
+				t.Fatalf("jitteredTTL(%v) = %v, want within [%v, %v]", tt.state, got, tt.wantMin, tt.wantMax)
+			}
+		})
 	}
 }
 

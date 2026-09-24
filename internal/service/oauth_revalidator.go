@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math/rand"
 	"sync"
 	"time"
@@ -35,8 +36,9 @@ type revalidationState int
 
 const (
 	stateOK          revalidationState = iota // IdP check succeeded
-	stateRevoked                              // IdP says no / credential invalid
+	stateRevoked                              // positive revocation (allowlist miss, GitHub 401/404, user deactivated)
 	stateUnavailable                          // IdP unreachable
+	stateExpired                              // credential unusable; serve cache within grace then fail policy; non-destructive
 )
 
 // revalidationEntry is the per-user cache entry. All fields except inflight are
@@ -45,12 +47,13 @@ const (
 // has been set to nil under mu (or after the inflight channel is closed, which
 // synchronizes-with the write).
 type revalidationEntry struct {
-	state     revalidationState
-	groupIDs  []string
-	checkedAt time.Time // when the last IdP check ran
-	lastGood  time.Time // when the last successful (stateOK) check ran; zero if never
-	expiresAt time.Time // when this entry becomes stale (jittered TTL)
-	inflight  chan struct{}
+	state      revalidationState
+	groupIDs   []string
+	checkedAt  time.Time // when the last IdP check ran
+	lastGood   time.Time // when the last successful (stateOK) check ran; zero if never
+	expiresAt  time.Time // when this entry becomes stale (jittered TTL)
+	inflight   chan struct{}
+	credential string // snapshot of u.OAuthTokenCiphertext this entry was built from (re-login recovery)
 }
 
 // OAuthRevalidator enforces IdP group-membership revalidation behind a bounded,
@@ -171,9 +174,15 @@ func (r *OAuthRevalidator) Check(ctx context.Context, u *domain.User) ([]string,
 // DB: a successful re-login clears DeactivatedAt, so a revoked cache entry
 // must be re-checked to allow recovery (rather than denying forever on this
 // pod). For a still-deactivated user the entry is re-trusted until expiresAt;
-// refresh then short-circuits without an IdP call.
+// refresh then short-circuits without an IdP call. An expired entry (unusable
+// credential) is re-checked as soon as the user re-logs in: re-login writes a
+// fresh credential ciphertext, so a changed credential forces recovery
+// without waiting for revalidate_interval.
 func (r *OAuthRevalidator) fresh(entry *revalidationEntry, u *domain.User, now time.Time) bool {
 	if entry.state == stateRevoked && u.DeactivatedAt == nil {
+		return false
+	}
+	if entry.state == stateExpired && entry.credential != u.OAuthTokenCiphertext {
 		return false
 	}
 	if entry.expiresAt.IsZero() {
@@ -183,19 +192,25 @@ func (r *OAuthRevalidator) fresh(entry *revalidationEntry, u *domain.User, now t
 }
 
 // serve returns the cached result for a non-inflight entry. Called under r.mu.
+// stateExpired is handled like stateUnavailable: serve cached groups within
+// revalidate_grace, then revalidate_fail_open / fail-closed.
 func (r *OAuthRevalidator) serve(entry *revalidationEntry, u *domain.User, now time.Time) ([]string, error) {
 	switch entry.state {
 	case stateOK:
 		return entry.groupIDs, nil
 	case stateRevoked:
 		return nil, domain.ErrSessionRevoked
-	case stateUnavailable:
+	case stateUnavailable, stateExpired:
+		reason := "IdP unreachable"
+		if entry.state == stateExpired {
+			reason = "credential expired, cannot verify membership"
+		}
 		withinGrace := !entry.lastGood.IsZero() && now.Sub(entry.lastGood) <= r.cfg.Grace
 		if withinGrace {
 			if len(entry.groupIDs) > 0 {
 				r.logger.WithFields(logrus.Fields{
 					"user_id": u.ID, "oauth_provider": u.OAuthProvider,
-				}).Warn("oauth: IdP unreachable within grace, serving last-known-good")
+				}).Warn(fmt.Sprintf("oauth: %s within grace, serving last-known-good", reason))
 				return entry.groupIDs, nil
 			}
 			// No cached groups: fall through to deny below.
@@ -203,12 +218,12 @@ func (r *OAuthRevalidator) serve(entry *revalidationEntry, u *domain.User, now t
 		if r.cfg.FailOpen && len(entry.groupIDs) > 0 {
 			r.logger.WithFields(logrus.Fields{
 				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
-			}).Error("oauth: IdP unreachable past grace, serving last-known-good (fail-open)")
+			}).Error(fmt.Sprintf("oauth: %s past grace, serving last-known-good (fail-open)", reason))
 			return entry.groupIDs, nil
 		}
 		r.logger.WithFields(logrus.Fields{
 			"user_id": u.ID, "oauth_provider": u.OAuthProvider,
-		}).Error("oauth: IdP unreachable past grace, denying (fail-closed)")
+		}).Error(fmt.Sprintf("oauth: %s past grace, denying (fail-closed)", reason))
 		return nil, domain.ErrUnauthenticated
 	default:
 		return nil, domain.ErrUnauthenticated
@@ -231,6 +246,9 @@ func (r *OAuthRevalidator) finish(entry *revalidationEntry) {
 // reads entry while inflight is non-nil.
 func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *revalidationEntry) {
 	now := r.clock()
+	// Snapshot the credential this entry is built from so fresh() can force a
+	// re-check after re-login (AES-GCM ciphertext always differs once rotated).
+	entry.credential = u.OAuthTokenCiphertext
 
 	// Already deactivated: no IdP call needed.
 	if u.DeactivatedAt != nil {
@@ -252,6 +270,19 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 			entry.checkedAt = now
 			entry.lastGood = now
 			entry.expiresAt = now.Add(jitteredTTL(stateOK, r.cfg.Interval, r.cfg.Grace))
+			return
+		case errors.Is(err, errOAuthCredentialExpired):
+			// Unusable credential (expired/rotated/revoked — ambiguous per
+			// RFC 6749 §5.2): NOT evidence of revocation. Record stateExpired
+			// WITHOUT revoke() (no deactivation, no API-token deletion) and
+			// preserve any prior groupIDs/lastGood so the grace/fail policy
+			// can serve them.
+			r.logger.WithFields(logrus.Fields{
+				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
+			}).Warn("oauth: credential expired, cannot verify membership (serving cached groups within grace / denying after grace)")
+			entry.state = stateExpired
+			entry.checkedAt = now
+			entry.expiresAt = now.Add(jitteredTTL(stateExpired, r.cfg.Interval, r.cfg.Grace))
 			return
 		case errors.Is(err, domain.ErrForbidden), errors.Is(err, domain.ErrSessionRevoked):
 			r.revoke(ctx, u)

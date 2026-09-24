@@ -14,11 +14,16 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"golang.org/x/oauth2"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 const oidcTestClientID = "test-client"
+
+// oidcTestEncKey is the AES-256 key (32 bytes) used by tests that exercise the
+// encrypted at-rest OAuth credential path.
+const oidcTestEncKey = "0123456789abcdef0123456789abcdef"
 
 // fakeOIDCIssuer is a loopback httptest OIDC issuer serving discovery, JWKS,
 // token, and userinfo endpoints. go-oidc supports http loopback issuers, so the
@@ -32,6 +37,15 @@ type fakeOIDCIssuer struct {
 	claims      map[string]any
 	userinfo    map[string]any // claims served by /userinfo (nil -> empty object)
 	tokenStatus int
+
+	// Revalidation test knobs.
+	userinfoStatus int    // non-zero HTTP status served by /userinfo
+	tokenErrCode   string // OAuth2 error code served with 400 by /token
+	tokenErrAfter  int    // succeed this many /token calls before tokenErrCode kicks in (0 = fail from the start)
+	tokenExpiresIn int    // non-zero expires_in served by /token
+	accessToken    string // access_token served by /token (empty = default)
+	refreshToken   string // refresh_token served by /token (empty = omitted)
+	tokenCallCount int
 }
 
 func newFakeOIDCIssuer(t *testing.T) *fakeOIDCIssuer {
@@ -90,20 +104,41 @@ func (f *fakeOIDCIssuer) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (f *fakeOIDCIssuer) handleToken(w http.ResponseWriter, _ *http.Request) {
+	f.tokenCallCount++
 	if f.tokenStatus != 0 {
 		w.WriteHeader(f.tokenStatus)
 		return
 	}
+	if f.tokenErrCode != "" && (f.tokenErrAfter == 0 || f.tokenCallCount > f.tokenErrAfter) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(map[string]any{"error": f.tokenErrCode})
+		return
+	}
+	accessToken := f.accessToken
+	if accessToken == "" {
+		accessToken = "test-access-token"
+	}
 	resp := map[string]any{
-		"access_token": "test-access-token",
+		"access_token": accessToken,
 		"token_type":   "Bearer",
 		"id_token":     f.mintIDToken(),
+	}
+	if f.refreshToken != "" {
+		resp["refresh_token"] = f.refreshToken
+	}
+	if f.tokenExpiresIn != 0 {
+		resp["expires_in"] = f.tokenExpiresIn
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (f *fakeOIDCIssuer) handleUserinfo(w http.ResponseWriter, _ *http.Request) {
+	if f.userinfoStatus != 0 {
+		w.WriteHeader(f.userinfoStatus)
+		return
+	}
 	claims := f.userinfo
 	if claims == nil {
 		claims = map[string]any{}
@@ -730,4 +765,215 @@ func TestOIDCCompleteAdminGroups(t *testing.T) {
 			t.Fatalf("OAuthGroups = %v, want nil when the claim is absent", u.OAuthGroups)
 		}
 	})
+}
+
+// newOIDCServiceForKey returns an OIDCOAuthService with credential encryption
+// enabled (newOIDCService passes a nil encKey).
+func newOIDCServiceForKey(t *testing.T, cfg *domain.OAuthConfig) *OIDCOAuthService {
+	t.Helper()
+	svc, _ := newOIDCService(t, cfg)
+	svc.encKey = []byte(oidcTestEncKey)
+	return svc
+}
+
+// seedOIDCUser creates a local user with a stored (optionally encrypted)
+// OAuth credential and returns it.
+func seedOIDCUser(t *testing.T, svc *OIDCOAuthService, cred *oauthCredential) *domain.User {
+	t.Helper()
+	ctx := context.Background()
+	u, err := svc.users.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	u.OAuthProvider = "oidc"
+	u.OAuthID = "alice-sub"
+	if cred != nil {
+		ct, err := encryptOAuthCredential(svc.encKey, cred)
+		if err != nil {
+			t.Fatalf("encrypt credential: %v", err)
+		}
+		u.OAuthTokenCiphertext = ct
+	}
+	if err := svc.users.Update(ctx, u); err != nil {
+		t.Fatalf("persist user: %v", err)
+	}
+	return u
+}
+
+// TestOIDCRevalidateCredentialUnusable covers the credential-unusable cases
+// (issue #30): they must return errOAuthCredentialExpired — never
+// domain.ErrSessionRevoked, which would deactivate the user and delete their
+// API token.
+func TestOIDCRevalidateCredentialUnusable(t *testing.T) {
+	expiredCred := &oauthCredential{
+		Provider:     "oidc",
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+	}
+	validCred := &oauthCredential{
+		Provider:     "oidc",
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(time.Hour),
+	}
+	tests := []struct {
+		name   string
+		cred   *oauthCredential
+		mutate func(t *testing.T, issuer *fakeOIDCIssuer, u *domain.User)
+	}{
+		{
+			name: "refresh rejected with invalid_grant",
+			cred: expiredCred,
+			mutate: func(t *testing.T, issuer *fakeOIDCIssuer, _ *domain.User) {
+				t.Helper()
+				issuer.tokenErrCode = "invalid_grant"
+				issuer.userinfo = map[string]any{"groups": []any{"devs"}}
+			},
+		},
+		{
+			name: "userinfo 401 then refresh invalid_grant",
+			cred: expiredCred,
+			mutate: func(t *testing.T, issuer *fakeOIDCIssuer, _ *domain.User) {
+				t.Helper()
+				issuer.tokenErrCode = "invalid_grant"
+				issuer.tokenErrAfter = 1   // first refresh succeeds, the retry fails
+				issuer.tokenExpiresIn = -1 // refreshed access token is already expired
+				issuer.userinfoStatus = http.StatusUnauthorized
+			},
+		},
+		{
+			name: "userinfo 401 not recoverable by refresh",
+			cred: validCred,
+			mutate: func(t *testing.T, issuer *fakeOIDCIssuer, _ *domain.User) {
+				t.Helper()
+				issuer.userinfoStatus = http.StatusUnauthorized
+			},
+		},
+		{
+			name: "stored credential fails to decrypt",
+			cred: nil,
+			mutate: func(t *testing.T, _ *fakeOIDCIssuer, u *domain.User) {
+				t.Helper()
+				u.OAuthTokenCiphertext = "!!not-a-valid-ciphertext!!"
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer := newFakeOIDCIssuer(t)
+			issuer.userinfo = map[string]any{"groups": []any{"devs"}}
+			svc := newOIDCServiceForKey(t, oidcCfg(issuer.srv.URL, nil))
+			u := seedOIDCUser(t, svc, tt.cred)
+			tt.mutate(t, issuer, u)
+
+			groups, err := svc.Revalidate(context.Background(), u)
+			if !errors.Is(err, errOAuthCredentialExpired) {
+				t.Fatalf("Revalidate err = %v, want errOAuthCredentialExpired (groups=%v)", err, groups)
+			}
+			if errors.Is(err, domain.ErrSessionRevoked) {
+				t.Fatal("credential expiry must not be classified as revocation")
+			}
+		})
+	}
+}
+
+// TestOIDCRevalidateGroupsFailingAllowlistStillForbidden is the regression for
+// positive revocation: userinfo succeeds but the groups no longer satisfy the
+// allowlist, which must stay domain.ErrForbidden (destructive revoke path).
+func TestOIDCRevalidateGroupsFailingAllowlistStillForbidden(t *testing.T) {
+	issuer := newFakeOIDCIssuer(t)
+	issuer.userinfo = map[string]any{"groups": []any{"outsiders"}}
+	svc := newOIDCServiceForKey(t, oidcCfg(issuer.srv.URL, nil))
+	u := seedOIDCUser(t, svc, &oauthCredential{
+		Provider:    "oidc",
+		AccessToken: "old-access",
+		ExpiresAt:   time.Now().Add(time.Hour),
+	})
+
+	_, err := svc.Revalidate(context.Background(), u)
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("Revalidate err = %v, want domain.ErrForbidden", err)
+	}
+	if errors.Is(err, errOAuthCredentialExpired) {
+		t.Fatal("allowlist miss must not be classified as credential expiry")
+	}
+}
+
+// TestOIDCRevalidateRefreshRotatesAndPersistsCredential covers the healthy
+// refresh path: a rotated refresh token is persisted on the user record.
+func TestOIDCRevalidateRefreshRotatesAndPersistsCredential(t *testing.T) {
+	issuer := newFakeOIDCIssuer(t)
+	issuer.userinfo = map[string]any{"groups": []any{"devs"}}
+	issuer.accessToken = "rotated-access"
+	issuer.refreshToken = "rotated-refresh"
+	svc := newOIDCServiceForKey(t, oidcCfg(issuer.srv.URL, nil))
+	u := seedOIDCUser(t, svc, &oauthCredential{
+		Provider:     "oidc",
+		AccessToken:  "old-access",
+		RefreshToken: "old-refresh",
+		ExpiresAt:    time.Now().Add(-time.Hour),
+	})
+	oldCiphertext := u.OAuthTokenCiphertext
+
+	groups, err := svc.Revalidate(context.Background(), u)
+	if err != nil {
+		t.Fatalf("Revalidate: %v", err)
+	}
+	if len(groups) != 1 || groups[0] != "devs" {
+		t.Fatalf("groups = %v, want [devs]", groups)
+	}
+	if u.OAuthTokenCiphertext == oldCiphertext {
+		t.Fatal("rotated credential was not persisted on the in-memory user")
+	}
+	got, err := svc.users.Get(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("get user: %v", err)
+	}
+	if got.OAuthTokenCiphertext == oldCiphertext {
+		t.Fatal("rotated credential was not persisted to the store")
+	}
+	decoded, err := decryptOAuthCredential(svc.encKey, got.OAuthTokenCiphertext)
+	if err != nil {
+		t.Fatalf("decrypt persisted credential: %v", err)
+	}
+	if decoded.RefreshToken != "rotated-refresh" || decoded.AccessToken != "rotated-access" {
+		t.Fatalf("persisted credential = %+v, want rotated tokens", decoded)
+	}
+}
+
+// TestOAuthTokenRevokedClassification pins the oauthTokenRevoked semantics:
+// invalid_grant/invalid_token/401 are "credential unusable" (ambiguous), any
+// other error is a transient IdP-unavailable condition. go-oidc wraps token
+// and HTTP errors with %v, so message-based classification must be covered too.
+func TestOAuthTokenRevokedClassification(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "retrieve error invalid_grant", err: &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, want: true},
+		{name: "retrieve error invalid_token", err: &oauth2.RetrieveError{ErrorCode: "invalid_token"}, want: true},
+		{
+			name: "retrieve error 401 without code",
+			err:  &oauth2.RetrieveError{Response: &http.Response{StatusCode: http.StatusUnauthorized, Status: "401 Unauthorized"}},
+			want: true,
+		},
+		{
+			name: "retrieve error other client error",
+			err:  &oauth2.RetrieveError{ErrorCode: "invalid_client", Response: &http.Response{StatusCode: http.StatusBadRequest, Status: "400 Bad Request"}},
+			want: false,
+		},
+		{name: "wrapped invalid_grant message", err: errors.New("oidc: get access token: oauth2: \"invalid_grant\""), want: true},
+		{name: "wrapped userinfo 401 message", err: errors.New("401 Unauthorized: {\"error\":\"invalid_token\"}"), want: true},
+		{name: "transport error", err: errors.New("oidc: userinfo: Get \"https://dex.example.com/userinfo\": dial tcp: connection refused"), want: false},
+		{name: "server error", err: errors.New("oidc: userinfo: 500 Internal Server Error: boom"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := oauthTokenRevoked(tt.err); got != tt.want {
+				t.Fatalf("oauthTokenRevoked(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
 }
