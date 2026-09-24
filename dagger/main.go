@@ -60,6 +60,8 @@ type helmVariant struct {
 // tempo/loki/victoria/minio/opentelemetry-collector and, in lock step, sets
 // the global.daggerKubernetes.serviceNames.* keys the collector exporters
 // follow — proving the auto-wired URLs track each dependency's fullname rules.
+// The final variant enables the optional dex/openldap subcharts (disabled by
+// default) and asserts the Dex Deployment renders.
 var helmTemplateMatrix = []helmVariant{
 	{
 		sets: []string{},
@@ -126,6 +128,13 @@ var helmTemplateMatrix = []helmVariant{
 			`endpoint: http://my-loki.`,
 			`endpoint: http://my-victoria.`,
 		},
+	},
+	// Optional Dex/OpenLDAP subcharts (both disabled by default): prove the
+	// condition-gated dependencies render when enabled (the default variant
+	// proves they stay out when disabled).
+	{
+		sets:   []string{"--set", "dex.enabled=true", "--set", "openldap.enabled=true"},
+		expect: []string{"name: dagger-kubernetes-dex"},
 	},
 }
 

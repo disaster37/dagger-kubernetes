@@ -484,14 +484,21 @@ func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *d
 
 // oauthTokenRevoked reports whether err signals an unusable OIDC credential: a
 // refresh rejected with invalid_grant / invalid_token, or a 401 from the token
-// or userinfo endpoint. Per RFC 6749 §5.2 invalid_grant is ambiguous (the
-// refresh token may be expired, rotated, or revoked), so callers must treat it
-// as "cannot verify membership" (errOAuthCredentialExpired) — never as
-// definitive revocation. Any other error (network, 5xx) is a transient
-// IdP-unavailable condition. go-oidc wraps token-source and HTTP errors with
-// %v (breaking the error chain), so errors that are not *oauth2.RetrieveError
-// are classified by inspecting the message for the RFC 6749 error codes and
-// the 401 status line.
+// or userinfo endpoint. Per RFC 6749 §5.2 invalid_grant is ambiguous
+// (expired/rotated/revoked), so callers treat it as "cannot verify membership"
+// (errOAuthCredentialExpired) — never definitive revocation. Any other error
+// (network, 5xx) is a transient IdP-unavailable condition.
+//
+// Classification order (exact go-oidc/oauth2 message formats relied upon — pinned by
+// TestOAuthTokenRevokedClassification):
+//  1. *oauth2.RetrieveError with ErrorCode "invalid_grant" or "invalid_token", or
+//     Response.StatusCode == 401.
+//  2. Fallback (go-oidc wraps token-source and HTTP errors with %v, breaking the errors.As
+//     chain): substring "invalid_grant", "invalid_token", or "401 Unauthorized". These appear
+//     in go-oidc's "oidc: get access token: %v" wrap (UserInfo token fetch) and oauth2's
+//     RetrieveError "%s: %s" (status + body) — e.g. `oidc: get access token:
+//     oauth2: "invalid_grant"` and `401 Unauthorized: {"error":"invalid_token"}`. Verified
+//     identical in go-oidc v3.17.0 and v3.21.0.
 func oauthTokenRevoked(err error) bool {
 	var rerr *oauth2.RetrieveError
 	if errors.As(err, &rerr) {

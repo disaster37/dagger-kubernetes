@@ -129,7 +129,9 @@ The fix reclassifies ambiguous credential failures as "cannot verify":
 - **Positive revocation stays destructive**: `domain.ErrForbidden` (userinfo
   succeeds but `allowed_groups`/`admin_groups` no longer match) still
   deactivates + revokes, as does GitHub's `domain.ErrSessionRevoked` (401/404
-  on an access token that never expires).
+  on an access token that never expires, **or decrypt failure of the stored
+  credential** — both returned from `GitHubOAuthService.Revalidate`,
+  `internal/service/oauth_github.go:251`).
 
 Behaviour matrix after the revision:
 

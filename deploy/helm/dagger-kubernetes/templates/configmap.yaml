@@ -56,6 +56,10 @@ data:
 {{ toYaml .Values.auth.oauth.scopes | indent 10 }}
         username_claim: {{ .Values.auth.oauth.usernameClaim | quote }}
         groups_claim: {{ .Values.auth.oauth.groupsClaim | quote }}
+        revalidate_interval: {{ .Values.auth.oauth.revalidateInterval | quote }}
+        revalidate_grace: {{ .Values.auth.oauth.revalidateGrace | quote }}
+        revalidate_fail_open: {{ .Values.auth.oauth.revalidateFailOpen }}
+        session_max_age: {{ .Values.auth.oauth.sessionMaxAge | quote }}
         ca_cert_path: {{ if .Values.supervisor.config.fleet.engineCaSecret }}{{ printf "/usr/local/share/ca-certificates/%s" .Values.supervisor.config.fleet.engineCaSecretKey | quote }}{{ else }}""{{ end }}
       cookie:
         access_name: {{ .Values.auth.cookie.accessName | quote }}

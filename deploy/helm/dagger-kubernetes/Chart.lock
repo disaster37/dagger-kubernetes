@@ -17,5 +17,11 @@ dependencies:
 - name: grafana
   repository: https://grafana.github.io/helm-charts
   version: 10.5.15
-digest: sha256:36c2cb24adeb14595f7aa76ddbdf89182640c15078fcaf41cdc7d4d1cd462e70
-generated: "2026-09-14T08:56:50.063335998Z"
+- name: dex
+  repository: https://charts.dexidp.io
+  version: 0.24.1
+- name: openldap
+  repository: https://jp-gouin.github.io/helm-openldap/
+  version: 2.0.4
+digest: sha256:94434a611b29d10334d088f389c9a61d3e4fe4f5f6ef35089d571fa8a66b3f38
+generated: "2026-09-24T09:59:11.992613986Z"
