@@ -1,0 +1,1 @@
+import{S as e}from"#entry";var t=e(`/logo.svg`);export{t};

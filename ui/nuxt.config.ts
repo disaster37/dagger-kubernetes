@@ -9,6 +9,7 @@ export default defineNuxtConfig({
     head: {
       title: 'Dagger Kubernetes - Pipeline View',
       htmlAttrs: { lang: 'en' },
+      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
       meta: [{ name: 'viewport', content: 'width=device-width, initial-scale=1.0' }],
     },
   },

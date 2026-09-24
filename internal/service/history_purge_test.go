@@ -53,7 +53,7 @@ func (r *fakeTraceMetaRepo) Get(_ context.Context, traceID string) (*domain.Trac
 	cp := *m
 	return &cp, nil
 }
-func (r *fakeTraceMetaRepo) List(context.Context, domain.TraceFilter) ([]*domain.TraceListResult, error) {
+func (r *fakeTraceMetaRepo) List(context.Context, *domain.TraceFilter) ([]*domain.TraceListResult, error) {
 	return nil, nil
 }
 func (r *fakeTraceMetaRepo) ListBefore(_ context.Context, cutoff time.Time, protectRunning bool) ([]*domain.TraceMeta, error) {

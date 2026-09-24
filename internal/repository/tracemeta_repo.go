@@ -81,7 +81,7 @@ func (r *TraceMetaRepo) Get(ctx context.Context, traceID string) (*domain.TraceM
 
 // List returns trace metadata scoped by the filter, joined with group/user
 // names for display.
-func (r *TraceMetaRepo) List(ctx context.Context, f domain.TraceFilter) ([]*domain.TraceListResult, error) {
+func (r *TraceMetaRepo) List(ctx context.Context, f *domain.TraceFilter) ([]*domain.TraceListResult, error) {
 	return r.store.fsmRead().listTraces(f), nil
 }
 

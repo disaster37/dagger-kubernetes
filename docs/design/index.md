@@ -48,3 +48,4 @@ the decision.
 | 039  | [CI timeout is opt-in, live Dagger output, and live pipeline-view URL](ADR-039-ci-timeout-live-streaming.md) |
 | 040  | [Frontend is Nuxt 4 + Nuxt UI v4 (static SPA)](ADR-040-frontend-nuxt4-nuxt-ui.md) |
 | 041  | [Per-pod leader-forward proxy (drop label-based leader routing)](ADR-041-per-pod-leader-forward-proxy.md) |
+| 042  | [Runner-fleet metrics + storage usage (cAdvisor, 15m rolling window)](ADR-042-runner-fleet-metrics-storage.md) |

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/common/ut"
 
@@ -130,5 +131,81 @@ func assertOmitOrEqual(t *testing.T, body map[string]any, key, want string) {
 	}
 	if got != want {
 		t.Fatalf("%s = %v, want %v", key, got, want)
+	}
+}
+
+// TestHandleTracesListTextFilters proves handleTracesList parses the ci_repo
+// and user query params into the TraceFilter: both are case-insensitive
+// substring filters (repo on ci_repo/project_name, user on the joined
+// username) applied on top of the admin visibility scope.
+func TestHandleTracesListTextFilters(t *testing.T) {
+	env := newTestEnv(t)
+	ctx := context.Background()
+	bearer := env.loginAsAdmin(t)
+
+	admin, err := env.users.GetByUsername(ctx, "admin")
+	if err != nil {
+		t.Fatalf("get admin: %v", err)
+	}
+	_, alice := env.createUserAndToken(t)
+
+	seed := func(traceID, userID, ciRepo, project string) {
+		t.Helper()
+		if err := env.server.traceMeta.UpsertProvision(ctx, traceID, userID, ""); err != nil {
+			t.Fatalf("provision: %v", err)
+		}
+		if err := env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{
+			TraceID: traceID, CIRepo: ciRepo, ProjectName: project,
+			StartedAt: time.Now(), UpdatedAt: time.Now(),
+		}); err != nil {
+			t.Fatalf("ingest: %v", err)
+		}
+	}
+	// admin's repo run, alice's project-only run, and an anonymous run.
+	seed("trace-repo", admin.ID, "github.com/org/repo", "")
+	seed("trace-alice", alice.ID, "", "alice-project")
+	seed("trace-anon", "", "", "unrelated")
+
+	cases := []struct {
+		name  string
+		query string
+		want  []string
+	}{
+		{"repo substring", "ci_repo=github.com", []string{"trace-repo"}},
+		{"repo project fallback", "ci_repo=ALICE-PROJECT", []string{"trace-alice"}},
+		{"user substring", "user=alice", []string{"trace-alice"}},
+		{"user case-insensitive", "user=ADMIN", []string{"trace-repo"}},
+		{"combined", "ci_repo=github&user=alice", nil},
+		{"no match", "ci_repo=missing&user=missing", nil},
+		{"no filters", "", []string{"trace-repo", "trace-alice", "trace-anon"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newAuthEngine(env.server)
+			path := "/api/v1/traces"
+			if tc.query != "" {
+				path = fmt.Sprintf("%s?%s", path, tc.query)
+			}
+			resp := ut.PerformRequest(e, "GET", path, nil, ut.Header{Key: "Authorization", Value: bearer})
+			if resp.Result().StatusCode() != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.Result().StatusCode())
+			}
+			var rows []domain.TraceListResult
+			if err := json.Unmarshal(resp.Result().Body(), &rows); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			got := make(map[string]bool, len(rows))
+			for _, r := range rows {
+				got[r.TraceID] = true
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %d rows, want %d: %+v", len(got), len(tc.want), got)
+			}
+			for _, w := range tc.want {
+				if !got[w] {
+					t.Fatalf("missing %q in %+v", w, got)
+				}
+			}
+		})
 	}
 }

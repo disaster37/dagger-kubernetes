@@ -217,7 +217,7 @@ func (errorTraceMetaRepo) UpsertIngest(context.Context, *domain.TraceMeta) error
 func (errorTraceMetaRepo) Get(context.Context, string) (*domain.TraceMeta, error) {
 	return nil, errors.New("boom")
 }
-func (errorTraceMetaRepo) List(context.Context, domain.TraceFilter) ([]*domain.TraceListResult, error) {
+func (errorTraceMetaRepo) List(context.Context, *domain.TraceFilter) ([]*domain.TraceListResult, error) {
 	return nil, nil
 }
 func (errorTraceMetaRepo) ListBefore(context.Context, time.Time, bool) ([]*domain.TraceMeta, error) {

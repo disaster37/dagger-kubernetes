@@ -1,5 +1,11 @@
 <template>
-  <UHeader title="Dagger Kubernetes" to="/">
+  <UHeader title="Dagger Kubernetes">
+    <template #title>
+      <NuxtLink to="/" class="flex items-center gap-2">
+        <img src="/logo.svg" alt="" class="size-7" />
+        <span class="font-semibold">Dagger Kubernetes</span>
+      </NuxtLink>
+    </template>
     <UNavigationMenu :items="navItems" orientation="horizontal" />
 
     <template #right>

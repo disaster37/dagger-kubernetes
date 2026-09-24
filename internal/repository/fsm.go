@@ -1125,8 +1125,9 @@ func (f *FSM) traceStats() (int, time.Time) {
 }
 
 // listTraces applies the filter, joins group/user names, sorts by
-// COALESCE(started_at, updated_at) DESC, and clamps the limit.
-func (f *FSM) listTraces(filter domain.TraceFilter) []*domain.TraceListResult {
+// COALESCE(started_at, updated_at) DESC, and clamps the limit. The filter is
+// taken by pointer: TraceFilter exceeds gocritic's hugeParam threshold.
+func (f *FSM) listTraces(filter *domain.TraceFilter) []*domain.TraceListResult {
 	f.state.mu.RLock()
 	defer f.state.mu.RUnlock()
 
@@ -1146,6 +1147,14 @@ func (f *FSM) listTraces(filter domain.TraceFilter) []*domain.TraceListResult {
 		}
 		if u, ok := f.state.users[m.UserID]; ok {
 			r.Username = u.Username
+		}
+		// Text filters run after the group/user joins (Username) and before the
+		// limit clamp, so they see the same rows the UI would render.
+		if filter.CIRepo != "" && !containsFold(r.CIRepo, filter.CIRepo) && !containsFold(r.ProjectName, filter.CIRepo) {
+			continue
+		}
+		if filter.Username != "" && !containsFold(r.Username, filter.Username) {
+			continue
 		}
 		out = append(out, r)
 	}
@@ -1170,7 +1179,15 @@ func traceSortKey(m *domain.TraceMeta) time.Time {
 	return m.UpdatedAt
 }
 
-func traceMatches(f domain.TraceFilter, m *domain.TraceMeta) bool {
+// containsFold reports whether s contains substr (ASCII case-insensitive).
+func containsFold(s, substr string) bool {
+	if substr == "" {
+		return true
+	}
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+func traceMatches(f *domain.TraceFilter, m *domain.TraceMeta) bool {
 	if f.UnassignedOnly {
 		return m.GroupID == ""
 	}

@@ -299,7 +299,7 @@ func TestFSMTraceListFilterAndSort(t *testing.T) {
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "other", UserID: "u2", StartedAt: base.Add(2 * time.Minute), UpdatedAt: base.Add(2 * time.Minute)})
 
 	// Admin sees all, newest first.
-	all := f.listTraces(domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
+	all := f.listTraces(&domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
 	if len(all) != 3 || all[0].TraceID != "other" || all[2].TraceID != "in-group" {
 		t.Fatalf("admin list = %v", traceIDs(all))
 	}
@@ -308,21 +308,74 @@ func TestFSMTraceListFilterAndSort(t *testing.T) {
 	}
 
 	// u1 sees group + own, not u2's unassigned.
-	scoped := f.listTraces(domain.TraceFilter{GroupIDs: []string{"g1"}, UserID: "u1", Limit: 100})
+	scoped := f.listTraces(&domain.TraceFilter{GroupIDs: []string{"g1"}, UserID: "u1", Limit: 100})
 	if len(scoped) != 2 || scoped[0].TraceID != "own" || scoped[1].TraceID != "in-group" {
 		t.Fatalf("scoped list = %v", traceIDs(scoped))
 	}
 
 	// Unassigned-only.
-	unassigned := f.listTraces(domain.TraceFilter{UnassignedOnly: true, Limit: 100})
+	unassigned := f.listTraces(&domain.TraceFilter{UnassignedOnly: true, Limit: 100})
 	if len(unassigned) != 2 {
 		t.Fatalf("unassigned = %v", traceIDs(unassigned))
 	}
 
 	// Limit clamp.
-	limited := f.listTraces(domain.TraceFilter{IncludeUnassigned: true, Limit: 1})
+	limited := f.listTraces(&domain.TraceFilter{IncludeUnassigned: true, Limit: 1})
 	if len(limited) != 1 {
 		t.Fatalf("limit=1 -> %d", len(limited))
+	}
+}
+
+func TestFSMTraceListTextFilters(t *testing.T) {
+	f := newTestFSM(t)
+	applyCmd(t, f, kindUpsertUser, &cmdUser{ID: "u1", Username: "alice", Create: true})
+	applyCmd(t, f, kindUpsertUser, &cmdUser{ID: "u2", Username: "bob", Create: true})
+
+	base := time.Now().UTC()
+	ingest := func(id, userID, ciRepo, project string) {
+		t.Helper()
+		applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{
+			TraceID: id, UserID: userID, CIRepo: ciRepo, ProjectName: project,
+			StartedAt: base, UpdatedAt: base,
+		})
+	}
+	ingest("t1", "u1", "github.com/org/repo", "org-project")
+	ingest("t2", "u2", "gitlab.com/other/thing", "other-project")
+	ingest("t3", "", "", "bare-project")
+
+	cases := []struct {
+		name   string
+		filter domain.TraceFilter
+		want   []string
+	}{
+		{"repo matches ci_repo", domain.TraceFilter{CIRepo: "gitlab.com", IncludeUnassigned: true}, []string{"t2"}},
+		{"repo matches project fallback", domain.TraceFilter{CIRepo: "org-project", IncludeUnassigned: true}, []string{"t1"}},
+		{"repo case-insensitive", domain.TraceFilter{CIRepo: "GITHUB.COM/ORG", IncludeUnassigned: true}, []string{"t1"}},
+		{"repo matches both fields", domain.TraceFilter{CIRepo: "project", IncludeUnassigned: true}, []string{"t1", "t2", "t3"}},
+		{"username substring", domain.TraceFilter{Username: "bob", IncludeUnassigned: true}, []string{"t2"}},
+		{"username case-insensitive", domain.TraceFilter{Username: "ALICE", IncludeUnassigned: true}, []string{"t1"}},
+		{"combined AND", domain.TraceFilter{CIRepo: "gitlab", Username: "alice", IncludeUnassigned: true}, nil},
+		{"combined AND match", domain.TraceFilter{CIRepo: "gitlab", Username: "bob", IncludeUnassigned: true}, []string{"t2"}},
+		{"no match", domain.TraceFilter{CIRepo: "nope", Username: "nope", IncludeUnassigned: true}, nil},
+		{"empty filters unfiltered", domain.TraceFilter{IncludeUnassigned: true}, []string{"t1", "t2", "t3"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.filter.Limit = 100
+			got := traceIDs(f.listTraces(&tc.filter))
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want %v", got, tc.want)
+			}
+			wantSet := make(map[string]bool, len(tc.want))
+			for _, w := range tc.want {
+				wantSet[w] = true
+			}
+			for _, g := range got {
+				if !wantSet[g] {
+					t.Fatalf("unexpected trace %q in %v (want %v)", g, got, tc.want)
+				}
+			}
+		})
 	}
 }
 
@@ -334,7 +387,7 @@ func TestFSMTraceListNormalizesStatus(t *testing.T) {
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "running", Status: "running", StartedAt: now, UpdatedAt: now})
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "success", Status: "success", StartedAt: now, UpdatedAt: now})
 
-	rows := f.listTraces(domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
+	rows := f.listTraces(&domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
 	want := map[string]string{
 		"empty":        "running",
 		"legacy-unset": "running",

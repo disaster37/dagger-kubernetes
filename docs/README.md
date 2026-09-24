@@ -443,8 +443,8 @@ inline comments. The sections below summarise the most important ones.
 |                 | `stale_sweep.enabled`                     | `true`                                                   | Master switch for the pipeline stale-trace sweeper.                                                                                           |
 |                 | `stale_sweep.schedule`                    | `1m`                                                     | Stale sweeper ticker interval.                                                                                                                |
 |                 | `stale_sweep.stale_after`                 | `5m`                                                     | Mark running traces with no active lease failed once older than this.                                                                         |
-|                 | `metrics.enabled`                         | `true`                                                   | Serve `GET /api/v1/traces/:id/metrics` (engine resource charts).                                                                              |
-|                 | `metrics.step`                            | `15s`                                                    | `query_range` resolution; must be > 0 when enabled.                                                                                           |
+|                 | `metrics.enabled`                         | `true`                                                   | Serve `GET /api/v1/traces/:id/metrics` and `GET /api/v1/fleet/:version/metrics` (engine resource charts).                                     |
+|                 | `metrics.step`                            | `15s`                                                    | `query_range` resolution for both metrics endpoints; must be > 0 when enabled.                                                                |
 | `fleet`         | `namespace`                               | `dagger-kubernetes`                                      | K8s namespace for engine pods.                                                                                                                |
 |                 | `max_replicas_per_version`                | `3`                                                      | Autoscaler ceiling per version.                                                                                                               |
 |                 | `max_sessions_per_replica`                | `8`                                                      | Sessions pinned per pod.                                                                                                                      |
@@ -919,7 +919,8 @@ pipeline:
     schedule: "1m"
     stale_after: "5m"
   metrics:
-    enabled: true           # serve GET /api/v1/traces/:id/metrics (engine resource charts).
+    enabled: true           # serve GET /api/v1/traces/:id/metrics and GET
+                             # /api/v1/fleet/:version/metrics (engine charts).
     step: "15s"             # query_range resolution; must be > 0 when enabled.
 ```
 
@@ -944,6 +945,26 @@ summed series. The endpoint is auth-gated by the same visibility rules as the
 trace detail endpoint; a missing `trace_meta` or absent cAdvisor data yields an
 empty-but-valid payload (HTTP 200), and a disabled/unconfigured backend returns
 `501`. See [ADR-037](design/ADR-037-pipeline-view-observability.md).
+
+### Fleet metrics (Runners page)
+
+The same cAdvisor data path powers `GET /api/v1/fleet/:version/metrics`
+(auth-gated, any authenticated user), which serves the Runners-page charts:
+
+- **Window**: a rolling `[now - 15m, now]` (no trace window exists on the
+  fleet page), `step` = `pipeline.metrics.step`.
+- **Series**: the same six engine series (CPU, memory, disk read/write,
+  network rx/tx), selected by
+  `{namespace="<fleet.namespace>",pod=~"<engine-statefulset>-.*",container="engine"}`
+  and summed across replicas.
+- **Storage**: aggregate `container_fs_usage_bytes` (used) and
+  `container_fs_limit_bytes` (capacity) for the engine pods. When cAdvisor
+  reports no capacity, the fallback is `fleet.engine_storage_size × replicas`;
+  when that is also unknown, `percent` is `-1` (rendered as `-`).
+- **Errors**: a malformed `:version` is `400`, a disabled metrics service is
+  `501`, and an unknown-but-well-formed version or a backend failure yields an
+  empty-but-valid payload (HTTP 200). See
+  [ADR-042](design/ADR-042-runner-fleet-metrics-storage.md).
 
 ---
 
@@ -1733,7 +1754,16 @@ Features:
   or the root-folder/module name when there is no git repo) with status,
   duration, and engine version; the raw trace ID is shown as a secondary
   reference under the name. The list auto-refreshes every 10s while any run is
-  in flight, and the per-row duration ticks live every 1s until the run finishes
+  in flight, and the per-row duration ticks live every 1s until the run finishes.
+  Two free-text filters narrow the list server-side: **Repository**
+  (`?ci_repo=`, a case-insensitive substring match on `ci_repo` or
+  `project_name`) and **User** (`?user=`, a substring match on the joined
+  username); admins additionally keep the group `USelect` (`?group_id=`). The
+  filters are AND-ed and survive the auto-refresh (the poll reuses the current
+  filter values)
+- **Logo / favicon** — the header and the login card show a hand-authored
+  fleet-of-daggers logo (`/logo.svg`, `currentColor` so it follows the theme);
+  the browser tab uses `/favicon.svg` (fixed `#58a6ff` accent).
 - **Trace viewer** — drill-down step tree: the root's direct children are shown
   as high-level levels (with Dagger `dagger.io/ui.passthrough` spans promoted),
   each with status and wall-clock duration. Click a level's name to **zoom in**
@@ -1779,6 +1809,14 @@ Features:
   memory, disk read/write and network rx/tx over the trace window
   (`GET /api/v1/traces/:id/metrics`, hand-rolled SVG, no charting dependency).
   The card shows "No metrics" when cAdvisor data is absent.
+- **Runners metrics + storage** — each version card on the Runners page charts
+  the same six engine series over a rolling 15-minute window
+  (`GET /api/v1/fleet/:version/metrics`, refreshed with the page's 10s poll)
+  and shows a Storage row with the aggregate used/capacity bytes in human units
+  plus the used percent (from cAdvisor `container_fs_*`; capacity falls back to
+  `fleet.engine_storage_size × replicas` when cAdvisor reports no limit, and
+  the percent renders `-` when capacity is unknown). A failed/disabled endpoint
+  renders a muted "Metrics unavailable" line instead of breaking the page.
 - **Live updates** — the viewer subscribes to the `/api/v1/traces/:id/live`
   SSE stream. As the supervisor ingests each OTLP trace/log batch it extracts
   the affected trace IDs and broadcasts a lightweight `trace_update` or
@@ -1842,13 +1880,14 @@ Features:
 
 | Endpoint | Purpose |
 |---|---|
-| `GET /api/v1/traces` | Scoped pipeline list. |
+| `GET /api/v1/traces` | Scoped pipeline list. Optional filters: `group_id` (admin, repeatable, `unassigned` keyword), `ci_repo` (case-insensitive substring on `ci_repo`/`project_name`), `user` (case-insensitive substring on `username`), `limit`. |
 | `GET /api/v1/traces/:id` | Reconstructed span tree + status/duration/owner. |
 | `GET /api/v1/traces/:id/logs` | Per-span logs (Loki). |
 | `GET /api/v1/traces/:id/search` | Subtree-scoped, text-filtered, paginated log search (`span_id`, `q`, `mode=contains\|regex`, `limit`, `cursor`). The first page also returns per-span matching `counts`. |
 | `GET /api/v1/traces/:id/live` | SSE re-fetch signal stream. |
 | `GET /api/v1/traces/:id/url` | Self-hosted pipeline-view URL. |
 | `GET /api/v1/traces/:id/metrics` | Trace-scoped engine resource metrics (cAdvisor). |
+| `GET /api/v1/fleet/:version/metrics` | Fleet-scoped engine resource metrics over a 15m rolling window + aggregate storage usage (used/capacity/percent). |
 
 ### Pipeline view URL
 

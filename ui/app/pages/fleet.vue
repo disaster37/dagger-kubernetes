@@ -76,6 +76,34 @@
             {{ formatTime(row.original.startedAt) }}
           </template>
         </UTable>
+
+        <div v-if="metricsByVersion[version.version] === null" class="mt-4 text-[13px] text-muted">
+          Metrics unavailable
+        </div>
+        <div v-else-if="metricsByVersion[version.version]" class="mt-4">
+          <h4 class="mb-2 font-semibold">Runner metrics</h4>
+          <div v-if="metricsByVersion[version.version]!.series.length === 0" class="text-[13px] text-muted">
+            No metrics
+          </div>
+          <div v-else class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
+            <MetricChart
+              v-for="s in metricsByVersion[version.version]!.series"
+              :key="s.name"
+              :series="s"
+              :unit="s.unit"
+            />
+          </div>
+          <div v-if="storageOf(version.version)" class="mt-3 rounded border border-default p-3">
+            <span class="text-[13px] text-muted">Storage</span>
+            <div class="mt-1 flex items-baseline gap-2">
+              <span class="text-lg font-semibold">{{ formatBytes(storageOf(version.version)!.used_bytes) }}</span>
+              <span class="text-[13px] text-muted">
+                of {{ formatBytes(storageOf(version.version)!.capacity_bytes) }}
+                ({{ storagePercentOf(version.version) }}%)
+              </span>
+            </div>
+          </div>
+        </div>
       </UCard>
     </div>
 
@@ -94,9 +122,16 @@
 </template>
 
 <script setup lang="ts">
-import { fetchFleetInfo, purgeEngineCache } from '~/api/client'
+import { fetchFleetInfo, fetchFleetMetrics, purgeEngineCache } from '~/api/client'
 import { useAuthStore } from '~/stores/auth'
-import type { EngineCachePurgeResult, EnginePodPurgeResult, FleetInfo } from '~/api/types'
+import { formatBytes } from '~/utils/format'
+import type {
+  EngineCachePurgeResult,
+  EnginePodPurgeResult,
+  FleetInfo,
+  FleetMetrics,
+  FleetStorage,
+} from '~/api/types'
 
 const REFRESH_MS = 10_000
 
@@ -107,6 +142,7 @@ const error = ref<string | null>(null)
 const purging = ref<Record<string, boolean>>({})
 const purgeResults = ref<Record<string, EngineCachePurgeResult>>({})
 const purgeErrors = ref<Record<string, string>>({})
+const metricsByVersion = ref<Record<string, FleetMetrics | null>>({})
 let timer: number | undefined
 let loadingInFlight = false
 
@@ -128,12 +164,33 @@ async function load(): Promise<void> {
   try {
     fleet.value = await fetchFleetInfo()
     error.value = null
+    await Promise.all(fleet.value.map((v) => loadVersionMetrics(v.version)))
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load fleet'
   } finally {
     loading.value = false
     loadingInFlight = false
   }
+}
+
+// Per-version metrics are best-effort: an error/disabled endpoint records
+// null so the card renders "Metrics unavailable" instead of failing the page.
+async function loadVersionMetrics(version: string): Promise<void> {
+  try {
+    metricsByVersion.value = { ...metricsByVersion.value, [version]: await fetchFleetMetrics(version) }
+  } catch {
+    metricsByVersion.value = { ...metricsByVersion.value, [version]: null }
+  }
+}
+
+function storageOf(version: string): FleetStorage | null {
+  const s = metricsByVersion.value[version]?.storage
+  return s ? s : null
+}
+
+function storagePercentOf(version: string): string {
+  const p = storageOf(version)?.percent
+  return p !== undefined && p >= 0 ? p.toFixed(1) : '-'
 }
 
 function askPurge(version: string): void {

@@ -61,6 +61,12 @@ export interface TraceRow {
   started_at: string
 }
 
+export interface TraceFilterParams {
+  groupId?: string // group id, or the 'unassigned' sentinel
+  ciRepo?: string // substring
+  user?: string // substring
+}
+
 export interface SpanNode {
   span_id: string
   parent_span_id: string
@@ -149,6 +155,21 @@ export interface TraceMetrics {
   end_time: string
   step_seconds: number
   series: MetricSeries[]
+}
+
+export interface FleetStorage {
+  used_bytes: number
+  capacity_bytes: number
+  percent: number
+}
+
+export interface FleetMetrics {
+  version: string
+  start_time: string
+  end_time: string
+  step_seconds: number
+  series: MetricSeries[]
+  storage?: FleetStorage | null
 }
 
 export interface Providers {

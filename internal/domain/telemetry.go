@@ -76,6 +76,24 @@ type TraceMetrics struct {
 	Series      []MetricSeries `json:"series"`
 }
 
+// FleetStorage is the per-version aggregate engine storage usage.
+type FleetStorage struct {
+	UsedBytes     int64   `json:"used_bytes"`
+	CapacityBytes int64   `json:"capacity_bytes"`
+	Percent       float64 `json:"percent"` // 0..100; -1 when capacity is unknown
+}
+
+// FleetMetrics is the per-version aggregate engine resource metrics payload
+// served by GET /api/v1/fleet/:version/metrics.
+type FleetMetrics struct {
+	Version     string         `json:"version"`
+	StartTime   time.Time      `json:"start_time"`
+	EndTime     time.Time      `json:"end_time"`
+	StepSeconds int64          `json:"step_seconds"`
+	Series      []MetricSeries `json:"series"`
+	Storage     *FleetStorage  `json:"storage,omitempty"` // nil = no storage data
+}
+
 // MetricsQueryer runs one PromQL range query against the metrics backend and
 // returns the aggregate (summed across matched series) points.
 type MetricsQueryer interface {
