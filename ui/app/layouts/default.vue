@@ -2,7 +2,7 @@
   <UHeader title="Dagger Kubernetes">
     <template #title>
       <NuxtLink to="/" class="flex items-center gap-2">
-        <img src="/logo.svg" alt="" class="size-7" />
+        <AppLogo class="size-7" aria-hidden="true" />
         <span class="font-semibold">Dagger Kubernetes</span>
       </NuxtLink>
     </template>

@@ -12,7 +12,7 @@
     />
 
     <div class="mb-6 flex justify-center">
-      <img src="/logo.svg" alt="Dagger Kubernetes" class="size-16 text-primary" />
+      <AppLogo class="size-16 text-primary" />
     </div>
 
     <UCard>

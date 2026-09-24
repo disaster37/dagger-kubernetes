@@ -1760,10 +1760,11 @@ Features:
   `project_name`) and **User** (`?user=`, a substring match on the joined
   username); admins additionally keep the group `USelect` (`?group_id=`). The
   filters are AND-ed and survive the auto-refresh (the poll reuses the current
-  filter values)
+  filter values).
 - **Logo / favicon** — the header and the login card show a hand-authored
-  fleet-of-daggers logo (`/logo.svg`, `currentColor` so it follows the theme);
-  the browser tab uses `/favicon.svg` (fixed `#58a6ff` accent).
+  fleet-of-daggers logo, inlined so its `currentColor` fill follows the theme
+  (the same artwork is also served at `/logo.svg`); the browser tab uses
+  `/favicon.svg` (fixed `#58a6ff` accent).
 - **Trace viewer** — drill-down step tree: the root's direct children are shown
   as high-level levels (with Dagger `dagger.io/ui.passthrough` spans promoted),
   each with status and wall-clock duration. Click a level's name to **zoom in**
