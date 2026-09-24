@@ -27,6 +27,14 @@ import (
 // reaped) — a DoS vector (CWE-400/CWE-668).
 const oidcDiscoverTimeout = 15 * time.Second
 
+// errOAuthCredentialExpired signals the stored OIDC credential can no longer be
+// used to verify membership (refresh token expired/rotated/revoked — the IdP
+// does not distinguish these via invalid_grant, RFC 6749 §5.2). Unlike
+// domain.ErrSessionRevoked it is NOT evidence of revocation: the user must not
+// be deactivated and their API token must not be deleted. Re-login stores a
+// fresh credential and recovers immediately.
+var errOAuthCredentialExpired = errors.New("oauth credential expired; re-authentication required")
+
 // OIDCOAuthService implements the generic OIDC authorization-code login flow
 // for provider: "oidc" (covers Dex, Keycloak, Google, Auth0, etc.). Design
 // notes:
@@ -409,16 +417,19 @@ func claimMissing(claims map[string]any, key string) bool {
 
 // Revalidate re-checks the user's current IdP group membership using the stored
 // credential and returns the current provider group names. Returns
-// domain.ErrSessionRevoked when the credential is invalid/expired beyond refresh
-// (user must re-login) and domain.ErrForbidden when membership no longer
-// satisfies the allowlist.
+// errOAuthCredentialExpired when the credential can no longer be used to verify
+// membership (decrypt failure, refresh invalid_grant/invalid_token, or a
+// userinfo 401 that refresh cannot recover — expired, rotated, and revoked are
+// indistinguishable, so this is NOT evidence of revocation: the caller must
+// neither deactivate the user nor delete their API token) and domain.ErrForbidden
+// when membership no longer satisfies the allowlist (positive revocation).
 func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]string, error) {
 	if u.OAuthTokenCiphertext == "" {
 		return nil, errOAuthNoCredential
 	}
 	cred, err := decryptOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
 	if err != nil || cred == nil {
-		return nil, domain.ErrSessionRevoked
+		return nil, errOAuthCredentialExpired
 	}
 	if s.httpClient != nil {
 		ctx = oidc.ClientContext(ctx, s.httpClient)
@@ -438,18 +449,18 @@ func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]st
 		// Userinfo 401: the access token may simply be expired while the
 		// credential is still valid. Attempt one refresh via tokenSource,
 		// then retry userinfo once before concluding the credential is
-		// revoked (CWE-613 residual risk: clock-skew false revocation).
+		// unusable (CWE-613 residual risk: clock-skew false revocation).
 		s.logger.WithField("user_id", u.ID).Debug("oidc: userinfo returned 401, attempting token refresh")
 		if _, refreshErr := ts.Token(); refreshErr != nil {
 			if oauthTokenRevoked(refreshErr) {
-				return nil, domain.ErrSessionRevoked
+				return nil, errOAuthCredentialExpired
 			}
 			return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport on refresh => unavailable
 		}
 		ui, err = p.UserInfo(ctx, ts)
 		if err != nil {
 			if oauthTokenRevoked(err) {
-				return nil, domain.ErrSessionRevoked
+				return nil, errOAuthCredentialExpired
 			}
 			return nil, fmt.Errorf("oidc: userinfo: %w", err)
 		}
@@ -471,19 +482,28 @@ func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *d
 	return &refreshingSource{s: s, ctx: ctx, p: p, u: u, cred: cred, logger: s.logger}
 }
 
-// oauthTokenRevoked reports whether err represents a definitive token
-// revocation from the OIDC provider: a refresh rejected with invalid_grant /
-// invalid_token (user deleted or consent revoked), or a userinfo 401. Any other
-// error (network, 5xx) is treated as a transient IdP-unavailable condition.
+// oauthTokenRevoked reports whether err signals an unusable OIDC credential: a
+// refresh rejected with invalid_grant / invalid_token, or a 401 from the token
+// or userinfo endpoint. Per RFC 6749 §5.2 invalid_grant is ambiguous (the
+// refresh token may be expired, rotated, or revoked), so callers must treat it
+// as "cannot verify membership" (errOAuthCredentialExpired) — never as
+// definitive revocation. Any other error (network, 5xx) is a transient
+// IdP-unavailable condition. go-oidc wraps token-source and HTTP errors with
+// %v (breaking the error chain), so errors that are not *oauth2.RetrieveError
+// are classified by inspecting the message for the RFC 6749 error codes and
+// the 401 status line.
 func oauthTokenRevoked(err error) bool {
 	var rerr *oauth2.RetrieveError
-	if !errors.As(err, &rerr) {
-		return false
+	if errors.As(err, &rerr) {
+		if rerr.ErrorCode == "invalid_grant" || rerr.ErrorCode == "invalid_token" {
+			return true
+		}
+		return rerr.Response != nil && rerr.Response.StatusCode == http.StatusUnauthorized
 	}
-	if rerr.ErrorCode == "invalid_grant" || rerr.ErrorCode == "invalid_token" {
-		return true
-	}
-	return rerr.Response != nil && rerr.Response.StatusCode == http.StatusUnauthorized
+	msg := err.Error()
+	return strings.Contains(msg, "invalid_grant") ||
+		strings.Contains(msg, "invalid_token") ||
+		strings.Contains(msg, "401 Unauthorized")
 }
 
 // refreshingSource wraps an oauth2.TokenSource that refreshes the upstream
