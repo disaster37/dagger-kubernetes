@@ -9,8 +9,15 @@ export default defineNuxtConfig({
     head: {
       title: 'Dagger Kubernetes - Pipeline View',
       htmlAttrs: { lang: 'en' },
-      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
-      meta: [{ name: 'viewport', content: 'width=device-width, initial-scale=1.0' }],
+      link: [
+        { rel: 'icon', href: '/favicon.ico', sizes: '48x48' },
+        { rel: 'icon', href: '/favicon.svg', type: 'image/svg+xml' },
+        { rel: 'apple-touch-icon', href: '/apple-touch-icon.png', sizes: '180x180' },
+      ],
+      meta: [
+        { name: 'viewport', content: 'width=device-width, initial-scale=1.0' },
+        { name: 'theme-color', content: '#0d1117' },
+      ],
     },
   },
   nitro: {

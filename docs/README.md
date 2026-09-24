@@ -1764,7 +1764,12 @@ Features:
 - **Logo / favicon** — the header and the login card show a hand-authored
   fleet-of-daggers logo, inlined so its `currentColor` fill follows the theme
   (the same artwork is also served at `/logo.svg`); the browser tab uses
-  `/favicon.svg` (fixed `#58a6ff` accent).
+  `/favicon.svg` (fixed `#58a6ff` accent) with full fallbacks for browsers
+  without SVG-favicon support: `/favicon.ico` (16/32/48, same motif) for
+  Safari/legacy tabs, `/apple-touch-icon.png` (180×180 on the solid
+  `#0d1117` dark background) for iOS home-screen icons, and a `theme-color`
+  meta tag matching the forced-dark background. The raster assets are
+  generated reproducibly by `go run ./scripts/gen-favicon` (stdlib only).
 - **Trace viewer** — drill-down step tree: the root's direct children are shown
   as high-level levels (with Dagger `dagger.io/ui.passthrough` spans promoted),
   each with status and wall-clock duration. Click a level's name to **zoom in**

@@ -70,8 +70,21 @@ func serveFile(c *app.RequestContext, sub fs.FS, rel string) error {
 	return nil
 }
 
+// iconContentTypes pins the favicon-related types explicitly: Go's builtin
+// mime table has no ".ico" entry and the platform mime database (loaded from
+// /etc/mime.types etc.) is absent in the minimal runtime image, so without
+// this map favicon.ico would be served as application/octet-stream.
+var iconContentTypes = map[string]string{
+	".ico": "image/x-icon",
+	".png": "image/png",
+}
+
 func contentTypeFor(rel string) string {
-	if ct := mime.TypeByExtension(filepath.Ext(rel)); ct != "" {
+	ext := strings.ToLower(filepath.Ext(rel))
+	if ct, ok := iconContentTypes[ext]; ok {
+		return ct
+	}
+	if ct := mime.TypeByExtension(ext); ct != "" {
 		return ct
 	}
 	return "application/octet-stream"
