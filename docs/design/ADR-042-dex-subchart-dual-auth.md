@@ -66,6 +66,14 @@ questions had to be settled first:
      (`https://jp-gouin.github.io/helm-openldap/`, pinned `2.0.4`): bitnami's
      `openldap` chart was **removed** from `https://charts.bitnami.com/bitnami`
      (absent from the index; `.tgz` fetches 403) and from `bitnami/charts`.
+     Caveat: the jp-gouin repo was **archived** (read-only) on 2026-01-31, so
+     the pinned `2.0.4` receives no further updates — and that chart line runs
+     the **Osixia** image (`osixia/openldap:1.4.0`), not a Bitnami image (the
+     Bitnami switch happened in the 4.x line we do not pin). Both the chart and
+     the image remain fetchable (proven by the live validation) and the pin
+     guarantees reproducibility; the frozen-forever state is accepted for a
+     dev/test-only, plaintext, example-credentials subchart. If the repo or the
+     image ever disappears, vendor the `.tgz` or switch charts.
    - The same changeset adds the four existing Go revalidation keys
      (`revalidate_interval`, `revalidate_grace`, `revalidate_fail_open`,
      `session_max_age`) to `values.yaml` + `templates/configmap.yaml` — the

@@ -91,6 +91,12 @@ configurable (`service.control.port`, `service.data.port`).
 | Grafana Loki | `loki` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Log aggregation backend, stores OTLP logs |
 | VictoriaMetrics | `victoria-metrics-single` ([victoriametrics](https://victoriametrics.github.io/helm-charts/)) | enabled | PromQL-compatible metrics backend |
 | Grafana | `grafana` ([grafana](https://grafana.github.io/helm-charts)) | enabled | Unified dashboards with auto-provisioned datasources |
+| Dex (OIDC IdP) | `dex` ([charts.dexidp.io](https://charts.dexidp.io)) | disabled | Optional OIDC identity provider for the test environment (ADR-042); pair with `openldap` — the Dex `local`/passwordDB connector has no groups |
+| OpenLDAP | `openldap` ([jp-gouin](https://jp-gouin.github.io/helm-openldap/)) | disabled | Optional LDAP backend for the Dex connector (groups + refresh tokens); community chart, archived upstream (read-only since 2026-01-31), pinned 2.0.4 — bitnami/openldap was removed from the bitnami repo |
+
+Dex and OpenLDAP ship **disabled** by default (they exist for the OIDC test
+environment); enable both together with `dex.enabled: true` +
+`openldap.enabled: true` (see ADR-042 and the Dex recipe in `docs/README.md`).
 
 Disable any tool (and point the supervisor elsewhere) via its own `enabled`
 flag:

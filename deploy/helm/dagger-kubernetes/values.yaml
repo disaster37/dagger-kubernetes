@@ -1152,7 +1152,10 @@ dex:
 ## @param openldap.enabled Install an in-cluster OpenLDAP that Dex's ldap connector authenticates
 ##   against (provides groups + refresh tokens + preferred_username). Off by default.
 ##   Dev/test only: plaintext LDAP, example credentials. Uses the community jp-gouin
-##   openldap chart (bitnami/openldap was removed from the bitnami repo).
+##   openldap chart (bitnami/openldap was removed from the bitnami repo). Caveat: that
+##   repo is archived (read-only since 2026-01-31) and the pinned 2.0.4 chart runs the
+##   Osixia image (osixia/openldap:1.4.0, not Bitnami) — both remain fetchable but are
+##   effectively frozen; accepted for a dev/test-only subchart (ADR-042).
 openldap:
   enabled: false
   replicaCount: 1
