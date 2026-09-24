@@ -164,6 +164,7 @@ type Deps struct {
 	StartupProvider      domain.StartupProvider
 	ImageCache           domain.ImageCacheService
 	EngineMetrics        *service.EngineMetricsService // nil = trace metrics endpoint disabled
+	FleetMetrics         *service.FleetMetricsService  // nil = fleet metrics endpoint disabled
 	// LeaderInfo is the Raft store view used by the leader-forward middleware
 	// and the data-plane relay. nil disables both (single-node / tests).
 	LeaderInfo leaderInfo
@@ -255,6 +256,7 @@ type Server struct {
 	ciWrapperPath     string // path to pre-built dagger-kubernetes-ci binary
 	imageCache        domain.ImageCacheService
 	engineMetrics     *service.EngineMetricsService
+	fleetMetrics      *service.FleetMetricsService
 }
 
 // NewServer constructs a Server from a config and a Deps bundle.
@@ -302,6 +304,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		ciWrapperPath:     deps.CIWrapperPath,
 		imageCache:        deps.ImageCache,
 		engineMetrics:     deps.EngineMetrics,
+		fleetMetrics:      deps.FleetMetrics,
 	}
 }
 
@@ -606,6 +609,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.POST("/v1/metrics", s.handleOTel("metrics"))
 
 	h.GET("/api/v1/fleet", s.handleFleetInfo)
+	h.GET("/api/v1/fleet/:version/metrics", s.handleFleetMetrics)
 	h.POST("/api/v1/fleet/:version/purge-cache", s.adminOnly(s.handleFleetPurgeCache))
 	h.GET("/api/v1/fleet/:version/purge-cache", s.adminOnly(s.handleFleetPurgeStatus))
 	h.GET("/api/v1/history", s.handleHistoryInfo)

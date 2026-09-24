@@ -841,8 +841,10 @@ func validateOTelConfig(cfg *domain.Config) error {
 }
 
 // validatePipelineMetricsConfig requires a positive query_range step when the
-// trace-scoped engine metrics endpoint is enabled (a 0 step would make every
-// VictoriaMetrics range query invalid).
+// metrics endpoints are enabled (a 0 step would make every VictoriaMetrics
+// range query invalid). pipeline.metrics gates both GET
+// /api/v1/traces/:id/metrics and the runners-page GET
+// /api/v1/fleet/:version/metrics endpoint.
 func validatePipelineMetricsConfig(cfg *domain.Config) error {
 	if cfg.Pipeline.Metrics.Enabled && cfg.Pipeline.Metrics.Step <= 0 {
 		return fmt.Errorf("pipeline.metrics.step must be > 0 when pipeline.metrics.enabled is true")

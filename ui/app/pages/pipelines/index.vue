@@ -9,6 +9,19 @@
       </div>
     </UCard>
 
+    <UCard class="mb-4">
+      <div class="flex flex-wrap items-end gap-3">
+        <div class="min-w-[220px] flex-1">
+          <label class="mb-1 block text-sm">Repository</label>
+          <UInput v-model="repoFilter" placeholder="e.g. github.com/org/repo" @change="load" />
+        </div>
+        <div class="min-w-[180px] flex-1">
+          <label class="mb-1 block text-sm">User</label>
+          <UInput v-model="userFilter" placeholder="e.g. alice" @change="load" />
+        </div>
+      </div>
+    </UCard>
+
     <UCard>
       <UTable :data="traces" :columns="columns" :empty="emptyText">
         <template #pipeline-cell="{ row }">
@@ -50,6 +63,8 @@ const auth = useAuthStore()
 const traces = ref<TraceRow[]>([])
 const groups = ref<Group[]>([])
 const groupFilter = ref('__all__')
+const repoFilter = ref('')
+const userFilter = ref('')
 
 const columns = [
   { id: 'pipeline', accessorKey: 'trace_id', header: 'Pipeline' },
@@ -120,7 +135,11 @@ function onVisibilityChange() {
 
 async function load() {
   try {
-    traces.value = await fetchTraces(groupFilter.value === '__all__' ? undefined : groupFilter.value)
+    traces.value = await fetchTraces({
+      groupId: groupFilter.value === '__all__' ? undefined : groupFilter.value,
+      ciRepo: repoFilter.value.trim() || undefined,
+      user: userFilter.value.trim() || undefined,
+    })
   } catch (e) {
     console.error('Failed to fetch traces', e)
   }

@@ -70,6 +70,8 @@ type TraceFilter struct {
 	IncludeUnassigned bool     // admin: true (all); user: only their own user_id fallback
 	UnassignedOnly    bool     // admin "unassigned" view: only traces without a group
 	UserID            string   // owner fallback for unassigned traces
+	CIRepo            string   // case-insensitive substring on ci_repo/project_name; "" = none
+	Username          string   // case-insensitive substring on joined username; "" = none
 	Limit             int      // default DefaultTraceLimit, max MaxTraceLimit
 }
 
@@ -78,7 +80,7 @@ type TraceMetaRepository interface {
 	UpsertProvision(ctx context.Context, traceID, userID, version string) error
 	UpsertIngest(ctx context.Context, m *TraceMeta) error
 	Get(ctx context.Context, traceID string) (*TraceMeta, error)
-	List(ctx context.Context, f TraceFilter) ([]*TraceListResult, error)
+	List(ctx context.Context, f *TraceFilter) ([]*TraceListResult, error)
 
 	// ListBefore returns trace_meta rows whose COALESCE(started_at, updated_at)
 	// is older than cutoff. When protectRunning is true, rows with status ""

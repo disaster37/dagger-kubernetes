@@ -91,6 +91,9 @@ payload (HTTP 200); a disabled/unconfigured backend returns `501`.
 **Charting.** A hand-rolled SVG component (`MetricChart.vue`) — no charting
 dependency is added for four small time-series panels.
 
+(The same cAdvisor data path also serves the runners page — see
+[ADR-042](ADR-042-runner-fleet-metrics-storage.md).)
+
 ### 5. OTLP ingest body size is a dedicated, configurable cap
 
 `otel.ingest_max_body_size` (default 64 MiB) is separate from the 4 MiB

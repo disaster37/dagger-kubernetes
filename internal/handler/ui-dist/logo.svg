@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="currentColor" role="img" aria-label="Dagger Kubernetes">
+  <defs>
+    <g id="d">
+      <path d="M0 -18 L3.5 -5 L0 -3 L-3.5 -5 Z"/>
+      <rect x="-7" y="-5" width="14" height="2.5" rx="1"/>
+      <rect x="-2.5" y="-2.5" width="5" height="13" rx="1.5"/>
+    </g>
+  </defs>
+  <use href="#d" transform="translate(21 38) rotate(-18)"/>
+  <use href="#d" transform="translate(32 40)"/>
+  <use href="#d" transform="translate(43 38) rotate(18)"/>
+</svg>

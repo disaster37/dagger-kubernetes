@@ -146,7 +146,7 @@ func TestTraceMetaRepoListScoping(t *testing.T) {
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "other-unassigned", UserID: u2.ID, ProjectName: "p3", StartedAt: time.Now().UTC()})
 
 	// Admin sees all.
-	adminRes, err := repo.List(ctx, domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
+	adminRes, err := repo.List(ctx, &domain.TraceFilter{IncludeUnassigned: true, Limit: 100})
 	if err != nil {
 		t.Fatalf("admin List: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestTraceMetaRepoListScoping(t *testing.T) {
 	}
 
 	// u1 sees group traces + own unassigned (2), not u2's unassigned.
-	userRes, err := repo.List(ctx, domain.TraceFilter{GroupIDs: []string{g1.ID}, UserID: u1.ID, Limit: 100})
+	userRes, err := repo.List(ctx, &domain.TraceFilter{GroupIDs: []string{g1.ID}, UserID: u1.ID, Limit: 100})
 	if err != nil {
 		t.Fatalf("user List: %v", err)
 	}
@@ -171,7 +171,7 @@ func TestTraceMetaRepoListScoping(t *testing.T) {
 	}
 
 	// u2 (no groups) sees only own unassigned.
-	u2Res, err := repo.List(ctx, domain.TraceFilter{GroupIDs: nil, UserID: u2.ID, Limit: 100})
+	u2Res, err := repo.List(ctx, &domain.TraceFilter{GroupIDs: nil, UserID: u2.ID, Limit: 100})
 	if err != nil {
 		t.Fatalf("u2 List: %v", err)
 	}
@@ -195,7 +195,7 @@ func TestTraceMetaRepoListUnassignedOnly(t *testing.T) {
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "unassigned-2", StartedAt: time.Now().UTC()})
 
 	// Admin "unassigned" view: only traces without a group.
-	res, err := repo.List(ctx, domain.TraceFilter{UnassignedOnly: true, Limit: 100})
+	res, err := repo.List(ctx, &domain.TraceFilter{UnassignedOnly: true, Limit: 100})
 	if err != nil {
 		t.Fatalf("List unassigned: %v", err)
 	}
@@ -220,17 +220,17 @@ func TestTraceMetaRepoListLimitClamping(t *testing.T) {
 		repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: string(rune('a' + i)), StartedAt: time.Now().UTC()})
 	}
 	// default limit
-	res, _ := repo.List(ctx, domain.TraceFilter{IncludeUnassigned: true})
+	res, _ := repo.List(ctx, &domain.TraceFilter{IncludeUnassigned: true})
 	if len(res) != 5 {
 		t.Fatalf("default limit returned %d, want 5", len(res))
 	}
 	// explicit small limit
-	res, _ = repo.List(ctx, domain.TraceFilter{IncludeUnassigned: true, Limit: 2})
+	res, _ = repo.List(ctx, &domain.TraceFilter{IncludeUnassigned: true, Limit: 2})
 	if len(res) != 2 {
 		t.Fatalf("limit=2 returned %d, want 2", len(res))
 	}
 	// over-max clamps to 500 (just verify no error)
-	res, _ = repo.List(ctx, domain.TraceFilter{IncludeUnassigned: true, Limit: 1000})
+	res, _ = repo.List(ctx, &domain.TraceFilter{IncludeUnassigned: true, Limit: 1000})
 	if len(res) != 5 {
 		t.Fatalf("limit=1000 returned %d, want 5", len(res))
 	}

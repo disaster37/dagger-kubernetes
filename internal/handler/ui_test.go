@@ -2,7 +2,9 @@ package handler
 
 import (
 	"context"
+	"io/fs"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -21,6 +23,65 @@ func newUIFileEngine(fsys fstest.MapFS) *route.Engine {
 		serveUIPath(c, fsys, string(c.Path()))
 	})
 	return e
+}
+
+func TestContentTypeFor(t *testing.T) {
+	tests := []struct {
+		rel  string
+		want string
+	}{
+		{rel: "favicon.ico", want: "image/x-icon"},
+		{rel: "apple-touch-icon.png", want: "image/png"},
+		{rel: "assets/chart.png", want: "image/png"},
+		{rel: "FAVICON.ICO", want: "image/x-icon"},
+		{rel: "favicon.svg", want: "image/svg+xml"},
+		{rel: "blob.unknownext", want: "application/octet-stream"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.rel, func(t *testing.T) {
+			if got := contentTypeFor(tc.rel); got != tc.want {
+				t.Fatalf("contentTypeFor(%q) = %q, want %q", tc.rel, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestServeIconContentType proves the favicon assets are both present in the
+// embedded bundle and served with their pinned Content-Type (a 200 with the
+// wrong type or a 404 would break non-SVG-favicon browsers).
+func TestServeIconContentType(t *testing.T) {
+	for _, name := range []string{"favicon.ico", "apple-touch-icon.png", "favicon.svg"} {
+		if _, err := fs.Stat(uiAssets, filepath.Join("ui-dist", name)); err != nil {
+			t.Fatalf("embedded bundle missing %s: %v", name, err)
+		}
+	}
+
+	fsys := fstest.MapFS{
+		"favicon.ico":          &fstest.MapFile{Data: []byte{0, 0, 1, 0}},
+		"apple-touch-icon.png": &fstest.MapFile{Data: []byte("png")},
+		"favicon.svg":          &fstest.MapFile{Data: []byte("<svg/>")},
+	}
+	e := newUIFileEngine(fsys)
+
+	tests := []struct {
+		path     string
+		wantType string
+	}{
+		{path: "/favicon.ico", wantType: "image/x-icon"},
+		{path: "/apple-touch-icon.png", wantType: "image/png"},
+		{path: "/favicon.svg", wantType: "image/svg+xml"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.path, func(t *testing.T) {
+			resp := ut.PerformRequest(e, "GET", tc.path, nil)
+			if got := resp.Result().StatusCode(); got != http.StatusOK {
+				t.Fatalf("status = %d, want %d", got, http.StatusOK)
+			}
+			if got := string(resp.Result().Header.Peek("Content-Type")); got != tc.wantType {
+				t.Fatalf("Content-Type = %q, want %q", got, tc.wantType)
+			}
+		})
+	}
 }
 
 func TestServeFileCacheHeaders(t *testing.T) {

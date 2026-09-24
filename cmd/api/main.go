@@ -23,6 +23,7 @@ import (
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -296,6 +297,22 @@ func run(c *cli.Context) error {
 		engineMetricsSvc = service.NewEngineMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, logger)
 	}
 
+	// Runners-page fleet metrics: same cAdvisor source + feature flag, plus the
+	// configured per-pod PVC size as the storage-capacity fallback when
+	// cAdvisor reports no limit.
+	var engineStorageBytes int64
+	if cfg.Fleet.EngineStorageSize != "" {
+		if q, err := resource.ParseQuantity(cfg.Fleet.EngineStorageSize); err == nil {
+			engineStorageBytes = q.Value()
+		} else {
+			logger.WithError(err).Warn("invalid fleet.engine_storage_size; storage-capacity fallback disabled")
+		}
+	}
+	var fleetMetricsSvc *service.FleetMetricsService
+	if cfg.Pipeline.Metrics.Enabled {
+		fleetMetricsSvc = service.NewFleetMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, engineStorageBytes, logger)
+	}
+
 	// Shared S3 client for the S3-backed CLI cache.
 	var s3Client *minio.Client
 	if cfg.Cache.S3.Endpoint == "" {
@@ -392,6 +409,7 @@ func run(c *cli.Context) error {
 		CIWrapperPath:        cfg.CLI.CIWrapperPath,
 		ImageCache:           imageCacheSvc,
 		EngineMetrics:        engineMetricsSvc,
+		FleetMetrics:         fleetMetricsSvc,
 		LeaderInfo:           raftStore,
 	})
 

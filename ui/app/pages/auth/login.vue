@@ -11,6 +11,10 @@
       description="Your account was authenticated successfully, but you are not a member of any authorized group. Please contact your administrator to request access."
     />
 
+    <div class="mb-6 flex justify-center">
+      <AppLogo class="size-16 text-primary" />
+    </div>
+
     <UCard>
       <h2 class="mb-4 text-xl font-semibold">Login</h2>
       <UAlert

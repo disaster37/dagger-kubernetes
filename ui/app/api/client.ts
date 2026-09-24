@@ -5,6 +5,7 @@ import type {
   ConnectEnvSnapshot,
   EngineCachePurgeResult,
   FleetInfo,
+  FleetMetrics,
   Group,
   GroupSummary,
   HistoryInfo,
@@ -21,6 +22,7 @@ import type {
   Providers,
   TokenMeta,
   TraceDetail,
+  TraceFilterParams,
   TraceLogEntry,
   TraceMetrics,
   TraceRow,
@@ -178,8 +180,11 @@ export async function revokeMyToken(): Promise<void> {
 }
 
 // --- Traces / fleet / cache ---
-export async function fetchTraces(groupId?: string): Promise<TraceRow[]> {
-  const params = groupId !== undefined ? { group_id: groupId } : {}
+export async function fetchTraces(filter: TraceFilterParams = {}): Promise<TraceRow[]> {
+  const params: Record<string, string> = {}
+  if (filter.groupId) params.group_id = filter.groupId
+  if (filter.ciRepo) params.ci_repo = filter.ciRepo
+  if (filter.user) params.user = filter.user
   const { data } = await api.get('/api/v1/traces', { params })
   return data
 }
@@ -210,6 +215,10 @@ export async function fetchFleetInfo(): Promise<FleetInfo[]> {
 export async function purgeEngineCache(version: string): Promise<EngineCachePurgeResult> {
   const { data } = await api.post(`/api/v1/fleet/${encodeURIComponent(version)}/purge-cache`)
   return data as EngineCachePurgeResult
+}
+export async function fetchFleetMetrics(version: string): Promise<FleetMetrics> {
+  const { data } = await api.get(`/api/v1/fleet/${encodeURIComponent(version)}/metrics`)
+  return data as FleetMetrics
 }
 export async function fetchHistoryInfo(): Promise<HistoryInfo> {
   const { data } = await api.get('/api/v1/history')

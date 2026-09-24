@@ -21,7 +21,11 @@ func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	f := domain.TraceFilter{Limit: clampLimit(c.Query("limit"))}
+	f := domain.TraceFilter{
+		Limit:    clampLimit(c.Query("limit")),
+		CIRepo:   strings.TrimSpace(c.Query("ci_repo")),
+		Username: strings.TrimSpace(c.Query("user")),
+	}
 	if id.IsAdmin() {
 		// Admin may narrow with ?group_id= (repeatable); the "unassigned"
 		// keyword selects only traces without a group. Without a filter
@@ -39,7 +43,7 @@ func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
 		f.UserID = id.UserID
 	}
 
-	res, err := s.traceMeta.List(context.Background(), f)
+	res, err := s.traceMeta.List(context.Background(), &f)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
