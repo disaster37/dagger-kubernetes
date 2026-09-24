@@ -1070,7 +1070,8 @@ The mechanism works as follows:
    cache (default interval: 5m).
 3. On **positive revocation** — userinfo succeeds but the groups no longer
    satisfy `allowed_groups`/`admin_groups` (`domain.ErrForbidden`), or GitHub
-   answers 401/404 on its never-expiring token — the user is marked
+   answers 401/404 on its never-expiring token **or the stored credential
+   fails to decrypt** — the user is marked
    **deactivated** cluster-wide (Raft-replicated) and their API token is
    revoked. All pods reject their JWTs within the revalidation interval.
 4. An **unusable OIDC credential** (refresh rejected with
@@ -1119,6 +1120,15 @@ re-auth whenever a credential lapses — which the supervisor now tolerates
 want "never re-auth" keep polling-based revocation by configuring the IdP
 persistently (see the Dex recipe below) and setting `session_max_age` as the
 periodic hard re-login backstop.
+
+**Warning: `revalidate_fail_open: true` combined with `session_max_age: 0`
+(the default) trusts the last-known-good groups indefinitely while the
+credential stays unusable.** Fail-open only ever serves cached groups, and
+`session_max_age: 0` removes the only bound that would eventually force a
+re-login (and therefore a fresh allowlist evaluation) — so a user whose access
+should have lapsed keeps it for as long as the credential stays broken. That
+is a real availability-over-security tradeoff: prefer fail-closed (the
+default), or pair fail-open with a finite `session_max_age`.
 
 During rollout, set `session_max_age: "24h"` to force re-login for pre-upgrade
 users, which then captures a credential and enables revalidation.

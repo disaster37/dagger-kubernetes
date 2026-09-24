@@ -118,6 +118,11 @@ auth:
     revalidate_interval: "5m"   # per-user cache TTL for successful IdP re-checks; bounds the detection delay.
     revalidate_grace: "1h"      # serve last-known-good membership for this long when the IdP is unreachable or the OIDC credential is unusable.
     revalidate_fail_open: false # after grace, false = deny (fail-closed), true = allow (fail-open).
+                                #   WARNING: fail_open: true COMBINED with session_max_age: "0" (disabled) trusts the
+                                #   last-known-good groups INDEFINITELY while the credential stays unusable: fail-open
+                                #   only serves cached groups, and session_max_age: "0" removes the re-login bound that
+                                #   would force a fresh allowlist evaluation. Prefer fail-closed (default), or pair
+                                #   fail-open with a finite session_max_age (availability-over-security tradeoff).
     session_max_age: "0"        # optional hard bound on an OAuth session (refresh-token age); 0 = disabled.
                                 #   Set e.g. "24h" during rollout to bound sessions issued before this change.
 

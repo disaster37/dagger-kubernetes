@@ -320,6 +320,11 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 	if err := r.users.Update(ctx, u); err != nil {
 		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: persist revalidated user failed")
 	}
+	// Re-snapshot the credential: Revalidate's refreshingSource may have rotated and
+	// persisted u.OAuthTokenCiphertext mid-check (oauth_oidc.go refreshingSource.Token).
+	// Keeping the top-of-refresh snapshot would make a later stateExpired entry appear
+	// to have a "changed credential" and force one spurious re-check.
+	entry.credential = u.OAuthTokenCiphertext
 	entry.state = stateOK
 	gs, _ := r.groups.GroupsForUser(ctx, u.ID)
 	entry.groupIDs = groupIDs(gs)
