@@ -10,7 +10,7 @@ The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](
 |----------|-------------------|-----|
 | `lint`   | Delegated to `golang` module `Lint` | Upstream provides golangci-lint; custom base image pins v2.12.2 |
 | `build`  | Delegated to `golang` module `Build` ×2 | Upstream handles CGO_ENABLED=0, ldflags, cross-compile |
-| `helm`   | Lint delegated to `helm` module; template matrix local | Upstream `Lint` = `helm dependency update` + `helm lint`; no `helm template` support. The local template matrix also covers the three data-plane TLS cases (embedded default, `dataCert.enabled`, `dataIngress.tls.secretName`) plus the external-provider keypair rendering, a `minio.enabled=false` variant that renders the chart without the bundled S3 object store, and a subchart-`fullnameOverride` variant that renames tempo/loki/victoria/minio/opentelemetry-collector (in lock step with the `global.daggerKubernetes.serviceNames.*` collector-exporter keys). The default and subchart-rename variants additionally assert URL substrings in the rendered manifests, so the matrix proves the auto-wired service URLs follow each dependency's own fullname rules instead of only checking that rendering succeeds. |
+| `helm`   | Lint delegated to `helm` module; template matrix local | Upstream `Lint` = `helm dependency update` + `helm lint`; no `helm template` support. The local template matrix also covers the three data-plane TLS cases (embedded default, `dataCert.enabled`, `dataIngress.tls.secretName`) plus the external-provider keypair rendering, a `minio.enabled=false` variant that renders the chart without the bundled S3 object store, and a subchart-`fullnameOverride` variant that renames tempo/loki/victoria/minio/opentelemetry-collector (in lock step with the `global.daggerKubernetes.serviceNames.*` collector-exporter keys). The default and subchart-rename variants additionally assert URL substrings in the rendered manifests — the default variant covers both the supervisor ConfigMap URLs and the collector's own exporter endpoints under their default Service names, the rename variant the renamed ones — so the matrix proves the auto-wired service URLs follow each dependency's own fullname rules instead of only checking that rendering succeeds. |
 | `test`   | Local | Upstream hardcodes flags (no `-race`, `-vet=off`); `-race` requires CGO |
 | `ui`     | Local | Local Nuxt 4 + Nuxt UI v4 build (upstream has no UI support) |
 | `docker` | Local | Upstream has no Dockerfile support |
@@ -126,6 +126,12 @@ No secrets are required for CI. `publish` needs a registry username/password for
 
 - **Engine startup on first run:** Dagger pulls the engine image on the first invocation; subsequent runs are faster.
 - **`helm dependency update` needs network:** The chart depends on 6 public Helm charts (see `Chart.yaml`); ensure outbound network access is available.
+- **Collector exporter endpoints are templated in values.yaml:** the
+  opentelemetry-collector subchart renders its config through `tpl`, so the
+  `{{ include "dagger-kubernetes.otel*Service" . }}` expressions inside
+  `values.yaml` resolve to real `<service>.<namespace>.svc` URLs. The CI helm
+  matrix (default + rename variants) asserts these endpoints render, so a
+  subchart upgrade that drops the `tpl` fails CI.
 - **golangci-lint version drift:** The local module pins golangci-lint **v2.12.2** via a custom base image. Bump deliberately when upgrading.
 - **GHCR push fails with 401/403:** the PAT behind `env:GHCR_TOKEN` needs the `write:packages` scope (and the username must match the token owner). Both credentials must be passed together — see the next bullet.
 - **`publish` with only one credential:** the `image` module **silently skips auth** when only one of `WithRegistryUsername`/`WithRegistryPassword` is set; the local module therefore rejects a lone credential up front (`registryUsername and registryPassword must be provided together`). Pass both, or neither for anonymous registries (ttl.sh).

@@ -56,10 +56,12 @@ type helmVariant struct {
 // dataIngress.tls.secretName) plus the external-provider keypair rendering.
 // The default and subchart-rename variants assert the rendered URLs: the
 // default pins each dependency's fullname-derived default name (including
-// <release>-victoria-server), and the rename variant renames
-// tempo/loki/victoria/minio/opentelemetry-collector and, in lock step, sets
-// the global.daggerKubernetes.serviceNames.* keys the collector exporters
-// follow — proving the auto-wired URLs track each dependency's fullname rules.
+// <release>-victoria-server) — both the supervisor ConfigMap URLs and the
+// collector's own exporter endpoints under their default Service names — and
+// the rename variant renames tempo/loki/victoria/minio/opentelemetry-collector
+// and, in lock step, sets the global.daggerKubernetes.serviceNames.* keys the
+// collector exporters follow — proving the auto-wired URLs track each
+// dependency's fullname rules.
 var helmTemplateMatrix = []helmVariant{
 	{
 		sets: []string{},
@@ -69,6 +71,9 @@ var helmTemplateMatrix = []helmVariant{
 			`loki_url: "http://dagger-kubernetes-loki.`,
 			`victoria_url: "http://dagger-kubernetes-victoria-server.`,
 			`endpoint: "dagger-kubernetes-minio.`,
+			`endpoint: http://dagger-kubernetes-tempo.`,
+			`endpoint: http://dagger-kubernetes-loki.`,
+			`endpoint: http://dagger-kubernetes-victoria-server.`,
 		},
 	},
 	{sets: []string{"--set", "supervisor.enabled=false"}},
