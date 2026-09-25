@@ -40,3 +40,19 @@ jobs:
           helm dependency update deploy/helm/dagger-kubernetes
           helm package deploy/helm/dagger-kubernetes --version "${VERSION#v}" --app-version "${VERSION#v}"
           helm push dagger-kubernetes-${VERSION#v}.tgz oci://ghcr.io/${REPO}/charts
+  publish-jenkins-libs:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Dagger CLI
+        run: |
+          curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="0.21.8" BIN_DIR="$HOME/bin" sh
+          echo "$HOME/bin" >> "$GITHUB_PATH"
+      - name: Build Jenkins libs artifact
+        run: dagger call -m ./dagger --src . jenkins-libs --version "${{ github.ref_name }}" export --path "jenkins-libs-${{ github.ref_name }}.tar.gz"
+      - name: Upload artifact to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ github.ref_name }}" "jenkins-libs-${{ github.ref_name }}.tar.gz"
