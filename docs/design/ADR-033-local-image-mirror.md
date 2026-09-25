@@ -192,7 +192,9 @@ hostname-pattern magic — so a mirror that terminates TLS can omit the entry.
 - **Scope:** `engine.toml` mirrors cover the images pipelines pull
   (`container from`, `with-exec`, etc.). The **engine image** itself is pulled
   by the kubelet before the pod starts and is not routed through the mirror —
-  that remains `fleet.engine_image_registry` + `engine-image-auth`.
+  that remains `fleet.engine_image_registry` + `engine-image-auth`. Follow-up:
+  [ADR-043](ADR-043-engine-image-via-cache.md) routes it through a TLS mirror
+  when the `registry.dagger.io` preset and `imageCache.tls.enabled` are on.
 - Enabling the cache does not touch existing engine caches or PVCs; disabling
   it removes the mirror Deployments/Services and restores the raw upstream
   behavior (cached blobs remain in the bucket until deleted).
