@@ -332,11 +332,16 @@ func run(c *cli.Context) error {
 	// Local image cache: admin list/prune of the configured Zot mirrors over
 	// their OCI Distribution v2 API (chart-rendered image_cache.mirrors). Only
 	// built when at least one mirror is configured; no mirrors means the
-	// endpoints report an empty set.
+	// endpoints report an empty set. TLS mirrors are dialed over https:// and
+	// verified against image_cache.tls_ca_path (loaded once, fail fast).
 	var imageCacheSvc domain.ImageCacheService
 	if len(cfg.ImageCache.Mirrors) > 0 {
-		imageCacheSvc = service.NewImageCacheService(cfg.ImageCache.Mirrors, func(addr string) domain.DistributionClient {
-			return repository.NewDistributionClient(addr)
+		roots, err := repository.LoadCertPool(cfg.ImageCache.TLSCAPath)
+		if err != nil {
+			return fmt.Errorf("load image cache TLS CA: %w", err)
+		}
+		imageCacheSvc = service.NewImageCacheService(cfg.ImageCache.Mirrors, func(m domain.ImageCacheMirror) domain.DistributionClient {
+			return repository.NewDistributionClientForMirror(m, roots)
 		}, logger)
 	}
 
@@ -1173,6 +1178,7 @@ func createProvider(cfg *domain.Config, clientset kubernetes.Interface, logger *
 		LogFormat:           cfg.Fleet.EngineLogFormat,
 		RegistryMirrors:     cfg.Fleet.EngineRegistryMirrors,
 		MirrorHTTP:          cfg.Fleet.EngineRegistryMirrorsHTTP,
+		ImageCacheMirrors:   cfg.ImageCache.Mirrors,
 	}
 
 	return repository.NewK8sProvider(clientset, k8sCfg), nil
