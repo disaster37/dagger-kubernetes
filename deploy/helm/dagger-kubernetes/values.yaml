@@ -15,16 +15,18 @@ namespace: ""
 ## @section Cross-subchart service names (collector exporters)
 
 ## @descriptionStart
-## The OTel collector config is rendered by the opentelemetry-collector
-## subchart, whose template scope cannot see the parent's `tempo`/`loki`/
-## `victoria` values. To point the collector's exporters at a renamed backend,
-## set the matching value here *in addition to* the subchart's own
-## `fullnameOverride`. Empty = auto (`<release>-<default-name>`).
+## The OTel collector config is rendered by this chart (see the
+## `otel-collector-configmap` template), so the tempo/loki/victoria exporter
+## endpoints follow each subchart's own fullname rules automatically — a
+## subchart `fullnameOverride`/`nameOverride` is honored without extra config.
+## These overrides exist only for backends the subcharts do not own (renamed
+## Services, an external observability stack). Empty = auto-derive from the
+## subchart values.
 ## @descriptionEnd
 
-## @param global.daggerKubernetes.serviceNames.tempo Tempo Service name used by the collector's otlphttp/tempo exporter (empty = `<release>-tempo`).
-## @param global.daggerKubernetes.serviceNames.loki Loki Service name used by the collector's loki exporter (empty = `<release>-loki`).
-## @param global.daggerKubernetes.serviceNames.victoria VictoriaMetrics Service name used by the collector's prometheusremotewrite exporter (empty = `<release>-victoria-server`).
+## @param global.daggerKubernetes.serviceNames.tempo Tempo Service name override for the collector's otlphttp/tempo exporter (empty = derived from the tempo subchart's fullname rules).
+## @param global.daggerKubernetes.serviceNames.loki Loki Service name override for the collector's loki exporter (empty = derived from the loki subchart's fullname rules).
+## @param global.daggerKubernetes.serviceNames.victoria VictoriaMetrics Service name override for the collector's prometheusremotewrite exporter (empty = derived from the victoria subchart's fullname rules).
 global:
   daggerKubernetes:
     serviceNames:
@@ -815,6 +817,25 @@ opentelemetry-collector:
       memory: 512Mi
   service:
     type: ClusterIP
+  ## The pipeline config below is rendered by this (parent) chart into a
+  ## dedicated ConfigMap (templates/otel-collector-configmap.yaml) so the
+  ## exporter endpoints can resolve the tempo/loki/victoria Service names from
+  ## each subchart's own fullname rules, honoring fullnameOverride/nameOverride.
+  ## The collector's built-in ConfigMap is disabled and the parent-rendered one
+  ## is mounted at /conf/relay.yaml via extraVolumes/extraVolumeMounts.
+  configMap:
+    create: false
+  command:
+    extraArgs:
+      - --config=/conf/relay.yaml
+  extraVolumes:
+    - name: otel-collector-config
+      configMap:
+        name: "{{ printf \"%s-otel-collector-config\" .Release.Name }}"
+  extraVolumeMounts:
+    - name: otel-collector-config
+      mountPath: /conf
+      readOnly: true
   config:
     receivers:
       otlp:
