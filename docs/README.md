@@ -2030,7 +2030,7 @@ dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 \
   export --path jenkins-libs-v0.1.0.tar.gz
 
 # download a published release asset
-curl -fsSL -O https://github.com/disaster/dagger-kubernetes/releases/download/v0.1.0/jenkins-libs-v0.1.0.tar.gz
+curl -fsSL -O https://github.com/disaster37/dagger-kubernetes/releases/download/v0.1.0/jenkins-libs-v0.1.0.tar.gz
 ```
 
 > **Limitation — Jenkins global libraries are SCM-only.** Jenkins has no
@@ -2229,7 +2229,7 @@ jenkins:
                       libraryPath: "ci-integrations/jenkins"
                       scm:
                         git:
-                          remote: "https://github.com/disaster/dagger-kubernetes.git"
+                          remote: "https://github.com/disaster37/dagger-kubernetes.git"
 ```
 
 **3. Token credential.** Create a Jenkins **Secret text** credential (e.g.
