@@ -223,7 +223,7 @@ source of breakage. The three recurring failures are:
    pin deliberately and re-run the full `ci` afterwards.
 
 ```bash
-# Full CI pipeline (lint + test + ui + build + docker + helm) — what the workflow runs
+# Full CI pipeline (lint + test + ui + build + docker + helm + jenkins-libs) — what the workflow runs
 dagger call -m ./dagger --src . ci export --path out
 
 # Individual functions (useful while iterating)
@@ -233,6 +233,7 @@ dagger call -m ./dagger --src . ui export --path ui-dist
 dagger call -m ./dagger --src . build export --path .
 dagger call -m ./dagger --src . docker
 dagger call -m ./dagger --src . helm
+dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 export --path jenkins-libs-v0.1.0.tar.gz
 ```
 
 ## Project structure

@@ -2015,8 +2015,51 @@ engine's retained per-pod PVC and needs no client-side configuration.
 
 ### Jenkins
 
-Shared library at `ci-integrations/jenkins/vars/daggerKubernetes.groovy`.
-Configure the library with `libraryPath: "ci-integrations/jenkins"`:
+Shared library source lives at `ci-integrations/jenkins/vars/daggerKubernetes.groovy`
+(the single source of truth in this repository). Each GitHub release also
+publishes a small, versioned **`jenkins-libs-<version>.tar.gz`** asset, built by
+the Dagger module's `jenkins-libs` function from that directory (deterministic
+byte-for-byte build — see [ADR-044](design/ADR-044-jenkins-library-release-artifact.md)).
+The archive is rooted at the library root and contains only the library files
+(`./vars/daggerKubernetes.groovy` today, plus `src/` and `resources/` if they
+are ever added):
+
+```bash
+# local build (ad hoc)
+dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 \
+  export --path jenkins-libs-v0.1.0.tar.gz
+
+# download a published release asset
+curl -fsSL -O https://github.com/disaster37/dagger-kubernetes/releases/download/v0.1.0/jenkins-libs-v0.1.0.tar.gz
+```
+
+> **Limitation — Jenkins global libraries are SCM-only.** Jenkins has no
+> native HTTP/tar.gz/URL retriever for a global shared library, and JCasC's
+> `globalLibraries[].retriever` models only SCM blocks (`modernSCM` /
+> `legacySCM`). The tar.gz therefore **cannot** be wired directly into JCasC as
+> a library retriever. Consume it through one of the two paths below
+> ([ADR-044](design/ADR-044-jenkins-library-release-artifact.md)):
+
+1. **Recommended — dedicated minimal repository (JCasC-native).** Host *only*
+   `ci-integrations/jenkins/` in a dedicated repository (or a dedicated
+   branch), seeded from the release artifact
+   (`tar xzf jenkins-libs-<version>.tar.gz -C <repo>`), and keep the
+   `modernSCM` git retriever pointing at that repository (snippets below).
+   Cloning drops from the whole repository (Go sources, Helm chart, UI, tests)
+   to a handful of Groovy files. *Creating the dedicated repository is a
+   repo-owner action; until it exists, use the current full-repo `libraryPath`
+   snippet or path 2.*
+2. **Fallback — filesystem extraction.** On the Jenkins controller, download
+   and extract `jenkins-libs-<version>.tar.gz` into a library directory on
+   disk (e.g. an init/entrypoint step) and register that directory as the
+   library location, instead of using a git retriever:
+
+   ```bash
+   mkdir -p /var/jenkins_shared_libs/dagger-kubernetes
+   tar xzf jenkins-libs-<version>.tar.gz -C /var/jenkins_shared_libs/dagger-kubernetes
+   ```
+
+With the library registered (either path), a pipeline uses it as before:
 
 ```groovy
 @Library('dagger-kubernetes') _
@@ -2138,8 +2181,12 @@ directly, so bake it into the image only if your pipelines call
 `dagger-kubernetes-ci` themselves (or set `env.DAGGER_KUBERNETES_CI_BIN` to its
 path).
 
-**2. Shared library (JCasC).** Register the global pipeline library with
-`libraryPath` pointing at `ci-integrations/jenkins`:
+**2. Shared library (JCasC).** Register the global pipeline library. Jenkins
+global libraries are SCM-only (no native tar.gz retriever), so the
+`jenkins-libs-<version>.tar.gz` release asset is consumed by seeding a
+**dedicated minimal repository** with its contents (the archive root *is* the
+library root, so no `libraryPath` is needed) and pointing the `modernSCM`
+retriever at it:
 
 ```yaml
 jenkins:
@@ -2154,10 +2201,9 @@ jenkins:
                   defaultVersion: "main"
                   retriever:
                     modernSCM:
-                      libraryPath: "ci-integrations/jenkins"
                       scm:
                         git:
-                          remote: "https://github.com/disaster/dagger-kubernetes.git"
+                          remote: "https://github.com/your-org/dagger-kubernetes-jenkins.git"
         kubernetes-cloud: |
           jenkins:
             clouds:
@@ -2170,6 +2216,20 @@ jenkins:
                       containers:
                         - name: "jnlp"
                           image: "docker.io/your-org/jenkins-dagger-agent:latest"
+```
+
+> Until the dedicated repository exists, keep pointing the same retriever at
+> this repository with `libraryPath: "ci-integrations/jenkins"` (full-repo
+> clone — the behavior this artifact is meant to replace), or use the
+> filesystem-extraction fallback from [Jenkins](#jenkins):
+
+```yaml
+                  retriever:
+                    modernSCM:
+                      libraryPath: "ci-integrations/jenkins"
+                      scm:
+                        git:
+                          remote: "https://github.com/disaster37/dagger-kubernetes.git"
 ```
 
 **3. Token credential.** Create a Jenkins **Secret text** credential (e.g.

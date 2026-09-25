@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"strings"
 
+	"dagger/dagger-kubernetes/internal/artifact"
 	"dagger/dagger-kubernetes/internal/dagger"
 	"dagger/dagger-kubernetes/internal/ref"
 )
@@ -20,6 +21,10 @@ import (
 const (
 	// chartDir is the single source of truth for the helm chart path.
 	chartDir = "deploy/helm/dagger-kubernetes"
+
+	// jenkinsLibsDir is the single source of truth for the Jenkins shared
+	// library source directory packaged by JenkinsLibs.
+	jenkinsLibsDir = "ci-integrations/jenkins"
 
 	// Pinned tool images and versions. Keep in sync with DAGGER.md.
 	golangImage         = "golang:1.26"
@@ -377,10 +382,54 @@ func (m *DaggerKubernetes) Publish(
 	return digest, nil
 }
 
-// Ci runs the full pipeline: Lint, Test, Ui, Build, Docker, Helm.
+// JenkinsLibs packages the Jenkins shared library (ci-integrations/jenkins/)
+// as a deterministic, versioned tar.gz release artifact.
 //
-// Returns a directory containing bin/supervisor, bin/dagger-kubernetes-ci, and
-// coverage.out.
+// Determinism comes from GNU tar flags --sort=name --mtime=@0 --owner=0
+// --group=0 --numeric-owner plus gzip -n (no header timestamp/name), so
+// identical input yields a byte-identical archive. version is validated by
+// artifact.Filename before it reaches the shell command line.
+func (m *DaggerKubernetes) JenkinsLibs(
+	ctx context.Context,
+	// Artifact version, e.g. "v0.1.0" or "dev"; embedded in the output
+	// filename and validated to be filesystem/shell-safe.
+	// +required
+	version string,
+) (*dagger.File, error) {
+	name, err := artifact.Filename(version)
+	if err != nil {
+		return nil, err
+	}
+
+	src := m.Src.Directory(jenkinsLibsDir)
+	entries, err := src.Entries(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list jenkins libs: %w", err)
+	}
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("%s is empty: nothing to package", jenkinsLibsDir)
+	}
+
+	outPath := fmt.Sprintf("/out/%s", name)
+	ctr := dag.Container().
+		From(golangImage).
+		WithMountedDirectory("/src", src).
+		WithExec([]string{"bash", "-c", fmt.Sprintf(
+			"set -o pipefail && mkdir -p /out && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C /src . | gzip -n > '%s'",
+			outPath)})
+
+	if _, err := ctr.Sync(ctx); err != nil {
+		return nil, fmt.Errorf("package jenkins libs: %w", err)
+	}
+	return ctr.File(outPath), nil
+}
+
+// Ci runs the full pipeline: Lint, Test, Ui, Build, Docker, Helm, JenkinsLibs.
+//
+// Returns a directory containing bin/supervisor, bin/dagger-kubernetes-ci,
+// coverage.out, and jenkins-libs-dev.tar.gz (the dev Jenkins library artifact
+// proves packaging works on every run; only bin/ and coverage.out are
+// uploaded by ci.yml).
 func (m *DaggerKubernetes) Ci(ctx context.Context) (*dagger.Directory, error) {
 	if _, err := m.Lint(ctx); err != nil {
 		return nil, err
@@ -408,5 +457,11 @@ func (m *DaggerKubernetes) Ci(ctx context.Context) (*dagger.Directory, error) {
 		return nil, err
 	}
 
-	return bin.WithFile("coverage.out", coverage), nil
+	libs, err := m.JenkinsLibs(ctx, "dev")
+	if err != nil {
+		return nil, err
+	}
+
+	return bin.WithFile("coverage.out", coverage).
+		WithFile("jenkins-libs-dev.tar.gz", libs), nil
 }
