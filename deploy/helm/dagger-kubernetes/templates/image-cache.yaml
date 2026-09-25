@@ -2,6 +2,11 @@
 {{- $root := . }}
 {{- $ns := include "dagger-kubernetes.namespace" . }}
 {{- $backend := .Values.imageCache.storage.backend | default "s3" }}
+{{- $tlsEnabled := .Values.imageCache.tls.enabled }}
+{{- $tlsSecret := "" }}
+{{- if $tlsEnabled }}
+{{- $tlsSecret = required "imageCache.tls.enabled requires imageCache.tls.secretName (a Secret with tls.crt + tls.key valid for every mirror hostname, e.g. a wildcard *.<namespace>.svc cert)" .Values.imageCache.tls.secretName }}
+{{- end }}
 {{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) }}
 {{- $name := printf "%s-%s-mirror" $root.Release.Name .slug }}
 {{- $configName := printf "%s-zot-config" $name }}
@@ -51,10 +56,14 @@ data:
     {{- if $root.Values.imageCache.sync.pollInterval }}
     {{- $_ := set $syncRegistry "pollInterval" $root.Values.imageCache.sync.pollInterval }}
     {{- end }}
+    {{- $http := dict "address" "0.0.0.0" "port" "5000" "compat" (list "docker2s2") }}
+    {{- if $tlsEnabled }}
+    {{- $_ := set $http "tls" (dict "cert" "/etc/zot/tls/tls.crt" "key" "/etc/zot/tls/tls.key") }}
+    {{- end }}
     {{- $config := dict
       "distSpecVersion" "1.1.1"
       "storage" $storage
-      "http" (dict "address" "0.0.0.0" "port" "5000" "compat" (list "docker2s2"))
+      "http" $http
       "log" (dict "level" $root.Values.imageCache.logLevel)
       "extensions" (dict "sync" (dict
         "enable" true
@@ -145,6 +154,9 @@ spec:
             httpGet:
               path: /livez
               port: registry
+              {{- if $tlsEnabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
@@ -152,6 +164,9 @@ spec:
             httpGet:
               path: /readyz
               port: registry
+              {{- if $tlsEnabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
             failureThreshold: 3
@@ -161,12 +176,22 @@ spec:
             - name: zot-config
               mountPath: /etc/zot
               readOnly: true
+            {{- if $tlsEnabled }}
+            - name: tls
+              mountPath: /etc/zot/tls
+              readOnly: true
+            {{- end }}
             - name: data
               mountPath: /var/lib/registry
       volumes:
         - name: zot-config
           configMap:
             name: {{ $configName }}
+        {{- if $tlsEnabled }}
+        - name: tls
+          secret:
+            secretName: {{ $tlsSecret | quote }}
+        {{- end }}
         - name: data
           {{- if eq $backend "pvc" }}
           persistentVolumeClaim:

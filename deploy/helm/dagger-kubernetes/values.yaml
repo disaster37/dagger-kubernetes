@@ -419,7 +419,10 @@ supervisor:
 ## When enabled, the chart renders one Deployment + `<name>-zot-config`
 ## ConfigMap + Service per enabled preset / custom registry and merges the
 ## generated mirror addresses into the engine's `engine.toml` registry mirrors
-## (with `http = true`, since the in-cluster mirrors are plaintext HTTP).
+## (with `http = true` when the mirrors are plaintext HTTP, the default; with
+## `imageCache.tls.enabled` the mirrors serve HTTPS and are dialed accordingly).
+## When the `registry.dagger.io` preset is enabled and the mirrors serve TLS,
+## the fleet engine StatefulSet pulls the engine image through the mirror too.
 ## Zot's `extensions.sync` fetches an image from upstream on first request and
 ## serves cached content afterwards; invalidate with the admin image-cache
 ## prune (no TTL). Zot's online GC reclaims unreferenced blob bytes after
@@ -451,6 +454,10 @@ supervisor:
 ## @param imageCache.sync.pollInterval Periodic upstream refresh interval (empty = on-demand only; do not use for Docker Hub).
 ## @param imageCache.sync.maxRetries Upstream fetch retry count.
 ## @param imageCache.sync.retryDelay Delay between upstream fetch retries.
+## @param imageCache.tls.enabled Serve the Zot mirrors over HTTPS (requires imageCache.tls.secretName).
+## @param imageCache.tls.secretName Secret with tls.crt + tls.key valid for every mirror hostname (a wildcard `*.<namespace>.svc` cert covers all mirrors). Required when enabled.
+## @param imageCache.tls.caSecretName Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors.
+## @param imageCache.tls.caSecretKey Key inside `imageCache.tls.caSecretName` (default "ca.crt").
 ## @param imageCache.resources.requests.cpu Mirror CPU request.
 ## @param imageCache.resources.requests.memory Mirror memory request.
 ## @param imageCache.resources.limits.cpu Mirror CPU limit.
@@ -492,6 +499,11 @@ imageCache:
     pollInterval: ""
     maxRetries: 3
     retryDelay: "15m"
+  tls:
+    enabled: false
+    secretName: ""
+    caSecretName: ""
+    caSecretKey: "ca.crt"
   resources:
     requests:
       cpu: "100m"
