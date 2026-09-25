@@ -110,20 +110,26 @@ chart name); server.useLegacyNaming overrides the chart-level key. */}}
 {{- end -}}
 
 {{/* Service names for the OTel collector's exporters. The collector config is
-rendered by the opentelemetry-collector subchart's tpl, whose scope sees only
-its own .Values plus .Values.global and .Release — so the names come from
-global.daggerKubernetes.serviceNames.* (set in lock-step with a subchart
-fullnameOverride), defaulting to the subcharts' real Service names. */}}
+rendered by this chart (templates/otel-collector-configmap.yaml) with the
+parent scope, so each name is derived from the subchart's own fullname rule
+(tempoServiceName/lokiServiceName/victoriaServerServiceName) and honors its
+fullnameOverride/nameOverride automatically. An explicit
+global.daggerKubernetes.serviceNames.* entry wins over the derived name and is
+meant only for backends the subcharts do not own (renamed Services, an
+external observability stack). */}}
 {{- define "dagger-kubernetes.otelTempoService" -}}
-{{- default (printf "%s-tempo" .Release.Name) (.Values.global.daggerKubernetes.serviceNames.tempo) -}}
+{{- $svc := (((.Values.global | default dict).daggerKubernetes | default dict).serviceNames | default dict) -}}
+{{- default (include "dagger-kubernetes.tempoServiceName" .) $svc.tempo -}}
 {{- end -}}
 
 {{- define "dagger-kubernetes.otelLokiService" -}}
-{{- default (printf "%s-loki" .Release.Name) (.Values.global.daggerKubernetes.serviceNames.loki) -}}
+{{- $svc := (((.Values.global | default dict).daggerKubernetes | default dict).serviceNames | default dict) -}}
+{{- default (include "dagger-kubernetes.lokiServiceName" .) $svc.loki -}}
 {{- end -}}
 
 {{- define "dagger-kubernetes.otelVictoriaService" -}}
-{{- default (printf "%s-victoria-server" .Release.Name) (.Values.global.daggerKubernetes.serviceNames.victoria) -}}
+{{- $svc := (((.Values.global | default dict).daggerKubernetes | default dict).serviceNames | default dict) -}}
+{{- default (include "dagger-kubernetes.victoriaServerServiceName" .) $svc.victoria -}}
 {{- end -}}
 
 {{/* Resolve the OTLP collector URL: use the dependency Service when enabled.

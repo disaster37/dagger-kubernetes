@@ -471,10 +471,11 @@ supervisor (e.g. to download the Dagger CLI). See `CONTRIBUTING.md`.
 
 The `<release>-<svc>` names in the table are defaults: every dependency
 Service name is derived from that subchart's own fullname rules, so setting
-`fullnameOverride` or `nameOverride` on a subchart is honored automatically.
-The one exception is the collector's exporters, which are rendered in the
-subchart's scope and follow `global.daggerKubernetes.serviceNames.*` — see
-[Cross-subchart service names](#cross-subchart-service-names-collector-exporters).
+`fullnameOverride` or `nameOverride` on a subchart is honored automatically —
+including the collector's exporter endpoints, which are rendered by this chart
+into the `otel-collector-config` ConfigMap (the collector's own ConfigMap is
+disabled; see [Cross-subchart service names](#cross-subchart-service-names-collector-exporters)
+for the explicit-override escape hatch).
 
 ### Raft (distributed store)
 
@@ -643,18 +644,21 @@ Configure it under `supervisor.config.history`:
 
 ### Cross-subchart service names (collector exporters)
 
-The OTel collector config is rendered by the `opentelemetry-collector`
-subchart, whose template scope cannot see the parent's `tempo`/`loki`/`victoria`
-values. To point the collector's exporters at a renamed backend, set the
-matching value here *in addition to* the subchart's own `fullnameOverride`
-(keep both in lock step — the collector exporters are the one place a subchart
-rename is not auto-derived). Empty = auto (`<release>-<default-name>`).
+The OTel collector config is rendered by this chart into the
+`<release>-otel-collector-config` ConfigMap (`templates/otel-collector-configmap.yaml`)
+and mounted at `/conf/relay.yaml` (the collector's built-in ConfigMap is
+disabled). Because it renders in the parent scope, the tempo/loki/victoria
+exporter endpoints follow each subchart's own fullname rules automatically — a
+subchart `fullnameOverride`/`nameOverride` is honored without extra config.
+The overrides below exist only for backends the subcharts do not own (renamed
+Services, an external observability stack). Empty = auto-derive from the
+subchart values.
 
 | Name | Type | Default | Description |
 |---|---|---|---|
-| `global.daggerKubernetes.serviceNames.tempo` | string | `""` | Tempo Service name used by the collector's `otlphttp/tempo` exporter (empty = `<release>-tempo`). |
-| `global.daggerKubernetes.serviceNames.loki` | string | `""` | Loki Service name used by the collector's `loki` exporter (empty = `<release>-loki`). |
-| `global.daggerKubernetes.serviceNames.victoria` | string | `""` | VictoriaMetrics Service name used by the collector's `prometheusremotewrite` exporter (empty = `<release>-victoria-server`). |
+| `global.daggerKubernetes.serviceNames.tempo` | string | `""` | Tempo Service name override for the collector's `otlphttp/tempo` exporter (empty = derived from the tempo subchart's fullname rules). |
+| `global.daggerKubernetes.serviceNames.loki` | string | `""` | Loki Service name override for the collector's `loki` exporter (empty = derived from the loki subchart's fullname rules). |
+| `global.daggerKubernetes.serviceNames.victoria` | string | `""` | VictoriaMetrics Service name override for the collector's `prometheusremotewrite` exporter (empty = derived from the victoria subchart's fullname rules). |
 
 ### Supervisor
 

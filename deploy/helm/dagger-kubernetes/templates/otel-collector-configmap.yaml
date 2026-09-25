@@ -1,0 +1,17 @@
+{{- if index .Values "opentelemetry-collector" "enabled" }}
+{{- $sub := index .Values "opentelemetry-collector" | default dict }}
+{{- $config := $sub.alternateConfig | default $sub.config | default dict }}
+{{- /* The ConfigMap name is release-based (never fullnameOverride-based) because
+the mount is wired through the collector subchart's extraVolumes, which are
+rendered in the subchart scope where only .Release is shared. */}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-otel-collector-config" .Release.Name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+data:
+  relay: |
+    {{- tpl (toYaml $config) . | nindent 4 }}
+{{- end }}
