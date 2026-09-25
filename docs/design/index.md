@@ -49,3 +49,4 @@ the decision.
 | 040  | [Frontend is Nuxt 4 + Nuxt UI v4 (static SPA)](ADR-040-frontend-nuxt4-nuxt-ui.md) |
 | 041  | [Per-pod leader-forward proxy (drop label-based leader routing)](ADR-041-per-pod-leader-forward-proxy.md) |
 | 042  | [Runner-fleet metrics + storage usage (cAdvisor, 15m rolling window)](ADR-042-runner-fleet-metrics-storage.md) |
+| 044  | [Jenkins shared library as a release artifact](ADR-044-jenkins-library-release-artifact.md) |
