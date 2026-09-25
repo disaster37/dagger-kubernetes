@@ -2,6 +2,8 @@ package repository
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -681,6 +683,50 @@ func TestNewDistributionClientForMirrorScheme(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNewDistributionClientForMirrorTransport proves the TLS transport is a
+// DefaultTransport clone (proxy support + idle-connection timeout preserved so
+// pooled connections are not leaked after each admin operation) carrying a
+// fresh TLS config, and that the plaintext client keeps the shared default
+// transport.
+func TestNewDistributionClientForMirrorTransport(t *testing.T) {
+	pool := x509.NewCertPool()
+
+	t.Run("TLS mirror transport is a sane DefaultTransport clone", func(t *testing.T) {
+		c := NewDistributionClientForMirror(domain.ImageCacheMirror{InternalAddr: "mirror.svc:5000", TLS: true}, pool)
+		dc := c.(*DistributionClient)
+		tr, ok := dc.httpClient.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("transport type = %T, want *http.Transport", dc.httpClient.Transport)
+		}
+		if tr.IdleConnTimeout != 90*time.Second {
+			t.Errorf("IdleConnTimeout = %v, want the DefaultTransport 90s (0 would leak idle connections)", tr.IdleConnTimeout)
+		}
+		if tr.Proxy == nil {
+			t.Error("Proxy = nil, want ProxyFromEnvironment (inherited from DefaultTransport)")
+		}
+		if tr.TLSClientConfig == nil {
+			t.Fatal("TLSClientConfig = nil, want a fresh config")
+		}
+		if tr.TLSClientConfig == http.DefaultTransport.(*http.Transport).TLSClientConfig {
+			t.Error("TLSClientConfig must be a fresh config, not the shared DefaultTransport one")
+		}
+		if tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+			t.Errorf("TLS MinVersion = %v, want TLS 1.2", tr.TLSClientConfig.MinVersion)
+		}
+		if tr.TLSClientConfig.InsecureSkipVerify {
+			t.Error("InsecureSkipVerify = true, want certificate verification")
+		}
+	})
+
+	t.Run("plaintext mirror keeps the default transport", func(t *testing.T) {
+		c := NewDistributionClientForMirror(domain.ImageCacheMirror{InternalAddr: "mirror.svc:5000"}, nil)
+		dc := c.(*DistributionClient)
+		if dc.httpClient.Transport != nil {
+			t.Errorf("plaintext Transport = %T, want nil (http.DefaultTransport)", dc.httpClient.Transport)
+		}
+	})
 }
 
 func TestDistributionClientMirrorHTTPS(t *testing.T) {

@@ -143,6 +143,12 @@ func NewDistributionClientWithAuth(host, username, password string) *Distributio
 // non-nil, verifies the mirror against roots; roots == nil uses the system
 // trust pool. Plaintext mirrors (m.TLS == false) keep today's http:// behavior.
 //
+// The TLS transport is a clone of http.DefaultTransport (proxy support,
+// dial/TLS-handshake/idle-connection timeouts, HTTP/2) with only the
+// TLSClientConfig swapped for a fresh config — a bare &http.Transport{} would
+// leak its pooled idle connections (no IdleConnTimeout) after every admin
+// operation and silently lose proxy handling (CWE-400).
+//
 //nolint:gocritic // hugeParam: value param preserved for API stability
 func NewDistributionClientForMirror(m domain.ImageCacheMirror, roots *x509.CertPool) domain.DistributionClient {
 	c := NewDistributionClient(m.InternalAddr)
@@ -151,9 +157,9 @@ func NewDistributionClientForMirror(m domain.ImageCacheMirror, roots *x509.CertP
 	}
 	c.scheme = "https"
 	c.caPool = roots
-	c.httpClient.Transport = &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: c.caPool, MinVersion: tls.VersionTLS12},
-	}
+	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is always *http.Transport.
+	transport.TLSClientConfig = &tls.Config{RootCAs: c.caPool, MinVersion: tls.VersionTLS12}
+	c.httpClient.Transport = transport
 	return c
 }
 
