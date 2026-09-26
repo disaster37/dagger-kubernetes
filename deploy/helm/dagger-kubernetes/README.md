@@ -614,8 +614,13 @@ is always rendered because Zot requires it when sync is enabled with S3 storage;
 `imageCache.dedupe` defaults to `false` (Zot rejects dedupe with the S3 driver
 unless a remote DB is configured). The generated mirror addresses are merged
 into the engine's `engine.toml` with `http = true` for the plaintext in-cluster
-mirrors. See docs/README.md, "Local image cache (Zot mirror)", and
-[ADR-033](../../../docs/design/ADR-033-local-image-mirror.md).
+mirrors (the default). With `imageCache.tls.enabled: true` the mirrors serve
+HTTPS instead — `http = true` is dropped (BuildKit dials TLS), the kubelet
+needs the mirror CA in its trust store, and when the `registry.dagger.io`
+preset is enabled the fleet engine StatefulSet pulls the engine image through
+the mirror too. See docs/README.md, "Local image cache (Zot mirror)", and
+[ADR-033](../../../docs/design/ADR-033-local-image-mirror.md) /
+[ADR-043](../../../docs/design/ADR-043-engine-image-via-cache.md).
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
@@ -788,6 +793,10 @@ subchart values.
 | `imageCache.sync.pollInterval` | string | `""` | Periodic upstream refresh interval (empty = on-demand only; do not use for Docker Hub). |
 | `imageCache.sync.maxRetries` | int | `3` | Upstream fetch retry count. |
 | `imageCache.sync.retryDelay` | string | `"15m"` | Delay between upstream fetch retries. |
+| `imageCache.tls.enabled` | bool | `false` | Serve the Zot mirrors over HTTPS (requires `imageCache.tls.secretName`). |
+| `imageCache.tls.secretName` | string | `""` | Secret with `tls.crt` + `tls.key` valid for every mirror hostname (a wildcard `*.<namespace>.svc` cert covers all mirrors). Required when enabled. |
+| `imageCache.tls.caSecretName` | string | `""` | Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors. |
+| `imageCache.tls.caSecretKey` | string | `"ca.crt"` | Key inside `imageCache.tls.caSecretName` (default "ca.crt"). |
 | `imageCache.resources.requests.cpu` | string | `"100m"` | Mirror CPU request. |
 | `imageCache.resources.requests.memory` | string | `"128Mi"` | Mirror memory request. |
 | `imageCache.resources.limits.cpu` | string | `"500m"` | Mirror CPU limit. |

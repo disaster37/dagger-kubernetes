@@ -253,8 +253,8 @@ func newImageCacheTestEnv(t *testing.T, fake *fakeOCIRegistry) *imageCacheTestEn
 		{ID: "docker-io", Host: "docker.io", Upstream: "https://registry-1.docker.io", InternalAddr: fake.host(), Backend: "s3"},
 		{ID: "down", Host: "down.example", Upstream: "https://down.example", InternalAddr: "127.0.0.1:1", Backend: "pvc"},
 	}
-	imageCacheSvc := service.NewImageCacheService(mirrors, func(addr string) domain.DistributionClient {
-		return repository.NewDistributionClient(addr)
+	imageCacheSvc := service.NewImageCacheService(mirrors, func(m domain.ImageCacheMirror) domain.DistributionClient {
+		return repository.NewDistributionClientForMirror(m, nil)
 	}, logger)
 
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)

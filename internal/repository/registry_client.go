@@ -3,6 +3,8 @@ package repository
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -10,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -101,6 +104,8 @@ type DistributionClient struct {
 	host       string // e.g. "dagger-docker-io-mirror.dagger.svc:5000"
 	username   string
 	password   string
+	scheme     string         // "http" (default) | "https"
+	caPool     *x509.CertPool // nil = system trust pool
 	httpClient *http.Client
 }
 
@@ -108,7 +113,8 @@ var _ domain.DistributionClient = (*DistributionClient)(nil)
 
 func NewDistributionClient(host string) *DistributionClient {
 	return &DistributionClient{
-		host: host,
+		host:   host,
+		scheme: "http",
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 			// A compromised or poisoned mirror must not be able to pivot the
@@ -132,6 +138,49 @@ func NewDistributionClientWithAuth(host, username, password string) *Distributio
 	return c
 }
 
+// NewDistributionClientForMirror returns a client for a configured image-cache
+// mirror. When m.TLS is true the client dials https:// and, when roots is
+// non-nil, verifies the mirror against roots; roots == nil uses the system
+// trust pool. Plaintext mirrors (m.TLS == false) keep today's http:// behavior.
+//
+// The TLS transport is a clone of http.DefaultTransport (proxy support,
+// dial/TLS-handshake/idle-connection timeouts, HTTP/2) with only the
+// TLSClientConfig swapped for a fresh config — a bare &http.Transport{} would
+// leak its pooled idle connections (no IdleConnTimeout) after every admin
+// operation and silently lose proxy handling (CWE-400).
+//
+//nolint:gocritic // hugeParam: value param preserved for API stability
+func NewDistributionClientForMirror(m domain.ImageCacheMirror, roots *x509.CertPool) domain.DistributionClient {
+	c := NewDistributionClient(m.InternalAddr)
+	if !m.TLS {
+		return c
+	}
+	c.scheme = "https"
+	c.caPool = roots
+	transport := http.DefaultTransport.(*http.Transport).Clone() //nolint:forcetypeassert // http.DefaultTransport is always *http.Transport.
+	transport.TLSClientConfig = &tls.Config{RootCAs: c.caPool, MinVersion: tls.VersionTLS12}
+	c.httpClient.Transport = transport
+	return c
+}
+
+// LoadCertPool returns a CertPool seeded from the PEM CA bundle at path. An
+// empty path returns (nil, nil). A read/parse failure returns an error so
+// wiring can fail fast at startup.
+func LoadCertPool(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	pem, err := os.ReadFile(path) //nolint:gosec // G304: path is the admin-configured image_cache.tls_ca_path, not user input.
+	if err != nil {
+		return nil, fmt.Errorf("read CA bundle %q: %w", path, err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pem) {
+		return nil, fmt.Errorf("no certificates found in CA bundle %q", path)
+	}
+	return pool, nil
+}
+
 // WithTimeout returns the client with the given total per-request timeout,
 // overriding the 10s default. http.Client.Timeout covers connection,
 // redirects, and reading the response body.
@@ -147,7 +196,7 @@ func (c *DistributionClient) Host() string {
 
 // baseURL returns the scheme-prefixed registry host root.
 func (c *DistributionClient) baseURL() string {
-	return fmt.Sprintf("http://%s", c.host)
+	return fmt.Sprintf("%s://%s", c.scheme, c.host)
 }
 
 // do performs a request and maps transport errors to ErrRegistryUnreachable.

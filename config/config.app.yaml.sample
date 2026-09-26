@@ -234,12 +234,18 @@ cache:
 # Prune unlinks a manifest immediately; Zot's online GC reclaims the
 # unreferenced blob bytes after gcDelay on the next gcInterval cycle.
 image_cache:
-  mirrors: []                        # each: {id, host, upstream, internal_addr, backend}
+  tls_ca_path: ""                     # PEM CA bundle for verifying HTTPS mirrors (mirror tls: true);
+                                      # "" = system trust pool. Chart: /etc/dagger-kubernetes/image-cache-ca/<key>.
+                                      # A load failure fails startup (see ADR-043).
+  mirrors: []                        # each: {id, host, upstream, internal_addr, backend, tls}
     # - id: "docker-io"              # mirror lookup key (chart slug of host).
     #   host: "docker.io"           # upstream host.
     #   upstream: "https://registry-1.docker.io"  # upstream base URL (informational).
     #   internal_addr: "release-docker-io-mirror.dagger.svc:5000"  # in-cluster Zot Service address.
     #   backend: "s3"               # "s3" | "pvc" (informational; prune is identical).
+    #   tls: false                  # true = mirror serves HTTPS; when host matches
+    #                               # fleet.engine_image_registry the engine image is routed
+    #                               # through this mirror (ADR-043).
 
 # --- Pipeline history retention ------------------------------------------------
 # Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics

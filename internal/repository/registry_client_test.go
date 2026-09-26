@@ -2,10 +2,15 @@ package repository
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -180,8 +185,9 @@ func TestRegistryManifestSize(t *testing.T) {
 }
 
 // indexChild renders one image-index child descriptor with a platform.
-func indexChild(digest, os, arch string) string {
-	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":100,"platform":{"os":%q,"architecture":%q}}`, digest, os, arch)
+// The param is osName (not os) so it does not shadow the os package import.
+func indexChild(digest, osName, arch string) string {
+	return fmt.Sprintf(`{"mediaType":"application/vnd.oci.image.manifest.v1+json","digest":%q,"size":100,"platform":{"os":%q,"architecture":%q}}`, digest, osName, arch)
 }
 
 // attestChild renders a BuildKit attestation child descriptor.
@@ -650,4 +656,135 @@ func TestDistributionClientRejectsRedirects(t *testing.T) {
 	if pivotHit {
 		t.Fatal("redirect target was contacted: SSRF pivot was not blocked")
 	}
+}
+
+func TestNewDistributionClientForMirrorScheme(t *testing.T) {
+	tests := []struct {
+		name string
+		m    domain.ImageCacheMirror
+		want string
+	}{
+		{name: "TLS mirror dials https", m: domain.ImageCacheMirror{InternalAddr: "mirror.svc:5000", TLS: true}, want: "https://mirror.svc:5000"},
+		{name: "plaintext mirror dials http", m: domain.ImageCacheMirror{InternalAddr: "mirror.svc:5000", TLS: false}, want: "http://mirror.svc:5000"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewDistributionClientForMirror(tt.m, nil)
+			dc, ok := c.(*DistributionClient)
+			if !ok {
+				t.Fatalf("client type = %T, want *DistributionClient", c)
+			}
+			if got := dc.baseURL(); got != tt.want {
+				t.Errorf("baseURL = %q, want %q", got, tt.want)
+			}
+			if got := dc.Host(); got != tt.m.InternalAddr {
+				t.Errorf("Host = %q, want %q", got, tt.m.InternalAddr)
+			}
+		})
+	}
+}
+
+// TestNewDistributionClientForMirrorTransport proves the TLS transport is a
+// DefaultTransport clone (proxy support + idle-connection timeout preserved so
+// pooled connections are not leaked after each admin operation) carrying a
+// fresh TLS config, and that the plaintext client keeps the shared default
+// transport.
+func TestNewDistributionClientForMirrorTransport(t *testing.T) {
+	pool := x509.NewCertPool()
+
+	t.Run("TLS mirror transport is a sane DefaultTransport clone", func(t *testing.T) {
+		c := NewDistributionClientForMirror(domain.ImageCacheMirror{InternalAddr: "mirror.svc:5000", TLS: true}, pool)
+		dc := c.(*DistributionClient)
+		tr, ok := dc.httpClient.Transport.(*http.Transport)
+		if !ok {
+			t.Fatalf("transport type = %T, want *http.Transport", dc.httpClient.Transport)
+		}
+		if tr.IdleConnTimeout != 90*time.Second {
+			t.Errorf("IdleConnTimeout = %v, want the DefaultTransport 90s (0 would leak idle connections)", tr.IdleConnTimeout)
+		}
+		if tr.Proxy == nil {
+			t.Error("Proxy = nil, want ProxyFromEnvironment (inherited from DefaultTransport)")
+		}
+		if tr.TLSClientConfig == nil {
+			t.Fatal("TLSClientConfig = nil, want a fresh config")
+		}
+		if tr.TLSClientConfig == http.DefaultTransport.(*http.Transport).TLSClientConfig {
+			t.Error("TLSClientConfig must be a fresh config, not the shared DefaultTransport one")
+		}
+		if tr.TLSClientConfig.MinVersion != tls.VersionTLS12 {
+			t.Errorf("TLS MinVersion = %v, want TLS 1.2", tr.TLSClientConfig.MinVersion)
+		}
+		if tr.TLSClientConfig.InsecureSkipVerify {
+			t.Error("InsecureSkipVerify = true, want certificate verification")
+		}
+	})
+
+	t.Run("plaintext mirror keeps the default transport", func(t *testing.T) {
+		c := NewDistributionClientForMirror(domain.ImageCacheMirror{InternalAddr: "mirror.svc:5000"}, nil)
+		dc := c.(*DistributionClient)
+		if dc.httpClient.Transport != nil {
+			t.Errorf("plaintext Transport = %T, want nil (http.DefaultTransport)", dc.httpClient.Transport)
+		}
+	})
+}
+
+func TestDistributionClientMirrorHTTPS(t *testing.T) {
+	ts := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(ts.Close)
+
+	pemCert := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: ts.Certificate().Raw})
+	caPath := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(caPath, pemCert, 0o600); err != nil {
+		t.Fatalf("write CA bundle: %v", err)
+	}
+	pool, err := LoadCertPool(caPath)
+	if err != nil {
+		t.Fatalf("LoadCertPool: %v", err)
+	}
+	if pool == nil {
+		t.Fatal("LoadCertPool = nil pool, want populated pool")
+	}
+
+	m := domain.ImageCacheMirror{
+		InternalAddr: strings.TrimPrefix(ts.URL, "https://"),
+		TLS:          true,
+	}
+	verified := NewDistributionClientForMirror(m, pool)
+	if err := verified.Ping(context.Background()); err != nil {
+		t.Errorf("Ping with mirror CA: %v", err)
+	}
+
+	// Without the mirror CA the system trust pool must reject the self-signed
+	// mirror certificate.
+	if err := NewDistributionClientForMirror(m, nil).Ping(context.Background()); !errors.Is(err, ErrRegistryUnreachable) {
+		t.Errorf("Ping without mirror CA: %v, want ErrRegistryUnreachable", err)
+	}
+}
+
+func TestLoadCertPool(t *testing.T) {
+	t.Run("empty path returns nil pool and nil error", func(t *testing.T) {
+		pool, err := LoadCertPool("")
+		if err != nil || pool != nil {
+			t.Errorf("LoadCertPool(%q) = (%v, %v), want (nil, nil)", "", pool, err)
+		}
+	})
+
+	t.Run("nonexistent path errors", func(t *testing.T) {
+		if _, err := LoadCertPool(filepath.Join(t.TempDir(), "missing.pem")); err == nil {
+			t.Error("LoadCertPool(nonexistent) = nil error, want error")
+		}
+	})
+
+	t.Run("file without certificates errors", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "garbage.pem")
+		if err := os.WriteFile(path, []byte("not a certificate"), 0o600); err != nil {
+			t.Fatalf("write file: %v", err)
+		}
+		if _, err := LoadCertPool(path); err == nil {
+			t.Error("LoadCertPool(garbage) = nil error, want error")
+		}
+	})
 }
