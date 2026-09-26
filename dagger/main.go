@@ -401,13 +401,13 @@ func (m *DaggerKubernetes) JenkinsLibs(
 		return nil, err
 	}
 
-	src := m.Src.Directory(jenkinsLibsDir)
+	src := m.Src.Directory(jenkinsLibsDir).WithoutFile(".git")
 	entries, err := src.Entries(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list jenkins libs: %w", err)
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("%s is empty: nothing to package", jenkinsLibsDir)
+		return nil, fmt.Errorf("%s is empty: nothing to package (is the submodule initialized? run: git submodule update --init)", jenkinsLibsDir)
 	}
 
 	outPath := fmt.Sprintf("/out/%s", name)
