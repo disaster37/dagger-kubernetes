@@ -1,0 +1,4 @@
+[submodule "ci-integrations/jenkins"]
+	path = ci-integrations/jenkins
+	url = https://github.com/disaster37/dagger-kubernetes-jenkins.git
+	branch = main

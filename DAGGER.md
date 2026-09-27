@@ -20,6 +20,8 @@ The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](
 
 - **Dagger CLI** `0.21.8` (pinned in CI via `DAGGER_VERSION`; newer versions may work).
 - A running **Docker daemon** (Dagger uses it as the build engine).
+- An **initialized submodule**: `git submodule update --init` (the `ci` gate
+  packages `ci-integrations/jenkins`, which is a git submodule).
 
 Install the CLI:
 
@@ -43,6 +45,7 @@ Outputs:
 | `out/bin/supervisor` | Supervisor binary |
 | `out/bin/dagger-kubernetes-ci` | CI helper binary |
 | `out/coverage.out` | Go test coverage profile |
+| `out/jenkins-libs-dev.tar.gz` | Jenkins shared-library release artifact (dev build; packaging proof on every run — not uploaded by `ci.yml`) |
 
 ## Individual functions
 
@@ -55,6 +58,7 @@ Outputs:
 | `docker` | `dagger call -m ./dagger --src . docker` | built `Container` |
 | `helm` | `dagger call -m ./dagger --src . helm` | (no return value; fails on error) |
 | `publish` | `dagger call -m ./dagger --src . publish --tag dev --registry-username env:GHCR_USERNAME --registry-password env:GHCR_TOKEN` | image reference + digest (string) |
+| `jenkins-libs` | `dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 export --path jenkins-libs-v0.1.0.tar.gz` | deterministic `tar.gz` of the `ci-integrations/jenkins` submodule (repo `disaster37/dagger-kubernetes-jenkins`, `vars/` at the archive root) |
 
 ## Publishing the image (GHCR)
 
@@ -101,6 +105,28 @@ stays the canonical release path, `publish` is the dev/adhoc path.
 `imagePullPolicy: Always` and expects re-publishes under the same tag. Treat
 published semver tags as immutable (GHCR does not enforce this).
 
+## Jenkins libs artifact
+
+`jenkins-libs --version <version>` packages **only** the `ci-integrations/jenkins`
+submodule (repo `disaster37/dagger-kubernetes-jenkins`, `vars/` at the archive
+root) into `jenkins-libs-<version>.tar.gz` (version is validated to be
+filesystem/shell-safe; `release.yml` passes the release tag, `ci` uses `dev`).
+The source is selected with `.WithoutFile(".git")`, which strips the submodule's
+`.git` pointer file so the artifact stays deterministic across clones. The build
+runs in the pinned `golang:1.26` image with GNU `tar`
+`--sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner` piped through
+`gzip -n`, so identical input yields a byte-identical archive. On release
+(`release: created`), the `publish-jenkins-libs` job in `release.yml` builds
+the artifact and uploads it to the GitHub release with `gh release upload`.
+
+Jenkins global shared libraries are **SCM-only** — there is no native
+tar.gz/URL retriever, so the artifact cannot be plugged directly into JCasC.
+JCasC instead points its `modernSCM` git retriever at the dedicated repository
+`disaster37/dagger-kubernetes-jenkins` (no `libraryPath`); the artifact is the
+filesystem-extraction fallback for that consumption: see the Jenkins section in
+[`docs/README.md`](docs/README.md) and
+[ADR-044](docs/design/ADR-044-jenkins-library-release-artifact.md).
+
 ## Direct module usage (bypassing local module)
 
 The dependency modules can be called directly at their pinned tags. Because the
@@ -125,6 +151,9 @@ No secrets are required for CI. `publish` needs a registry username/password for
 ## Troubleshooting
 
 - **Engine startup on first run:** Dagger pulls the engine image on the first invocation; subsequent runs are faster.
+- **`jenkins-libs` / `ci` fails with "is empty … submodule not initialized":**
+  the Jenkins library is a git submodule. Run `git submodule update --init`
+  (or clone with `--recurse-submodules`) before `dagger call … ci`.
 - **`helm dependency update` needs network:** The chart depends on 8 public Helm charts (see `Chart.yaml`); ensure outbound network access is available. Two of them come from repos that are not Grafana/OTel/Victoria: `dex` from `https://charts.dexidp.io` and `openldap` (community jp-gouin chart — bitnami/openldap was removed from `https://charts.bitnami.com/bitnami`) from `https://jp-gouin.github.io/helm-openldap/` (that repo is archived/read-only, so the pinned 2.0.4 receives no updates; if the fetch ever 404s, vendor the archive); both are condition-gated (`dex.enabled` / `openldap.enabled`, default `false`), but the archives are still fetched on every `helm dependency update`.
 - **Collector exporter endpoints are templated in values.yaml:** the
   opentelemetry-collector subchart renders its config through `tpl`, so the
