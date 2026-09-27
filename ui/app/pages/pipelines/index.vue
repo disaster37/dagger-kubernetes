@@ -55,7 +55,7 @@
 </template>
 
 <script setup lang="ts">
-import { fetchTraces, listGroups } from '~/api/client'
+import { fetchTraces, listGroups, connectLivePipelines } from '~/api/client'
 import { useAuthStore } from '~/stores/auth'
 import type { TraceRow, Group } from '~/api/types'
 
@@ -90,6 +90,8 @@ const emptyText = 'No pipelines yet. Run dagger call with DAGGER_CLOUD_URL set t
 const now = ref<number>(Date.now())
 let nowTimer: number | undefined
 let pollTimer: number | undefined
+let listDebounce: number | undefined
+let listEventSource: EventSource | undefined
 let disposed = false
 
 onMounted(async () => {
@@ -116,6 +118,19 @@ onMounted(async () => {
     }
   }, 10000)
 
+  // Live SSE updates: the supervisor broadcasts pipelines_update whenever the
+  // list may have changed (OTLP trace ingest, disconnect/stale failure), so
+  // new pipelines appear and status flips render without a manual reload.
+  listEventSource = connectLivePipelines()
+  listEventSource.onmessage = (event) => {
+    try {
+      const data = JSON.parse(event.data)
+      if (data.type === 'pipelines_update') scheduleListRefetch()
+    } catch {
+      // Ignore malformed / non-JSON events (e.g. keepalives).
+    }
+  }
+
   document.addEventListener('visibilitychange', onVisibilityChange)
 })
 
@@ -123,6 +138,8 @@ onUnmounted(() => {
   disposed = true
   if (nowTimer) window.clearInterval(nowTimer)
   if (pollTimer) window.clearInterval(pollTimer)
+  if (listDebounce) window.clearTimeout(listDebounce)
+  if (listEventSource) listEventSource.close()
   document.removeEventListener('visibilitychange', onVisibilityChange)
 })
 
@@ -143,6 +160,15 @@ async function load() {
   } catch (e) {
     console.error('Failed to fetch traces', e)
   }
+}
+
+// Debounce list-level SSE events so a burst collapses into one re-fetch
+// (mirrors scheduleTraceRefetch in the pipeline detail view).
+function scheduleListRefetch() {
+  if (listDebounce) window.clearTimeout(listDebounce)
+  listDebounce = window.setTimeout(() => {
+    void load()
+  }, 300)
 }
 
 function statusColor(status: string): 'success' | 'error' | 'info' | 'neutral' {

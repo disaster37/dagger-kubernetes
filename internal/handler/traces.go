@@ -158,6 +158,31 @@ func (s *Server) handleTracesLive(ctx context.Context, c *app.RequestContext) {
 	s.liveHub.Unsubscribe(traceID, client)
 }
 
+// handleTracesListLive streams a lightweight "re-fetch the list" event to
+// pipelines-overview subscribers. EventSource clients cannot set headers, so it
+// uses the same ?token= query fallback as the per-trace /live route. There is
+// no trace-level authorization: the stream only signals "the list changed" and
+// carries no data — the subsequent GET /api/v1/traces is identity-scoped.
+func (s *Server) handleTracesListLive(ctx context.Context, c *app.RequestContext) {
+	if !s.requireAuthWithQueryFallback(c) {
+		return
+	}
+
+	c.SetStatusCode(consts.StatusOK)
+	c.Response.Header.Set("Content-Type", "text/event-stream")
+	c.Response.Header.Set("Cache-Control", "no-cache")
+	c.Response.Header.Set("Connection", "keep-alive")
+
+	client := repository.NewLiveClient(c, domain.PipelinesTopic)
+	s.liveHub.Subscribe(domain.PipelinesTopic, client)
+
+	select {
+	case <-ctx.Done():
+	case <-client.Done():
+	}
+	s.liveHub.Unsubscribe(domain.PipelinesTopic, client)
+}
+
 // authorizeTraceRequest resolves the identity, extracts the :traceID path
 // parameter, and enforces trace visibility. On any failure it writes the
 // response and returns false.

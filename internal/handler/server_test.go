@@ -37,6 +37,7 @@ func newTestEngine(s *Server) *route.Engine {
 	e.GET("/healthz", s.handleHealthz)
 	e.GET("/readyz", s.handleReadyz)
 	e.POST("/v1/engines", s.handleEngines)
+	e.GET("/api/v1/traces/live", s.handleTracesListLive)
 	e.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	e.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
 	e.GET("/api/v1/fleet", s.handleFleetInfo)

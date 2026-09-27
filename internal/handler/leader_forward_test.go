@@ -132,6 +132,8 @@ func TestLeaderPinnedRoute(t *testing.T) {
 		{"POST", "/v1/logs", true},
 		{"POST", "/v1/traces", true},
 		{"GET", "/api/v1/traces/abc/live", true},
+		// The list-level SSE stream matches the same prefix/suffix rule.
+		{"GET", "/api/v1/traces/live", true},
 		{"GET", "/api/v1/fleet/v0.19.0/purge-cache", true},
 		// OAuth callbacks are GETs that perform Raft writes (EnsureOAuthUser
 		// + group reconciliation), so they must be leader-pinned. The
@@ -244,6 +246,16 @@ func TestLeaderForwardRouting(t *testing.T) {
 			addr:          backendHostPort,
 			method:        "GET",
 			path:          "/api/v1/traces/xyz/live",
+			wantStatus:    http.StatusOK,
+			wantBody:      "from-leader",
+			wantForwarded: true,
+		},
+		{
+			name:          "follower forwards pipelines-live stream (GET, leader-pinned)",
+			leader:        false,
+			addr:          backendHostPort,
+			method:        "GET",
+			path:          "/api/v1/traces/live",
 			wantStatus:    http.StatusOK,
 			wantBody:      "from-leader",
 			wantForwarded: true,

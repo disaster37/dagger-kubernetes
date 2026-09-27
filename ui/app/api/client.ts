@@ -269,3 +269,9 @@ export async function fetchConnectEnv(version?: string, reveal?: boolean): Promi
 export function connectLiveTrace(id: string): EventSource {
   return new EventSource(`/api/v1/traces/${id}/live`)
 }
+
+// SSE pipeline-list change stream (same-origin EventSource sends the session
+// cookie; the supervisor also accepts ?token= via query fallback).
+export function connectLivePipelines(): EventSource {
+  return new EventSource('/api/v1/traces/live')
+}

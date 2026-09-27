@@ -1813,14 +1813,18 @@ Features:
 - **Pipeline list** — every run identified by a friendly name (`@username · org/repo`,
   or the root-folder/module name when there is no git repo) with status,
   duration, and engine version; the raw trace ID is shown as a secondary
-  reference under the name. The list auto-refreshes every 10s while any run is
-  in flight, and the per-row duration ticks live every 1s until the run finishes.
-  Two free-text filters narrow the list server-side: **Repository**
+  reference under the name. The list updates **live**: the overview subscribes
+  to the `/api/v1/traces/live` SSE stream, so new pipelines appear and status
+  changes propagate without a manual reload (each `pipelines_update` event is
+  debounced ~300ms into a re-fetch); the 10s auto-refresh while a run is in
+  flight remains as a resilience fallback, and the per-row duration ticks live
+  every 1s until the run finishes. Two free-text filters narrow the list
+  server-side: **Repository**
   (`?ci_repo=`, a case-insensitive substring match on `ci_repo` or
   `project_name`) and **User** (`?user=`, a substring match on the joined
   username); admins additionally keep the group `USelect` (`?group_id=`). The
-  filters are AND-ed and survive the auto-refresh (the poll reuses the current
-  filter values).
+  filters are AND-ed and survive the auto-refresh (the poll and the live
+  re-fetch reuse the current filter values).
 - **Logo / favicon** — the header and the login card show a hand-authored
   fleet-of-daggers logo, inlined so its `currentColor` fill follows the theme
   (the same artwork is also served at `/logo.svg`); the browser tab uses
@@ -1888,7 +1892,14 @@ Features:
   the affected trace IDs and broadcasts a lightweight `trace_update` or
   `logs_update` event; the viewer debounces these into an immediate re-fetch
   of steps/logs so new spans and log lines appear as the pipeline runs. A 5s
-  polling fallback remains for resilience. Log refresh is **non-disruptive**:
+  polling fallback remains for resilience. The pipelines **overview** page uses
+  the list-level `/api/v1/traces/live` stream instead: an OTLP trace ingest
+  (a new pipeline or a status/duration update) or a disconnect/stale-sweep
+  failure broadcasts `{"type":"pipelines_update"}` to the list topic, and the
+  page re-fetches `GET /api/v1/traces` with its current filters (debounced
+  300ms; `EventSource` reconnects on its own), so new pipelines and status
+  flips render without a manual reload — the conditional 10s poll stays as a
+  fallback. Log refresh is **non-disruptive**:
   it fetches only the strictly-newer tail via a forward cursor and appends it
   (deduped by timestamp + span + line), so the list is never cleared and the
   scroll position never jumps. Auto-scroll pauses while the user is scrolled up
@@ -1947,6 +1958,7 @@ Features:
 | Endpoint | Purpose |
 |---|---|
 | `GET /api/v1/traces` | Scoped pipeline list. Optional filters: `group_id` (admin, repeatable, `unassigned` keyword), `ci_repo` (case-insensitive substring on `ci_repo`/`project_name`), `user` (case-insensitive substring on `username`), `limit`. |
+| `GET /api/v1/traces/live` | SSE re-fetch signal stream for the pipeline list (`{"type":"pipelines_update"}`; header or `?token=` auth, no payload data). |
 | `GET /api/v1/traces/:id` | Reconstructed span tree + status/duration/owner. |
 | `GET /api/v1/traces/:id/logs` | Per-span logs (Loki). |
 | `GET /api/v1/traces/:id/search` | Subtree-scoped, text-filtered, paginated log search (`span_id`, `q`, `mode=contains\|regex`, `limit`, `cursor`). The first page also returns per-span matching `counts`. |

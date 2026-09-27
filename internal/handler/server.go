@@ -670,6 +670,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 
 	// Traces (scoped + authorized).
 	h.GET("/api/v1/traces", s.handleTracesList)
+	h.GET("/api/v1/traces/live", s.handleTracesListLive)
 	h.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	h.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
 	h.GET("/api/v1/traces/:traceID/logs", s.handleTracesLogs)
@@ -973,7 +974,9 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 
 // broadcastOTelUpdate fans out a lightweight re-fetch event to live SSE
 // subscribers for every trace ID present in the ingested OTLP body so clients
-// re-fetch steps/logs without waiting for the next poll.
+// re-fetch steps/logs without waiting for the next poll. A trace ingest also
+// means the pipeline list changed (new pipeline or status/duration update), so
+// it additionally notifies the pipelines-overview topic.
 func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
 	if s.liveHub == nil || len(body) == 0 {
 		return
@@ -985,6 +988,7 @@ func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "trace_update"})
 			}
 		}
+		s.liveHub.Broadcast(domain.PipelinesTopic, map[string]string{"type": "pipelines_update"})
 	case "logs":
 		for _, traceID := range service.ExtractLogTraceIDs(body) {
 			if traceID != "" {
