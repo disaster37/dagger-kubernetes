@@ -2046,6 +2046,15 @@ endpoint instead:
   self-hosted URL without parsing CLI output. The same URL is also returned as
   the `url` field of `GET /api/v1/traces/:id`.
 
+> **Note:** the wrapper loads configuration through a client-only profile —
+> the same file, environment variables and flags as the supervisor, but it
+> validates only the client-relevant `ci.jenkins.*` fields and skips
+> supervisor-only validation (`server.public_url`, `cli.s3_bucket`, auth,
+> fleet, image cache, OTel, pipeline metrics). `--config /dev/null` therefore
+> works (the Jenkins shared library's invocation), and `server.public_url`
+> stays an optional fallback for `--server`/`--ui-url` instead of a hard
+> startup requirement.
+
 The base URL is always `server.public_url`. It must be an absolute `http(s)`
 URL; only its scheme + host are used (the path `/pipelines/<id>` is fixed,
 and any path/query/fragment on the configured base is dropped, so links stay
