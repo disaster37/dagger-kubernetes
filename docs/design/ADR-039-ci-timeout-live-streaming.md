@@ -123,13 +123,23 @@ existing stderr channel.
 ### 5. `--ui-url` base-URL correctness
 
 Jenkins previously invoked the wrapper with `--server '${serverUrl}' --config
-/dev/null` and no `--ui-url`. `config.Load("/dev/null")` returns compiled-in
-defaults, and `fileExists("/dev/null")` is true (`os.Stat` succeeds on the
-device node), so `resolveUIBase` picked the compiled-in default
-`server.public_url` — not the Jenkins `serverUrl`/`uiUrl`. The live URL would
-therefore point at the wrong host. The library now passes `--ui-url '${uiUrl}'`
-(after `assertShellSafe(uiUrl, 'uiUrl')`), making the wrapper's base
-deterministic and correct.
+/dev/null` and no `--ui-url`. Pre-fix (before the client-only config-validation
+profile fix), `config.Load("/dev/null")` returned compiled-in defaults and
+`fileExists("/dev/null")` was true (`os.Stat` succeeds on the device node), so
+`resolveUIBase` picked the compiled-in default `server.public_url` — not the
+Jenkins `serverUrl`/`uiUrl`. The live URL would therefore point at the wrong
+host. The library now passes `--ui-url '${uiUrl}'` (after
+`assertShellSafe(uiUrl, 'uiUrl')`), making the wrapper's base deterministic
+and correct.
+
+Since the client-only config-validation profile fix (PR #52), `fileExists`
+requires a regular file, so `--config /dev/null` — and directories and other
+device nodes — count as "no config file": `configPublicURL` is no longer
+populated from compiled-in defaults. With no `--server` and no config file
+there is no target to fall back on, so the wrapper now fails fast with
+`--server and --token required` instead of silently targeting the
+compiled-in example URL. `--ui-url` remains as defense-in-depth: it still
+wins over a real config file's `server.public_url`.
 
 ### 6. Version skew (library vs preinstalled wrapper)
 
