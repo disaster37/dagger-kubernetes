@@ -14,7 +14,7 @@ The cache-ref emission previously exposed the raw registry address to the
 Dagger CLI and engine:
 
 ```
-type=registry,ref=dagger-kubernetes-test-registry:5000/dagger-cache:cache,mode=max
+type=registry,ref=<release>-registry:5000/dagger-cache:cache,mode=max
 ```
 
 This violates two requirements: the Dagger client/engine must never speak

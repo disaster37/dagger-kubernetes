@@ -7,16 +7,30 @@ A self-hosted, Dagger-Cloud-compatible platform: remote shared cache, auto-scali
 ## Local test environment
 
 Before deploying or updating this application on the local Kubernetes
-cluster, read `AGENTS.local.md`. It is the machine-specific source of truth for:
-
-- cluster access (kubeconfig `/home/user/.kube/home`, context `home`),
-- the live release (`dagger-kubernetes-test`) and its image
-  (`docker.io/disaster/dagger-kubernetes:dev`),
-- the build → push → helm-upgrade → rollout workflow,
-- the mandatory agent + human verification steps.
+cluster, read `AGENTS.local.md`. It is the machine-specific source of truth
+for cluster access, the live release and image, the build → push →
+helm-upgrade → rollout workflow, and the mandatory agent + human
+verification steps.
 
 Every new feature or bug fix MUST be redeployed and validated on that cluster
 (see the mandate in `AGENTS.local.md` §6).
+
+## Never commit internal environment values
+
+This repository is **public**. Private test-environment values must never
+appear in tracked files (code, docs, ADRs, chart values, tests), nor in
+commit messages, PR titles, or PR descriptions:
+
+- Never commit private test-environment hostnames, URLs, credentials,
+  cluster IDs, kubeconfig paths, release names, or namespaces.
+- Use generic placeholders instead: `example.com`, `<release>`,
+  `<namespace>`.
+- Chart defaults (`deploy/helm/**/values.yaml`) must stay generic.
+- Machine-specific values belong only in the gitignored `AGENTS.local.md`
+  and in live Helm values captured from the cluster.
+- Local-only directories (`.kube/`, `.opencode/`, `out/`, binaries) must
+  never be tracked — if one slips in, `git rm -r --cached <path>` and extend
+  `.gitignore`.
 
 ## CI gate (mandatory — do not break it)
 

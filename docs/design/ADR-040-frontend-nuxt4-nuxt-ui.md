@@ -82,7 +82,7 @@ preserved.
   the previous GitHub-dark hexes. `nuxt generate` also emits per-route
   prerendered shells (e.g. `pipelines/index.html`) that the Go handler does not
   use; they are harmless.
-- **Rollback:** revert the branch and `helm rollback dagger-kubernetes-test` to
+- **Rollback:** revert the branch and `helm rollback <release>` to
   the prior revision; a fresh image build from `main` restores the Vue 3 bundle.
 
 ## Alternatives considered
