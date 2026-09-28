@@ -52,7 +52,7 @@ questions had to be settled first:
 1. **Dex + OpenLDAP as optional subcharts.** `dex.enabled` / `openldap.enabled`
    (default `false`) gate the dependencies in `Chart.yaml`; the `dex:` /
    `openldap:` values sections ship the full test IdP: issuer
-   `https://dex-test.home.webcenter.fr` behind the nginx ingress with a
+   `https://dex.example.com` behind the nginx ingress with a
    Let's Encrypt cert (so the supervisor's default TLS trust accepts it —
    `auth.oauth.ca_cert_path` is **not** needed), plaintext in-cluster LDAP for
    the connector (dev/test only), and a LDIF that seeds `jane` +
@@ -122,7 +122,7 @@ questions had to be settled first:
   `dex.enabled=true`/`openldap.enabled=true` variant asserting
   `name: dagger-kubernetes-dex`).
 - The test release gains a `dex` Deployment and an `openldap` StatefulSet;
-  `https://dex-test.home.webcenter.fr` must resolve publicly (DNS-01 via
+  `https://dex.example.com` must resolve publicly (DNS-01 via
   cert-manager `letsencrypt-prod`, same as the existing hosts).
 - `AGENTS.local.md` documents the machine-specific recipe (issuer host,
   client-secret sync warning, short grace/interval, the live validation

@@ -19,7 +19,55 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-func Load(configFile string) (*domain.Config, error) {
+// validation pairs an error-prefix with the validator that produces the
+// underlying error, so the supervisor and CI-wrapper load paths can share the
+// same validators while enabling different subsets.
+type validation struct {
+	wrap string
+	fn   func(*domain.Config) error
+}
+
+// supervisorValidations is the full set, in the exact order they previously
+// ran inline in Load — order matters because the first failure wins and
+// determines the returned error string.
+var supervisorValidations = []validation{
+	{wrap: "validate auth config", fn: validateAuthConfig},
+	{wrap: "validate oauth revalidation config", fn: validateOAuthRevalidation},
+	{wrap: "validate group mappings", fn: validateGroupMappings},
+	{wrap: "validate project mappings", fn: validateProjectMappings},
+	{wrap: "validate group mapping default limit", fn: validateOAuthGroupMappingDefaultLimit},
+	{wrap: "validate oauth admin_groups", fn: validateOAuthAdminGroups},
+	{wrap: "validate server config", fn: validateServerConfig},
+	{wrap: "validate fleet config", fn: validateFleetConfig},
+	{wrap: "validate cli config", fn: validateCLIConfig},
+	{wrap: "validate image cache config", fn: validateImageCacheConfig},
+	{wrap: "validate ci config", fn: validateCIConfig},
+	{wrap: "validate otel config", fn: validateOTelConfig},
+	{wrap: "validate pipeline metrics config", fn: validatePipelineMetricsConfig},
+}
+
+// ciWrapperValidations is the client-relevant subset. The wrapper consumes only
+// cfg.CI.Jenkins.StepsPollInterval / StepsMaxDepth (resolveSteps) and reads
+// cfg.Server.PublicURL, cfg.LogLevel, cfg.LogFormat as optional inputs, so
+// validateCIConfig is the only validation that guards values it actually uses.
+var ciWrapperValidations = []validation{
+	{wrap: "validate ci config", fn: validateCIConfig},
+}
+
+// runValidations runs each validation in order and wraps the first error with
+// its prefix, preserving the exact historical error strings.
+func runValidations(cfg *domain.Config, validations []validation) error {
+	for _, v := range validations {
+		if err := v.fn(cfg); err != nil {
+			return fmt.Errorf("%s: %w", v.wrap, err)
+		}
+	}
+	return nil
+}
+
+// load reads, decodes, and validates the configuration file with the supplied
+// validation profile.
+func load(configFile string, validations []validation) (*domain.Config, error) {
 	v := viper.New()
 
 	v.SetConfigFile(configFile)
@@ -242,59 +290,24 @@ func Load(configFile string) (*domain.Config, error) {
 		return nil, fmt.Errorf("unmarshal config: %w", err)
 	}
 
-	if err := validateAuthConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate auth config: %w", err)
-	}
-
-	if err := validateOAuthRevalidation(&cfg); err != nil {
-		return nil, fmt.Errorf("validate oauth revalidation config: %w", err)
-	}
-
-	if err := validateGroupMappings(&cfg); err != nil {
-		return nil, fmt.Errorf("validate group mappings: %w", err)
-	}
-
-	if err := validateProjectMappings(&cfg); err != nil {
-		return nil, fmt.Errorf("validate project mappings: %w", err)
-	}
-
-	if err := validateOAuthGroupMappingDefaultLimit(&cfg); err != nil {
-		return nil, fmt.Errorf("validate group mapping default limit: %w", err)
-	}
-
-	if err := validateOAuthAdminGroups(&cfg); err != nil {
-		return nil, fmt.Errorf("validate oauth admin_groups: %w", err)
-	}
-
-	if err := validateServerConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate server config: %w", err)
-	}
-
-	if err := validateFleetConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate fleet config: %w", err)
-	}
-
-	if err := validateCLIConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate cli config: %w", err)
-	}
-
-	if err := validateImageCacheConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate image cache config: %w", err)
-	}
-
-	if err := validateCIConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate ci config: %w", err)
-	}
-
-	if err := validateOTelConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate otel config: %w", err)
-	}
-
-	if err := validatePipelineMetricsConfig(&cfg); err != nil {
-		return nil, fmt.Errorf("validate pipeline metrics config: %w", err)
+	if err := runValidations(&cfg, validations); err != nil {
+		return nil, err
 	}
 
 	return &cfg, nil
+}
+
+// Load loads and fully validates the supervisor configuration.
+func Load(configFile string) (*domain.Config, error) {
+	return load(configFile, supervisorValidations)
+}
+
+// LoadForCIWrapper loads configuration for the CI wrapper, validating only the
+// client-relevant fields (ci.jenkins.*) and skipping supervisor-only
+// validation (server.public_url, cli.s3_bucket, auth, fleet, image cache,
+// OTel, pipeline metrics).
+func LoadForCIWrapper(configFile string) (*domain.Config, error) {
+	return load(configFile, ciWrapperValidations)
 }
 
 // unmarshalConfig decodes the merged Viper settings into cfg. It deliberately

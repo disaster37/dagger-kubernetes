@@ -1253,7 +1253,7 @@ bounded schedule.
 **Bundled test IdP (Dex + OpenLDAP subcharts).** The Helm chart ships Dex and
 OpenLDAP as optional, condition-gated dependencies (`dex.enabled` /
 `openldap.enabled`, both `false` by default; ADR-042). Enabling both installs
-Dex behind `https://dex-test.home.webcenter.fr` (nginx ingress, cert-manager
+Dex behind `https://dex.example.com` (nginx ingress, cert-manager
 Let's Encrypt — publicly trusted, so `auth.oauth.ca_cert_path` is not needed)
 plus an in-cluster OpenLDAP seeded with a test user (`jane`) and group (`devs`)
 via `customLdifFiles`; Dex's LDAP connector is what provides `groups` +
@@ -2046,6 +2046,15 @@ endpoint instead:
   metadata → admin-only). Clients that already know a trace ID can resolve the
   self-hosted URL without parsing CLI output. The same URL is also returned as
   the `url` field of `GET /api/v1/traces/:id`.
+
+> **Note:** the wrapper loads configuration through a client-only profile —
+> the same file, environment variables and flags as the supervisor, but it
+> validates only the client-relevant `ci.jenkins.*` fields and skips
+> supervisor-only validation (`server.public_url`, `cli.s3_bucket`, auth,
+> fleet, image cache, OTel, pipeline metrics). `--config /dev/null` therefore
+> works (the Jenkins shared library's invocation), and `server.public_url`
+> stays an optional fallback for `--server`/`--ui-url` instead of a hard
+> startup requirement.
 
 The base URL is always `server.public_url`. It must be an absolute `http(s)`
 URL; only its scheme + host are used (the path `/pipelines/<id>` is fixed,
