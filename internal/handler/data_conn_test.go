@@ -96,7 +96,7 @@ func TestServeDataTunnelMarksTraceFailedOnClose(t *testing.T) {
 	const certFP = "fp-close"
 	setupDataTunnel(t, env, certFP, testTraceID)
 
-	liveConn := subscribeCaptureClient(t, s.liveHub)
+	liveConn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	client, server := net.Pipe()
 	defer client.Close()

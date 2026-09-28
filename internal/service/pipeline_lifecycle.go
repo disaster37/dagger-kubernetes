@@ -137,6 +137,7 @@ func (p *PipelineLifecycle) markFailed(ctx context.Context, source, traceID, rea
 	}
 	if p.broadcaster != nil {
 		p.broadcaster.Broadcast(traceID, map[string]string{"type": "trace_update"})
+		p.broadcaster.Broadcast(domain.PipelinesTopic, map[string]string{"type": "pipelines_update"})
 	}
 	if p.metrics != nil {
 		p.metrics.PipelineDisconnectFailedTotal.WithLabelValues(source).Inc()

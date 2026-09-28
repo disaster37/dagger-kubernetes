@@ -51,3 +51,4 @@ the decision.
 | 042  | [Runner-fleet metrics + storage usage (cAdvisor, 15m rolling window)](ADR-042-runner-fleet-metrics-storage.md) |
 | 043  | [Engine (fleet runner) image pulled through the cache mirror](ADR-043-engine-image-via-cache.md) |
 | 044  | [Jenkins shared library as a release artifact](ADR-044-jenkins-library-release-artifact.md) |
+| 044  | [Pipelines overview updates live via a sentinel-topic SSE stream](ADR-044-pipelines-overview-live-stream.md) |

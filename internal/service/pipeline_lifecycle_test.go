@@ -107,6 +107,9 @@ func TestOnTunnelClosed(t *testing.T) {
 		if !bc.sawEvent("t1") {
 			t.Fatal("expected broadcast on transition")
 		}
+		if !bc.sawEvent(domain.PipelinesTopic) {
+			t.Fatal("expected pipelines-overview broadcast on transition")
+		}
 		if got := counterVecValue(t, reg, "dagger_kubernetes_pipeline_disconnect_failed_total", "tunnel_close"); got != 1 {
 			t.Fatalf("tunnel_close metric = %v, want 1", got)
 		}
@@ -123,6 +126,9 @@ func TestOnTunnelClosed(t *testing.T) {
 		}
 		if bc.sawEvent("t1") {
 			t.Fatal("no broadcast expected")
+		}
+		if bc.sawEvent(domain.PipelinesTopic) {
+			t.Fatal("no pipelines-overview broadcast without a transition")
 		}
 	})
 

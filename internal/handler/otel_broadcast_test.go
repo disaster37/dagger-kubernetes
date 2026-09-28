@@ -21,6 +21,7 @@ import (
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
@@ -131,16 +132,16 @@ func otlpLogsBody(t *testing.T, traceIDHex string) []byte {
 	return protowire.AppendBytes(body, rlBytes)
 }
 
-// subscribeCaptureClient registers a live SSE client backed by a mockConn so
-// tests can assert on the bytes writePump emits.
-func subscribeCaptureClient(t *testing.T, hub *repository.LiveHub) *mockConn {
+// subscribeCaptureClient registers a live SSE client backed by a mockConn on
+// the given hub key so tests can assert on the bytes writePump emits.
+func subscribeCaptureClient(t *testing.T, hub *repository.LiveHub, key string) *mockConn {
 	t.Helper()
 	conn := &mockConn{}
 	c := app.NewContext(0)
 	c.SetConn(conn)
-	client := repository.NewLiveClient(c, testTraceID)
-	hub.Subscribe(testTraceID, client)
-	t.Cleanup(func() { hub.Unsubscribe(testTraceID, client) })
+	client := repository.NewLiveClient(c, key)
+	hub.Subscribe(key, client)
+	t.Cleanup(func() { hub.Unsubscribe(key, client) })
 	return conn
 }
 
@@ -158,7 +159,7 @@ func waitForString(t *testing.T, conn *mockConn, want string) {
 
 func TestBroadcastOTelUpdateTraces(t *testing.T) {
 	s, _ := newTestServer(t)
-	conn := subscribeCaptureClient(t, s.liveHub)
+	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
 	waitForString(t, conn, `"type":"trace_update"`)
@@ -166,7 +167,7 @@ func TestBroadcastOTelUpdateTraces(t *testing.T) {
 
 func TestBroadcastOTelUpdateLogs(t *testing.T) {
 	s, _ := newTestServer(t)
-	conn := subscribeCaptureClient(t, s.liveHub)
+	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	s.broadcastOTelUpdate("logs", otlpLogsBody(t, testTraceID))
 	waitForString(t, conn, `"type":"logs_update"`)
@@ -174,7 +175,7 @@ func TestBroadcastOTelUpdateLogs(t *testing.T) {
 
 func TestBroadcastOTelUpdateMetricsNoop(t *testing.T) {
 	s, _ := newTestServer(t)
-	conn := subscribeCaptureClient(t, s.liveHub)
+	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	s.broadcastOTelUpdate("metrics", otlpTraceBody(t))
 
@@ -183,6 +184,22 @@ func TestBroadcastOTelUpdateMetricsNoop(t *testing.T) {
 	if got := conn.String(); strings.Contains(got, "update") {
 		t.Fatalf("metrics ingest must not broadcast, got: %q", got)
 	}
+}
+
+func TestBroadcastOTelUpdatePipelinesTopic(t *testing.T) {
+	s, _ := newTestServer(t)
+	conn := subscribeCaptureClient(t, s.liveHub, domain.PipelinesTopic)
+
+	// A logs ingest must not notify the pipelines-overview topic.
+	s.broadcastOTelUpdate("logs", otlpLogsBody(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+	time.Sleep(50 * time.Millisecond)
+	if got := conn.String(); strings.Contains(got, "pipelines_update") {
+		t.Fatalf("logs ingest must not broadcast to the pipelines topic, got: %q", got)
+	}
+
+	// A trace ingest broadcasts one list-level re-fetch event per batch.
+	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
+	waitForString(t, conn, `"type":"pipelines_update"`)
 }
 
 func TestBroadcastOTelUpdateNilHub(t *testing.T) {
@@ -209,7 +226,7 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	e.POST("/v1/traces", s.handleOTel("traces"))
 	e.POST("/v1/logs", s.handleOTel("logs"))
 
-	traceConn := subscribeCaptureClient(t, s.liveHub)
+	traceConn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	traceBody := otlpTraceBody(t)
 	resp := ut.PerformRequest(e, "POST", "/v1/traces", &ut.Body{
@@ -221,7 +238,7 @@ func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {
 	}
 	waitForString(t, traceConn, `"type":"trace_update"`)
 
-	logsConn := subscribeCaptureClient(t, s.liveHub)
+	logsConn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
 	logsBody := otlpLogsBody(t, testTraceID)
 	resp = ut.PerformRequest(e, "POST", "/v1/logs", &ut.Body{

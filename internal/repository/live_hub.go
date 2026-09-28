@@ -22,13 +22,21 @@ type LiveClient struct {
 type LiveHub struct {
 	mu      sync.RWMutex
 	clients map[string]map[*LiveClient]bool
+	// keepAlive is the writePump keep-alive cadence; tests shorten it before
+	// the first Subscribe (per-hub, so no shared package state races).
+	keepAlive time.Duration
 }
 
 func NewLiveHub() *LiveHub {
 	return &LiveHub{
-		clients: make(map[string]map[*LiveClient]bool),
+		clients:   make(map[string]map[*LiveClient]bool),
+		keepAlive: defaultKeepAliveInterval,
 	}
 }
+
+// defaultKeepAliveInterval keeps an idle SSE stream below nginx's
+// proxy_read_timeout (60s).
+const defaultKeepAliveInterval = 30 * time.Second
 
 func (h *LiveHub) Subscribe(traceID string, client *LiveClient) {
 	h.mu.Lock()
@@ -82,7 +90,7 @@ func (h *LiveHub) Broadcast(traceID string, event interface{}) {
 }
 
 func (h *LiveHub) writePump(client *LiveClient) {
-	ticker := time.NewTicker(30 * time.Second)
+	ticker := time.NewTicker(h.keepAlive)
 	defer func() {
 		ticker.Stop()
 		_ = client.writer.Close()

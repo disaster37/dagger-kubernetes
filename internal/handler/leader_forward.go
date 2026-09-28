@@ -45,8 +45,9 @@ func isReadOnlyMethod(method string) bool {
 // also pinned because they read leader-local state or perform a Raft write
 // despite being read-only by method:
 //
-//   - /api/v1/traces/:traceID/live — SSE; the liveHub is per-pod and events
-//     are produced only on the leader.
+//   - /api/v1/traces/:traceID/live and /api/v1/traces/live — SSE; the liveHub
+//     is per-pod and events are produced only on the leader. The list-level
+//     stream matches the same prefix/suffix rule automatically.
 //   - /api/v1/fleet/:version/purge-cache — the purge-job status lives in the
 //     in-memory EngineCachePurgeService of the pod that accepted the POST.
 //   - /api/v1/auth/oauth/{github,oidc}/callback — a GET that runs the OAuth
