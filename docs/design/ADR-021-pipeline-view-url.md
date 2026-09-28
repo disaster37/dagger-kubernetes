@@ -8,7 +8,7 @@
 
 When a developer runs the Dagger CLI against this self-hosted platform, the
 pipeline-view / trace link surfaced in the CLI output should point at **this
-platform's** web UI (`https://dagger.home.webcenter.fr/pipelines/<traceID>`)
+platform's** web UI (`https://dagger.example.com/pipelines/<traceID>`)
 instead of `https://dagger.cloud/<org>/traces/<traceID>`.
 
 Verified against the upstream Dagger `main` branch (`engine/telemetry/url.go`):

@@ -1252,7 +1252,7 @@ bounded schedule.
 **Bundled test IdP (Dex + OpenLDAP subcharts).** The Helm chart ships Dex and
 OpenLDAP as optional, condition-gated dependencies (`dex.enabled` /
 `openldap.enabled`, both `false` by default; ADR-042). Enabling both installs
-Dex behind `https://dex-test.home.webcenter.fr` (nginx ingress, cert-manager
+Dex behind `https://dex.example.com` (nginx ingress, cert-manager
 Let's Encrypt — publicly trusted, so `auth.oauth.ca_cert_path` is not needed)
 plus an in-cluster OpenLDAP seeded with a test user (`jane`) and group (`devs`)
 via `customLdifFiles`; Dex's LDAP connector is what provides `groups` +

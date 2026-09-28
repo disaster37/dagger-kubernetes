@@ -30,6 +30,9 @@ go.work.sum
 # Local agent deployment notes (machine-specific; contains cluster hostnames)
 AGENTS.local.md
 
+# Local kubectl cache (machine-specific; contains cluster hostnames)
+.kube/
+
 # Helm: vendored dependency archives (rebuilt via `helm dependency update`)
 deploy/helm/**/charts/*.tgz
 
@@ -58,5 +61,7 @@ ui/dist
 bin/
 out/
 /ui-dist/
-ci
+# Root-level CI build artifact only (do NOT use an unanchored `ci`: it
+# would also ignore the tracked cmd/ci/ sources)
+/ci
 .opencode
