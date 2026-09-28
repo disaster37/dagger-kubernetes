@@ -1092,3 +1092,60 @@ func TestPipelineViewURLLiveErrorNonFatal(t *testing.T) {
 		t.Fatalf("stderr = %q, want no live line for an invalid trace ID", stderr)
 	}
 }
+
+// newCIApp builds the app exactly like main() does, so tests can drive the
+// real flag set and run() through app.Run.
+func newCIApp() *cli.App {
+	return &cli.App{
+		Name:   "dagger-kubernetes-ci",
+		Usage:  "Dagger Kubernetes CI helper",
+		Flags:  ciFlags(),
+		Action: run,
+	}
+}
+
+// TestRunConfigLoadsWithDevNull drives the exact Jenkins shared-library
+// invocation (--config /dev/null): the config load must pass the wrapper's
+// client-only validation profile, so the run fails on the missing
+// --server/--token and never on supervisor-only validation.
+func TestRunConfigLoadsWithDevNull(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_TOKEN", "")
+
+	err := newCIApp().Run([]string{"dagger-kubernetes-ci", "--config", "/dev/null"})
+	if err == nil {
+		t.Fatal("app.Run = nil, want --server/--token error")
+	}
+	if !strings.Contains(err.Error(), "--server and --token required") {
+		t.Fatalf("app.Run error = %q, want --server and --token required", err.Error())
+	}
+	for _, banned := range []string{"validate cli config", "validate server config"} {
+		if strings.Contains(err.Error(), banned) {
+			t.Fatalf("app.Run error = %q, must not contain %q", err.Error(), banned)
+		}
+	}
+}
+
+// TestRunFailsFastOnInvalidCIConfig proves client-relevant validation is
+// retained: a bad ci.jenkins.steps_poll_interval still fails the wrapper at
+// config load, before any dagger command runs.
+func TestRunFailsFastOnInvalidCIConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.app.yaml")
+	content := "ci:\n  jenkins:\n    dynamic_stages: true\n    steps_poll_interval: \"0s\"\n"
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	err := newCIApp().Run([]string{"dagger-kubernetes-ci", "--config", path})
+	if err == nil {
+		t.Fatal("app.Run = nil, want config validation error")
+	}
+	for _, want := range []string{
+		"load config",
+		"validate ci config",
+		"ci.jenkins.steps_poll_interval must be > 0",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("app.Run error = %q, want containing %q", err.Error(), want)
+		}
+	}
+}

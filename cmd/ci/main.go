@@ -93,14 +93,15 @@ func ciFlags() []cli.Flag {
 }
 
 func run(c *cli.Context) error {
-	cfg, err := config.Load(c.String("config"))
+	cfg, err := config.LoadForCIWrapper(c.String("config"))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
 
 	// Only trust config values when the config file was actually present;
-	// config.Load otherwise returns compiled-in defaults (e.g. the example
-	// public_url) that must not silently become the wrapper's target.
+	// config.LoadForCIWrapper otherwise returns compiled-in defaults (e.g.
+	// the example public_url) that must not silently become the wrapper's
+	// target.
 	hasConfigFile := fileExists(c.String("config"))
 	var configPublicURL string
 	if hasConfigFile {
@@ -448,7 +449,7 @@ func resolveUIBase(uiURLFlag, serverURLFlag, configPublicURL string) string {
 }
 
 // fileExists reports whether path exists (used to distinguish a real config
-// file from config.Load's compiled-in defaults).
+// file from config.LoadForCIWrapper's compiled-in defaults).
 func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
