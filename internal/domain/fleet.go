@@ -31,6 +31,12 @@ type AcquireResult struct {
 	Image   string
 }
 
+// PVCInfo is a per-pod PVC of an engine version's StatefulSet.
+type PVCInfo struct {
+	Name    string
+	Ordinal int
+}
+
 type FleetProvider interface {
 	EnsureStatefulSet(version string, image string) error
 	DeleteStatefulSet(version string) error
@@ -51,6 +57,14 @@ type FleetProvider interface {
 	// SetVersionIdleSince stamps (or, when idleSince is the zero time, clears)
 	// the idle-since annotation on the version's StatefulSet.
 	SetVersionIdleSince(version string, idleSince time.Time) error
+	// ListPVCs returns the per-pod PVCs of the version's StatefulSet.
+	// Each entry carries the PVC name and its ordinal (extracted from the
+	// StatefulSet volume-claim naming convention). PVCs whose ordinal
+	// cannot be parsed are omitted.
+	ListPVCs(version string) ([]PVCInfo, error)
+	// DeletePVC deletes a single PVC by name. A missing PVC (already
+	// deleted) is treated as success (idempotent).
+	DeletePVC(name string) error
 }
 
 func VersionSlug(version string) string {

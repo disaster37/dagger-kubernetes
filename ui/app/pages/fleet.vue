@@ -194,7 +194,7 @@ function storagePercentOf(version: string): string {
 }
 
 function askPurge(version: string): void {
-  confirmMessage.value = `Purge the local BuildKit cache on every ${version} engine pod? Running pipelines are not interrupted.`
+  confirmMessage.value = `Purge the local BuildKit cache on every ${version} engine pod and delete the retained PVCs of scaled-down runners? Running pipelines are not interrupted.`
   confirmAction = () => purge(version)
   confirmOpen.value = true
 }
@@ -222,7 +222,11 @@ async function purge(version: string): Promise<void> {
 
 function purgeSummary(result: EngineCachePurgeResult): string {
   const pruned = result.pods.filter((p) => p.pruned).length
-  return `Pruned ${pruned}/${result.pods.length} pods`
+  const base = `Pruned ${pruned}/${result.pods.length} pods`
+  const pvcs = result.pvcs ?? []
+  if (!pvcs.length) return base
+  const deleted = pvcs.filter((p) => p.deleted).length
+  return `${base}; deleted ${deleted}/${pvcs.length} orphaned PVCs`
 }
 
 function failedPods(result: EngineCachePurgeResult): EnginePodPurgeResult[] {

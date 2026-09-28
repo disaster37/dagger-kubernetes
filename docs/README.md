@@ -668,8 +668,9 @@ upstream registries.
 
 The Runners page shows a per-version **"Purge cache"** button (admin-only). It
 calls `POST /api/v1/fleet/:version/purge-cache` and returns an
-`EngineCachePurgeResult` with a per-pod outcome. `GET` on the same path returns
-the last recorded result.
+`EngineCachePurgeResult` with a per-pod prune outcome (`pods[]`) and a
+per-PVC deletion outcome (`pvcs[]`). `GET` on the same path returns the last
+recorded result.
 
 What it does, per engine version:
 
@@ -677,11 +678,22 @@ What it does, per engine version:
    protocol directly over plaintext TCP (`POST http://<pod-ip>:9999/query` with
    a synthetic `X-Dagger-Client-Metadata` header) and runs the dagql mutation
    `{ engine { localCache { prune(useDefaultPolicy: false) } } }` concurrently on
-   **all** pods of the version's StatefulSet. No `dagger` CLI subprocess, no
-   scale-to-zero, no PVC deletion — the engines stay up and available. The
-   purge is **purely local**: it has no sync/push follow-up, and the result's
+   **all** pods of the version's StatefulSet. No `dagger` CLI subprocess and no
+   scale-to-zero — the engines stay up and available. The purge is
+   **purely local**: it has no sync/push follow-up, and the result's
    `pods[]` entries carry only `pod_name`, `ordinal`, `pruned`, and `error`
    (the former `synced` field was removed with the worker-cache sync).
+
+2. **Delete the PVCs of runners that are not running.** Once every pod has been
+   pruned, the supervisor lists the version's PVCs (label selector
+   `app=dagger-engine,version=<v>`) and deletes every PVC whose ordinal has no
+   non-terminating pod — the PVCs the StatefulSet retains after a scale-down
+   (`WhenScaled: Retain`) and, when the version is scaled to zero, all of them.
+   PVCs of running, starting and pending pods are never touched. A terminating
+   pod's ordinal counts as "not running", so its PVC deletion is requested, but
+   Kubernetes defers the actual volume removal until the pod releases the claim
+   (safe). The outcome is reported in `pvcs[]` (`pvc_name`, `ordinal`,
+   `deleted`, `error`).
 
 Semantics and caveats:
 
@@ -689,19 +701,25 @@ Semantics and caveats:
 - **Allowed with running sessions.** `useDefaultPolicy:false` prunes only
   *releasable* entries, so a live prune does not corrupt in-flight pipelines.
   There is no pinned-session refusal.
-- **Idempotent.** Re-running after a completed/failed purge is safe (pruning an
-  already-pruned cache is a no-op).
+- **Idempotent.** Re-running after a completed/failed purge is safe: pruning an
+  already-pruned cache is a no-op, and deleting an already-deleted PVC reports
+  success (`NotFound` is treated as success).
 - **Per-version serialization.** A concurrent purge of the same version returns
   `409 purge already in progress`; different versions can purge in parallel.
 - **No `cli.enabled` requirement.** The endpoint needs only a Kubernetes
   clientset + fleet provider (always true in the live deployment) and reachable
-  target pods.
-- **Per-pod failure reporting.** A pod that fails to prune keeps its cache; its
-  error is reported in `pods[].error` and summarised in `message`. The
+  target pods. PVC listing/deletion uses `persistentvolumeclaims`
+  `list`/`delete`, already granted by the chart's RBAC.
+- **Failure reporting.** A pod that fails to prune keeps its cache; its error is
+  reported in `pods[].error`. A PVC that fails to delete is reported in
+  `pvcs[].error` (logged at WARN) and the remaining PVCs still proceed. The
   aggregate state is `completed` whenever the orchestration ran over all
-  targeted pods (even with per-pod failures); `failed` is reserved for
-  precondition failures (fleet not found).
-- **Zero replicas** is a no-op (`replicas:0`, `completed`).
+  targeted pods and PVCs (even with per-pod/per-PVC failures); `failed` is
+  reserved for precondition failures (fleet not found, listing pods or PVCs
+  failed).
+- **Zero replicas.** The prune step is a no-op (`replicas:0`), but the deletion
+  step still removes the version's retained PVCs. When there are neither pods
+  nor PVCs, the message stays `no running engine pods; nothing to prune`.
 - **Status is in-memory.** A supervisor restart loses the last result; re-running
   is idempotent.
 

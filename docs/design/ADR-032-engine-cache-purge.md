@@ -6,6 +6,12 @@
 > **Partially superseded (2026-09-15):** the post-prune `push-once` sync step
 > was removed together with the worker-cache sync; the purge is now purely
 > local. The live-dagql-prune decision below still stands.
+>
+> **Extended (2026-09-28):** after the live prune, the purge now also deletes
+> the PVCs of runners that are **not** running (issue #44). See
+> "Orphaned-PVC deletion" below. The operator's rejection of a blanket
+> scale-to-zero purge stands: running pods are never scaled down and their
+> PVCs are never deleted.
 
 ## Context
 
@@ -109,6 +115,48 @@ operation Dagger itself performs under load. The purge is therefore **allowed
 while the version has pinned (running) sessions**; there is no pinned-session
 refusal.
 
+### Orphaned-PVC deletion (2026-09-28 update, issue #44)
+
+After the per-pod prune completes, the supervisor **deletes the PVCs of runners
+that are not running** — the per-pod PVCs the StatefulSet retains after a
+scale-down (`PersistentVolumeClaimRetentionPolicy.WhenScaled: Retain`) and,
+when a version is scaled to zero, all of them.
+
+- **"Not running" definition.** A runner is not running when no
+  non-terminating pod exists for its ordinal (`GetReplicas` excludes pods with
+  a `DeletionTimestamp`). PVCs of ready, pending, CrashLooping and
+  starting pods are therefore never deleted. A terminating pod's ordinal
+  counts as "not running", so its PVC delete is accepted by the API server;
+  Kubernetes only removes the volume once the pod releases the claim (safe).
+- **Ordering.** Prune running pods first (unchanged), then delete orphaned
+  PVCs — matching the issue: "clean on running pods … then delete the PVC of
+  runners that are not running".
+- **Zero replicas.** The early return (`no running engine pods; nothing to
+  prune`) no longer short-circuits the flow: the prune step becomes empty and
+  the deletion step still runs. The legacy message is kept only when the
+  version has neither pods nor PVCs.
+- **New provider methods.** `domain.FleetProvider` gained `ListPVCs(version)`
+  (label selector `app=dagger-engine,version=<v>`, ordinal parsed from the
+  `<vct>-<sts>-<ordinal>` name; unparseable names omitted) and `DeletePVC(name)`
+  (`NotFound` → success, so re-runs are idempotent). The service orchestrates:
+  it builds the running-ordinal set from `GetReplicas` and deletes the rest —
+  same service-orchestrates/repository-executes split as the prune step.
+- **Partial-failure semantics.** PVC listing failure is a precondition failure
+  → `state:"failed"`. A per-PVC delete failure is logged at WARN and recorded
+  in `pvcs[].error`; the other PVCs proceed and the aggregate stays
+  `completed`. A result entry with an unparseable ordinal is skipped with a
+  WARN log.
+- **Concurrency.** PVC deletions are sequential (few PVCs per version, bounded
+  by `max_replicas_per_version`); the bounded prune concurrency (`8`) is
+  unchanged.
+- **No new config keys, no RBAC change.** The purge stays always-on for
+  admins, and the chart already grants `persistentvolumeclaims`
+  `list,delete`.
+
+The rejected **scale-to-zero + delete every PVC** alternative remains
+rejected: a purge still never scales a fleet down, and PVCs of live runners
+are protected — only orphans are reclaimed.
+
 ### API surface
 
 | Item | Value |
@@ -121,7 +169,8 @@ refusal.
 
 `EngineCachePurgeResult` carries `version`, `state`
 (`running`/`completed`/`failed`), `started_at`, `finished_at`, `replicas`,
-`pods[]` (`pod_name`, `ordinal`, `pruned`, `error`), and `message`.
+`pods[]` (`pod_name`, `ordinal`, `pruned`, `error`), `pvcs[]` (`pvc_name`,
+`ordinal`, `deleted`, `error` — added 2026-09-28), and `message`.
 `freed_bytes` is intentionally omitted: the dagql `prune` mutation reports no
 byte count.
 
@@ -141,8 +190,10 @@ restart loses it; re-running is idempotent). Per-pod prune jobs are bounded by
 - **StatefulSet missing** → `AllVersions()` does not contain the version →
   `ErrEngineFleetNotFound` → 404 (`GetReplicas` alone cannot distinguish
   "missing" from "present but 0 replicas").
-- **Zero replicas** → no-op: `replicas=0`, `state:"completed"`, message
-  "no running engine pods; nothing to prune".
+- **Zero replicas** → the prune step is a no-op (`replicas=0`,
+  `state:"completed"`); the PVC step still deletes the version's retained
+  PVCs. With neither pods nor PVCs the message stays "no running engine pods;
+  nothing to prune".
 - **Pod unreachable / NotReady / IP changed** → per-pod error, `pruned:false`;
   other pods proceed; aggregate is `completed` with per-pod detail.
 - **Version mismatch** → the engine returns 500 "incompatible client version …";

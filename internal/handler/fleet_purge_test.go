@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/cloudwego/hertz/pkg/common/ut"
@@ -81,6 +82,9 @@ func TestFleetPurgeSuccess(t *testing.T) {
 			{PodName: "p0", Ordinal: 0, Pruned: true},
 			{PodName: "p1", Ordinal: 1, Pruned: true},
 		},
+		PVCs: []domain.EnginePVCDeleteResult{
+			{PVCName: "dagger-kubernetes-dagger-engine-v0-19-0-2", Ordinal: 2, Deleted: true},
+		},
 	}
 	env, e := newPurgeTestEnv(t, &stubEngineCachePurger{result: want})
 	auth := env.loginAsAdmin(t)
@@ -90,12 +94,18 @@ func TestFleetPurgeSuccess(t *testing.T) {
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.Result().StatusCode())
 	}
+	if !strings.Contains(string(resp.Result().Body()), `"pvcs"`) {
+		t.Fatalf("body = %s, want the pvcs field", resp.Result().Body())
+	}
 	var got domain.EngineCachePurgeResult
 	if err := json.Unmarshal(resp.Result().Body(), &got); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
 	if got.State != "completed" || len(got.Pods) != 2 {
 		t.Fatalf("got = %+v, want completed/2 pods", got)
+	}
+	if len(got.PVCs) != 1 || got.PVCs[0].Ordinal != 2 || !got.PVCs[0].Deleted {
+		t.Fatalf("pvcs = %+v, want ordinal 2 deleted", got.PVCs)
 	}
 }
 
