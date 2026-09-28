@@ -652,7 +652,10 @@ Configure it under `supervisor.config.history`:
 The OTel collector config is rendered by this chart into the
 `<release>-otel-collector-config` ConfigMap (`templates/otel-collector-configmap.yaml`)
 and mounted at `/conf/relay.yaml` (the collector's built-in ConfigMap is
-disabled). Because it renders in the parent scope, the tempo/loki/victoria
+disabled). The parent's `extraVolumes` projects the ConfigMap `relay` key to
+`relay.yaml` via an `items:` mapping (mirroring the collector subchart's own
+volume), so the mount matches `--config=/conf/relay.yaml`. Because it renders
+in the parent scope, the tempo/loki/victoria
 exporter endpoints follow each subchart's own fullname rules automatically — a
 subchart `fullnameOverride`/`nameOverride` is honored without extra config.
 The overrides below exist only for backends the subcharts do not own (renamed
