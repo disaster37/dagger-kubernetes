@@ -259,10 +259,13 @@ custom host cannot silently shadow a preset. */}}
 {{- end -}}
 
 {{/* List the generated mirror addresses (host[:port]) for every enabled
-upstream. Empty list when imageCache is disabled. */}}
+upstream. Empty list when imageCache is disabled — and when the mirrors serve
+HTTPS (imageCache.tls.enabled): these hosts feed engine_registry_mirrors_http,
+which makes BuildKit dial plaintext HTTP. A TLS mirror must NOT be listed there
+or every pipeline pull would fail against the HTTPS listener. */}}
 {{- define "dagger-kubernetes.imageCacheMirrorHosts" -}}
 {{- $hosts := list -}}
-{{- if .Values.imageCache.enabled -}}
+{{- if and .Values.imageCache.enabled (not .Values.imageCache.tls.enabled) -}}
 {{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) -}}
 {{- $hosts = append $hosts (include "dagger-kubernetes.imageCacheMirrorAddress" (dict "root" $ "slug" .slug)) -}}
 {{- end -}}

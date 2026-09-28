@@ -585,6 +585,84 @@ func TestK8sGetEngineImage(t *testing.T) {
 	}
 }
 
+func TestK8sGetEngineImageViaMirror(t *testing.T) {
+	tests := []struct {
+		name   string
+		mirror domain.ImageCacheMirror
+		want   string
+	}{
+		{
+			name: "TLS mirror rewrites the engine image",
+			mirror: domain.ImageCacheMirror{
+				Host:         "registry.dagger.io",
+				InternalAddr: "rel-registry-dagger-io-mirror.dagger.svc:5000",
+				TLS:          true,
+			},
+			want: "rel-registry-dagger-io-mirror.dagger.svc:5000/engine:v0.21.4",
+		},
+		{
+			name: "plaintext mirror leaves the engine image unchanged",
+			mirror: domain.ImageCacheMirror{
+				Host:         "registry.dagger.io",
+				InternalAddr: "rel-registry-dagger-io-mirror.dagger.svc:5000",
+				TLS:          false,
+			},
+			want: "registry.dagger.io/engine:v0.21.4",
+		},
+		{
+			name: "TLS mirror for another host leaves the engine image unchanged",
+			mirror: domain.ImageCacheMirror{
+				Host:         "ghcr.io",
+				InternalAddr: "rel-ghcr-io-mirror.dagger.svc:5000",
+				TLS:          true,
+			},
+			want: "registry.dagger.io/engine:v0.21.4",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, _ := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+				cfg.ImageCacheMirrors = []domain.ImageCacheMirror{tt.mirror}
+			})
+			if got := p.GetEngineImage("v0.21.4"); got != tt.want {
+				t.Errorf("GetEngineImage = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestK8sStatefulSetImageViaMirror proves the resolved (possibly rewritten)
+// engine image reaches the deployed StatefulSet's container spec: the mirror
+// rewrite in GetEngineImage is what EnsureStatefulSet stores verbatim.
+func TestK8sStatefulSetImageViaMirror(t *testing.T) {
+	const want = "rel-registry-dagger-io-mirror.dagger.svc:5000/engine:v0.20.0"
+
+	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+		cfg.ImageCacheMirrors = []domain.ImageCacheMirror{{
+			Host:         "registry.dagger.io",
+			InternalAddr: "rel-registry-dagger-io-mirror.dagger.svc:5000",
+			TLS:          true,
+		}}
+	})
+
+	image := p.GetEngineImage(testEngineVersion)
+	if image != want {
+		t.Fatalf("GetEngineImage = %q, want %q", image, want)
+	}
+	if err := p.EnsureStatefulSet(testEngineVersion, image); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+
+	sts, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), domain.StsName(testEngineVersion), metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get statefulset: %v", err)
+	}
+	if got := sts.Spec.Template.Spec.Containers[0].Image; got != want {
+		t.Errorf("container image = %q, want %q", got, want)
+	}
+}
+
 func TestK8sAllVersions(t *testing.T) {
 	p, cs := defaultK8sProvider()
 

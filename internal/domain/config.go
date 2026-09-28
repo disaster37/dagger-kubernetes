@@ -291,9 +291,11 @@ type S3Config struct {
 // ImageCacheConfig describes the local image mirrors the supervisor manages
 // over their OCI Distribution v2 API. It is admin-visible/read-only and
 // rendered by the Helm chart from what the chart deploys; the supervisor never
-// sees the mirror's own S3 credentials.
+// sees the mirror's own S3 credentials. TLSCAPath is an optional PEM CA bundle
+// the supervisor uses to verify HTTPS mirrors (empty = system trust pool).
 type ImageCacheConfig struct {
-	Mirrors []ImageCacheMirror `mapstructure:"mirrors"`
+	Mirrors   []ImageCacheMirror `mapstructure:"mirrors"`
+	TLSCAPath string             `mapstructure:"tls_ca_path"`
 }
 
 // ImageCacheMirror is one local Zot mirror endpoint.
@@ -303,6 +305,7 @@ type ImageCacheMirror struct {
 	Upstream     string `mapstructure:"upstream"`      // upstream base URL
 	InternalAddr string `mapstructure:"internal_addr"` // "<release>-<slug>-mirror.<ns>.svc:5000"
 	Backend      string `mapstructure:"backend"`       // "s3" | "pvc" (informational)
+	TLS          bool   `mapstructure:"tls"`           // true = mirror is served over HTTPS (imageCache.tls.enabled)
 }
 
 // HistoryConfig governs pipeline-history retention (trace_meta + logs +

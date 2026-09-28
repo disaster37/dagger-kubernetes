@@ -73,6 +73,7 @@ type K8sProviderConfig struct {
 	LogFormat           string                         // engine.toml: [log] format; "" omits the section
 	RegistryMirrors     map[string][]string            // engine.toml: [registry."<host>"] mirrors
 	MirrorHTTP          []string                       // engine.toml: [registry."<mirror>"] http = true
+	ImageCacheMirrors   []domain.ImageCacheMirror      // engine-image routing through TLS image-cache mirrors
 }
 
 type K8sProvider struct {
@@ -683,7 +684,8 @@ func (p *K8sProvider) WaitForReady(version, podName string) error {
 }
 
 func (p *K8sProvider) GetEngineImage(version string) string {
-	return fmt.Sprintf("%s:%s", p.cfg.ImageRegistry, version)
+	registry := domain.EngineImageRegistryViaMirror(p.cfg.ImageRegistry, p.cfg.ImageCacheMirrors)
+	return fmt.Sprintf("%s:%s", registry, version)
 }
 
 func (p *K8sProvider) AllVersions() ([]string, error) {

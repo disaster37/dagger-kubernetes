@@ -1886,11 +1886,15 @@ func TestLoadImageCacheMirrors(t *testing.T) {
 	if len(cfg.ImageCache.Mirrors) != 0 {
 		t.Fatalf("image_cache.mirrors default = %v, want empty", cfg.ImageCache.Mirrors)
 	}
+	if cfg.ImageCache.TLSCAPath != "" {
+		t.Fatalf("image_cache.tls_ca_path default = %q, want empty", cfg.ImageCache.TLSCAPath)
+	}
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.app.yaml")
 	content := []byte(`
 image_cache:
+  tls_ca_path: "/etc/dagger-kubernetes/image-cache-ca/ca.crt"
   mirrors:
     - id: "docker-io"
       host: "docker.io"
@@ -1902,6 +1906,7 @@ image_cache:
       upstream: "https://ghcr.io"
       internal_addr: "rel-ghcr-io-mirror.dagger.svc:5000"
       backend: "pvc"
+      tls: true
 `)
 	if err := os.WriteFile(path, content, 0o600); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -1918,8 +1923,17 @@ image_cache:
 		m.InternalAddr != "rel-docker-io-mirror.dagger.svc:5000" || m.Backend != "s3" {
 		t.Fatalf("mirror[0] = %+v", m)
 	}
+	if m.TLS {
+		t.Fatalf("mirror[0].tls = true, want false (unset)")
+	}
+	if cfg.ImageCache.TLSCAPath != "/etc/dagger-kubernetes/image-cache-ca/ca.crt" {
+		t.Fatalf("image_cache.tls_ca_path = %q", cfg.ImageCache.TLSCAPath)
+	}
 	if cfg.ImageCache.Mirrors[1].Backend != "pvc" {
 		t.Fatalf("mirror[1].backend = %q, want pvc", cfg.ImageCache.Mirrors[1].Backend)
+	}
+	if !cfg.ImageCache.Mirrors[1].TLS {
+		t.Fatalf("mirror[1].tls = false, want true")
 	}
 }
 

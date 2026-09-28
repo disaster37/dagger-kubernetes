@@ -226,6 +226,20 @@ func invoke(ctx context.Context, parentJSON []byte, parentName string, fnName st
 				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
 			}
 			return nil, (*DaggerKubernetes).Helm(&parent, ctx)
+		case "JenkinsLibs":
+			var parent DaggerKubernetes
+			err = json.Unmarshal(parentJSON, &parent)
+			if err != nil {
+				panic(fmt.Errorf("%s: %w", "failed to unmarshal parent object", err))
+			}
+			var version string
+			if inputArgs["version"] != nil {
+				err = json.Unmarshal([]byte(inputArgs["version"]), &version)
+				if err != nil {
+					panic(fmt.Errorf("%s: %w", "failed to unmarshal input arg version", err))
+				}
+			}
+			return (*DaggerKubernetes).JenkinsLibs(&parent, ctx, version)
 		case "Lint":
 			var parent DaggerKubernetes
 			err = json.Unmarshal(parentJSON, &parent)

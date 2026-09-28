@@ -119,6 +119,11 @@ data:
         secret_key: ""
 {{- if .Values.imageCache.enabled }}
     image_cache:
+      # tls: marks an HTTPS mirror; when its host matches
+      # fleet.engine_image_registry the fleet engine image is routed through it
+      # (ADR-043). tls_ca_path: CA bundle for verifying HTTPS mirrors, mounted
+      # by the supervisor StatefulSet from imageCache.tls.caSecretName.
+      tls_ca_path: {{ if and .Values.imageCache.tls.enabled .Values.imageCache.tls.caSecretName }}{{ printf "/etc/dagger-kubernetes/image-cache-ca/%s" .Values.imageCache.tls.caSecretKey | quote }}{{ else }}""{{ end }}
       mirrors:
       {{- range (fromYamlArray (include "dagger-kubernetes.imageCacheRegistries" .)) }}
       {{- $addr := include "dagger-kubernetes.imageCacheMirrorAddress" (dict "root" $ "slug" .slug) }}
@@ -127,6 +132,7 @@ data:
           upstream: {{ .remoteUrl | quote }}
           internal_addr: {{ $addr | quote }}
           backend: {{ $.Values.imageCache.storage.backend | default "s3" | quote }}
+          tls: {{ $.Values.imageCache.tls.enabled }}
       {{- end }}
 {{- end }}
 {{- with .Values.supervisor.config.history }}

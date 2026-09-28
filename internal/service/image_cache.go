@@ -36,18 +36,18 @@ const (
 type ImageCacheService struct {
 	mirrors   []domain.ImageCacheMirror
 	byID      map[string]domain.ImageCacheMirror
-	newClient func(addr string) domain.DistributionClient
+	newClient func(m domain.ImageCacheMirror) domain.DistributionClient
 	logger    *logrus.Logger
 }
 
 var _ domain.ImageCacheService = (*ImageCacheService)(nil)
 
 // NewImageCacheService builds the image-cache service. newClient is wired to
-// repository.NewDistributionClient in main; mirrors come from
-// image_cache.mirrors (chart-rendered).
+// repository.NewDistributionClientForMirror in main (it sees the whole mirror,
+// including TLS); mirrors come from image_cache.mirrors (chart-rendered).
 func NewImageCacheService(
 	mirrors []domain.ImageCacheMirror,
-	newClient func(addr string) domain.DistributionClient,
+	newClient func(m domain.ImageCacheMirror) domain.DistributionClient,
 	logger *logrus.Logger,
 ) *ImageCacheService {
 	byID := make(map[string]domain.ImageCacheMirror, len(mirrors))
@@ -363,7 +363,7 @@ func (s *ImageCacheService) dialMirror(ctx context.Context, m *domain.ImageCache
 	if s.newClient == nil {
 		return nil, opCtx, cancel, errors.New("image cache client not configured")
 	}
-	c := s.newClient(m.InternalAddr)
+	c := s.newClient(*m)
 	if err := c.Ping(opCtx); err != nil {
 		return nil, opCtx, cancel, err
 	}

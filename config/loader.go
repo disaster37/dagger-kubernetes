@@ -150,6 +150,7 @@ func Load(configFile string) (*domain.Config, error) {
 	// Distribution v2 API. Admin-visible/read-only; the Helm chart renders the
 	// block from what it deploys.
 	v.SetDefault("image_cache.mirrors", []domain.ImageCacheMirror{})
+	v.SetDefault("image_cache.tls_ca_path", "")
 
 	v.SetDefault("history.gc.enabled", false)
 	v.SetDefault("history.gc.max_age", "720h") // 30d

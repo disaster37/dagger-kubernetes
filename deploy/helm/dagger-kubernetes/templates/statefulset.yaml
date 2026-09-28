@@ -167,6 +167,11 @@ spec:
               mountPath: /usr/local/share/ca-certificates
               readOnly: true
             {{- end }}
+            {{- if and .Values.imageCache.tls.enabled .Values.imageCache.tls.caSecretName }}
+            - name: image-cache-ca
+              mountPath: /etc/dagger-kubernetes/image-cache-ca
+              readOnly: true
+            {{- end }}
           startupProbe:
             httpGet:
               path: /startup
@@ -218,6 +223,11 @@ spec:
         - name: ca-bundle
           secret:
             secretName: {{ .Values.supervisor.config.fleet.engineCaSecret }}
+        {{- end }}
+        {{- if and .Values.imageCache.tls.enabled .Values.imageCache.tls.caSecretName }}
+        - name: image-cache-ca
+          secret:
+            secretName: {{ .Values.imageCache.tls.caSecretName }}
         {{- end }}
         {{- if not .Values.supervisor.persistence.enabled }}
         - name: db

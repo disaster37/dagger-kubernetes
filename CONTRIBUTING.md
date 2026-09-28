@@ -223,7 +223,7 @@ source of breakage. The three recurring failures are:
    pin deliberately and re-run the full `ci` afterwards.
 
 ```bash
-# Full CI pipeline (lint + test + ui + build + docker + helm) — what the workflow runs
+# Full CI pipeline (lint + test + ui + build + docker + helm + jenkins-libs) — what the workflow runs
 dagger call -m ./dagger --src . ci export --path out
 
 # Individual functions (useful while iterating)
@@ -233,7 +233,19 @@ dagger call -m ./dagger --src . ui export --path ui-dist
 dagger call -m ./dagger --src . build export --path .
 dagger call -m ./dagger --src . docker
 dagger call -m ./dagger --src . helm
+dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 export --path jenkins-libs-v0.1.0.tar.gz
 ```
+
+### Jenkins shared library (git submodule)
+
+The Jenkins integration is a git submodule at `ci-integrations/jenkins`
+(dedicated repo `disaster37/dagger-kubernetes-jenkins`). Clone with
+`git clone --recurse-submodules …` or run `git submodule update --init` after a
+plain clone — the Dagger `ci` gate packages that directory and fails with
+`ci-integrations/jenkins is empty … (is the submodule initialized? …)` if it is
+not materialized. Groovy changes follow a **2-PR workflow**: PR + merge in the
+dedicated repo, then bump the pin here
+(`git submodule update --remote ci-integrations/jenkins` + commit) in a second PR.
 
 ## Project structure
 ```

@@ -440,6 +440,8 @@ inline comments. The sections below summarise the most important ones.
 |                 | `s3.endpoint`                             | `""` (chart: MinIO Service)                              | S3-compatible endpoint (`host[:port]`) for the shared S3 client (CLI cache). Empty = the supervisor logs a WARN and disables the S3-backed CLI cache. |
 |                 | `s3.use_ssl`                              | `true`                                                   | Use HTTPS for the S3 endpoint.                                                                                                                |
 |                 | `s3.access_key` / `s3.secret_key`         | `""`                                                     | S3 credentials (env/Secret only; empty falls back to the AWS env chain).                                                                      |
+| `image_cache`   | `mirrors`                                 | `[]` (chart: generated mirrors)                          | Read-only mirror endpoints `{id, host, upstream, internal_addr, backend, tls}` rendered from the deployed Zot mirrors. `tls: true` marks an HTTPS mirror and enables engine-image routing through it (see "Local image cache"). |
+|                 | `tls_ca_path`                             | `""`                                                     | PEM CA bundle used to verify HTTPS mirrors (`tls: true`); empty = system trust pool. Chart: mounted from `imageCache.tls.caSecretName` at `/etc/dagger-kubernetes/image-cache-ca/<key>`; a load failure fails startup. |
 | `history`       | `gc.enabled`                              | `false`                                                  | Master switch for the history auto-purge sweeper.                                                                                             |
 |                 | `gc.max_age`                              | `720h`                                                   | Purge traces whose last update is older than this (30d).                                                                                      |
 |                 | `gc.schedule`                             | `1h`                                                     | History sweeper ticker interval.                                                                                                              |
@@ -461,7 +463,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_debug`                            | `false`                                                  | `engine.toml: debug = true`.                                                                                                                  |
 |                 | `engine_log_format`                       | `json`                                                   | `engine.toml: [log] format`; `""` omits.                                                                                                      |
 |                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
-|                 | `engine_registry_mirrors_http`            | `[]` (chart: generated mirror hosts)                     | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors). |
+|                 | `engine_registry_mirrors_http`            | `[]` (chart: generated plaintext mirror hosts)           | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors and omits TLS mirrors, which BuildKit dials over HTTPS). |
 | `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
 | `supervisor.dataplane.tls` | `provider`                        | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Chart auto-switches when `dataCert.enabled` or `dataIngress.tls.secretName` is set. Minting CA is auto-bootstrapped for all. |
@@ -788,10 +790,45 @@ emptyDir and the `pvc` backend's PVC — so it is writable in both cases. Zot
 requires this key with S3 storage; omitting it makes the mirror pod fail at
 startup.
 
-The mirrors are unauthenticated plaintext HTTP inside the cluster, so engines
-need no credential for them. `engine-image-auth` (`.dockerconfigjson`) is still
-used by the kubelet for the engine image itself and for registries that are not
-mirrored.
+The mirrors are unauthenticated plaintext HTTP inside the cluster by default,
+so engines need no credential for them. `engine-image-auth` (`.dockerconfigjson`)
+is still used by the kubelet for the engine image itself and for registries that
+are not mirrored.
+
+### TLS mirrors and the engine image (ADR-043)
+
+`imageCache.tls.enabled: true` (requires `imageCache.tls.secretName`, a Secret
+with `tls.crt` + `tls.key` valid for every mirror hostname — a wildcard
+`*.<namespace>.svc` cert covers all mirrors) makes every Zot mirror serve
+HTTPS: the chart mounts the cert/key at `/etc/zot/tls`, renders
+`http.tls` into each `config.json`, and switches the mirror probes to
+`scheme: HTTPS`. The mirror CA itself goes in `imageCache.tls.caSecretName`
+(key `imageCache.tls.caSecretKey`, default `ca.crt`); the chart mounts it into
+the supervisor at `/etc/dagger-kubernetes/image-cache-ca/` and points
+`image_cache.tls_ca_path` at it, so the supervisor's admin image-cache client
+verifies HTTPS mirrors (a load failure fails startup).
+
+With TLS enabled the chart:
+
+- renders `image_cache.mirrors[].tls: true`, and
+- **omits** the mirror hosts from `fleet.engine_registry_mirrors_http`, so
+  `engine.toml` no longer emits `http = true` and BuildKit dials the mirrors
+  over HTTPS instead of plaintext.
+
+**Engine-image routing:** when a TLS mirror's `host` matches the host of
+`fleet.engine_image_registry` (the `registry.dagger.io` preset produces
+exactly that), the supervisor automatically rewrites the engine image so the
+fleet runner StatefulSet pulls `registry.dagger.io/engine:<version>` through
+`<release>-registry-dagger-io-mirror.<namespace>.svc:5000/engine:<version>` —
+no extra supervisor flag. The rewrite is gated on `tls: true`: a plaintext
+mirror never triggers it, because the kubelet cannot pull from it without
+node-level insecure-registry configuration. See
+[ADR-043](design/ADR-043-engine-image-via-cache.md).
+
+Operator prerequisite (not automated by the chart): nodes must trust the
+mirror CA for the kubelet's pull (containerd/CRI-O `certs.d`/`hosts.toml`).
+A mirror that is down at pull time produces `ImagePullBackOff` for the engine
+pod; the supervisor does not orchestrate pulls.
 
 ### Managing the image cache (admin)
 
@@ -837,9 +874,13 @@ sections:
 
 `engine.toml` mirrors cover the images pipelines pull (`container from`,
 `with-exec`, …). The **engine image** is pulled by the kubelet before the pod
-starts and is *not* routed through the mirror — that remains
-`fleet.engine_image_registry` + `engine-image-auth`. If a mirror is down the
-engine fails that pull; BuildKit does not silently fall back to the upstream
+starts; it is routed through the mirror only when a TLS image-cache mirror's
+host matches `fleet.engine_image_registry` — with the `registry.dagger.io`
+preset enabled and `imageCache.tls.enabled`, the StatefulSet image is rewritten
+to the mirror address automatically (see "TLS mirrors and the engine image"
+above and [ADR-043](design/ADR-043-engine-image-via-cache.md)). Otherwise it
+remains `fleet.engine_image_registry` + `engine-image-auth`. If a mirror is down
+the engine fails that pull; BuildKit does not silently fall back to the upstream
 for a configured mirror. Disabling `imageCache` removes the mirror workloads
 and restores the raw upstream configuration.
 
@@ -2027,8 +2068,54 @@ engine's retained per-pod PVC and needs no client-side configuration.
 
 ### Jenkins
 
-Shared library at `ci-integrations/jenkins/vars/daggerKubernetes.groovy`.
-Configure the library with `libraryPath: "ci-integrations/jenkins"`:
+Shared library source of truth is the dedicated repository
+[`disaster37/dagger-kubernetes-jenkins`](https://github.com/disaster37/dagger-kubernetes-jenkins),
+tracked in this repo as a git submodule at `ci-integrations/jenkins` (the
+submodule root *is* the library root). Each GitHub release also publishes a
+small, versioned **`jenkins-libs-<version>.tar.gz`** asset, built by
+the Dagger module's `jenkins-libs` function from that directory (deterministic
+byte-for-byte build — see [ADR-044](design/ADR-044-jenkins-library-release-artifact.md)).
+The archive is rooted at the library root and contains the library files
+(`./vars/daggerKubernetes.groovy` today, plus `src/` and `resources/` if they
+are ever added) together with the repository `README.md` and `LICENSE`:
+
+```bash
+# local build (ad hoc)
+dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 \
+  export --path jenkins-libs-v0.1.0.tar.gz
+
+# download a published release asset
+curl -fsSL -O https://github.com/disaster37/dagger-kubernetes/releases/download/v0.1.0/jenkins-libs-v0.1.0.tar.gz
+```
+
+> Cloning this repository for development requires initializing the submodule:
+> `git clone --recurse-submodules …` or, after a plain clone,
+> `git submodule update --init`.
+
+> **Limitation — Jenkins global libraries are SCM-only.** Jenkins has no
+> native HTTP/tar.gz/URL retriever for a global shared library, and JCasC's
+> `globalLibraries[].retriever` models only SCM blocks (`modernSCM` /
+> `legacySCM`). The tar.gz therefore **cannot** be wired directly into JCasC as
+> a library retriever. Consume it through one of the two paths below
+> ([ADR-044](design/ADR-044-jenkins-library-release-artifact.md)):
+
+1. **Primary — dedicated repository (JCasC-native).** The library lives in
+   [`disaster37/dagger-kubernetes-jenkins`](https://github.com/disaster37/dagger-kubernetes-jenkins),
+   tracked here as a submodule at `ci-integrations/jenkins` (the repo root is
+   the library root, so no `libraryPath` is needed). Point the `modernSCM` git
+   retriever at it (snippet below). Cloning drops from the whole repository to
+   a single Groovy file.
+2. **Fallback — filesystem extraction.** On the Jenkins controller, download
+   and extract `jenkins-libs-<version>.tar.gz` into a library directory on
+   disk (e.g. an init/entrypoint step) and register that directory as the
+   library location, instead of using a git retriever:
+
+   ```bash
+   mkdir -p /var/jenkins_shared_libs/dagger-kubernetes
+   tar xzf jenkins-libs-<version>.tar.gz -C /var/jenkins_shared_libs/dagger-kubernetes
+   ```
+
+With the library registered (either path), a pipeline uses it as before:
 
 ```groovy
 @Library('dagger-kubernetes') _
@@ -2150,8 +2237,10 @@ directly, so bake it into the image only if your pipelines call
 `dagger-kubernetes-ci` themselves (or set `env.DAGGER_KUBERNETES_CI_BIN` to its
 path).
 
-**2. Shared library (JCasC).** Register the global pipeline library with
-`libraryPath` pointing at `ci-integrations/jenkins`:
+**2. Shared library (JCasC).** Register the global pipeline library. Jenkins
+global libraries are SCM-only (no native tar.gz retriever), so point the
+`modernSCM` git retriever at the dedicated repository (the archive root *is* the
+library root, so no `libraryPath` is needed):
 
 ```yaml
 jenkins:
@@ -2166,10 +2255,9 @@ jenkins:
                   defaultVersion: "main"
                   retriever:
                     modernSCM:
-                      libraryPath: "ci-integrations/jenkins"
                       scm:
                         git:
-                          remote: "https://github.com/disaster/dagger-kubernetes.git"
+                          remote: "https://github.com/disaster37/dagger-kubernetes-jenkins.git"
         kubernetes-cloud: |
           jenkins:
             clouds:

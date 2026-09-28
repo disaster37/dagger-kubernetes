@@ -89,8 +89,8 @@ func digest(ch byte) string {
 
 // newFakeImageCacheService wires the service to a static mirror→client map.
 func newFakeImageCacheService(mirrors []domain.ImageCacheMirror, clients map[string]*fakeImageCacheClient) *ImageCacheService {
-	return NewImageCacheService(mirrors, func(addr string) domain.DistributionClient {
-		return clients[addr]
+	return NewImageCacheService(mirrors, func(m domain.ImageCacheMirror) domain.DistributionClient {
+		return clients[m.InternalAddr]
 	}, testLogger())
 }
 
