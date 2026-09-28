@@ -98,10 +98,12 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("load config: %w", err)
 	}
 
-	// Only trust config values when the config file was actually present;
-	// config.LoadForCIWrapper otherwise returns compiled-in defaults (e.g.
-	// the example public_url) that must not silently become the wrapper's
-	// target.
+	// Only trust config values when an actual regular config file was
+	// present; config.LoadForCIWrapper otherwise returns compiled-in
+	// defaults (e.g. the example public_url) that must not silently become
+	// the wrapper's target. Non-regular paths — /dev/null (the Jenkins
+	// shared library's --config value), directories, device nodes — count
+	// as "no config file" (see fileExists).
 	hasConfigFile := fileExists(c.String("config"))
 	var configPublicURL string
 	if hasConfigFile {
@@ -448,11 +450,15 @@ func resolveUIBase(uiURLFlag, serverURLFlag, configPublicURL string) string {
 	return serverURLFlag
 }
 
-// fileExists reports whether path exists (used to distinguish a real config
-// file from config.LoadForCIWrapper's compiled-in defaults).
+// fileExists reports whether path is an existing regular file (used to
+// distinguish a real config file from config.LoadForCIWrapper's compiled-in
+// defaults). Non-regular paths — /dev/null (the Jenkins shared library's
+// --config value; os.Stat succeeds on the char device), directories and other
+// device nodes — are treated as "no config file" so compiled-in defaults are
+// never trusted as the wrapper's target.
 func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular()
 }
 
 // resolveSteps resolves the nested-step streaming settings: --steps is a plain

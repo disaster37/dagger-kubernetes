@@ -1149,3 +1149,55 @@ func TestRunFailsFastOnInvalidCIConfig(t *testing.T) {
 		}
 	}
 }
+
+// TestRunDevNullWithTokenFailsWithoutServer proves the exact hazard the code
+// review flagged: with the Jenkins shared library's invocation shape
+// (--config /dev/null, no --server) and a NON-EMPTY DAGGER_KUBERNETES_TOKEN,
+// the wrapper must fail with "--server and --token required" instead of
+// silently falling back to the compiled-in default server.public_url
+// (https://supv.example.com) and targeting the wrong server.
+func TestRunDevNullWithTokenFailsWithoutServer(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_TOKEN", "env-token")
+
+	err := newCIApp().Run([]string{"dagger-kubernetes-ci", "--config", "/dev/null"})
+	if err == nil {
+		t.Fatal("app.Run = nil, want --server/--token error")
+	}
+	if !strings.Contains(err.Error(), "--server and --token required") {
+		t.Fatalf("app.Run error = %q, want --server and --token required", err.Error())
+	}
+	for _, banned := range []string{"validate cli config", "validate server config"} {
+		if strings.Contains(err.Error(), banned) {
+			t.Fatalf("app.Run error = %q, must not contain %q", err.Error(), banned)
+		}
+	}
+}
+
+// TestFileExistsRegularOnly proves fileExists reports true only for regular
+// files: /dev/null (a char device) and directories count as "no config file"
+// so compiled-in defaults are never trusted as the wrapper's target.
+func TestFileExistsRegularOnly(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "config.app.yaml")
+	if err := os.WriteFile(regular, []byte("server: {}\n"), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		path string
+		want bool
+	}{
+		{name: "regular file", path: regular, want: true},
+		{name: "dev null char device", path: "/dev/null", want: false},
+		{name: "directory", path: dir, want: false},
+		{name: "missing path", path: filepath.Join(dir, "missing.yaml"), want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := fileExists(tt.path); got != tt.want {
+				t.Fatalf("fileExists(%q) = %v, want %v", tt.path, got, tt.want)
+			}
+		})
+	}
+}
