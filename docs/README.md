@@ -46,6 +46,7 @@ cache-config env var, so none is emitted.
   - [GitHub Actions](#github-actions)
   - [Jenkins](#jenkins)
     - [Jenkins on Kubernetes (official Helm chart)](#jenkins-on-kubernetes-official-helm-chart)
+    - [Troubleshooting library loading](#troubleshooting-library-loading)
   - [Drone](#drone)
   - [CLI provisioning](#cli-provisioning)
 - [Client wrapper script](#client-wrapper-script)
@@ -2334,6 +2335,47 @@ The supervisor schedules the Dagger engine pods itself (per version
 StatefulSets in its own namespace); the agent pods only need egress to the
 `-control` Service over HTTP and to the `-data` Service over mTLS (both
 cluster-internal).
+
+#### Troubleshooting library loading
+
+```
+ERROR: Rejecting library: expected directory: ci-integrations/jenkins
+```
+
+Jenkins resolves and clones the dedicated repository successfully, then
+rejects it at library-loading time because the registration still follows
+the pre-ADR-044 convention: either a `libraryPath: "ci-integrations/jenkins"`
+on the `modernSCM` retriever, or a `:ci-integrations/jenkins/` suffix in the
+`@Library` annotation. Since
+[ADR-044](design/ADR-044-jenkins-library-release-artifact.md) the library
+lives in the dedicated repository
+[`disaster37/dagger-kubernetes-jenkins`](https://github.com/disaster37/dagger-kubernetes-jenkins),
+whose repository root *is* the library root (`vars/` at the top level), so
+there is no `ci-integrations/jenkins` directory inside it to point at.
+
+Delete the `libraryPath` line from the JCasC registration:
+
+```yaml
+unclassified:
+  globalLibraries:
+    libraries:
+      - name: "dagger-kubernetes"
+        defaultVersion: "0.0.1"
+        retriever:
+          modernSCM:
+            scm:
+              git:
+                remote: "https://github.com/disaster37/dagger-kubernetes-jenkins.git"
+```
+
+Drop the same suffix from the pipeline annotation — the
+`:ci-integrations/jenkins/` part must go:
+
+```groovy
+// before: @Library('dagger-kubernetes@0.0.1:ci-integrations/jenkins/') _
+// the ':ci-integrations/jenkins/' suffix must be dropped
+@Library('dagger-kubernetes@0.0.1') _
+```
 
 ### Drone
 
