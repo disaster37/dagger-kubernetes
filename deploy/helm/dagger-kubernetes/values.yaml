@@ -844,6 +844,9 @@ opentelemetry-collector:
     - name: otel-collector-config
       configMap:
         name: "{{ printf \"%s-otel-collector-config\" .Release.Name }}"
+        items:
+          - key: relay
+            path: relay.yaml
   extraVolumeMounts:
     - name: otel-collector-config
       mountPath: /conf
