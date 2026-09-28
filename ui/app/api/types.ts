@@ -203,6 +203,13 @@ export interface EnginePodPurgeResult {
   error?: string
 }
 
+export interface EnginePVCDeleteResult {
+  pvc_name: string
+  ordinal: number
+  deleted: boolean
+  error?: string
+}
+
 export interface EngineCachePurgeResult {
   version: string
   state: 'running' | 'completed' | 'failed'
@@ -210,6 +217,7 @@ export interface EngineCachePurgeResult {
   finished_at?: string
   replicas: number
   pods: EnginePodPurgeResult[]
+  pvcs?: EnginePVCDeleteResult[]
   message?: string
 }
 

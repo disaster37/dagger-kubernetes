@@ -327,9 +327,12 @@ func (s *stubSessionStore) List() []*domain.Lease {
 
 // stubFleetProvider is an in-memory FleetProvider for status/fleet tests.
 type stubFleetProvider struct {
-	versions []string
-	replicas map[string][]domain.Replica
-	allErr   error
+	versions  []string
+	replicas  map[string][]domain.Replica
+	allErr    error
+	pvcs      map[string][]domain.PVCInfo // version → PVCs
+	pvcErr    error                       // error for ListPVCs
+	deleteErr map[string]error            // PVC name → error for DeletePVC
 }
 
 func (p *stubFleetProvider) EnsureStatefulSet(string, string) error { return nil }
@@ -349,5 +352,17 @@ func (p *stubFleetProvider) VersionIdleSince(string) (time.Time, bool, error) {
 	return time.Time{}, false, nil
 }
 func (p *stubFleetProvider) SetVersionIdleSince(string, time.Time) error { return nil }
+func (p *stubFleetProvider) ListPVCs(v string) ([]domain.PVCInfo, error) {
+	if p.pvcErr != nil {
+		return nil, p.pvcErr
+	}
+	return p.pvcs[v], nil
+}
+func (p *stubFleetProvider) DeletePVC(name string) error {
+	if err, ok := p.deleteErr[name]; ok {
+		return err
+	}
+	return nil
+}
 
 var _ domain.FleetProvider = (*stubFleetProvider)(nil)

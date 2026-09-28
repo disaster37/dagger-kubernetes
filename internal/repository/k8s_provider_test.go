@@ -2,14 +2,18 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -904,6 +908,143 @@ func TestK8sExtractOrdinal(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("extractOrdinal(%q, v0.20.0) = %d, want %d", tc.podName, got, tc.want)
 		}
+	}
+}
+
+func TestK8sExtractPVCOrdinal(t *testing.T) {
+	tests := []struct {
+		pvcName string
+		want    int
+	}{
+		{"dagger-kubernetes-dagger-engine-v0-20-0-0", 0},
+		{"dagger-kubernetes-dagger-engine-v0-20-0-5", 5},
+		{"dagger-kubernetes-dagger-engine-v0-20-0-99", 99},
+		{"wrong-prefix-0", -1},
+		{"dagger-engine-v0-20-0-0", -1}, // pod-name prefix only
+		{"dagger-kubernetes-dagger-engine-v0-20-0-abc", -1},
+		{"dagger-kubernetes-dagger-engine-v0-20-0--1", -1},                   // negative suffix
+		{"dagger-kubernetes-dagger-engine-v0-20-0-99999999999999999999", -1}, // Atoi overflow
+		{"dagger-kubernetes-dagger-engine-v0-20-0-", -1},                     // empty suffix
+		{"dagger-kubernetes-dagger-engine-v0-21-0-0", -1},                    // other version
+	}
+
+	for _, tc := range tests {
+		got := extractPVCOrdinal(tc.pvcName, "v0.20.0")
+		if got != tc.want {
+			t.Errorf("extractPVCOrdinal(%q, v0.20.0) = %d, want %d", tc.pvcName, got, tc.want)
+		}
+	}
+}
+
+func TestK8sListPVCs(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	labelsV20 := p.engineLabels("v0.20.0")
+	labelsV21 := p.engineLabels("v0.21.0")
+
+	pvcs := []*corev1.PersistentVolumeClaim{
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "dagger-kubernetes-dagger-engine-v0-20-0-0", Namespace: "dagger-kubernetes", Labels: labelsV20,
+		}},
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "dagger-kubernetes-dagger-engine-v0-20-0-2", Namespace: "dagger-kubernetes", Labels: labelsV20,
+		}},
+		// Not matching the naming convention → omitted even with the label.
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "unexpected-name", Namespace: "dagger-kubernetes", Labels: labelsV20,
+		}},
+		// Other version → excluded by the label selector.
+		{ObjectMeta: metav1.ObjectMeta{
+			Name: "dagger-kubernetes-dagger-engine-v0-21-0-1", Namespace: "dagger-kubernetes", Labels: labelsV21,
+		}},
+	}
+	for _, pvc := range pvcs {
+		if _, err := cs.CoreV1().PersistentVolumeClaims("dagger-kubernetes").Create(context.Background(), pvc, metav1.CreateOptions{}); err != nil {
+			t.Fatalf("create pvc: %v", err)
+		}
+	}
+
+	got, err := p.ListPVCs("v0.20.0")
+	if err != nil {
+		t.Fatalf("ListPVCs: %v", err)
+	}
+	want := map[string]int{
+		"dagger-kubernetes-dagger-engine-v0-20-0-0": 0,
+		"dagger-kubernetes-dagger-engine-v0-20-0-2": 2,
+	}
+	if len(got) != len(want) {
+		t.Fatalf("ListPVCs = %+v, want %d entries", got, len(want))
+	}
+	for _, info := range got {
+		if wantOrdinal, ok := want[info.Name]; !ok || wantOrdinal != info.Ordinal {
+			t.Errorf("pvc = %+v, want ordinal %d", info, wantOrdinal)
+		}
+	}
+}
+
+func TestK8sListPVCsEmpty(t *testing.T) {
+	p, _ := defaultK8sProvider()
+
+	got, err := p.ListPVCs("v0.20.0")
+	if err != nil {
+		t.Fatalf("ListPVCs: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("ListPVCs = %+v, want empty", got)
+	}
+}
+
+func TestK8sListPVCsError(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	cs.PrependReactor("list", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("list boom")
+	})
+
+	if _, err := p.ListPVCs("v0.20.0"); err == nil {
+		t.Fatal("expected ListPVCs error")
+	}
+}
+
+func TestK8sDeletePVC(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	name := "dagger-kubernetes-dagger-engine-v0-20-0-0"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "dagger-kubernetes", Labels: p.engineLabels("v0.20.0"),
+		},
+	}
+	if _, err := cs.CoreV1().PersistentVolumeClaims("dagger-kubernetes").Create(context.Background(), pvc, metav1.CreateOptions{}); err != nil {
+		t.Fatalf("create pvc: %v", err)
+	}
+
+	if err := p.DeletePVC(name); err != nil {
+		t.Fatalf("DeletePVC: %v", err)
+	}
+	if _, err := cs.CoreV1().PersistentVolumeClaims("dagger-kubernetes").Get(context.Background(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("pvc still present after delete (err = %v)", err)
+	}
+}
+
+func TestK8sDeletePVCNotFound(t *testing.T) {
+	p, _ := defaultK8sProvider()
+
+	if err := p.DeletePVC("dagger-kubernetes-dagger-engine-v0-20-0-9"); err != nil {
+		t.Fatalf("DeletePVC of a missing PVC must be a no-op, got %v", err)
+	}
+}
+
+func TestK8sDeletePVCError(t *testing.T) {
+	p, cs := defaultK8sProvider()
+	cs.PrependReactor("delete", "persistentvolumeclaims", func(k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("delete boom")
+	})
+
+	name := "dagger-kubernetes-dagger-engine-v0-20-0-0"
+	err := p.DeletePVC(name)
+	if err == nil {
+		t.Fatal("expected DeletePVC error")
+	}
+	if !strings.Contains(err.Error(), name) || !strings.Contains(err.Error(), "delete boom") {
+		t.Fatalf("err = %v, want the PVC name and the underlying error", err)
 	}
 }
 

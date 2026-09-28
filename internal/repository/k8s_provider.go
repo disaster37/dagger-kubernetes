@@ -581,6 +581,51 @@ func (p *K8sProvider) GetReplicas(version string) ([]domain.Replica, error) {
 	return replicas, nil
 }
 
+// ListPVCs returns the per-pod PVCs of the version's StatefulSet, discovered
+// via the label selector app=dagger-engine,version=<v>. Each entry carries the
+// PVC name and its ordinal (extracted from the StatefulSet volume-claim naming
+// convention). PVCs whose ordinal cannot be parsed are silently omitted (they
+// do not match the naming convention and should not exist under the label
+// selector).
+func (p *K8sProvider) ListPVCs(version string) ([]domain.PVCInfo, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	labelMap := p.engineLabels(version)
+	selector := labels.SelectorFromSet(labelMap).String()
+
+	pvcList, err := p.clientset.CoreV1().PersistentVolumeClaims(p.cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list PVCs: %w", err)
+	}
+
+	var out []domain.PVCInfo
+	for i := range pvcList.Items {
+		pvc := &pvcList.Items[i]
+		ordinal := extractPVCOrdinal(pvc.Name, version)
+		if ordinal < 0 {
+			continue
+		}
+		out = append(out, domain.PVCInfo{Name: pvc.Name, Ordinal: ordinal})
+	}
+	return out, nil
+}
+
+// DeletePVC deletes a single PVC by name. NotFound is treated as success
+// (idempotent — the PVC is already gone).
+func (p *K8sProvider) DeletePVC(name string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	err := p.clientset.CoreV1().PersistentVolumeClaims(p.cfg.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete PVC %s: %w", name, err)
+	}
+	return nil
+}
+
 func (p *K8sProvider) ScaleUp(version string, targetReplicas int) error {
 	if targetReplicas < 0 || targetReplicas > math.MaxInt32 {
 		return fmt.Errorf("target replicas %d out of range", targetReplicas)
@@ -781,6 +826,22 @@ func (p *K8sProvider) isPodReady(pod *corev1.Pod) bool {
 func (p *K8sProvider) extractOrdinal(podName, version string) int {
 	prefix := fmt.Sprintf("dagger-engine-%s-", domain.VersionSlug(version))
 	suffix, ok := strings.CutPrefix(podName, prefix)
+	if !ok {
+		return -1
+	}
+	ordinal, err := strconv.Atoi(suffix)
+	if err != nil {
+		return -1
+	}
+	return ordinal
+}
+
+// extractPVCOrdinal extracts the ordinal from a StatefulSet PVC name
+// (<volume-claim-template>-<stsName>-<ordinal>). Returns -1 when the name does
+// not follow the convention.
+func extractPVCOrdinal(pvcName, version string) int {
+	prefix := fmt.Sprintf("%s-%s-", volumeDaggerKubernetes, domain.StsName(version))
+	suffix, ok := strings.CutPrefix(pvcName, prefix)
 	if !ok {
 		return -1
 	}

@@ -8,13 +8,14 @@ import (
 // EngineCachePurgeResult is the response/status of a per-version local-cache
 // purge. State is "running" | "completed" | "failed".
 type EngineCachePurgeResult struct {
-	Version    string                 `json:"version"`
-	State      string                 `json:"state"`
-	StartedAt  string                 `json:"started_at"`            // RFC3339 UTC
-	FinishedAt string                 `json:"finished_at,omitempty"` // RFC3339 UTC
-	Replicas   int                    `json:"replicas"`              // pods targeted
-	Pods       []EnginePodPurgeResult `json:"pods"`
-	Message    string                 `json:"message,omitempty"`
+	Version    string                  `json:"version"`
+	State      string                  `json:"state"`
+	StartedAt  string                  `json:"started_at"`            // RFC3339 UTC
+	FinishedAt string                  `json:"finished_at,omitempty"` // RFC3339 UTC
+	Replicas   int                     `json:"replicas"`              // pods targeted
+	Pods       []EnginePodPurgeResult  `json:"pods"`
+	PVCs       []EnginePVCDeleteResult `json:"pvcs"`
+	Message    string                  `json:"message,omitempty"`
 }
 
 // EnginePodPurgeResult is the per-pod outcome of the local-cache prune.
@@ -22,6 +23,15 @@ type EnginePodPurgeResult struct {
 	PodName string `json:"pod_name"`
 	Ordinal int    `json:"ordinal"`
 	Pruned  bool   `json:"pruned"` // engine.localCache.prune succeeded on this pod
+	Error   string `json:"error,omitempty"`
+}
+
+// EnginePVCDeleteResult is the per-PVC outcome of the orphaned-PVC deletion
+// step that follows the per-pod local-cache prune.
+type EnginePVCDeleteResult struct {
+	PVCName string `json:"pvc_name"`
+	Ordinal int    `json:"ordinal"`
+	Deleted bool   `json:"deleted"`
 	Error   string `json:"error,omitempty"`
 }
 
