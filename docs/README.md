@@ -350,6 +350,7 @@ variables **take precedence** over the file. Examples:
 | `auth.jwt.secret`                | `DAGGER_KUBERNETES_AUTH_JWT_SECRET`                |
 | `auth.oauth.client_secret`       | `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`       |
 | `auth.bootstrap_admin.password`  | `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`  |
+| `auth.bootstrap_admin.password_file` | `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD_FILE` |
 | `auth.cookie.access_name`        | `DAGGER_KUBERNETES_AUTH_COOKIE_ACCESS_NAME`        |
 | `auth.cookie.refresh_name`       | `DAGGER_KUBERNETES_AUTH_COOKIE_REFRESH_NAME`       |
 | `auth.cookie.secure`             | `DAGGER_KUBERNETES_AUTH_COOKIE_SECURE`             |
@@ -1379,8 +1380,14 @@ auth:
 On first boot with an empty `users` table, the supervisor creates an admin
 from `auth.bootstrap_admin.username` (default `admin`). When
 `auth.bootstrap_admin.password` is empty, a random 16-byte hex password is
-generated and logged once at WARN (the only place a credential is ever
-logged). Set the password explicitly in production.
+generated and written **before** the account is created to
+`auth.bootstrap_admin.password_file` (mode `0600`; default
+`<database.dir>/bootstrap-admin-password`, override via
+`DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD_FILE`). The first-boot WARN
+log records only the file path — never the password itself (CWE-532). If the
+file cannot be written, supervisor startup fails rather than creating an
+account whose password is unrecoverable. Set the password explicitly in
+production to skip generation entirely.
 
 ### Default group
 

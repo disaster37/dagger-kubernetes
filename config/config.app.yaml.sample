@@ -45,7 +45,8 @@ auth:
   # Bootstrap admin: created on first boot when the users table is empty.
   bootstrap_admin:
     username: "admin"                               # created on first boot when no users exist.
-    password: ""                                    # empty = random password logged once at first boot.
+    password: ""                                    # empty = random password generated once at first boot and written 0600 to password_file (never logged).
+    password_file: ""                               # where the generated password is written (0600); empty = <database.dir>/bootstrap-admin-password.
 
   # JWT (HS256) issuance for username/password and OAuth login.
   jwt:

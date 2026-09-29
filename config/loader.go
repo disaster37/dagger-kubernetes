@@ -116,6 +116,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 
 	v.SetDefault("auth.bootstrap_admin.username", "admin")
 	v.SetDefault("auth.bootstrap_admin.password", "")
+	v.SetDefault("auth.bootstrap_admin.password_file", "")
 
 	v.SetDefault("auth.cookie.access_name", "dagger_kubernetes_access")
 	v.SetDefault("auth.cookie.refresh_name", "dagger_kubernetes_refresh")

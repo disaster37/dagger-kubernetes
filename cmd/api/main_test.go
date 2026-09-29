@@ -6,11 +6,13 @@ import (
 	"crypto/aes"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -18,6 +20,7 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
+	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
 func newRaftStoreForTest(t *testing.T) *repository.RaftStore {
@@ -814,5 +817,171 @@ func TestIsMintingCAOnPerPodStorage(t *testing.T) {
 				t.Fatalf("isMintingCAOnPerPodStorage = %v, want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+// --- bootstrap admin password file (SEC-009 / CWE-532) ---
+
+// newBootstrapUserSvc builds a UserService over a single-node in-memory Raft
+// store (leader after WaitForLeader).
+func newBootstrapUserSvc(t *testing.T) *service.UserService {
+	t.Helper()
+	store, err := repository.NewInmemRaftStore("bootstrap-admin-test", observ.NewTestLogger(), 5*time.Second)
+	if err != nil {
+		t.Fatalf("NewInmemRaftStore: %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.WaitForLeader(ctx); err != nil {
+		t.Fatalf("WaitForLeader: %v", err)
+	}
+	return service.NewUserService(repository.NewUserRepo(store), repository.NewGroupRepo(store), observ.NewTestLogger())
+}
+
+// newBootstrapTest returns a bootstrap config rooted at a temp database dir,
+// a UserService, and a logger capturing output into buf.
+func newBootstrapTest(t *testing.T) (*domain.Config, *service.UserService, *bytes.Buffer, *logrus.Logger) {
+	t.Helper()
+	cfg := &domain.Config{}
+	cfg.Database.Dir = t.TempDir()
+	cfg.Auth.BootstrapAdmin.Username = "admin"
+	buf := &bytes.Buffer{}
+	logger := logrus.New()
+	logger.SetOutput(buf)
+	logger.SetFormatter(&logrus.TextFormatter{DisableColors: true, DisableTimestamp: true})
+	return cfg, newBootstrapUserSvc(t), buf, logger
+}
+
+func TestBootstrapAdminWritesGeneratedPasswordFile(t *testing.T) {
+	cfg, users, buf, logger := newBootstrapTest(t)
+	ctx := context.Background()
+
+	if err := bootstrapAdmin(ctx, cfg, users, logger); err != nil {
+		t.Fatalf("bootstrapAdmin: %v", err)
+	}
+
+	path := filepath.Join(cfg.Database.Dir, "bootstrap-admin-password")
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("password file: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("password file mode = %04o, want 0600", fi.Mode().Perm())
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read password file: %v", err)
+	}
+	password := strings.TrimSuffix(string(raw), "\n")
+	if password == "" {
+		t.Fatal("password file is empty")
+	}
+
+	// The credential never appears in the log; the recovery path does.
+	out := buf.String()
+	if strings.Contains(out, password) {
+		t.Fatalf("generated password leaked into log output: %s", out)
+	}
+	if !strings.Contains(out, "bootstrap admin created") {
+		t.Fatalf("missing bootstrap WARN: %s", out)
+	}
+	if !strings.Contains(out, path) {
+		t.Fatalf("log should name the password file path: %s", out)
+	}
+
+	// The account is usable with the file's password.
+	if _, err := users.Authenticate(ctx, "admin", password); err != nil {
+		t.Fatalf("authenticate with generated password: %v", err)
+	}
+}
+
+func TestBootstrapAdminConfiguredPasswordNotWritten(t *testing.T) {
+	cfg, users, buf, logger := newBootstrapTest(t)
+	cfg.Auth.BootstrapAdmin.Password = "configuredpw123"
+
+	if err := bootstrapAdmin(context.Background(), cfg, users, logger); err != nil {
+		t.Fatalf("bootstrapAdmin: %v", err)
+	}
+
+	path := filepath.Join(cfg.Database.Dir, "bootstrap-admin-password")
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("password file should not exist for a configured password: %v", err)
+	}
+	if strings.Contains(buf.String(), "configuredpw123") {
+		t.Fatalf("configured password leaked into log output: %s", buf.String())
+	}
+	if _, err := users.Authenticate(context.Background(), "admin", "configuredpw123"); err != nil {
+		t.Fatalf("authenticate: %v", err)
+	}
+}
+
+func TestBootstrapAdminCustomPasswordFile(t *testing.T) {
+	cfg, users, buf, logger := newBootstrapTest(t)
+	custom := filepath.Join(t.TempDir(), "sub", "admin.pw")
+	cfg.Auth.BootstrapAdmin.PasswordFile = custom
+
+	if err := bootstrapAdmin(context.Background(), cfg, users, logger); err != nil {
+		t.Fatalf("bootstrapAdmin: %v", err)
+	}
+
+	fi, err := os.Stat(custom)
+	if err != nil {
+		t.Fatalf("custom password file: %v", err)
+	}
+	if fi.Mode().Perm() != 0o600 {
+		t.Fatalf("custom password file mode = %04o, want 0600", fi.Mode().Perm())
+	}
+	if !strings.Contains(buf.String(), custom) {
+		t.Fatalf("log should name the custom path: %s", buf.String())
+	}
+	raw, err := os.ReadFile(custom)
+	if err != nil {
+		t.Fatalf("read custom file: %v", err)
+	}
+	if strings.Contains(buf.String(), strings.TrimSuffix(string(raw), "\n")) {
+		t.Fatal("generated password leaked into log output")
+	}
+}
+
+func TestBootstrapAdminUnwritablePasswordFileFails(t *testing.T) {
+	cfg, users, _, logger := newBootstrapTest(t)
+	// Parent path is an existing regular file: MkdirAll must fail.
+	blocker := filepath.Join(t.TempDir(), "blocker")
+	if err := os.WriteFile(blocker, []byte("x"), 0o600); err != nil {
+		t.Fatalf("write blocker: %v", err)
+	}
+	cfg.Auth.BootstrapAdmin.PasswordFile = filepath.Join(blocker, "admin.pw")
+
+	err := bootstrapAdmin(context.Background(), cfg, users, logger)
+	if err == nil || !strings.Contains(err.Error(), "create bootstrap password dir") {
+		t.Fatalf("err = %v, want wrapped mkdir failure", err)
+	}
+	// No account may exist whose password is unrecoverable.
+	if _, err := users.GetByUsername(context.Background(), "admin"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("user should not be created when the recovery file fails: %v", err)
+	}
+}
+
+func TestBootstrapAdminIdempotentSecondBoot(t *testing.T) {
+	cfg, users, _, logger := newBootstrapTest(t)
+	if err := bootstrapAdmin(context.Background(), cfg, users, logger); err != nil {
+		t.Fatalf("first bootstrap: %v", err)
+	}
+	path := filepath.Join(cfg.Database.Dir, "bootstrap-admin-password")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read password file: %v", err)
+	}
+	// Second boot with users present: no-op, file untouched.
+	if err := bootstrapAdmin(context.Background(), cfg, users, logger); err != nil {
+		t.Fatalf("second bootstrap: %v", err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("re-read password file: %v", err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("password file rewritten on second boot")
 	}
 }

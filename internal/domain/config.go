@@ -263,6 +263,11 @@ type TokenConfig struct {
 type BootstrapAdminConfig struct {
 	Username string `mapstructure:"username"`
 	Password string `mapstructure:"password"`
+	// PasswordFile is where a GENERATED password is written (0600) so the
+	// operator can recover it without it ever being logged (CWE-532). Empty
+	// derives <database.dir>/bootstrap-admin-password. Ignored when Password
+	// is configured explicitly.
+	PasswordFile string `mapstructure:"password_file"`
 }
 
 type TelemetryConfig struct {
