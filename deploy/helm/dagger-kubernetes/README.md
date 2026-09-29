@@ -678,6 +678,7 @@ subchart values.
 | `supervisor.image.pullPolicy` | string | `IfNotPresent` | Image pull policy. |
 | `supervisor.image.pullSecrets` | array | `[]` | Image pull secrets for private registries. |
 | `supervisor.replicaCount` | int | `3` | Number of supervisor pods. Single source of truth for the Raft cluster size: each supervisor pod is one Raft voter, so the voter count is derived from this value (never asked separately). Use an odd number >= 3 for quorum fault tolerance (a 2-node cluster has no failure tolerance). |
+| `supervisor.probes.scheme` | string | `HTTP` | Scheme for the startup/readiness/liveness probes (HTTP or HTTPS). Probes hit the container's control port directly, which serves plain HTTP unless control-plane TLS is enabled in-pod (TLS usually terminates at the ingress); set HTTPS only when the probe endpoint itself is TLS. |
 | `supervisor.resources.requests.cpu` | string | `250m` | Supervisor CPU request. |
 | `supervisor.resources.requests.memory` | string | `256Mi` | Supervisor memory request. |
 | `supervisor.resources.limits.cpu` | string | `1000m` | Supervisor CPU limit. |

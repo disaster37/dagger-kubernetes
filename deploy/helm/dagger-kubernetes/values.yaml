@@ -50,6 +50,9 @@ supervisor:
     pullSecrets: []
 ## @param supervisor.replicaCount Number of supervisor pods. Single source of truth for the Raft cluster size: each supervisor pod is one Raft voter, so the voter count is derived from this value (never asked separately). Use an odd number >= 3 for quorum fault tolerance (a 2-node cluster has no failure tolerance).
   replicaCount: 3
+## @param supervisor.probes.scheme Scheme for the startup/readiness/liveness probes (HTTP or HTTPS). Probes hit the container's control port directly, which serves plain HTTP unless control-plane TLS is enabled in-pod (TLS usually terminates at the ingress); set HTTPS only when the probe endpoint itself is TLS.
+  probes:
+    scheme: HTTP
 ## @param supervisor.resources.requests.cpu Supervisor CPU request.
 ## @param supervisor.resources.requests.memory Supervisor memory request.
 ## @param supervisor.resources.limits.cpu Supervisor CPU limit.

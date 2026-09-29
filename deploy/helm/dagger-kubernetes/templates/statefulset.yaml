@@ -176,7 +176,7 @@ spec:
             httpGet:
               path: /startup
               port: control
-              scheme: HTTPS
+              scheme: {{ .Values.supervisor.probes.scheme }}
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 60
@@ -185,7 +185,7 @@ spec:
             httpGet:
               path: /readyz
               port: control
-              scheme: HTTPS
+              scheme: {{ .Values.supervisor.probes.scheme }}
             initialDelaySeconds: 5
             periodSeconds: 5
             failureThreshold: 3
@@ -194,7 +194,7 @@ spec:
             httpGet:
               path: /healthz
               port: control
-              scheme: HTTPS
+              scheme: {{ .Values.supervisor.probes.scheme }}
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
