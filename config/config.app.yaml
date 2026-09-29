@@ -31,8 +31,8 @@ auth:
   oauth:                                       # optional; disabled by default. Single active provider per deployment.
     enabled: false
     provider: "github"                        # "github" | "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
-    client_id: "${OAUTH_CLIENT_ID}"
-    client_secret: "${OAUTH_CLIENT_SECRET}"
+    client_id: ""                              # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_ID); do not commit secrets.
+    client_secret: ""                          # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET); do not commit secrets.
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"
     allowed_orgs: []                          # github: org membership allowlist; oidc: deprecated alias for allowed_groups; empty = allow all.
     allowed_teams: []                         # github only: "org/team" slug allowlist; empty = allow all. AND-ed with allowed_orgs when both set.
