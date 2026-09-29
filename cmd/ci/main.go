@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -93,6 +95,11 @@ func ciFlags() []cli.Flag {
 }
 
 func run(c *cli.Context) error {
+	// SIGINT/SIGTERM cancel the root context: the in-flight dagger command
+	// (exec.CommandContext) and every derived poller stop promptly.
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	cfg, err := config.LoadForCIWrapper(c.String("config"))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -154,10 +161,10 @@ func run(c *cli.Context) error {
 	if timeout < 0 {
 		return fmt.Errorf("--timeout must be >= 0")
 	}
-	var cmdCtx = context.Background()
+	var cmdCtx = rootCtx
 	var cmdCancel context.CancelFunc = func() {}
 	if timeout > 0 {
-		cmdCtx, cmdCancel = context.WithTimeout(context.Background(), timeout)
+		cmdCtx, cmdCancel = context.WithTimeout(rootCtx, timeout)
 	}
 	defer cmdCancel()
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
@@ -173,7 +180,7 @@ func run(c *cli.Context) error {
 	}
 
 	if c.Bool("cli") {
-		binDir, cleanup, err := provisionCLI(context.Background(), serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
+		binDir, cleanup, err := provisionCLI(rootCtx, serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
 		if err != nil {
 			return fmt.Errorf("provision dagger cli: %w", err)
 		}
@@ -210,7 +217,7 @@ func run(c *cli.Context) error {
 	fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] server=%s token=%t steps=%t version=%s timeout=%s\n",
 		serverURL, token != "", steps, version, timeoutDisplay)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(rootCtx)
 	stepsCancel = cancel
 	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout)
 
