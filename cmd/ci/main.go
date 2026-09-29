@@ -361,7 +361,7 @@ func run(c *cli.Context) error {
 			if !steps {
 				switch ciMode {
 				case "gha":
-					emitGHAAnnotations(traceURL, traceID)
+					emitGHAAnnotations(rootCtx, traceURL, traceID)
 				case "jenkins":
 					emitJenkinsStages(traceURL, traceID)
 				case "drone":
@@ -510,7 +510,7 @@ func newCIEventSink(w io.Writer, format string) domain.CIEventSink {
 	return service.NewNDJSONEventSink(w)
 }
 
-func emitGHAAnnotations(traceURL, traceID string) {
+func emitGHAAnnotations(ctx context.Context, traceURL, traceID string) {
 	fmt.Printf("::notice title=Dagger Pipeline::Pipeline View: %s\n", traceURL)
 
 	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
@@ -527,7 +527,7 @@ func emitGHAAnnotations(traceURL, traceID string) {
 	}
 
 	if os.Getenv("GITHUB_REPOSITORY") != "" {
-		pollSummary(traceURL)
+		pollSummary(ctx, traceURL)
 	}
 }
 
@@ -541,10 +541,18 @@ func emitDroneAnnotations(traceURL string) {
 	fmt.Printf("[dagger-kubernetes] Pipeline View: %s\n", traceURL)
 }
 
-func pollSummary(traceURL string) {
+// pollSummary polls the supervisor until the trace reaches a terminal status
+// (so the GHA job summary carries the final state). Bounded by ctx (SEC-010):
+// wrapper shutdown cancels the root context and the poll returns immediately
+// instead of sleeping out the remaining iterations.
+func pollSummary(ctx context.Context, traceURL string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	for i := 0; i < 30; i++ {
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
 		if traceFinished(client, traceURL) {
 			return
 		}

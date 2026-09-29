@@ -1201,3 +1201,45 @@ func TestFileExistsRegularOnly(t *testing.T) {
 		})
 	}
 }
+
+// TestPollSummaryCancelledContextReturnsImmediately covers SEC-010: a
+// cancelled root context stops the summary poll at once instead of sleeping
+// out the remaining 2s iterations.
+func TestPollSummaryCancelledContextReturnsImmediately(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pollSummary(ctx, "http://127.0.0.1:1/trace")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pollSummary did not return after context cancel")
+	}
+}
+
+// TestPollSummaryStopsOnTerminalStatus: the poll returns once the trace
+// reaches a terminal status (non-cancel path).
+func TestPollSummaryStopsOnTerminalStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status": "success"}`))
+	}))
+	defer srv.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pollSummary(context.Background(), srv.URL)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pollSummary did not return after terminal status")
+	}
+}
