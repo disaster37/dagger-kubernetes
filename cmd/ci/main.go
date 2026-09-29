@@ -252,7 +252,7 @@ func run(c *cli.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				traces, err := stepsSrc.ListTraces(1)
+				traces, err := stepsSrc.ListTraces(ctx, 1)
 				if err != nil {
 					logger.WithError(err).Debug("trace discovery poll failed")
 					continue
@@ -298,7 +298,9 @@ func run(c *cli.Context) error {
 		id := discoveredID
 		discoveredMu.Unlock()
 		if id != "" {
-			if perr := pollTraceOnce(stepsSrc, stepsBuilder, stepsSink, id, stepsBuilder.LogMark()); perr != nil {
+			// No request context applies here (the discovery ctx is already
+			// cancelled); bounded by the client's HTTP timeout.
+			if perr := pollTraceOnce(context.Background(), stepsSrc, stepsBuilder, stepsSink, id, stepsBuilder.LogMark()); perr != nil {
 				logger.WithError(perr).WithField("trace_id", id).Debug("final ci step flush failed")
 			}
 		}
@@ -398,7 +400,7 @@ func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 		if ctx.Err() != nil {
 			return
 		}
-		if err := pollTraceOnce(src, builder, sink, traceID, builder.LogMark()); err != nil {
+		if err := pollTraceOnce(ctx, src, builder, sink, traceID, builder.LogMark()); err != nil {
 			logger.WithError(err).WithField("trace_id", traceID).Warn("ci step poll failed")
 		}
 	}
@@ -416,13 +418,13 @@ func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 
 // pollTraceOnce performs a single snapshot poll and emits any new events.
 // Extracted for unit testing and the final-flush path.
-func pollTraceOnce(src domain.TraceSnapshotSource, builder *service.StepEventBuilder,
+func pollTraceOnce(ctx context.Context, src domain.TraceSnapshotSource, builder *service.StepEventBuilder,
 	sink domain.CIEventSink, traceID string, logFrom time.Time) error {
-	trace, err := src.GetTrace(traceID)
+	trace, err := src.GetTrace(ctx, traceID)
 	if err != nil {
 		return fmt.Errorf("get trace: %w", err)
 	}
-	logs, err := src.QueryTraceLogs(traceID, logFrom, time.Now(), ciLogQueryLimit)
+	logs, err := src.QueryTraceLogs(ctx, traceID, logFrom, time.Now(), ciLogQueryLimit)
 	if err != nil {
 		return fmt.Errorf("query logs: %w", err)
 	}

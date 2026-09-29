@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"context"
+	"time"
+)
 
 // StepState is the CI-visible lifecycle state of one Dagger operation (span).
 type StepState string
@@ -64,7 +67,7 @@ type CIEventSink interface {
 // step tree: the supervisor's span-tree reconstruction + per-span logs. The
 // wrapper's HTTP client implements it (repository.SupervisorTraceClient).
 type TraceSnapshotSource interface {
-	GetTrace(traceID string) (*TraceInfo, error)
-	QueryTraceLogs(traceID string, start, end time.Time, limit int) ([]LogEntry, error)
-	ListTraces(limit int) ([]TraceListResult, error)
+	GetTrace(ctx context.Context, traceID string) (*TraceInfo, error)
+	QueryTraceLogs(ctx context.Context, traceID string, start, end time.Time, limit int) ([]LogEntry, error)
+	ListTraces(ctx context.Context, limit int) ([]TraceListResult, error)
 }

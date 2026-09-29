@@ -490,16 +490,16 @@ type stubSnapshotSource struct {
 	lastStart time.Time
 }
 
-func (s *stubSnapshotSource) GetTrace(string) (*domain.TraceInfo, error) {
+func (s *stubSnapshotSource) GetTrace(_ context.Context, _ string) (*domain.TraceInfo, error) {
 	return s.trace, s.traceErr
 }
 
-func (s *stubSnapshotSource) QueryTraceLogs(_ string, start, _ time.Time, _ int) ([]domain.LogEntry, error) {
+func (s *stubSnapshotSource) QueryTraceLogs(_ context.Context, _ string, start, _ time.Time, _ int) ([]domain.LogEntry, error) {
 	s.lastStart = start
 	return s.logs, s.logsErr
 }
 
-func (s *stubSnapshotSource) ListTraces(_ int) ([]domain.TraceListResult, error) {
+func (s *stubSnapshotSource) ListTraces(_ context.Context, _ int) ([]domain.TraceListResult, error) {
 	return nil, nil
 }
 
@@ -545,7 +545,7 @@ func TestPollTraceOnceEmitsEvents(t *testing.T) {
 	b := service.NewStepEventBuilder(0)
 	sink := &collectSink{}
 
-	if err := pollTraceOnce(src, b, sink, testTraceID, time.Time{}); err != nil {
+	if err := pollTraceOnce(context.Background(), src, b, sink, testTraceID, time.Time{}); err != nil {
 		t.Fatalf("pollTraceOnce: %v", err)
 	}
 	if len(sink.events) == 0 {
@@ -569,7 +569,7 @@ func TestPollTraceOnceGetTraceError(t *testing.T) {
 	b := service.NewStepEventBuilder(0)
 	sink := &collectSink{}
 
-	err := pollTraceOnce(src, b, sink, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, sink, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "get trace") {
 		t.Fatalf("err = %q, want get-trace error", err)
 	}
@@ -583,7 +583,7 @@ func TestPollTraceOnceLogsError(t *testing.T) {
 	b := service.NewStepEventBuilder(0)
 	sink := &collectSink{}
 
-	err := pollTraceOnce(src, b, sink, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, sink, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "query logs") {
 		t.Fatalf("err = %q, want query-logs error", err)
 	}
@@ -630,7 +630,7 @@ func TestPollTraceOnceNilTraceError(t *testing.T) {
 	src := &stubSnapshotSource{trace: nil}
 	b := service.NewStepEventBuilder(0)
 
-	err := pollTraceOnce(src, b, &collectSink{}, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, &collectSink{}, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "advance step snapshot") {
 		t.Fatalf("err = %q, want advance error", err)
 	}
@@ -641,7 +641,7 @@ func TestPollTraceOnceEmitError(t *testing.T) {
 	src := &stubSnapshotSource{trace: &domain.TraceInfo{TraceID: testTraceID, RootSpan: root, Status: "success"}}
 	b := service.NewStepEventBuilder(0)
 
-	err := pollTraceOnce(src, b, errSink{}, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, errSink{}, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "emit step event") {
 		t.Fatalf("err = %q, want emit error", err)
 	}

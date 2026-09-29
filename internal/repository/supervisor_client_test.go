@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,7 @@ func TestSupervisorTraceClientGetTrace(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
-	trace, err := c.GetTrace("abcdef0123456789")
+	trace, err := c.GetTrace(context.Background(), "abcdef0123456789")
 	if err != nil {
 		t.Fatalf("GetTrace: %v", err)
 	}
@@ -42,7 +43,7 @@ func TestSupervisorTraceClientGetTraceNon200(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
-	_, err := c.GetTrace("abcdef0123456789")
+	_, err := c.GetTrace(context.Background(), "abcdef0123456789")
 	if err == nil {
 		t.Fatal("GetTrace = nil error, want wrapped error")
 	}
@@ -58,7 +59,7 @@ func TestSupervisorTraceClientGetTraceInvalidJSON(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
-	_, err := c.GetTrace("abcdef0123456789")
+	_, err := c.GetTrace(context.Background(), "abcdef0123456789")
 	if err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("err = %q, want decode error", err)
 	}
@@ -81,7 +82,7 @@ func TestSupervisorTraceClientQueryTraceLogs(t *testing.T) {
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
 	start := time.Unix(90, 0)
 	end := time.Unix(110, 0)
-	entries, err := c.QueryTraceLogs("abcdef0123456789", start, end, 500)
+	entries, err := c.QueryTraceLogs(context.Background(), "abcdef0123456789", start, end, 500)
 	if err != nil {
 		t.Fatalf("QueryTraceLogs: %v", err)
 	}
@@ -109,7 +110,7 @@ func TestSupervisorTraceClientQueryTraceLogsOmitsZeroParams(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
-	if _, err := c.QueryTraceLogs("abcdef0123456789", time.Time{}, time.Time{}, 0); err != nil {
+	if _, err := c.QueryTraceLogs(context.Background(), "abcdef0123456789", time.Time{}, time.Time{}, 0); err != nil {
 		t.Fatalf("QueryTraceLogs: %v", err)
 	}
 	if gotQuery != "" {
@@ -124,7 +125,7 @@ func TestSupervisorTraceClientQueryTraceLogsNon200(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
-	_, err := c.QueryTraceLogs("abcdef0123456789", time.Time{}, time.Time{}, 0)
+	_, err := c.QueryTraceLogs(context.Background(), "abcdef0123456789", time.Time{}, time.Time{}, 0)
 	if err == nil || !strings.Contains(err.Error(), "query trace logs abcdef0123456789") || !strings.Contains(err.Error(), "server returned 500") {
 		t.Fatalf("err = %q", err)
 	}
@@ -139,7 +140,7 @@ func TestSupervisorTraceClientTrimsBaseURLSlash(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL+"/", "tok", time.Second)
-	if _, err := c.GetTrace("abcdef0123456789"); err != nil {
+	if _, err := c.GetTrace(context.Background(), "abcdef0123456789"); err != nil {
 		t.Fatalf("GetTrace: %v", err)
 	}
 	if gotPath != "/api/v1/traces/abcdef0123456789" {
@@ -154,7 +155,7 @@ func TestSupervisorTraceClientTimeout(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", 20*time.Millisecond)
-	_, err := c.GetTrace("abcdef0123456789")
+	_, err := c.GetTrace(context.Background(), "abcdef0123456789")
 	if err == nil {
 		t.Fatal("GetTrace = nil error, want timeout error")
 	}
@@ -165,7 +166,7 @@ func TestSupervisorTraceClientTimeout(t *testing.T) {
 
 func TestSupervisorTraceClientBuildRequestError(t *testing.T) {
 	c := NewSupervisorTraceClient("://bad", "tok", time.Second)
-	_, err := c.GetTrace("abcdef0123456789")
+	_, err := c.GetTrace(context.Background(), "abcdef0123456789")
 	if err == nil {
 		t.Fatal("GetTrace = nil error, want build-request error")
 	}
@@ -180,10 +181,10 @@ func TestSupervisorTraceClientBuildRequestError(t *testing.T) {
 func TestSupervisorTraceClientRejectsInvalidTraceID(t *testing.T) {
 	c := NewSupervisorTraceClient("http://127.0.0.1:1", "tok", time.Second)
 	for _, bad := range []string{"", "../etc/passwd", "abc?x=1", "not-hex", "short", strings.Repeat("a", 129)} {
-		if _, err := c.GetTrace(bad); err == nil || !strings.Contains(err.Error(), "invalid trace id") {
+		if _, err := c.GetTrace(context.Background(), bad); err == nil || !strings.Contains(err.Error(), "invalid trace id") {
 			t.Fatalf("GetTrace(%q) err = %v, want invalid trace id", bad, err)
 		}
-		if _, err := c.QueryTraceLogs(bad, time.Time{}, time.Time{}, 0); err == nil || !strings.Contains(err.Error(), "invalid trace id") {
+		if _, err := c.QueryTraceLogs(context.Background(), bad, time.Time{}, time.Time{}, 0); err == nil || !strings.Contains(err.Error(), "invalid trace id") {
 			t.Fatalf("QueryTraceLogs(%q) err = %v, want invalid trace id", bad, err)
 		}
 	}
@@ -202,7 +203,7 @@ func TestSupervisorTraceClientResponseSizeCap(t *testing.T) {
 	defer srv.Close()
 
 	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second)
-	_, err := c.GetTrace("abcdef0123456789")
+	_, err := c.GetTrace(context.Background(), "abcdef0123456789")
 	if err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("err = %v, want decode error from truncated body", err)
 	}
