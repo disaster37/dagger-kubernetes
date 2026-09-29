@@ -1187,8 +1187,17 @@ func (s *Server) touchSession(fp string) {
 	_ = s.sessions.Touch(fp)
 }
 
-// handleNoRoute serves the embedded SPA for unmatched routes.
+// handleNoRoute serves the embedded SPA for unmatched routes. Unmatched API
+// paths (/api/, /v1/) answer 404 JSON instead of the SPA shell so API clients
+// never receive HTML where they expect a JSON error (CWE-204, SEC-014);
+// everything else keeps SPA client-side routing (extension-less paths resolve
+// to index.html).
 func (s *Server) handleNoRoute(ctx context.Context, c *app.RequestContext) {
+	path := string(c.Path())
+	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/v1/") {
+		writeError(c, consts.StatusNotFound, "not found")
+		return
+	}
 	s.serveUI(ctx, c)
 }
 

@@ -48,6 +48,7 @@ func newTestEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
 	e.GET("/api/v1/cli/:version", s.handleCLIDownload)
 	e.GET("/api/v1/cli/ci-wrapper/latest", s.handleCIWrapperDownload)
+	e.NoRoute(s.handleNoRoute)
 	return e
 }
 
@@ -446,5 +447,53 @@ func TestHandleFleetInfoError(t *testing.T) {
 	logOutput := buf.String()
 	if !strings.Contains(logOutput, "fleet info unavailable") {
 		t.Errorf("expected log message 'fleet info unavailable', got: %s", logOutput)
+	}
+}
+
+// TestHandleNoRoute verifies SEC-014 (CWE-204): unmatched API paths return
+// 404 JSON rather than the SPA shell, while SPA routes keep serving HTML for
+// client-side routing.
+func TestHandleNoRoute(t *testing.T) {
+	s, _ := newTestServer(t)
+	e := newTestEngine(s)
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantJSON   bool
+	}{
+		{name: "unmatched api path is 404 JSON", path: "/api/v1/nonexistent", wantStatus: http.StatusNotFound, wantJSON: true},
+		{name: "unmatched v1 path is 404 JSON", path: "/v1/nonexistent", wantStatus: http.StatusNotFound, wantJSON: true},
+		{name: "SPA route serves the shell", path: "/dashboard", wantStatus: http.StatusOK, wantJSON: false},
+		{name: "root serves the shell", path: "/", wantStatus: http.StatusOK, wantJSON: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := ut.PerformRequest(e, "GET", tt.path, nil)
+			if got := resp.Result().StatusCode(); got != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", got, tt.wantStatus)
+			}
+			contentType := string(resp.Result().Header.Peek("Content-Type"))
+			if tt.wantJSON {
+				if !strings.Contains(contentType, "application/json") {
+					t.Fatalf("Content-Type = %q, want application/json", contentType)
+				}
+				var body ErrorResponse
+				if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+					t.Fatalf("decode: %v", err)
+				}
+				if body.Message != "not found" {
+					t.Fatalf("message = %q, want %q", body.Message, "not found")
+				}
+				return
+			}
+			if !strings.Contains(contentType, "text/html") {
+				t.Fatalf("Content-Type = %q, want text/html", contentType)
+			}
+			if !strings.Contains(string(resp.Result().Body()), "<html") {
+				t.Fatalf("body does not look like the SPA shell: %.80q", string(resp.Result().Body()))
+			}
+		})
 	}
 }
