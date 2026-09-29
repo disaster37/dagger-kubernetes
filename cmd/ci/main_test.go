@@ -318,8 +318,9 @@ func TestProvisionCLILatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat dagger: %v", err)
 	}
-	if st.Mode()&0o111 == 0 {
-		t.Fatal("dagger not executable")
+	// SEC-011: owner+group executable only — never world-executable.
+	if st.Mode().Perm() != 0o750 {
+		t.Fatalf("dagger mode = %04o, want 0750", st.Mode().Perm())
 	}
 	got, err := os.ReadFile(bin)
 	if err != nil {

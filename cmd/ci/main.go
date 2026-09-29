@@ -680,8 +680,8 @@ func extractDagger(r io.Reader, binDir string) error {
 		}
 
 		dst := filepath.Join(binDir, "dagger")
-		// #nosec G304 G302 -- dst is a fixed "dagger" basename under the caller-owned binDir; 0755 is required for the executable.
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		// #nosec G304 G302 -- dst is a fixed "dagger" basename under the caller-owned binDir; 0750 limits execution to the wrapper's own user+group (CWE-732).
+		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o750)
 		if err != nil {
 			return fmt.Errorf("create dagger binary: %w", err)
 		}
