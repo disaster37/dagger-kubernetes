@@ -10,8 +10,8 @@ import (
 // handleConnectEnv returns the connection env-var snapshot for the caller.
 // Auth-gated. ?reveal=true populates the DAGGER_CLOUD_TOKEN plaintext when the
 // token is recoverable. The response is never cached (no-store).
-func (s *Server) handleConnectEnv(_ context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
+func (s *Server) handleConnectEnv(ctx context.Context, c *app.RequestContext) {
+	if !s.requireAuth(ctx, c) {
 		return
 	}
 	if s.connect == nil {
@@ -25,7 +25,7 @@ func (s *Server) handleConnectEnv(_ context.Context, c *app.RequestContext) {
 	}
 	reveal := c.Query("reveal") == "true"
 	version := c.Query("version")
-	snap, err := s.connect.ConnectEnv(context.Background(), id.UserID, version, reveal)
+	snap, err := s.connect.ConnectEnv(ctx, id.UserID, version, reveal)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return

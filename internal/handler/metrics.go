@@ -13,7 +13,7 @@ import (
 // configured). With no VictoriaURL it returns a small help document describing
 // the available query endpoints.
 func (s *Server) handleMetricsProxy(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
+	if !s.requireAuth(ctx, c) {
 		return
 	}
 
@@ -35,7 +35,7 @@ func (s *Server) handleMetricsProxy(ctx context.Context, c *app.RequestContext) 
 // builds the scoped PromQL server-side; the UI never writes PromQL. A missing
 // trace_meta yields an empty-but-valid payload (HTTP 200), never a 404.
 func (s *Server) handleTraceMetrics(ctx context.Context, c *app.RequestContext) {
-	traceID, ok := s.authorizeTraceRequest(c)
+	traceID, ok := s.authorizeTraceRequest(ctx, c)
 	if !ok {
 		return
 	}

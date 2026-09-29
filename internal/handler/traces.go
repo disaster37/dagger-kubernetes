@@ -15,8 +15,8 @@ import (
 // handleTracesList returns a scoped list of trace metadata. Admins see all
 // (with an optional ?group_id= filter, including "unassigned"); users see
 // traces in their groups plus their own unassigned traces.
-func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
-	id, ok := s.resolveIdentity(c)
+func (s *Server) handleTracesList(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return
 	}
@@ -43,7 +43,7 @@ func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
 		f.UserID = id.UserID
 	}
 
-	res, err := s.traceMeta.List(context.Background(), &f)
+	res, err := s.traceMeta.List(ctx, &f)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -54,8 +54,8 @@ func (s *Server) handleTracesList(_ context.Context, c *app.RequestContext) {
 // handleTracesDetail returns a single trace's span tree (Tempo), enriched with
 // the persisted trace_meta row. Gated by authorizeTrace (owner/member/admin;
 // unknown meta -> admin-only).
-func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
-	traceID, ok := s.authorizeTraceRequest(c)
+func (s *Server) handleTracesDetail(ctx context.Context, c *app.RequestContext) {
+	traceID, ok := s.authorizeTraceRequest(ctx, c)
 	if !ok {
 		return
 	}
@@ -70,7 +70,7 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 	// resource-level attributes dropped during reconstruction). The SQLite
 	// trace_meta row populated at provision/ingest time is authoritative, so
 	// merge it in best-effort and only fill fields Tempo left empty.
-	if meta, err := s.traceMeta.Get(context.Background(), traceID); err == nil {
+	if meta, err := s.traceMeta.Get(ctx, traceID); err == nil {
 		if trace.Version == "" {
 			trace.Version = meta.Version
 		}
@@ -98,7 +98,7 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 		// from the users table (empty for legacy/anonymous or deleted users).
 		trace.UserID = meta.UserID
 		if meta.UserID != "" {
-			if u, err := s.users.Get(context.Background(), meta.UserID); err == nil {
+			if u, err := s.users.Get(ctx, meta.UserID); err == nil {
 				trace.Username = u.Username
 			} else {
 				s.logger.WithError(err).WithField("user_id", meta.UserID).Debug("trace user lookup failed")
@@ -118,8 +118,8 @@ func (s *Server) handleTracesDetail(_ context.Context, c *app.RequestContext) {
 }
 
 // handleTracesLogs returns a trace's logs (Loki). Gated by authorizeTrace.
-func (s *Server) handleTracesLogs(_ context.Context, c *app.RequestContext) {
-	traceID, ok := s.authorizeTraceRequest(c)
+func (s *Server) handleTracesLogs(ctx context.Context, c *app.RequestContext) {
+	traceID, ok := s.authorizeTraceRequest(ctx, c)
 	if !ok {
 		return
 	}
@@ -131,14 +131,14 @@ func (s *Server) handleTracesLogs(_ context.Context, c *app.RequestContext) {
 // clients cannot set headers, so this is the only route that also accepts the
 // ?token= query param (D14).
 func (s *Server) handleTracesLive(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuthWithQueryFallback(c) {
+	if !s.requireAuthWithQueryFallback(ctx, c) {
 		return
 	}
 	traceID, ok := traceIDParam(c)
 	if !ok {
 		return
 	}
-	if !s.authorizeTrace(c, traceID) {
+	if !s.authorizeTrace(ctx, c, traceID) {
 		return
 	}
 
@@ -164,7 +164,7 @@ func (s *Server) handleTracesLive(ctx context.Context, c *app.RequestContext) {
 // no trace-level authorization: the stream only signals "the list changed" and
 // carries no data — the subsequent GET /api/v1/traces is identity-scoped.
 func (s *Server) handleTracesListLive(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuthWithQueryFallback(c) {
+	if !s.requireAuthWithQueryFallback(ctx, c) {
 		return
 	}
 
@@ -186,15 +186,15 @@ func (s *Server) handleTracesListLive(ctx context.Context, c *app.RequestContext
 // authorizeTraceRequest resolves the identity, extracts the :traceID path
 // parameter, and enforces trace visibility. On any failure it writes the
 // response and returns false.
-func (s *Server) authorizeTraceRequest(c *app.RequestContext) (string, bool) {
-	if !s.requireAuth(c) {
+func (s *Server) authorizeTraceRequest(ctx context.Context, c *app.RequestContext) (string, bool) {
+	if !s.requireAuth(ctx, c) {
 		return "", false
 	}
 	traceID, ok := traceIDParam(c)
 	if !ok {
 		return "", false
 	}
-	if !s.authorizeTrace(c, traceID) {
+	if !s.authorizeTrace(ctx, c, traceID) {
 		return "", false
 	}
 	return traceID, true

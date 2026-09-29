@@ -30,13 +30,13 @@ type updateProjectRequest struct {
 // admin role before they run.
 
 // handleProjectsList returns all projects with their group names joined.
-func (s *Server) handleProjectsList(_ context.Context, c *app.RequestContext) {
-	ps, err := s.projects.List(context.Background())
+func (s *Server) handleProjectsList(ctx context.Context, c *app.RequestContext) {
+	ps, err := s.projects.List(ctx)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	groups, _ := s.groups.List(context.Background())
+	groups, _ := s.groups.List(ctx)
 	groupName := make(map[string]string, len(groups))
 	for _, g := range groups {
 		groupName[g.ID] = g.Name
@@ -49,12 +49,12 @@ func (s *Server) handleProjectsList(_ context.Context, c *app.RequestContext) {
 }
 
 // handleProjectCreate creates a new project.
-func (s *Server) handleProjectCreate(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleProjectCreate(ctx context.Context, c *app.RequestContext) {
 	var req createProjectRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	p, err := s.projects.Create(context.Background(), req.Name, req.GroupID)
+	p, err := s.projects.Create(ctx, req.Name, req.GroupID)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -63,13 +63,13 @@ func (s *Server) handleProjectCreate(_ context.Context, c *app.RequestContext) {
 }
 
 // handleProjectUpdate assigns (or unassigns when group_id is empty) a project.
-func (s *Server) handleProjectUpdate(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleProjectUpdate(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
 	var req updateProjectRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	p, err := s.projects.Assign(context.Background(), id, req.GroupID)
+	p, err := s.projects.Assign(ctx, id, req.GroupID)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -78,9 +78,9 @@ func (s *Server) handleProjectUpdate(_ context.Context, c *app.RequestContext) {
 }
 
 // handleProjectDelete removes a project.
-func (s *Server) handleProjectDelete(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleProjectDelete(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
-	if err := s.projects.Delete(context.Background(), id); err != nil {
+	if err := s.projects.Delete(ctx, id); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}

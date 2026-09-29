@@ -20,8 +20,8 @@ var (
 
 // cliGuard performs the common pre-checks for CLI endpoints: auth, enabled,
 // and os/arch validation. Returns the parsed os/arch and whether to proceed.
-func (s *Server) cliGuard(c *app.RequestContext) (osName, arch string, ok bool) {
-	if !s.requireAuth(c) {
+func (s *Server) cliGuard(ctx context.Context, c *app.RequestContext) (osName, arch string, ok bool) {
+	if !s.requireAuth(ctx, c) {
 		return "", "", false
 	}
 	if s.cli == nil {
@@ -34,7 +34,7 @@ func (s *Server) cliGuard(c *app.RequestContext) (osName, arch string, ok bool) 
 // handleCLILatest resolves the highest allowed released Dagger CLI version,
 // ensures it is cached, and returns its artifact metadata.
 func (s *Server) handleCLILatest(ctx context.Context, c *app.RequestContext) {
-	osName, arch, ok := s.cliGuard(c)
+	osName, arch, ok := s.cliGuard(ctx, c)
 	if !ok {
 		return
 	}
@@ -51,7 +51,7 @@ func (s *Server) handleCLILatest(ctx context.Context, c *app.RequestContext) {
 // CLIService.Open → EnsureCached, which returns ErrCLIVersionNotAllowed on
 // invalid/disallowed versions.
 func (s *Server) handleCLIDownload(ctx context.Context, c *app.RequestContext) {
-	osName, arch, ok := s.cliGuard(c)
+	osName, arch, ok := s.cliGuard(ctx, c)
 	if !ok {
 		return
 	}
@@ -119,7 +119,7 @@ func (s *Server) writeCLIError(c *app.RequestContext, err error) {
 // the supervisor image. The binary is read from the configured path (default
 // /usr/local/bin/dagger-kubernetes-ci) and served as an octet-stream download.
 func (s *Server) handleCIWrapperDownload(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
+	if !s.requireAuth(ctx, c) {
 		return
 	}
 	osName, arch, ok := s.parseCLIOSArch(c)

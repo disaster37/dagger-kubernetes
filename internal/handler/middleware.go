@@ -16,8 +16,8 @@ const identityKey = "auth_identity"
 // on the context. Credentials are read from the Authorization header first
 // (bearer stays primary for CI), then the access cookie. A missing or
 // unparseable credential results in an unauthenticated error (401).
-func (s *Server) resolveIdentity(c *app.RequestContext) (*domain.Identity, bool) {
-	id, err := s.auth.Resolve(context.Background(), s.bearerFromRequest(c))
+func (s *Server) resolveIdentity(ctx context.Context, c *app.RequestContext) (*domain.Identity, bool) {
+	id, err := s.auth.Resolve(ctx, s.bearerFromRequest(c))
 	if err != nil {
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
 		return nil, false
@@ -39,8 +39,8 @@ func (s *Server) bearerFromRequest(c *app.RequestContext) string {
 // requireAuth resolves the identity and writes 401 on failure. Returns the
 // identity for downstream use. Kept as a bool so existing call sites compile
 // unchanged; handlers that need the identity use identityOf(c).
-func (s *Server) requireAuth(c *app.RequestContext) bool {
-	_, ok := s.resolveIdentity(c)
+func (s *Server) requireAuth(ctx context.Context, c *app.RequestContext) bool {
+	_, ok := s.resolveIdentity(ctx, c)
 	return ok
 }
 
@@ -49,12 +49,12 @@ func (s *Server) requireAuth(c *app.RequestContext) bool {
 // SSE /live route uses this: EventSource clients cannot set headers, and tokens
 // in URLs leak via logs/referrers, so query-param auth is limited to that one
 // route.
-func (s *Server) requireAuthWithQueryFallback(c *app.RequestContext) bool {
+func (s *Server) requireAuthWithQueryFallback(ctx context.Context, c *app.RequestContext) bool {
 	bearer := s.bearerFromRequest(c)
 	if bearer == "" {
 		bearer = c.Query("token")
 	}
-	id, err := s.auth.Resolve(context.Background(), bearer)
+	id, err := s.auth.Resolve(ctx, bearer)
 	if err != nil {
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
 		return false
@@ -65,8 +65,8 @@ func (s *Server) requireAuthWithQueryFallback(c *app.RequestContext) bool {
 
 // requireAdmin resolves the identity and enforces the admin role. Writes 401
 // when unauthenticated, 403 when authenticated but not admin.
-func (s *Server) requireAdmin(c *app.RequestContext) (*domain.Identity, bool) {
-	id, ok := s.resolveIdentity(c)
+func (s *Server) requireAdmin(ctx context.Context, c *app.RequestContext) (*domain.Identity, bool) {
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return nil, false
 	}
@@ -97,7 +97,7 @@ func identityOf(c *app.RequestContext) *domain.Identity {
 //
 // Returns ok; the loaded meta is unused by callers (they re-fetch via the
 // trace repository) so it is not returned.
-func (s *Server) authorizeTrace(c *app.RequestContext, traceID string) bool {
+func (s *Server) authorizeTrace(ctx context.Context, c *app.RequestContext, traceID string) bool {
 	id := identityOf(c)
 	if id == nil {
 		// No identity resolved (should not happen on gated routes); deny.
@@ -105,7 +105,7 @@ func (s *Server) authorizeTrace(c *app.RequestContext, traceID string) bool {
 		return false
 	}
 
-	meta, err := s.traceMeta.Get(context.Background(), traceID)
+	meta, err := s.traceMeta.Get(ctx, traceID)
 	if err != nil {
 		if id.IsAdmin() {
 			// Admins may view unknown traces (e.g. Tempo-only traces).

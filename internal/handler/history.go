@@ -12,7 +12,7 @@ import (
 
 // handleHistoryInfo serves the history stats + GC rules (GET /api/v1/history).
 func (s *Server) handleHistoryInfo(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
+	if !s.requireAuth(ctx, c) {
 		return
 	}
 	if s.historyStats == nil {

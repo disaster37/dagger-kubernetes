@@ -61,7 +61,7 @@ type changePasswordRequest struct {
 
 // handleLogin authenticates a user and issues a JWT pair in httpOnly cookies.
 // Password attempts are rate-limited per username + client IP (CWE-307).
-func (s *Server) handleLogin(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleLogin(ctx context.Context, c *app.RequestContext) {
 	if !s.internalAuthEnabled {
 		writeError(c, consts.StatusNotFound, "internal auth disabled")
 		return
@@ -83,7 +83,7 @@ func (s *Server) handleLogin(_ context.Context, c *app.RequestContext) {
 		return
 	}
 
-	access, refresh, u, err := s.auth.Login(context.Background(), req.Username, req.Password)
+	access, refresh, u, err := s.auth.Login(ctx, req.Username, req.Password)
 	if err != nil {
 		// Only genuine credential failures count toward lockout; internal
 		// errors (DB/JWT) must not lock a user out.
@@ -95,7 +95,7 @@ func (s *Server) handleLogin(_ context.Context, c *app.RequestContext) {
 	}
 	s.limiter.recordSuccess(key)
 	s.setAuthCookies(c, access, refresh)
-	groups, _ := s.groups.GroupsForUser(context.Background(), u.ID)
+	groups, _ := s.groups.GroupsForUser(ctx, u.ID)
 	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
 }
 
@@ -106,7 +106,7 @@ func loginLimitKey(username, clientIP string) string {
 
 // handleRefresh rotates a refresh token (from the refresh cookie first, then
 // the JSON body for backwards compat) into a new pair and sets fresh cookies.
-func (s *Server) handleRefresh(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleRefresh(ctx context.Context, c *app.RequestContext) {
 	refresh := string(c.Cookie(s.cookieCfg.RefreshName))
 	if refresh == "" {
 		var req refreshRequest
@@ -119,7 +119,7 @@ func (s *Server) handleRefresh(_ context.Context, c *app.RequestContext) {
 		writeError(c, consts.StatusBadRequest, "refresh_token is required")
 		return
 	}
-	access, refreshed, err := s.auth.Refresh(context.Background(), refresh)
+	access, refreshed, err := s.auth.Refresh(ctx, refresh)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -135,8 +135,8 @@ func (s *Server) handleLogout(_ context.Context, c *app.RequestContext) {
 }
 
 // handleMe returns the current user's profile + groups.
-func (s *Server) handleMe(_ context.Context, c *app.RequestContext) {
-	id, ok := s.resolveIdentity(c)
+func (s *Server) handleMe(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return
 	}
@@ -146,12 +146,12 @@ func (s *Server) handleMe(_ context.Context, c *app.RequestContext) {
 		c.JSON(consts.StatusOK, syntheticUserResponse())
 		return
 	}
-	u, err := s.users.Get(context.Background(), id.UserID)
+	u, err := s.users.Get(ctx, id.UserID)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	groups, _ := s.groups.GroupsForUser(context.Background(), id.UserID)
+	groups, _ := s.groups.GroupsForUser(ctx, id.UserID)
 	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
 }
 
@@ -193,8 +193,8 @@ func (s *Server) requireOAuthProvider(c *app.RequestContext, provider string) bo
 
 // handleChangePassword verifies the current password and sets a new one.
 // Current-password verification is rate-limited per user + client IP (CWE-307).
-func (s *Server) handleChangePassword(_ context.Context, c *app.RequestContext) {
-	id, ok := s.resolveIdentity(c)
+func (s *Server) handleChangePassword(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return
 	}
@@ -217,7 +217,7 @@ func (s *Server) handleChangePassword(_ context.Context, c *app.RequestContext) 
 		writeError(c, consts.StatusTooManyRequests, "too many failed attempts, try again later")
 		return
 	}
-	if err := s.users.ChangePassword(context.Background(), id.UserID, req.CurrentPassword, req.NewPassword); err != nil {
+	if err := s.users.ChangePassword(ctx, id.UserID, req.CurrentPassword, req.NewPassword); err != nil {
 		if errors.Is(err, domain.ErrInvalidCredential) {
 			s.limiter.recordFailure(key)
 		}
@@ -275,25 +275,25 @@ func (s *Server) startOAuthLogin(c *app.RequestContext) {
 
 // handleOAuthCallback exchanges the GitHub code for tokens, sets the session
 // cookies, and redirects to the SPA.
-func (s *Server) handleOAuthCallback(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleOAuthCallback(ctx context.Context, c *app.RequestContext) {
 	if !s.requireOAuthProvider(c, "github") {
 		return
 	}
-	s.completeOAuthCallback(c)
+	s.completeOAuthCallback(ctx, c)
 }
 
 // handleOAuthOIDCCallback exchanges the OIDC code for tokens, sets the session
 // cookies, and redirects to the SPA.
-func (s *Server) handleOAuthOIDCCallback(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleOAuthOIDCCallback(ctx context.Context, c *app.RequestContext) {
 	if !s.requireOAuthProvider(c, "oidc") {
 		return
 	}
-	s.completeOAuthCallback(c)
+	s.completeOAuthCallback(ctx, c)
 }
 
 // completeOAuthCallback is the shared OAuth callback flow (nonce verification,
 // state validation, code exchange, cookie issuance, query redirect).
-func (s *Server) completeOAuthCallback(c *app.RequestContext) {
+func (s *Server) completeOAuthCallback(ctx context.Context, c *app.RequestContext) {
 	code := c.Query("code")
 	state := c.Query("state")
 
@@ -315,7 +315,7 @@ func (s *Server) completeOAuthCallback(c *app.RequestContext) {
 
 	// Validate the state token, then exchange the code. Any failure lands the
 	// browser back on the login screen with an error hint.
-	access, refresh, _, err := s.oauth.Complete(context.Background(), code)
+	access, refresh, _, err := s.oauth.Complete(ctx, code)
 	if err != nil {
 		if errors.Is(err, domain.ErrForbidden) {
 			redirectOAuthErrorCode(c, "group_required")

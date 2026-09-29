@@ -40,26 +40,26 @@ type setGroupMembersRequest struct {
 // admin role before they run.
 
 // handleGroupsList returns all groups with member counts and live quota usage.
-func (s *Server) handleGroupsList(_ context.Context, c *app.RequestContext) {
-	gs, err := s.groups.List(context.Background())
+func (s *Server) handleGroupsList(ctx context.Context, c *app.RequestContext) {
+	gs, err := s.groups.List(ctx)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
 	rows := make([]groupRow, 0, len(gs))
 	for _, g := range gs {
-		rows = append(rows, s.toGroupRow(context.Background(), g))
+		rows = append(rows, s.toGroupRow(ctx, g))
 	}
 	c.JSON(consts.StatusOK, rows)
 }
 
 // handleGroupCreate creates a new group.
-func (s *Server) handleGroupCreate(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleGroupCreate(ctx context.Context, c *app.RequestContext) {
 	var req createGroupRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	g, err := s.groups.Create(context.Background(), toGroupInput(req))
+	g, err := s.groups.Create(ctx, toGroupInput(req))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -68,35 +68,35 @@ func (s *Server) handleGroupCreate(_ context.Context, c *app.RequestContext) {
 }
 
 // handleGroupGet returns a single group.
-func (s *Server) handleGroupGet(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleGroupGet(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
-	g, err := s.groups.Get(context.Background(), id)
+	g, err := s.groups.Get(ctx, id)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	c.JSON(consts.StatusOK, s.toGroupRow(context.Background(), g))
+	c.JSON(consts.StatusOK, s.toGroupRow(ctx, g))
 }
 
 // handleGroupUpdate modifies a group.
-func (s *Server) handleGroupUpdate(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleGroupUpdate(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
 	var req updateGroupRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	g, err := s.groups.Update(context.Background(), id, toGroupInput(req))
+	g, err := s.groups.Update(ctx, id, toGroupInput(req))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	c.JSON(consts.StatusOK, s.toGroupRow(context.Background(), g))
+	c.JSON(consts.StatusOK, s.toGroupRow(ctx, g))
 }
 
 // handleGroupDelete removes a group.
-func (s *Server) handleGroupDelete(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleGroupDelete(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
-	if err := s.groups.Delete(context.Background(), id); err != nil {
+	if err := s.groups.Delete(ctx, id); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
@@ -104,28 +104,28 @@ func (s *Server) handleGroupDelete(_ context.Context, c *app.RequestContext) {
 }
 
 // handleGroupMembers returns the users in a group.
-func (s *Server) handleGroupMembers(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleGroupMembers(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
-	members, err := s.groups.Members(context.Background(), id)
+	members, err := s.groups.Members(ctx, id)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
 	rows := make([]userRow, 0, len(members))
 	for _, u := range members {
-		rows = append(rows, s.toUserRow(context.Background(), u))
+		rows = append(rows, s.toUserRow(ctx, u))
 	}
 	c.JSON(consts.StatusOK, rows)
 }
 
 // handleGroupSetMembers replaces a group's membership.
-func (s *Server) handleGroupSetMembers(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleGroupSetMembers(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
 	var req setGroupMembersRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	if err := s.groups.SetMembers(context.Background(), id, req.UserIDs); err != nil {
+	if err := s.groups.SetMembers(ctx, id, req.UserIDs); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
