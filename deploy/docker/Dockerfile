@@ -11,7 +11,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -ldflags "-s -w" -o /supervisor ./cmd/api/
 
-FROM alpine:3.20
+FROM alpine:3.21
 
 RUN apk add --no-cache ca-certificates tzdata \
     && update-ca-certificates \
