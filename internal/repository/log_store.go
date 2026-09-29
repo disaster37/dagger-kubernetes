@@ -75,37 +75,22 @@ func (c *LogsClient) QueryTraceLogs(traceID string, start, end time.Time, limit 
 		return nil, fmt.Errorf("loki returned status %d", resp.StatusCode)
 	}
 
-	var result struct {
-		Data struct {
-			Result []struct {
-				Stream map[string]string `json:"stream"`
-				Values [][]string        `json:"values"`
-			} `json:"result"`
-		} `json:"data"`
-	}
-
+	var result lokiResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("loki decode failed: %w", err)
 	}
 
 	var entries []domain.LogEntry
 	for _, stream := range result.Data.Result {
-		// The collector promotes the span ID to a Loki stream label as a hex
-		// string; Tempo exposes span IDs as base64, so normalise here so the
-		// frontend can match logs to spans by string equality.
-		spanID := normalizeSpanID(stream.Stream["span_id"])
 		for _, v := range stream.Values {
-			if len(v) < 2 {
-				continue
-			}
-			ts, err := parseNanos(v[0])
+			ts, err := parseNanos(v.Timestamp)
 			if err != nil {
 				continue
 			}
 			entries = append(entries, domain.LogEntry{
 				Timestamp: ts,
-				Line:      v[1],
-				SpanID:    spanID,
+				Line:      v.Line,
+				SpanID:    spanIDOf(stream.Stream, v),
 			})
 		}
 	}
@@ -270,37 +255,103 @@ func (c *LogsClient) queryRawLogs(ctx context.Context, traceID string, startNano
 		return nil, fmt.Errorf("loki returned status %d", resp.StatusCode)
 	}
 
-	var result struct {
-		Data struct {
-			Result []struct {
-				Stream map[string]string `json:"stream"`
-				Values [][]string        `json:"values"`
-			} `json:"result"`
-		} `json:"data"`
-	}
+	var result lokiResult
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("loki decode failed: %w", err)
 	}
 
 	var entries []domain.LogEntry
 	for _, stream := range result.Data.Result {
-		spanID := normalizeSpanID(stream.Stream["span_id"])
 		for _, v := range stream.Values {
-			if len(v) < 2 {
-				continue
-			}
-			ts, err := parseNanos(v[0])
+			ts, err := parseNanos(v.Timestamp)
 			if err != nil {
 				continue
 			}
 			entries = append(entries, domain.LogEntry{
 				Timestamp: ts,
-				Line:      v[1],
-				SpanID:    spanID,
+				Line:      v.Line,
+				SpanID:    spanIDOf(stream.Stream, v),
 			})
 		}
 	}
 	return entries, nil
+}
+
+// lokiResult mirrors the Loki query_range / query response payload.
+type lokiResult struct {
+	Data struct {
+		Result []lokiStream `json:"result"`
+	} `json:"data"`
+}
+
+type lokiStream struct {
+	Stream map[string]string `json:"stream"`
+	Values []lokiLogValue    `json:"values"`
+}
+
+// lokiLogValue is one Loki entry: [timestamp, line, structuredMetadata?].
+// Loki appends a flat string->string JSON object as a third array element
+// when the entry carries structured metadata (supported for forward
+// compatibility; current deployments embed the span id in the line instead).
+type lokiLogValue struct {
+	Timestamp string
+	Line      string
+	Metadata  map[string]string
+}
+
+func (v *lokiLogValue) UnmarshalJSON(data []byte) error {
+	var raw []json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+	if len(raw) >= 1 {
+		if err := json.Unmarshal(raw[0], &v.Timestamp); err != nil {
+			return err
+		}
+	}
+	if len(raw) >= 2 {
+		if err := json.Unmarshal(raw[1], &v.Line); err != nil {
+			return err
+		}
+	}
+	if len(raw) >= 3 {
+		if err := json.Unmarshal(raw[2], &v.Metadata); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// spanIDOf returns the span ID for one log entry. The collector no longer
+// promotes span_id to a Loki stream label (one active stream per span tripped
+// Loki's max_active_streams_per_user limit and dropped every log line), so the
+// span ID is recovered from the JSON log line the exporter writes — the
+// lokiexporter's json format embeds the record's span id under "spanid".
+// Structured metadata and the legacy stream label are honoured first for
+// deployments that still send them. The collector sends span IDs as hex
+// strings while Tempo exposes them as base64, so the value is normalised so
+// the frontend can match logs to spans by string equality.
+func spanIDOf(stream map[string]string, entry lokiLogValue) string {
+	if id := entry.Metadata["span_id"]; id != "" {
+		return normalizeSpanID(id)
+	}
+	if id := stream["span_id"]; id != "" {
+		return normalizeSpanID(id)
+	}
+	return normalizeSpanID(spanIDFromLine(entry.Line))
+}
+
+// spanIDFromLine extracts the record-level span id embedded in a lokiexporter
+// JSON log line ("spanid"). Returns "" when the line is not JSON or has no
+// span id.
+func spanIDFromLine(line string) string {
+	var rec struct {
+		SpanID string `json:"spanid"`
+	}
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		return ""
+	}
+	return rec.SpanID
 }
 
 // matchLogLine reports whether line matches query under mode. re is precompiled

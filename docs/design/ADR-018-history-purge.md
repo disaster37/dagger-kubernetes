@@ -79,8 +79,11 @@ Ordering is enforced in `HistoryPurgeService` (new `internal/service/history_pur
   series** matching `match[]` (no time range); space is reclaimed lazily. If
   `-deleteAuthKey` is set on the VM deployment, the delete request must include
   that key (out of scope for v1; documented as a prerequisite). The
-  OpenTelemetry collector's `transform/logs` processor promotes
-  `trace_id`/`span_id` to **log** labels only; the metrics pipeline
+  OpenTelemetry collector's `transform/logs` processor promotes `trace_id` to
+  a **log** stream label only; `span_id` stays out of the labels (one active
+  stream per span trips Loki's `max_active_streams_per_user` limit and drops
+  every log line) and the supervisor recovers it from the JSON log line. The
+  metrics pipeline
   (`otlp → batch → prometheusremotewrite`) has no such transform, and the
   metrics currently emitted (BuildKit cache hit/miss counters, engine metrics)
   are aggregate with no trace association. `{trace_id="..."}` metric deletion

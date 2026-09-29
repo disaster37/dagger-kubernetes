@@ -756,6 +756,14 @@ func TestQueryTraceLogsParsesSpanID(t *testing.T) {
 					{
 						"stream": {"trace_id": "` + traceID + `"},
 						"values": [["1700000000000000001", "unmatched line"]]
+					},
+					{
+						"stream": {"trace_id": "` + traceID + `", "span_id": "stale-label"},
+						"values": [["1700000000000000002", "structured line", {"span_id": "aa38207ca76b8091"}]]
+					},
+					{
+						"stream": {"trace_id": "` + traceID + `"},
+						"values": [["1700000000000000003", "{\"body\":\"line json\",\"spanid\":\"aa38207ca76b8091\"}"]]
 					}
 				]
 			}
@@ -768,14 +776,104 @@ func TestQueryTraceLogsParsesSpanID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("QueryTraceLogs: %v", err)
 	}
-	if len(entries) != 2 {
-		t.Fatalf("expected 2 entries, got %d", len(entries))
+	if len(entries) != 4 {
+		t.Fatalf("expected 4 entries, got %d", len(entries))
 	}
 	if entries[0].SpanID != "GTZMI47B92A=" {
 		t.Fatalf("entry[0] span_id = %q, want GTZMI47B92A=", entries[0].SpanID)
 	}
 	if entries[1].SpanID != "" {
 		t.Fatalf("entry[1] span_id = %q, want empty", entries[1].SpanID)
+	}
+	if entries[2].SpanID != "qjggfKdrgJE=" {
+		t.Fatalf("entry[2] span_id = %q, want structured metadata (normalised to qjggfKdrgJE=)", entries[2].SpanID)
+	}
+	if entries[3].SpanID != "qjggfKdrgJE=" {
+		t.Fatalf("entry[3] span_id = %q, want line json spanid (normalised to qjggfKdrgJE=)", entries[3].SpanID)
+	}
+}
+
+func TestLokiLogValueUnmarshal(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		ts   string
+		line string
+		meta map[string]string
+		bad  bool
+	}{
+		{"two elements", `["1","line"]`, "1", "line", nil, false},
+		{"three elements", `["1","line",{"span_id":"abc"}]`, "1", "line", map[string]string{"span_id": "abc"}, false},
+		{"one element", `["1"]`, "1", "", nil, false},
+		{"empty array", `[]`, "", "", nil, false},
+		{"not an array", `"nope"`, "", "", nil, true},
+		{"bad third element", `["1","line",7]`, "", "", nil, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var v lokiLogValue
+			err := v.UnmarshalJSON([]byte(tc.json))
+			if tc.bad {
+				if err == nil {
+					t.Fatalf("expected error for %s", tc.json)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if v.Timestamp != tc.ts || v.Line != tc.line {
+				t.Fatalf("got ts=%q line=%q, want ts=%q line=%q", v.Timestamp, v.Line, tc.ts, tc.line)
+			}
+			if len(v.Metadata) != len(tc.meta) {
+				t.Fatalf("metadata = %v, want %v", v.Metadata, tc.meta)
+			}
+		})
+	}
+}
+
+func TestSpanIDOf(t *testing.T) {
+	meta := lokiLogValue{Metadata: map[string]string{"span_id": "19364c238ec1f760"}}
+	if got := spanIDOf(map[string]string{"span_id": "stale"}, meta); got != "GTZMI47B92A=" {
+		t.Fatalf("metadata should win: %q", got)
+	}
+	meta = lokiLogValue{Metadata: map[string]string{"span_id": ""}}
+	if got := spanIDOf(map[string]string{"span_id": "19364c238ec1f760"}, meta); got != "GTZMI47B92A=" {
+		t.Fatalf("label fallback: %q", got)
+	}
+	meta = lokiLogValue{Line: `{"body":"x","spanid":"19364c238ec1f760"}`}
+	if got := spanIDOf(map[string]string{"span_id": "abc"}, meta); got != "abc" {
+		t.Fatalf("label should win over line: %q", got)
+	}
+	if got := spanIDOf(map[string]string{}, meta); got != "GTZMI47B92A=" {
+		t.Fatalf("line json fallback: %q", got)
+	}
+	meta = lokiLogValue{Line: "plain text line"}
+	if got := spanIDOf(map[string]string{}, meta); got != "" {
+		t.Fatalf("non-json line: %q", got)
+	}
+	if got := spanIDOf(map[string]string{}, lokiLogValue{}); got != "" {
+		t.Fatalf("empty: %q", got)
+	}
+}
+
+func TestSpanIDFromLine(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+		want string
+	}{
+		{"json with spanid", `{"body":"x","spanid":"aa38207ca76b8091"}`, "aa38207ca76b8091"},
+		{"json without spanid", `{"body":"x"}`, ""},
+		{"not json", "plain line", ""},
+		{"empty", "", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := spanIDFromLine(tc.line); got != tc.want {
+				t.Fatalf("spanIDFromLine(%q) = %q, want %q", tc.line, got, tc.want)
+			}
+		})
 	}
 }
 
