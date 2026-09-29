@@ -524,10 +524,16 @@ docker run -p 8080:8080 -p 8443:8443 \
   dagger-kubernetes/supervisor:latest
 ```
 
-Health endpoints (control port):
+Health + metrics endpoints (control port). All four are **unauthenticated by
+design** (SEC-012/013) so kubelet probes and Prometheus can reach them without
+credentials:
 
-- `GET /healthz` — liveness
-- `GET /readyz`  — readiness
+- `GET /healthz`  — liveness
+- `GET /readyz`   — readiness
+- `GET /startup`  — startup probe
+- `GET /metrics`  — Prometheus exposition; carry no user data but do expose
+  deployment telemetry, so keep the control port restricted to probes, the
+  scraper, and the ingress (see [Security notes](#security-notes))
 
 ---
 
@@ -1634,8 +1640,18 @@ subcommand remain (they import flat-file tokens, not SQLite data):
   `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`
   (clickjacking), and `Referrer-Policy: no-referrer` (keeps the SSE
   `?token=` param out of Referer headers).
-- Refresh-token revocation is stateless today; password change does not
-  invalidate existing JWTs until expiry (access TTL is 15m).
+- `GET /healthz`, `GET /readyz`, `GET /startup` and `GET /metrics` on the
+  control port are **unauthenticated by design** (CWE-306, SEC-012/013):
+  kubelet probes and Prometheus scrape them without credentials, and they are
+  intentionally excluded from auth middleware. They return no user data, but
+  `/metrics` exposes deployment telemetry — enforce reachability at the
+  network edge instead of with application auth: a Kubernetes NetworkPolicy,
+  a firewall rule, or an Ingress that only forwards the probe paths to the
+  kubelet-equivalent health checks and `/metrics` to the monitoring stack.
+- Session JWTs are revoked server-side via `token_version` (ADR-045, see
+  [Session revocation](#session-revocation-token_version-adr-045)): logout and
+  password changes invalidate every outstanding JWT immediately — revocation
+  no longer waits for the access TTL to expire.
 - Trace backfill of group metadata after project reassignment is intentional
   (set-once).
 - `?token=` query-param auth (D14) is limited to the SSE `/live` endpoint
