@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	crand "crypto/rand"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"math/rand"
@@ -359,6 +361,19 @@ func (r *OAuthRevalidator) revoke(_ context.Context, u *domain.User) {
 	}).Warn("oauth: membership revalidation revoked access")
 }
 
+// jitterRng is the PRNG for cache-TTL jitter, seeded from crypto/rand so the
+// jitter is unpredictable (CWE-330). math/rand is fine for jitter (no
+// cryptographic property required), but the deterministic default seed is not.
+var jitterRng = func() *rand.Rand {
+	var seed int64
+	_ = binary.Read(crand.Reader, binary.BigEndian, &seed)
+	return rand.New(rand.NewSource(seed)) //nolint:gosec // G404: seeded from crypto/rand; jitter needs no cryptographic RNG.
+}()
+
+// jitterRngMu guards jitterRng: math/rand.Rand is not safe for concurrent use
+// and jitteredTTL runs from concurrent per-entry refresh goroutines.
+var jitterRngMu sync.Mutex
+
 // jitteredTTL returns the cache TTL for state, with ±10% jitter to prevent
 // thundering herd on refresh. For the unavailable state the retry window is
 // min(interval, grace) so we re-check sooner while degraded (but never faster
@@ -368,5 +383,8 @@ func jitteredTTL(state revalidationState, interval, grace time.Duration) time.Du
 	if state == stateUnavailable && grace > 0 && grace < base {
 		base = grace
 	}
-	return time.Duration(float64(base) * (0.9 + rand.Float64()*0.2)) //nolint:gosec // G404: cache jitter needs no cryptographic randomness.
+	jitterRngMu.Lock()
+	f := jitterRng.Float64()
+	jitterRngMu.Unlock()
+	return time.Duration(float64(base) * (0.9 + f*0.2)) //nolint:gosec // G404: cache jitter needs no cryptographic randomness.
 }

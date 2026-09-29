@@ -384,12 +384,34 @@ func TestJitteredTTLStateExpiredUsesFullInterval(t *testing.T) {
 			interval: 5 * time.Minute, grace: time.Minute,
 			wantMin: 54 * time.Second, wantMax: 66 * time.Second,
 		},
+		{
+			name:     "stateUnavailable keeps interval when grace is zero",
+			state:    stateUnavailable,
+			interval: 5 * time.Minute, grace: 0,
+			wantMin: 4*time.Minute + 30*time.Second, wantMax: 5*time.Minute + 30*time.Second,
+		},
+		{
+			name:     "stateOK jitters full interval ±10%",
+			state:    stateOK,
+			interval: 2 * time.Minute, grace: time.Minute,
+			wantMin: 108 * time.Second, wantMax: 132 * time.Second,
+		},
+		{
+			name:     "stateRevoked jitters full interval ±10%",
+			state:    stateRevoked,
+			interval: 2 * time.Minute, grace: time.Minute,
+			wantMin: 108 * time.Second, wantMax: 132 * time.Second,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := jitteredTTL(tt.state, tt.interval, tt.grace)
-			if got < tt.wantMin || got > tt.wantMax {
-				t.Fatalf("jitteredTTL(%v) = %v, want within [%v, %v]", tt.state, got, tt.wantMin, tt.wantMax)
+			// Sample repeatedly: exercises the shared crypto-seeded RNG
+			// (concurrency-unsafe without its mutex) across all states.
+			for i := 0; i < 64; i++ {
+				got := jitteredTTL(tt.state, tt.interval, tt.grace)
+				if got < tt.wantMin || got > tt.wantMax {
+					t.Fatalf("jitteredTTL(%v) = %v, want within [%v, %v]", tt.state, got, tt.wantMin, tt.wantMax)
+				}
 			}
 		})
 	}
