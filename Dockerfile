@@ -30,7 +30,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     go build -trimpath -ldflags "-s -w" -o /out/dagger-kubernetes-ci ./cmd/ci/
 
 # ---------- Runtime ----------
-FROM alpine:3.20
+FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata \
     && update-ca-certificates \
     && addgroup -S dagger && adduser -S -G dagger -u 10001 dagger

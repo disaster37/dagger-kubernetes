@@ -318,8 +318,9 @@ func TestProvisionCLILatest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stat dagger: %v", err)
 	}
-	if st.Mode()&0o111 == 0 {
-		t.Fatal("dagger not executable")
+	// SEC-011: owner+group executable only — never world-executable.
+	if st.Mode().Perm() != 0o750 {
+		t.Fatalf("dagger mode = %04o, want 0750", st.Mode().Perm())
 	}
 	got, err := os.ReadFile(bin)
 	if err != nil {
@@ -490,16 +491,16 @@ type stubSnapshotSource struct {
 	lastStart time.Time
 }
 
-func (s *stubSnapshotSource) GetTrace(string) (*domain.TraceInfo, error) {
+func (s *stubSnapshotSource) GetTrace(_ context.Context, _ string) (*domain.TraceInfo, error) {
 	return s.trace, s.traceErr
 }
 
-func (s *stubSnapshotSource) QueryTraceLogs(_ string, start, _ time.Time, _ int) ([]domain.LogEntry, error) {
+func (s *stubSnapshotSource) QueryTraceLogs(_ context.Context, _ string, start, _ time.Time, _ int) ([]domain.LogEntry, error) {
 	s.lastStart = start
 	return s.logs, s.logsErr
 }
 
-func (s *stubSnapshotSource) ListTraces(_ int) ([]domain.TraceListResult, error) {
+func (s *stubSnapshotSource) ListTraces(_ context.Context, _ int) ([]domain.TraceListResult, error) {
 	return nil, nil
 }
 
@@ -545,7 +546,7 @@ func TestPollTraceOnceEmitsEvents(t *testing.T) {
 	b := service.NewStepEventBuilder(0)
 	sink := &collectSink{}
 
-	if err := pollTraceOnce(src, b, sink, testTraceID, time.Time{}); err != nil {
+	if err := pollTraceOnce(context.Background(), src, b, sink, testTraceID, time.Time{}); err != nil {
 		t.Fatalf("pollTraceOnce: %v", err)
 	}
 	if len(sink.events) == 0 {
@@ -569,7 +570,7 @@ func TestPollTraceOnceGetTraceError(t *testing.T) {
 	b := service.NewStepEventBuilder(0)
 	sink := &collectSink{}
 
-	err := pollTraceOnce(src, b, sink, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, sink, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "get trace") {
 		t.Fatalf("err = %q, want get-trace error", err)
 	}
@@ -583,7 +584,7 @@ func TestPollTraceOnceLogsError(t *testing.T) {
 	b := service.NewStepEventBuilder(0)
 	sink := &collectSink{}
 
-	err := pollTraceOnce(src, b, sink, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, sink, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "query logs") {
 		t.Fatalf("err = %q, want query-logs error", err)
 	}
@@ -630,7 +631,7 @@ func TestPollTraceOnceNilTraceError(t *testing.T) {
 	src := &stubSnapshotSource{trace: nil}
 	b := service.NewStepEventBuilder(0)
 
-	err := pollTraceOnce(src, b, &collectSink{}, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, &collectSink{}, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "advance step snapshot") {
 		t.Fatalf("err = %q, want advance error", err)
 	}
@@ -641,7 +642,7 @@ func TestPollTraceOnceEmitError(t *testing.T) {
 	src := &stubSnapshotSource{trace: &domain.TraceInfo{TraceID: testTraceID, RootSpan: root, Status: "success"}}
 	b := service.NewStepEventBuilder(0)
 
-	err := pollTraceOnce(src, b, errSink{}, testTraceID, time.Time{})
+	err := pollTraceOnce(context.Background(), src, b, errSink{}, testTraceID, time.Time{})
 	if err == nil || !strings.Contains(err.Error(), "emit step event") {
 		t.Fatalf("err = %q, want emit error", err)
 	}
@@ -1199,5 +1200,47 @@ func TestFileExistsRegularOnly(t *testing.T) {
 				t.Fatalf("fileExists(%q) = %v, want %v", tt.path, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestPollSummaryCancelledContextReturnsImmediately covers SEC-010: a
+// cancelled root context stops the summary poll at once instead of sleeping
+// out the remaining 2s iterations.
+func TestPollSummaryCancelledContextReturnsImmediately(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pollSummary(ctx, "http://127.0.0.1:1/trace")
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pollSummary did not return after context cancel")
+	}
+}
+
+// TestPollSummaryStopsOnTerminalStatus: the poll returns once the trace
+// reaches a terminal status (non-cancel path).
+func TestPollSummaryStopsOnTerminalStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"status": "success"}`))
+	}))
+	defer srv.Close()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		pollSummary(context.Background(), srv.URL)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("pollSummary did not return after terminal status")
 	}
 }

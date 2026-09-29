@@ -149,7 +149,9 @@ func (s *UserService) Delete(ctx context.Context, id string) error {
 	return nil
 }
 
-// ResetPassword sets a new password for a user (admin-set; no current pw check).
+// ResetPassword sets a new password for a user (admin-set; no current pw
+// check). The password change also bumps token_version (in the same persisted
+// update as the new hash) so every outstanding JWT is revoked (ADR-045).
 func (s *UserService) ResetPassword(ctx context.Context, id, newPassword string) error {
 	if err := validatePassword(newPassword); err != nil {
 		return err
@@ -158,10 +160,14 @@ func (s *UserService) ResetPassword(ctx context.Context, id, newPassword string)
 	if err != nil {
 		return err
 	}
+	u.TokenVersion++
 	return s.setPassword(ctx, u, newPassword)
 }
 
-// ChangePassword verifies the current password before setting a new one.
+// ChangePassword verifies the current password before setting a new one. The
+// password change also bumps token_version (in the same persisted update as
+// the new hash) so every outstanding JWT is revoked (ADR-045). A failed bump
+// fails the whole change (the new password is never persisted without it).
 func (s *UserService) ChangePassword(ctx context.Context, id, current, newPassword string) error {
 	if err := validatePassword(newPassword); err != nil {
 		return err
@@ -173,7 +179,20 @@ func (s *UserService) ChangePassword(ctx context.Context, id, current, newPasswo
 	if u.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(current)) != nil {
 		return domain.ErrInvalidCredential
 	}
+	u.TokenVersion++
 	return s.setPassword(ctx, u, newPassword)
+}
+
+// IncrementTokenVersion bumps the user's token_version, revoking every JWT
+// issued before the bump (logout; ADR-045). API tokens (dct_) are unaffected —
+// they carry their own revocation.
+func (s *UserService) IncrementTokenVersion(ctx context.Context, id string) error {
+	u, err := s.users.Get(ctx, id)
+	if err != nil {
+		return fmt.Errorf("load user for token version bump: %w", err)
+	}
+	u.TokenVersion++
+	return s.users.Update(ctx, u)
 }
 
 // setPassword hashes newPassword and persists it on u.

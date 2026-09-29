@@ -65,6 +65,13 @@ type User struct {
 	// resolution and refresh reject deactivated users cluster-wide.
 	DeactivatedAt *time.Time `json:"deactivated_at,omitempty"`
 
+	// TokenVersion is the server-side JWT revocation counter (ADR-045).
+	// Every issued JWT carries the value at issue time; logout and password
+	// changes increment it, and identity resolution rejects tokens whose
+	// claim no longer matches. Pre-upgrade records lack the JSON key and
+	// decode to 0, matching the 0 carried by legacy tokens.
+	TokenVersion int `json:"token_version"`
+
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

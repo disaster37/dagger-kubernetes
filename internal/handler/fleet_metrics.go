@@ -15,7 +15,7 @@ import (
 // metrics-backend failure) yields an empty-but-valid payload (HTTP 200),
 // matching the tolerant trace-metrics endpoint.
 func (s *Server) handleFleetMetrics(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
+	if !s.requireAuth(ctx, c) {
 		return
 	}
 	version := c.Param("version")

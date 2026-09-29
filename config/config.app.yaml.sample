@@ -45,7 +45,8 @@ auth:
   # Bootstrap admin: created on first boot when the users table is empty.
   bootstrap_admin:
     username: "admin"                               # created on first boot when no users exist.
-    password: ""                                    # empty = random password logged once at first boot.
+    password: ""                                    # empty = random password generated once at first boot and written 0600 to password_file (never logged).
+    password_file: ""                               # where the generated password is written (0600); empty = <database.dir>/bootstrap-admin-password.
 
   # JWT (HS256) issuance for username/password and OAuth login.
   jwt:
@@ -66,7 +67,7 @@ auth:
   oauth:
     enabled: false
     provider: "github"                 # "github" | "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
-    client_id: "${OAUTH_CLIENT_ID}"    # set via env, do not commit secrets.
+    client_id: ""                      # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_ID), do not commit secrets.
     client_secret: ""                   # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET) or the Helm <release>-oauth Secret — never this file.
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"  # backend endpoint (302s to SPA with session cookies). Use /oidc/callback for provider: oidc.
     allowed_orgs: []                   # github: org membership allowlist; oidc: deprecated alias for allowed_groups; empty = allow all.

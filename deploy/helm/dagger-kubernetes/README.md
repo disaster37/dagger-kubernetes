@@ -678,6 +678,7 @@ subchart values.
 | `supervisor.image.pullPolicy` | string | `IfNotPresent` | Image pull policy. |
 | `supervisor.image.pullSecrets` | array | `[]` | Image pull secrets for private registries. |
 | `supervisor.replicaCount` | int | `3` | Number of supervisor pods. Single source of truth for the Raft cluster size: each supervisor pod is one Raft voter, so the voter count is derived from this value (never asked separately). Use an odd number >= 3 for quorum fault tolerance (a 2-node cluster has no failure tolerance). |
+| `supervisor.probes.scheme` | string | `HTTPS` | Scheme for the startup/readiness/liveness probes (HTTP or HTTPS). The control plane serves HTTPS: the dataplane keypair is fail-closed-mandatory and reused for the control plane, so probes must reach it over TLS. The knob exists for a future plain-HTTP control plane. |
 | `supervisor.resources.requests.cpu` | string | `250m` | Supervisor CPU request. |
 | `supervisor.resources.requests.memory` | string | `256Mi` | Supervisor memory request. |
 | `supervisor.resources.limits.cpu` | string | `1000m` | Supervisor CPU limit. |

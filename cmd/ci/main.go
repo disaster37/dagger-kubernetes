@@ -10,10 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"os/signal"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -93,6 +95,11 @@ func ciFlags() []cli.Flag {
 }
 
 func run(c *cli.Context) error {
+	// SIGINT/SIGTERM cancel the root context: the in-flight dagger command
+	// (exec.CommandContext) and every derived poller stop promptly.
+	rootCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+
 	cfg, err := config.LoadForCIWrapper(c.String("config"))
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
@@ -154,10 +161,10 @@ func run(c *cli.Context) error {
 	if timeout < 0 {
 		return fmt.Errorf("--timeout must be >= 0")
 	}
-	var cmdCtx = context.Background()
+	var cmdCtx = rootCtx
 	var cmdCancel context.CancelFunc = func() {}
 	if timeout > 0 {
-		cmdCtx, cmdCancel = context.WithTimeout(context.Background(), timeout)
+		cmdCtx, cmdCancel = context.WithTimeout(rootCtx, timeout)
 	}
 	defer cmdCancel()
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
@@ -173,7 +180,7 @@ func run(c *cli.Context) error {
 	}
 
 	if c.Bool("cli") {
-		binDir, cleanup, err := provisionCLI(context.Background(), serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
+		binDir, cleanup, err := provisionCLI(rootCtx, serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
 		if err != nil {
 			return fmt.Errorf("provision dagger cli: %w", err)
 		}
@@ -210,7 +217,7 @@ func run(c *cli.Context) error {
 	fmt.Fprintf(os.Stderr, "[dagger-kubernetes-ci] server=%s token=%t steps=%t version=%s timeout=%s\n",
 		serverURL, token != "", steps, version, timeoutDisplay)
 
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(rootCtx)
 	stepsCancel = cancel
 	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout)
 
@@ -252,7 +259,7 @@ func run(c *cli.Context) error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				traces, err := stepsSrc.ListTraces(1)
+				traces, err := stepsSrc.ListTraces(ctx, 1)
 				if err != nil {
 					logger.WithError(err).Debug("trace discovery poll failed")
 					continue
@@ -298,7 +305,9 @@ func run(c *cli.Context) error {
 		id := discoveredID
 		discoveredMu.Unlock()
 		if id != "" {
-			if perr := pollTraceOnce(stepsSrc, stepsBuilder, stepsSink, id, stepsBuilder.LogMark()); perr != nil {
+			// No request context applies here (the discovery ctx is already
+			// cancelled); bounded by the client's HTTP timeout.
+			if perr := pollTraceOnce(context.Background(), stepsSrc, stepsBuilder, stepsSink, id, stepsBuilder.LogMark()); perr != nil {
 				logger.WithError(perr).WithField("trace_id", id).Debug("final ci step flush failed")
 			}
 		}
@@ -352,7 +361,7 @@ func run(c *cli.Context) error {
 			if !steps {
 				switch ciMode {
 				case "gha":
-					emitGHAAnnotations(traceURL, traceID)
+					emitGHAAnnotations(rootCtx, traceURL, traceID)
 				case "jenkins":
 					emitJenkinsStages(traceURL, traceID)
 				case "drone":
@@ -398,7 +407,7 @@ func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 		if ctx.Err() != nil {
 			return
 		}
-		if err := pollTraceOnce(src, builder, sink, traceID, builder.LogMark()); err != nil {
+		if err := pollTraceOnce(ctx, src, builder, sink, traceID, builder.LogMark()); err != nil {
 			logger.WithError(err).WithField("trace_id", traceID).Warn("ci step poll failed")
 		}
 	}
@@ -416,13 +425,13 @@ func streamSteps(ctx context.Context, src domain.TraceSnapshotSource,
 
 // pollTraceOnce performs a single snapshot poll and emits any new events.
 // Extracted for unit testing and the final-flush path.
-func pollTraceOnce(src domain.TraceSnapshotSource, builder *service.StepEventBuilder,
+func pollTraceOnce(ctx context.Context, src domain.TraceSnapshotSource, builder *service.StepEventBuilder,
 	sink domain.CIEventSink, traceID string, logFrom time.Time) error {
-	trace, err := src.GetTrace(traceID)
+	trace, err := src.GetTrace(ctx, traceID)
 	if err != nil {
 		return fmt.Errorf("get trace: %w", err)
 	}
-	logs, err := src.QueryTraceLogs(traceID, logFrom, time.Now(), ciLogQueryLimit)
+	logs, err := src.QueryTraceLogs(ctx, traceID, logFrom, time.Now(), ciLogQueryLimit)
 	if err != nil {
 		return fmt.Errorf("query logs: %w", err)
 	}
@@ -501,7 +510,7 @@ func newCIEventSink(w io.Writer, format string) domain.CIEventSink {
 	return service.NewNDJSONEventSink(w)
 }
 
-func emitGHAAnnotations(traceURL, traceID string) {
+func emitGHAAnnotations(ctx context.Context, traceURL, traceID string) {
 	fmt.Printf("::notice title=Dagger Pipeline::Pipeline View: %s\n", traceURL)
 
 	summaryFile := os.Getenv("GITHUB_STEP_SUMMARY")
@@ -518,7 +527,7 @@ func emitGHAAnnotations(traceURL, traceID string) {
 	}
 
 	if os.Getenv("GITHUB_REPOSITORY") != "" {
-		pollSummary(traceURL)
+		pollSummary(ctx, traceURL)
 	}
 }
 
@@ -532,10 +541,18 @@ func emitDroneAnnotations(traceURL string) {
 	fmt.Printf("[dagger-kubernetes] Pipeline View: %s\n", traceURL)
 }
 
-func pollSummary(traceURL string) {
+// pollSummary polls the supervisor until the trace reaches a terminal status
+// (so the GHA job summary carries the final state). Bounded by ctx (SEC-010):
+// wrapper shutdown cancels the root context and the poll returns immediately
+// instead of sleeping out the remaining iterations.
+func pollSummary(ctx context.Context, traceURL string) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	for i := 0; i < 30; i++ {
-		time.Sleep(2 * time.Second)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(2 * time.Second):
+		}
 		if traceFinished(client, traceURL) {
 			return
 		}
@@ -663,8 +680,8 @@ func extractDagger(r io.Reader, binDir string) error {
 		}
 
 		dst := filepath.Join(binDir, "dagger")
-		// #nosec G304 G302 -- dst is a fixed "dagger" basename under the caller-owned binDir; 0755 is required for the executable.
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o755)
+		// #nosec G304 G302 -- dst is a fixed "dagger" basename under the caller-owned binDir; 0750 limits execution to the wrapper's own user+group (CWE-732).
+		f, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o750)
 		if err != nil {
 			return fmt.Errorf("create dagger binary: %w", err)
 		}

@@ -22,8 +22,8 @@ const (
 
 // handleTracesSearch serves a subtree-scoped, text-filtered, paginated log
 // search for a trace. Gated by authorizeTraceRequest (owner/member/admin).
-func (s *Server) handleTracesSearch(_ context.Context, c *app.RequestContext) {
-	traceID, ok := s.authorizeTraceRequest(c)
+func (s *Server) handleTracesSearch(ctx context.Context, c *app.RequestContext) {
+	traceID, ok := s.authorizeTraceRequest(ctx, c)
 	if !ok {
 		return
 	}
@@ -60,7 +60,7 @@ func (s *Server) handleTracesSearch(_ context.Context, c *app.RequestContext) {
 	}
 
 	start, end := searchWindow(c)
-	page, err := s.logs.SearchTraceLogs(context.Background(), traceID, domain.LogSearchRequest{
+	page, err := s.logs.SearchTraceLogs(ctx, traceID, domain.LogSearchRequest{
 		SpanIDs:       spanIDs,
 		Query:         c.Query("q"),
 		Mode:          mode,

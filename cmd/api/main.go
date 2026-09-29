@@ -687,7 +687,10 @@ func loadOrCreateMetaSecret(ctx context.Context, ms *repository.MetaStore, metaK
 
 // bootstrapAdmin creates the first admin user when the users table is empty.
 // When no password is configured, a random 16-byte hex password is generated
-// and logged once at WARN (the only place a credential is ever logged).
+// and written (0600) to auth.bootstrap_admin.password_file BEFORE the user is
+// created, so a usable recovery copy exists before the credential does. The
+// WARN log records only the file path — never the password (CWE-532). An
+// unwritable file aborts startup instead of creating an unrecoverable account.
 func bootstrapAdmin(ctx context.Context, cfg *domain.Config, users *service.UserService, logger *logrus.Logger) error {
 	count, err := users.Count(ctx)
 	if err != nil {
@@ -703,6 +706,7 @@ func bootstrapAdmin(ctx context.Context, cfg *domain.Config, users *service.User
 	}
 	password := cfg.Auth.BootstrapAdmin.Password
 	generated := false
+	passwordFile := ""
 	if password == "" {
 		b := make([]byte, 16)
 		if _, err := rand.Read(b); err != nil {
@@ -710,9 +714,21 @@ func bootstrapAdmin(ctx context.Context, cfg *domain.Config, users *service.User
 		}
 		password = hex.EncodeToString(b)
 		generated = true
+		passwordFile = bootstrapPasswordPath(cfg)
+		if err := writeBootstrapPasswordFile(passwordFile, password); err != nil {
+			return err
+		}
 	}
 
 	if _, err := users.Create(ctx, username, password, domain.RoleAdmin); err != nil {
+		// This node never created the user: its generated password (and the
+		// file just written) is not the one in effect — drop the stale copy
+		// so only the creator pod holds a recovery file.
+		if generated {
+			if rmErr := os.Remove(passwordFile); rmErr != nil && !errors.Is(rmErr, os.ErrNotExist) {
+				logger.WithError(rmErr).WithField("path", passwordFile).Debug("stale bootstrap password file removal failed")
+			}
+		}
 		if errors.Is(err, domain.ErrNotLeader) {
 			logger.Warn("bootstrap admin: not raft leader, skipping")
 			return nil
@@ -725,12 +741,40 @@ func bootstrapAdmin(ctx context.Context, cfg *domain.Config, users *service.User
 		"generated": generated,
 	}
 	if generated {
-		// The generated password is unrecoverable; log it exactly once so the
-		// operator can log in and rotate it (the only place a credential is
-		// ever logged). Configured passwords are never logged.
-		fields["password"] = password
+		// The password itself is never logged; point the operator at the
+		// 0600 recovery file instead (CWE-532). Configured passwords are
+		// neither generated nor written anywhere.
+		fields["password_file"] = passwordFile
 	}
 	logger.WithFields(fields).Warn("bootstrap admin created")
+	return nil
+}
+
+// bootstrapPasswordPath returns the recovery file for a generated bootstrap
+// password: auth.bootstrap_admin.password_file, defaulting to
+// <database.dir>/bootstrap-admin-password.
+func bootstrapPasswordPath(cfg *domain.Config) string {
+	if cfg.Auth.BootstrapAdmin.PasswordFile != "" {
+		return cfg.Auth.BootstrapAdmin.PasswordFile
+	}
+	return filepath.Join(cfg.Database.Dir, "bootstrap-admin-password")
+}
+
+// writeBootstrapPasswordFile persists the generated password with 0600
+// permissions (created parents get 0750). The explicit chmod also tightens a
+// pre-existing file at the same path.
+func writeBootstrapPasswordFile(path, password string) error {
+	if dir := filepath.Dir(path); dir != "" {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			return fmt.Errorf("create bootstrap password dir: %w", err)
+		}
+	}
+	if err := os.WriteFile(path, []byte(fmt.Sprintf("%s\n", password)), 0o600); err != nil {
+		return fmt.Errorf("write bootstrap password file: %w", err)
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("chmod bootstrap password file: %w", err)
+	}
 	return nil
 }
 

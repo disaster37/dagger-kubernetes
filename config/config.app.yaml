@@ -23,7 +23,8 @@ auth:
     tokens_file: "/etc/dagger-kubernetes/tokens"   # DEPRECATED legacy fallback; migrate with `supervisor migrate-tokens` then remove.
   bootstrap_admin:
     username: "admin"                         # created on first boot when no users exist.
-    password: ""                               # empty = random password logged once at first boot.
+    password: ""                               # empty = random password generated once at first boot and written 0600 to password_file (never logged).
+    password_file: ""                          # where the generated password is written (0600); empty = <database.dir>/bootstrap-admin-password.
   jwt:
     secret: ""                                 # HS256 signing key (>= 32 bytes, enforced); empty = auto-generated and persisted in the DB.
     access_ttl: "15m"
@@ -31,8 +32,8 @@ auth:
   oauth:                                       # optional; disabled by default. Single active provider per deployment.
     enabled: false
     provider: "github"                        # "github" | "oidc" (generic OIDC: Dex, Keycloak, Google, Auth0, ...).
-    client_id: "${OAUTH_CLIENT_ID}"
-    client_secret: "${OAUTH_CLIENT_SECRET}"
+    client_id: ""                              # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_ID); do not commit secrets.
+    client_secret: ""                          # set via env (DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET); do not commit secrets.
     redirect_url: "https://supv.example.com/api/v1/auth/oauth/github/callback"
     allowed_orgs: []                          # github: org membership allowlist; oidc: deprecated alias for allowed_groups; empty = allow all.
     allowed_teams: []                         # github only: "org/team" slug allowlist; empty = allow all. AND-ed with allowed_orgs when both set.

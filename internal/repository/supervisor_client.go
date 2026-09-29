@@ -45,12 +45,12 @@ func NewSupervisorTraceClient(baseURL, token string, timeout time.Duration) *Sup
 // rule the supervisor enforces) before it is interpolated into the URL, so a
 // malformed ID can never tamper with the request path (CWE-20/CWE-918).
 // Non-200 → wrapped error.
-func (c *SupervisorTraceClient) GetTrace(traceID string) (*domain.TraceInfo, error) {
+func (c *SupervisorTraceClient) GetTrace(ctx context.Context, traceID string) (*domain.TraceInfo, error) {
 	if !domain.ValidTraceID(traceID) {
 		return nil, fmt.Errorf("get trace: invalid trace id")
 	}
 	var out domain.TraceInfo
-	if err := c.getJSON(fmt.Sprintf("%s/api/v1/traces/%s", c.baseURL, traceID), &out); err != nil {
+	if err := c.getJSON(ctx, fmt.Sprintf("%s/api/v1/traces/%s", c.baseURL, traceID), &out); err != nil {
 		return nil, fmt.Errorf("get trace %s: %w", traceID, err)
 	}
 	return &out, nil
@@ -60,7 +60,7 @@ func (c *SupervisorTraceClient) GetTrace(traceID string) (*domain.TraceInfo, err
 // decodes []domain.LogEntry. The trace ID is validated before URL
 // interpolation (see GetTrace). start/end/limit are passed through as query
 // params.
-func (c *SupervisorTraceClient) QueryTraceLogs(traceID string, start, end time.Time, limit int) ([]domain.LogEntry, error) {
+func (c *SupervisorTraceClient) QueryTraceLogs(ctx context.Context, traceID string, start, end time.Time, limit int) ([]domain.LogEntry, error) {
 	if !domain.ValidTraceID(traceID) {
 		return nil, fmt.Errorf("query trace logs: invalid trace id")
 	}
@@ -83,15 +83,15 @@ func (c *SupervisorTraceClient) QueryTraceLogs(traceID string, start, end time.T
 	var out struct {
 		Entries []domain.LogEntry `json:"entries"`
 	}
-	if err := c.getJSON(u, &out); err != nil {
+	if err := c.getJSON(ctx, u, &out); err != nil {
 		return nil, fmt.Errorf("query trace logs %s: %w", traceID, err)
 	}
 	return out.Entries, nil
 }
 
 // getJSON performs an authenticated GET and decodes the JSON response into out.
-func (c *SupervisorTraceClient) getJSON(u string, out any) error {
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, u, http.NoBody)
+func (c *SupervisorTraceClient) getJSON(ctx context.Context, u string, out any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, http.NoBody)
 	if err != nil {
 		return fmt.Errorf("build request: %w", err)
 	}
@@ -115,13 +115,13 @@ func (c *SupervisorTraceClient) getJSON(u string, out any) error {
 // ListTraces fetches GET /api/v1/traces?limit=N (Bearer auth) and returns the
 // most recent traces for the authenticated identity. Used by the CI wrapper to
 // discover the trace ID of a just-launched pipeline.
-func (c *SupervisorTraceClient) ListTraces(limit int) ([]domain.TraceListResult, error) {
+func (c *SupervisorTraceClient) ListTraces(ctx context.Context, limit int) ([]domain.TraceListResult, error) {
 	if limit <= 0 {
 		limit = 1
 	}
 	var out []domain.TraceListResult
 	u := fmt.Sprintf("%s/api/v1/traces?limit=%d", c.baseURL, limit)
-	if err := c.getJSON(u, &out); err != nil {
+	if err := c.getJSON(ctx, u, &out); err != nil {
 		return nil, fmt.Errorf("list traces: %w", err)
 	}
 	return out, nil

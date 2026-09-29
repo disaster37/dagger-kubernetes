@@ -350,6 +350,7 @@ variables **take precedence** over the file. Examples:
 | `auth.jwt.secret`                | `DAGGER_KUBERNETES_AUTH_JWT_SECRET`                |
 | `auth.oauth.client_secret`       | `DAGGER_KUBERNETES_AUTH_OAUTH_CLIENT_SECRET`       |
 | `auth.bootstrap_admin.password`  | `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD`  |
+| `auth.bootstrap_admin.password_file` | `DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD_FILE` |
 | `auth.cookie.access_name`        | `DAGGER_KUBERNETES_AUTH_COOKIE_ACCESS_NAME`        |
 | `auth.cookie.refresh_name`       | `DAGGER_KUBERNETES_AUTH_COOKIE_REFRESH_NAME`       |
 | `auth.cookie.secure`             | `DAGGER_KUBERNETES_AUTH_COOKIE_SECURE`             |
@@ -523,10 +524,16 @@ docker run -p 8080:8080 -p 8443:8443 \
   dagger-kubernetes/supervisor:latest
 ```
 
-Health endpoints (control port):
+Health + metrics endpoints (control port). All four are **unauthenticated by
+design** (SEC-012/013) so kubelet probes and Prometheus can reach them without
+credentials:
 
-- `GET /healthz` — liveness
-- `GET /readyz`  — readiness
+- `GET /healthz`  — liveness
+- `GET /readyz`   — readiness
+- `GET /startup`  — startup probe
+- `GET /metrics`  — Prometheus exposition; carry no user data but do expose
+  deployment telemetry, so keep the control port restricted to probes, the
+  scraper, and the ingress (see [Security notes](#security-notes))
 
 ---
 
@@ -1094,6 +1101,31 @@ Important notes:
 - Always anchor mapping patterns (`^...$`): an unanchored pattern also matches
   longer names (prefix match).
 
+### Session revocation (`token_version`, ADR-045)
+
+Every issued JWT carries a per-user counter, `token_version`, and the
+supervisor re-checks it against the stored user on **every** token resolution
+(access and refresh). Three events bump the counter and therefore revoke
+**all** previously issued sessions of that user, cluster-wide and immediately:
+
+- **Logout** (`POST /api/v1/auth/logout`) — best-effort: the cookies are
+  cleared and `204` is returned even if the bump fails (a WARN is logged and
+  old tokens remain valid until expiry until it succeeds).
+- **Self password change** (`PUT /api/v1/auth/password`) — the bump is part of
+  the same persisted update as the new hash; a failed bump fails the whole
+  change with `500`, so a new password is never stored while old tokens would
+  stay valid.
+- **Admin password reset** (`PUT /api/v1/users/:id/password`) — same
+  guarantee.
+
+A token minted before the bump fails with `401 session revoked; please sign in
+again`; a fresh login (or the first refresh after the bump) issues a pair
+carrying the current version. API tokens (`dct_…`) are unaffected — they carry
+their own revocation (deleting the token row).
+
+Upgrade compatibility: pre-existing user records and tokens lack the field and
+default to `0`, so nothing is invalidated by deploying this change.
+
 ### Automatic admin role via `admin_groups`
 
 `auth.oauth.admin_groups` is an allowlist of **raw upstream** provider group
@@ -1354,8 +1386,14 @@ auth:
 On first boot with an empty `users` table, the supervisor creates an admin
 from `auth.bootstrap_admin.username` (default `admin`). When
 `auth.bootstrap_admin.password` is empty, a random 16-byte hex password is
-generated and logged once at WARN (the only place a credential is ever
-logged). Set the password explicitly in production.
+generated and written **before** the account is created to
+`auth.bootstrap_admin.password_file` (mode `0600`; default
+`<database.dir>/bootstrap-admin-password`, override via
+`DAGGER_KUBERNETES_AUTH_BOOTSTRAP_ADMIN_PASSWORD_FILE`). The first-boot WARN
+log records only the file path — never the password itself (CWE-532). If the
+file cannot be written, supervisor startup fails rather than creating an
+account whose password is unrecoverable. Set the password explicitly in
+production to skip generation entirely.
 
 ### Default group
 
@@ -1602,8 +1640,18 @@ subcommand remain (they import flat-file tokens, not SQLite data):
   `X-Frame-Options: DENY`, `Content-Security-Policy: frame-ancestors 'none'`
   (clickjacking), and `Referrer-Policy: no-referrer` (keeps the SSE
   `?token=` param out of Referer headers).
-- Refresh-token revocation is stateless today; password change does not
-  invalidate existing JWTs until expiry (access TTL is 15m).
+- `GET /healthz`, `GET /readyz`, `GET /startup` and `GET /metrics` on the
+  control port are **unauthenticated by design** (CWE-306, SEC-012/013):
+  kubelet probes and Prometheus scrape them without credentials, and they are
+  intentionally excluded from auth middleware. They return no user data, but
+  `/metrics` exposes deployment telemetry — enforce reachability at the
+  network edge instead of with application auth: a Kubernetes NetworkPolicy,
+  a firewall rule, or an Ingress that only forwards the probe paths to the
+  kubelet-equivalent health checks and `/metrics` to the monitoring stack.
+- Session JWTs are revoked server-side via `token_version` (ADR-045, see
+  [Session revocation](#session-revocation-token_version-adr-045)): logout and
+  password changes invalidate every outstanding JWT immediately — revocation
+  no longer waits for the access TTL to expire.
 - Trace backfill of group metadata after project reassignment is intentional
   (set-once).
 - `?token=` query-param auth (D14) is limited to the SSE `/live` endpoint

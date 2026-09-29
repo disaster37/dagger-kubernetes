@@ -78,7 +78,7 @@ func TestRequireAuthWithQueryFallback(t *testing.T) {
 
 	// Token via query param authenticates.
 	c := ut.CreateUtRequestContext("GET", "/api/v1/traces/t1/live?token="+token, nil)
-	if !env.server.requireAuthWithQueryFallback(c) {
+	if !env.server.requireAuthWithQueryFallback(context.Background(), c) {
 		t.Fatal("query token should authenticate")
 	}
 	if id := identityOf(c); id == nil || id.Username != "alice" {
@@ -87,7 +87,7 @@ func TestRequireAuthWithQueryFallback(t *testing.T) {
 
 	// Authorization header still wins when present.
 	c = ut.CreateUtRequestContext("GET", "/api/v1/traces/t1/live", nil, ut.Header{Key: "Authorization", Value: bearer})
-	if !env.server.requireAuthWithQueryFallback(c) {
+	if !env.server.requireAuthWithQueryFallback(context.Background(), c) {
 		t.Fatal("header token should authenticate")
 	}
 
@@ -99,7 +99,7 @@ func TestRequireAuthWithQueryFallback(t *testing.T) {
 	}
 	c = ut.CreateUtRequestContext("GET", "/api/v1/traces/t1/live", nil,
 		ut.Header{Key: "Cookie", Value: fmt.Sprintf("dagger_kubernetes_access=%s", access)})
-	if !env.server.requireAuthWithQueryFallback(c) {
+	if !env.server.requireAuthWithQueryFallback(context.Background(), c) {
 		t.Fatal("access cookie should authenticate")
 	}
 	if id := identityOf(c); id == nil || id.Username != "admin" {
@@ -108,7 +108,7 @@ func TestRequireAuthWithQueryFallback(t *testing.T) {
 
 	// No token at all -> rejected.
 	c = ut.CreateUtRequestContext("GET", "/api/v1/traces/t1/live", nil)
-	if env.server.requireAuthWithQueryFallback(c) {
+	if env.server.requireAuthWithQueryFallback(context.Background(), c) {
 		t.Fatal("missing token should be rejected")
 	}
 }

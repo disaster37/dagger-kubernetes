@@ -62,11 +62,11 @@ func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Ident
 			a.logger.WithError(err).Debug("api token validate failed")
 			return nil, domain.ErrUnauthenticated
 		}
-		return a.identityForUser(ctx, tok.UserID, domain.AuthAPIToken)
+		return a.identityForUser(ctx, tok.UserID, domain.AuthAPIToken, 0)
 	}
 
 	if claims, err := a.jwt.ParseAccess(bearer); err == nil {
-		return a.identityForUser(ctx, claims.UserID, domain.AuthJWT)
+		return a.identityForUser(ctx, claims.UserID, domain.AuthJWT, claims.TokenVersion)
 	}
 
 	if a.legacy != nil {
@@ -87,11 +87,24 @@ func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Ident
 // identityForUser loads a fresh user + group membership from the DB (claims
 // can be stale) and builds the Identity. A missing user yields
 // ErrUnauthenticated. For OAuth users, IdP revalidation is enforced.
-func (a *AuthService) identityForUser(ctx context.Context, userID string, method domain.AuthMethod) (*domain.Identity, error) {
+//
+// tokenVersion is the version carried by a JWT claim and is enforced only for
+// method == AuthJWT: a mismatch with the stored user.TokenVersion means the
+// token was minted before the last logout/password change (ADR-045) and yields
+// ErrSessionRevoked. API tokens and other methods pass 0 (no check).
+func (a *AuthService) identityForUser(ctx context.Context, userID string, method domain.AuthMethod, tokenVersion int) (*domain.Identity, error) {
 	u, err := a.users.Get(ctx, userID)
 	if err != nil {
 		a.logger.WithError(err).Debug("resolved user missing")
 		return nil, domain.ErrUnauthenticated
+	}
+	if method == domain.AuthJWT && u.TokenVersion != tokenVersion {
+		a.logger.WithFields(logrus.Fields{
+			"user_id":       u.ID,
+			"token_version": u.TokenVersion,
+			"claim_version": tokenVersion,
+		}).Debug("stale jwt token version; session revoked")
+		return nil, domain.ErrSessionRevoked
 	}
 	gids, err := a.loadAuthorizedGroups(ctx, u)
 	if err != nil {
@@ -155,6 +168,17 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (access,
 	u, err := a.users.Get(ctx, claims.UserID)
 	if err != nil {
 		return "", "", domain.ErrUnauthenticated
+	}
+
+	// Reject refresh tokens minted before the last logout/password change
+	// (ADR-045): the refresh path is a session too.
+	if claims.TokenVersion != u.TokenVersion {
+		a.logger.WithFields(logrus.Fields{
+			"user_id":       u.ID,
+			"token_version": u.TokenVersion,
+			"claim_version": claims.TokenVersion,
+		}).Debug("stale refresh token version; session revoked")
+		return "", "", domain.ErrSessionRevoked
 	}
 
 	// Session max-age backstop for OAuth users.

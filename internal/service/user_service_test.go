@@ -276,3 +276,81 @@ func TestValidateUsername(t *testing.T) {
 		})
 	}
 }
+
+// TestUserServiceIncrementTokenVersion covers SEC-006 (ADR-045): the counter
+// starts at 0, increments once per call, and fails closed for missing users.
+func TestUserServiceIncrementTokenVersion(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, err := svc.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	got, err := svc.Get(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.TokenVersion != 0 {
+		t.Fatalf("TokenVersion = %d, want 0", got.TokenVersion)
+	}
+
+	for want := 1; want <= 3; want++ {
+		if err := svc.IncrementTokenVersion(ctx, u.ID); err != nil {
+			t.Fatalf("IncrementTokenVersion: %v", err)
+		}
+		got, err := svc.Get(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		if got.TokenVersion != want {
+			t.Fatalf("TokenVersion = %d, want %d", got.TokenVersion, want)
+		}
+	}
+
+	if err := svc.IncrementTokenVersion(ctx, "missing"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing user = %v, want ErrNotFound", err)
+	}
+}
+
+// TestUserServicePasswordChangeBumpsTokenVersion covers SEC-006 (ADR-045):
+// reset and change bump token_version in the same persisted update as the new
+// hash; a rejected change leaves the version untouched.
+func TestUserServicePasswordChangeBumpsTokenVersion(t *testing.T) {
+	svc := newUserService(t)
+	ctx := context.Background()
+
+	u, err := svc.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	version := func() int {
+		got, err := svc.Get(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+		return got.TokenVersion
+	}
+
+	if err := svc.ResetPassword(ctx, u.ID, "newpassword123"); err != nil {
+		t.Fatalf("ResetPassword: %v", err)
+	}
+	if v := version(); v != 1 {
+		t.Fatalf("after reset TokenVersion = %d, want 1", v)
+	}
+
+	if err := svc.ChangePassword(ctx, u.ID, "newpassword123", "anotherpw1"); err != nil {
+		t.Fatalf("ChangePassword: %v", err)
+	}
+	if v := version(); v != 2 {
+		t.Fatalf("after change TokenVersion = %d, want 2", v)
+	}
+
+	// Wrong current password: rejected before any bump.
+	if err := svc.ChangePassword(ctx, u.ID, "wrong", "anotherpw2"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("wrong current = %v, want ErrInvalidCredential", err)
+	}
+	if v := version(); v != 2 {
+		t.Fatalf("after failed change TokenVersion = %d, want 2", v)
+	}
+}

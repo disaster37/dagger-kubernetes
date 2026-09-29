@@ -246,3 +246,73 @@ func TestAuthRefreshRevalidatesOAuth(t *testing.T) {
 		t.Fatalf("refresh with revoked OAuth: %v", err)
 	}
 }
+
+// TestAuthResolveRejectsStaleTokenVersion covers SEC-006 (ADR-045): a session
+// JWT minted before a token_version bump stops resolving; a freshly minted
+// pair resolves again; API tokens keep their own revocation and ignore the
+// bump.
+func TestAuthResolveRejectsStaleTokenVersion(t *testing.T) {
+	asvc, usvc, _, _ := newAuthForTest(t, nil)
+	ctx := context.Background()
+	u, err := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	access, _, _ := asvc.jwt.IssuePair(u, nil)
+	if _, err := asvc.Resolve(ctx, access); err != nil {
+		t.Fatalf("Resolve before bump: %v", err)
+	}
+	apiToken, _, err := asvc.tokens.Generate(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+
+	if err := usvc.IncrementTokenVersion(ctx, u.ID); err != nil {
+		t.Fatalf("IncrementTokenVersion: %v", err)
+	}
+	if _, err := asvc.Resolve(ctx, access); !errors.Is(err, domain.ErrSessionRevoked) {
+		t.Fatalf("stale jwt Resolve = %v, want ErrSessionRevoked", err)
+	}
+	if _, err := asvc.Resolve(ctx, apiToken); err != nil {
+		t.Fatalf("api token Resolve after bump: %v", err)
+	}
+
+	fresh, err := usvc.Get(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	access2, _, _ := asvc.jwt.IssuePair(fresh, nil)
+	if _, err := asvc.Resolve(ctx, access2); err != nil {
+		t.Fatalf("Resolve fresh jwt: %v", err)
+	}
+}
+
+// TestAuthRefreshRejectsStaleTokenVersion covers SEC-006 (ADR-045) on the
+// refresh path: a refresh token minted before the bump cannot rotate, while a
+// token from a fresh login can.
+func TestAuthRefreshRejectsStaleTokenVersion(t *testing.T) {
+	asvc, usvc, _, _ := newAuthForTest(t, nil)
+	ctx := context.Background()
+	if _, err := usvc.Create(ctx, "alice", "password123", domain.RoleUser); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	_, refresh, u, err := asvc.Login(ctx, "alice", "password123")
+	if err != nil {
+		t.Fatalf("Login: %v", err)
+	}
+
+	if err := usvc.IncrementTokenVersion(ctx, u.ID); err != nil {
+		t.Fatalf("IncrementTokenVersion: %v", err)
+	}
+	if _, _, err := asvc.Refresh(ctx, refresh); !errors.Is(err, domain.ErrSessionRevoked) {
+		t.Fatalf("stale refresh = %v, want ErrSessionRevoked", err)
+	}
+
+	_, refresh2, _, err := asvc.Login(ctx, "alice", "password123")
+	if err != nil {
+		t.Fatalf("Login after bump: %v", err)
+	}
+	if _, _, err := asvc.Refresh(ctx, refresh2); err != nil {
+		t.Fatalf("fresh refresh: %v", err)
+	}
+}

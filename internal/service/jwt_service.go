@@ -17,6 +17,11 @@ type Claims struct {
 	GroupIDs []string `json:"groups"`
 	Type     string   `json:"typ"` // "access" | "refresh" | "oauth_state"
 	Nonce    string   `json:"nonce,omitempty"`
+	// TokenVersion mirrors domain.User.TokenVersion at issue time (ADR-045);
+	// resolution compares it against the freshly loaded user, so a logout or
+	// password change invalidates every token minted before the bump. Tokens
+	// minted before the upgrade lack the claim and decode to 0.
+	TokenVersion int `json:"token_version"`
 	jwt.RegisteredClaims
 }
 
@@ -99,6 +104,7 @@ func (s *JWTService) issue(u *domain.User, groupIDs []string, typ string, ttl ti
 	claims.Username = u.Username
 	claims.Role = string(u.Role)
 	claims.GroupIDs = groupIDs
+	claims.TokenVersion = u.TokenVersion
 	return s.sign(claims)
 }
 

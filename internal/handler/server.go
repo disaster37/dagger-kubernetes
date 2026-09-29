@@ -779,7 +779,7 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
-	id, ok := s.resolveIdentity(c)
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return
 	}
@@ -916,7 +916,7 @@ func (s *Server) extractVersion(image string) (*domain.Version, error) {
 // best-effort extracts root-span metadata and runs attribution before proxying.
 func (s *Server) handleOTel(signal string) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		id, ok := s.resolveIdentity(c)
+		id, ok := s.resolveIdentity(ctx, c)
 		if !ok {
 			return
 		}
@@ -1001,8 +1001,8 @@ func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
 // handleTracesURL returns the self-hosted pipeline-view URL for a trace.
 // Gated by authorizeTraceRequest (owner/member/admin; unknown meta ->
 // admin-only). URL derivation does not require the trace to exist in Tempo.
-func (s *Server) handleTracesURL(_ context.Context, c *app.RequestContext) {
-	traceID, ok := s.authorizeTraceRequest(c)
+func (s *Server) handleTracesURL(ctx context.Context, c *app.RequestContext) {
+	traceID, ok := s.authorizeTraceRequest(ctx, c)
 	if !ok {
 		return
 	}
@@ -1033,8 +1033,8 @@ func (s *Server) pipelineViewURL(traceID string) (string, bool) {
 	return u, true
 }
 
-func (s *Server) handleFleetInfo(_ context.Context, c *app.RequestContext) {
-	if !s.requireAuth(c) {
+func (s *Server) handleFleetInfo(ctx context.Context, c *app.RequestContext) {
+	if !s.requireAuth(ctx, c) {
 		return
 	}
 
@@ -1176,15 +1176,28 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 // failover window) so the local reaper never kills a live tunnel.
 func (s *Server) touchSession(fp string) {
 	if s.sessionRegistry != nil {
-		if err := s.sessionRegistry.Touch(context.Background(), fp); err == nil {
+		// Bounded apply (matches raft.apply_timeout); touchSession runs from
+		// the background data-tunnel goroutine, which has no request context.
+		touchCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.sessionRegistry.Touch(touchCtx, fp); err == nil {
 			return
 		}
 	}
 	_ = s.sessions.Touch(fp)
 }
 
-// handleNoRoute serves the embedded SPA for unmatched routes.
+// handleNoRoute serves the embedded SPA for unmatched routes. Unmatched API
+// paths (/api/, /v1/) answer 404 JSON instead of the SPA shell so API clients
+// never receive HTML where they expect a JSON error (CWE-204, SEC-014);
+// everything else keeps SPA client-side routing (extension-less paths resolve
+// to index.html).
 func (s *Server) handleNoRoute(ctx context.Context, c *app.RequestContext) {
+	path := string(c.Path())
+	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/v1/") {
+		writeError(c, consts.StatusNotFound, "not found")
+		return
+	}
 	s.serveUI(ctx, c)
 }
 
@@ -1276,7 +1289,7 @@ func formatTime(t time.Time) string {
 // retrieve the resolved identity with identityOf(c).
 func (s *Server) adminOnly(h app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if _, ok := s.requireAdmin(c); !ok {
+		if _, ok := s.requireAdmin(ctx, c); !ok {
 			return
 		}
 		h(ctx, c)

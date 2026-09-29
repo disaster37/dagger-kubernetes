@@ -100,6 +100,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.BootstrapAdmin.Password != "" {
 		t.Fatalf("auth.bootstrap_admin.password default should be empty, got %q", cfg.Auth.BootstrapAdmin.Password)
 	}
+	if cfg.Auth.BootstrapAdmin.PasswordFile != "" {
+		t.Fatalf("auth.bootstrap_admin.password_file default should be empty, got %q", cfg.Auth.BootstrapAdmin.PasswordFile)
+	}
 	if cfg.Auth.OAuth.DefaultGroup != "" {
 		t.Fatalf("auth.oauth.default_group default should be empty, got %q", cfg.Auth.OAuth.DefaultGroup)
 	}
