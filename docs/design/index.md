@@ -52,3 +52,4 @@ the decision.
 | 043  | [Engine (fleet runner) image pulled through the cache mirror](ADR-043-engine-image-via-cache.md) |
 | 044  | [Jenkins shared library as a release artifact](ADR-044-jenkins-library-release-artifact.md) |
 | 044  | [Pipelines overview updates live via a sentinel-topic SSE stream](ADR-044-pipelines-overview-live-stream.md) |
+| 045  | [Server-side JWT revocation via `token_version`](ADR-045-server-side-jwt-revocation-token-version.md) |

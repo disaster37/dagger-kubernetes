@@ -960,3 +960,92 @@ func TestFSMSnapshotPersistError(t *testing.T) {
 		t.Fatal("expected error persisting to a failing sink")
 	}
 }
+
+// TestFSMUserTokenVersionRoundTrip covers SEC-006 (ADR-045): TokenVersion
+// survives the cmdUser conversion (both directions), FSM persistence, and a
+// full snapshot → restore cycle.
+func TestFSMUserTokenVersionRoundTrip(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+	u := &domain.User{
+		ID:           "u1",
+		Username:     "alice",
+		Role:         domain.RoleUser,
+		TokenVersion: 5,
+		CreatedAt:    now,
+		UpdatedAt:    now,
+	}
+
+	// Conversion round-trip: domain -> cmdUser -> domain.
+	cu := cmdUserFrom(u)
+	if cu.TokenVersion != 5 {
+		t.Fatalf("cmdUserFrom lost TokenVersion: %+v", cu)
+	}
+	if back := cu.toDomain(); back.TokenVersion != 5 {
+		t.Fatalf("toDomain lost TokenVersion: %+v", back)
+	}
+
+	// FSM persistence: upsert -> read. cmdUserFrom never sets Create.
+	cu.Create = true
+	if err := applyCmd(t, f, kindUpsertUser, cu); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	got, err := f.readUserByID("u1")
+	if err != nil {
+		t.Fatalf("readUserByID: %v", err)
+	}
+	if got.TokenVersion != 5 {
+		t.Fatalf("stored TokenVersion = %d, want 5", got.TokenVersion)
+	}
+
+	// Snapshot/restore round-trip.
+	snap, err := f.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	sink := &memSink{}
+	if err := snap.Persist(sink); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	snap.Release()
+
+	restored := NewFSM()
+	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	rp, err := restored.readUserByID("u1")
+	if err != nil {
+		t.Fatalf("readUserByID after restore: %v", err)
+	}
+	if rp.TokenVersion != 5 {
+		t.Fatalf("restored TokenVersion = %d, want 5", rp.TokenVersion)
+	}
+}
+
+// TestFSMRestoreLegacyUserWithoutTokenVersion covers the SEC-006 back-compat
+// guarantee: a pre-upgrade snapshot record without the token_version key
+// restores to 0, matching the 0 carried by pre-upgrade JWTs (so existing
+// sessions keep working across the upgrade).
+func TestFSMRestoreLegacyUserWithoutTokenVersion(t *testing.T) {
+	legacy := `{
+	  "users": [{"id":"u","username":"alice","role":"admin","password_hash":"hash",
+	             "created_at":"2026-01-01T00:00:00Z","updated_at":"2026-01-01T00:00:00Z"}],
+	  "groups": [],
+	  "memberships": [],
+	  "tokens": [],
+	  "projects": [],
+	  "traces": [],
+	  "meta": {}
+	}`
+	f := NewFSM()
+	if err := f.Restore(io.NopCloser(strings.NewReader(legacy))); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+	u, err := f.readUserByID("u")
+	if err != nil {
+		t.Fatalf("readUserByID: %v", err)
+	}
+	if u.TokenVersion != 0 {
+		t.Fatalf("legacy TokenVersion = %d, want 0", u.TokenVersion)
+	}
+}

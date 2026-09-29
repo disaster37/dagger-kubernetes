@@ -128,9 +128,19 @@ func (s *Server) handleRefresh(ctx context.Context, c *app.RequestContext) {
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
-// handleLogout clears the session cookies and returns 204.
-func (s *Server) handleLogout(_ context.Context, c *app.RequestContext) {
+// handleLogout clears the session cookies and returns 204. When the request
+// still carries a resolvable session JWT it also bumps the user's
+// token_version (best-effort, ADR-045) so every JWT issued before this logout
+// stops resolving. Failure only logs a WARN — logout always succeeds because
+// the cookies are cleared either way. Legacy flat-file identities have no user
+// row to bump.
+func (s *Server) handleLogout(ctx context.Context, c *app.RequestContext) {
 	s.clearAuthCookies(c)
+	if id, err := s.auth.Resolve(ctx, s.bearerFromRequest(c)); err == nil && id.Method == domain.AuthJWT {
+		if verr := s.users.IncrementTokenVersion(ctx, id.UserID); verr != nil {
+			s.logger.WithError(verr).WithField("user_id", id.UserID).Warn("logout: token version bump failed; outstanding sessions may remain valid")
+		}
+	}
 	c.SetStatusCode(consts.StatusNoContent)
 }
 

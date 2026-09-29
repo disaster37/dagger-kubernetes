@@ -102,6 +102,7 @@ type (
 		OAuthGroups          []string    `json:"oauth_groups,omitempty"`
 		OAuthAdmin           bool        `json:"oauth_admin,omitempty"`
 		DeactivatedAt        *time.Time  `json:"deactivated_at,omitempty"`
+		TokenVersion         int         `json:"token_version"`
 		CreatedAt            time.Time   `json:"created_at"`
 		UpdatedAt            time.Time   `json:"updated_at"`
 		Create               bool        `json:"create,omitempty"` // true = insert-only; false = update-only
@@ -192,6 +193,7 @@ func (c *cmdUser) toDomain() *domain.User {
 		OAuthGroups:          c.OAuthGroups,
 		OAuthAdmin:           c.OAuthAdmin,
 		DeactivatedAt:        c.DeactivatedAt,
+		TokenVersion:         c.TokenVersion,
 		CreatedAt:            c.CreatedAt,
 		UpdatedAt:            c.UpdatedAt,
 	}
@@ -212,6 +214,7 @@ func cmdUserFrom(u *domain.User) *cmdUser {
 		OAuthGroups:          u.OAuthGroups,
 		OAuthAdmin:           u.OAuthAdmin,
 		DeactivatedAt:        u.DeactivatedAt,
+		TokenVersion:         u.TokenVersion,
 		CreatedAt:            u.CreatedAt,
 		UpdatedAt:            u.UpdatedAt,
 	}

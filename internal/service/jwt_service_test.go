@@ -153,3 +153,61 @@ func flip(b byte) byte {
 	}
 	return 'a'
 }
+
+// TestJWTIssueIncludesTokenVersion covers SEC-006 (ADR-045): both tokens in a
+// pair carry the user's token_version, and a token minted before the upgrade
+// (claim absent) parses to 0 so it still matches a 0-version user.
+func TestJWTIssueIncludesTokenVersion(t *testing.T) {
+	s := newJWTService()
+
+	tests := []struct {
+		name    string
+		version int
+	}{
+		{"new user default version", 0},
+		{"bumped version", 7},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, TokenVersion: tt.version}
+			access, refresh, err := s.IssuePair(u, nil)
+			if err != nil {
+				t.Fatalf("IssuePair: %v", err)
+			}
+			accessClaims, err := s.ParseAccess(access)
+			if err != nil {
+				t.Fatalf("ParseAccess: %v", err)
+			}
+			if accessClaims.TokenVersion != tt.version {
+				t.Fatalf("access TokenVersion = %d, want %d", accessClaims.TokenVersion, tt.version)
+			}
+			refreshClaims, err := s.ParseRefresh(refresh)
+			if err != nil {
+				t.Fatalf("ParseRefresh: %v", err)
+			}
+			if refreshClaims.TokenVersion != tt.version {
+				t.Fatalf("refresh TokenVersion = %d, want %d", refreshClaims.TokenVersion, tt.version)
+			}
+		})
+	}
+
+	// Pre-upgrade token: no token_version claim decodes to 0.
+	legacy := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
+		"uid":      "u1",
+		"username": "alice",
+		"role":     "user",
+		"typ":      typAccess,
+		"exp":      time.Now().Add(time.Hour).Unix(),
+	})
+	tok, err := legacy.SignedString([]byte("test-secret-32-bytes-long-enough!!"))
+	if err != nil {
+		t.Fatalf("sign legacy token: %v", err)
+	}
+	claims, err := s.ParseAccess(tok)
+	if err != nil {
+		t.Fatalf("ParseAccess legacy: %v", err)
+	}
+	if claims.TokenVersion != 0 {
+		t.Fatalf("legacy TokenVersion = %d, want 0", claims.TokenVersion)
+	}
+}

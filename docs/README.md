@@ -1094,6 +1094,31 @@ Important notes:
 - Always anchor mapping patterns (`^...$`): an unanchored pattern also matches
   longer names (prefix match).
 
+### Session revocation (`token_version`, ADR-045)
+
+Every issued JWT carries a per-user counter, `token_version`, and the
+supervisor re-checks it against the stored user on **every** token resolution
+(access and refresh). Three events bump the counter and therefore revoke
+**all** previously issued sessions of that user, cluster-wide and immediately:
+
+- **Logout** (`POST /api/v1/auth/logout`) — best-effort: the cookies are
+  cleared and `204` is returned even if the bump fails (a WARN is logged and
+  old tokens remain valid until expiry until it succeeds).
+- **Self password change** (`PUT /api/v1/auth/password`) — the bump is part of
+  the same persisted update as the new hash; a failed bump fails the whole
+  change with `500`, so a new password is never stored while old tokens would
+  stay valid.
+- **Admin password reset** (`PUT /api/v1/users/:id/password`) — same
+  guarantee.
+
+A token minted before the bump fails with `401 session revoked; please sign in
+again`; a fresh login (or the first refresh after the bump) issues a pair
+carrying the current version. API tokens (`dct_…`) are unaffected — they carry
+their own revocation (deleting the token row).
+
+Upgrade compatibility: pre-existing user records and tokens lack the field and
+default to `0`, so nothing is invalidated by deploying this change.
+
 ### Automatic admin role via `admin_groups`
 
 `auth.oauth.admin_groups` is an allowlist of **raw upstream** provider group
