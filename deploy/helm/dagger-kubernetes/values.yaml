@@ -866,9 +866,16 @@ opentelemetry-collector:
         log_statements:
           - context: log
             statements:
+              # trace_id stays a Loki stream label: the supervisor queries and
+              # deletes logs by {trace_id="..."}. span_id must NOT be promoted
+              # to a stream label — every span is a distinct value, so one
+              # pipeline would create one active stream per span and trip
+              # Loki's max_active_streams_per_user limit (HTTP 429, dropped
+              # logs, empty UI). The lokiexporter embeds the record's span id
+              # in the JSON log line ("spanid"), and the supervisor reads it
+              # from there.
               - set(attributes["trace_id"], trace_id.string)
-              - set(attributes["span_id"], span_id.string)
-              - set(attributes["loki.attribute.labels"], "trace_id,span_id")
+              - set(attributes["loki.attribute.labels"], "trace_id")
     exporters:
       otlphttp/tempo:
         endpoint: http://{{ include "dagger-kubernetes.otelTempoService" . }}.{{ .Release.Namespace }}.svc:4318

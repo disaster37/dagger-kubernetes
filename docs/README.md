@@ -948,8 +948,12 @@ telemetry ages out via backend retention).
   series matching `match[]` (no time range; space is reclaimed lazily during
   background merges). If `-deleteAuthKey` is set on the VM deployment, the
   supervisor's delete request must include that key. The OpenTelemetry
-  collector's `transform/logs` processor promotes `trace_id`/`span_id` to
-  **log** labels only; the metrics pipeline (`otlp → batch →
+  collector's `transform/logs` processor promotes `trace_id` to a **log**
+  stream label (the supervisor queries/deletes by it) but deliberately keeps
+  `span_id` out of the labels — one active stream per span trips Loki's
+  `max_active_streams_per_user` limit and drops every log line; the
+  supervisor instead recovers the span ID from the JSON log line the
+  lokiexporter writes; the metrics pipeline (`otlp → batch →
   prometheusremotewrite`) has no such transform, and the metrics currently
   emitted (BuildKit cache hit/miss counters, engine metrics) are aggregate
   with no trace association. `{trace_id="..."}` metric deletion is therefore a
@@ -1977,7 +1981,8 @@ Features:
   `/api/v1/traces/:id` response returns `duration_ms` in milliseconds (matching
   the list endpoint), with the raw value available as `duration_ns`
 - **Log viewer** — log lines correlated by span ID (the collector promotes
-  `trace_id` and `span_id` to Loki labels) and rendered inline under the step
+  `trace_id` to a Loki label; the span ID rides inside the JSON log line and
+  the supervisor extracts it per entry) and rendered inline under the step
   or sub-span that produced them (`GET /api/v1/traces/:id/logs`); in the
   drill-down tree's aggregated panel, logs with no recognisable span are labeled
   "unattributed" inline (the separate "unmatched" section was removed). Logs

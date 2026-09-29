@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -19,6 +20,10 @@ const searchTraceID = "401ccb197124a8ff2028720fcb5eaa06"
 // lokiSearchServer serves a fixed set of (timestamp, span_id, line) records
 // from /loki/api/v1/query_range, honouring start/end/limit so pagination can be
 // exercised. Records are returned in the order given (the client must sort).
+// Records with structured metadata (meta != nil) are grouped into a single
+// stream whose span_id travels per-entry in the values array, the way the
+// collector sends it once span_id is demoted from a stream label; records
+// without metadata use span_id as a stream label (the legacy form).
 func lokiSearchServer(t *testing.T, records []searchRecord) *httptest.Server {
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -32,8 +37,9 @@ func lokiSearchServer(t *testing.T, records []searchRecord) *httptest.Server {
 		limit, _ := parseInt64(q.Get("limit"))
 
 		type stream struct {
-			spanID string
-			values [][]string
+			spanID   string
+			withMeta bool
+			values   [][]string
 		}
 		var streams []stream
 		index := map[string]int{}
@@ -41,13 +47,24 @@ func lokiSearchServer(t *testing.T, records []searchRecord) *httptest.Server {
 			if rec.ts < start || rec.ts > end {
 				continue
 			}
-			idx, ok := index[rec.spanID]
+			key := rec.spanID
+			if rec.meta != nil {
+				key = "\x00meta"
+			}
+			idx, ok := index[key]
 			if !ok {
 				idx = len(streams)
-				index[rec.spanID] = idx
-				streams = append(streams, stream{spanID: rec.spanID})
+				index[key] = idx
+				streams = append(streams, stream{spanID: rec.spanID, withMeta: rec.meta != nil})
 			}
-			streams[idx].values = append(streams[idx].values, []string{fmt.Sprintf("%d", rec.ts), rec.line})
+			tsJSON, _ := json.Marshal(fmt.Sprintf("%d", rec.ts))
+			lineJSON, _ := json.Marshal(rec.line)
+			value := []string{string(tsJSON), string(lineJSON)}
+			if rec.meta != nil {
+				metaJSON, _ := json.Marshal(rec.meta)
+				value = append(value, string(metaJSON))
+			}
+			streams[idx].values = append(streams[idx].values, value)
 		}
 
 		var result strings.Builder
@@ -60,7 +77,11 @@ func lokiSearchServer(t *testing.T, records []searchRecord) *httptest.Server {
 			if i > 0 {
 				result.WriteString(",")
 			}
-			result.WriteString(`{"stream":{"trace_id":"` + searchTraceID + `","span_id":"` + st.spanID + `"},"values":[`)
+			if st.withMeta || st.spanID == "" {
+				result.WriteString(`{"stream":{"trace_id":"` + searchTraceID + `"},"values":[`)
+			} else {
+				result.WriteString(`{"stream":{"trace_id":"` + searchTraceID + `","span_id":"` + st.spanID + `"},"values":[`)
+			}
 			for j, v := range st.values {
 				if written >= int(limit) {
 					break
@@ -68,7 +89,14 @@ func lokiSearchServer(t *testing.T, records []searchRecord) *httptest.Server {
 				if j > 0 {
 					result.WriteString(",")
 				}
-				fmt.Fprintf(&result, `["%s",%q]`, v[0], v[1])
+				result.WriteString("[")
+				for k, part := range v {
+					if k > 0 {
+						result.WriteString(",")
+					}
+					result.WriteString(part)
+				}
+				result.WriteString("]")
 				written++
 			}
 			result.WriteString(`]}`)
@@ -84,6 +112,7 @@ type searchRecord struct {
 	ts     int64
 	spanID string
 	line   string
+	meta   map[string]string
 }
 
 func parseInt64(s string) (int64, error) {
@@ -174,6 +203,60 @@ func TestSearchTraceLogsSpanFilter(t *testing.T) {
 	}
 	if len(page.Entries) != 1 || page.Entries[0].SpanID != "span-b" {
 		t.Fatalf("entries = %+v, want only span-b", page.Entries)
+	}
+}
+
+func TestSearchTraceLogsSpanIDFromStructuredMetadata(t *testing.T) {
+	base := time.Now().Add(-time.Hour).UnixNano()
+	records := []searchRecord{
+		{ts: base + 100, meta: map[string]string{"span_id": "19364c238ec1f760"}, line: "hello"},
+		{ts: base + 200, meta: map[string]string{"span_id": "aa38207ca76b8091"}, line: "error world"},
+	}
+	srv := lokiSearchServer(t, records)
+	defer srv.Close()
+
+	client := NewLogsClient(srv.URL)
+	page, err := client.SearchTraceLogs(context.Background(), searchTraceID, domain.LogSearchRequest{
+		SpanIDs: []string{"GTZMI47B92A="},
+		Start:   time.Unix(0, base),
+		End:     time.Unix(0, base+1000),
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("SearchTraceLogs: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Line != "hello" {
+		t.Fatalf("entries = %+v, want only the hex-span entry", page.Entries)
+	}
+	if page.Entries[0].SpanID != "GTZMI47B92A=" {
+		t.Fatalf("span id = %q, want GTZMI47B92A=", page.Entries[0].SpanID)
+	}
+}
+
+func TestSearchTraceLogsSpanIDFromLineJSON(t *testing.T) {
+	base := time.Now().Add(-time.Hour).UnixNano()
+	records := []searchRecord{
+		{ts: base + 100, line: `{"body":"hello","spanid":"19364c238ec1f760"}`},
+		{ts: base + 200, line: `{"body":"error world","spanid":"aa38207ca76b8091"}`},
+	}
+	srv := lokiSearchServer(t, records)
+	defer srv.Close()
+
+	client := NewLogsClient(srv.URL)
+	page, err := client.SearchTraceLogs(context.Background(), searchTraceID, domain.LogSearchRequest{
+		SpanIDs: []string{"GTZMI47B92A="},
+		Start:   time.Unix(0, base),
+		End:     time.Unix(0, base+1000),
+		Limit:   10,
+	})
+	if err != nil {
+		t.Fatalf("SearchTraceLogs: %v", err)
+	}
+	if len(page.Entries) != 1 || page.Entries[0].Line != `{"body":"hello","spanid":"19364c238ec1f760"}` {
+		t.Fatalf("entries = %+v, want only the spanid-in-line entry", page.Entries)
+	}
+	if page.Entries[0].SpanID != "GTZMI47B92A=" {
+		t.Fatalf("span id = %q, want GTZMI47B92A=", page.Entries[0].SpanID)
 	}
 }
 
