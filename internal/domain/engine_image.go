@@ -7,20 +7,28 @@ import (
 
 // EngineImageRegistryViaMirror rewrites registry (the engine image registry,
 // e.g. "registry.dagger.io/engine") to route through an image-cache mirror when
-// mirrors contains a TLS-enabled entry whose Host equals the registry's host.
-// It returns registry unchanged otherwise. The mirror's InternalAddr replaces
-// the original host and the repository path is preserved, e.g.
-// "registry.dagger.io/engine" -> "<release>-registry-dagger-io-mirror.<ns>.svc:5000/engine".
-// A mirror that is not TLS (plaintext HTTP) never triggers a rewrite, because
-// the kubelet cannot pull the engine image from a plaintext mirror without
-// node-level insecure-registry configuration.
+// a mirror's Host matches the registry's host.
+//
+// Address selection order:
+//  1. ExternalAddr — the node-reachable ingress host (TLS terminated at the
+//     ingress), used when non-empty; this no longer requires tls: true.
+//  2. TLS && InternalAddr — legacy ADR-043 in-cluster .svc path (operator must
+//     pin DNS + trust the CA on each node).
+//
+// Returns registry unchanged otherwise.
 func EngineImageRegistryViaMirror(registry string, mirrors []ImageCacheMirror) string {
 	host, path := splitRegistryRef(registry)
 	if host == "" {
 		return registry
 	}
 	for _, m := range mirrors {
-		if m.TLS && m.Host == host && m.InternalAddr != "" {
+		if m.Host != host {
+			continue
+		}
+		if m.ExternalAddr != "" {
+			return fmt.Sprintf("%s%s", m.ExternalAddr, path)
+		}
+		if m.TLS && m.InternalAddr != "" {
 			return fmt.Sprintf("%s%s", m.InternalAddr, path)
 		}
 	}

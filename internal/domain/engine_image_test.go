@@ -27,6 +27,17 @@ func TestEngineImageRegistryViaMirror(t *testing.T) {
 		Host: "registry.dagger.io",
 		TLS:  true,
 	}
+	externalMirror := ImageCacheMirror{
+		Host:         "registry.dagger.io",
+		ExternalAddr: "mirror.example.com",
+		TLS:          false,
+	}
+	externalAndInternalMirror := ImageCacheMirror{
+		Host:         "registry.dagger.io",
+		InternalAddr: internalAddr,
+		ExternalAddr: "mirror.example.com",
+		TLS:          true,
+	}
 
 	tests := []struct {
 		name     string
@@ -41,7 +52,7 @@ func TestEngineImageRegistryViaMirror(t *testing.T) {
 			want:     "registry.dagger.io/engine",
 		},
 		{
-			name:     "non-TLS matching mirror unchanged",
+			name:     "no external addr, plaintext mirror unchanged",
 			registry: "registry.dagger.io/engine",
 			mirrors:  []ImageCacheMirror{plainMirror},
 			want:     "registry.dagger.io/engine",
@@ -53,10 +64,22 @@ func TestEngineImageRegistryViaMirror(t *testing.T) {
 			want:     "registry.dagger.io/engine",
 		},
 		{
-			name:     "TLS mirror host match rewritten",
+			name:     "no external addr, TLS mirror uses internal",
 			registry: "registry.dagger.io/engine",
 			mirrors:  []ImageCacheMirror{tlsMirror},
 			want:     fmt.Sprintf("%s/engine", internalAddr),
+		},
+		{
+			name:     "external addr rewrites regardless of tls",
+			registry: "registry.dagger.io/engine",
+			mirrors:  []ImageCacheMirror{externalMirror},
+			want:     "mirror.example.com/engine",
+		},
+		{
+			name:     "external addr preferred over internal",
+			registry: "registry.dagger.io/engine",
+			mirrors:  []ImageCacheMirror{externalAndInternalMirror},
+			want:     "mirror.example.com/engine",
 		},
 		{
 			name:     "match after non-matching mirror",
