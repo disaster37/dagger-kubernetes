@@ -1,6 +1,6 @@
 # ADR-043: Engine (fleet runner) image pulled through the cache mirror
 
-**Status:** Accepted  
+**Status:** Accepted (D1 superseded by [ADR-046](ADR-046-engine-image-via-mirror-ingress.md) — engine-image routing now prefers a TLS-terminated mirror ingress `external_addr`)  
 **Date:** 2026-09-25
 
 ## Context
