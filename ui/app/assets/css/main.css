@@ -1,6 +1,14 @@
 @import "tailwindcss";
 @import "@nuxt/ui";
 
+/* Issue #56: full-width app shell on large screens.
+   Nuxt UI's Container component defaults to --ui-container = var(--container-7xl)
+   (80rem). Widen it to the full viewport so UHeader, UMain content, and UFooter
+   span the full width; the Container base keeps its own px-4/sm:px-6/lg:px-8 gutters. */
+:root {
+  --ui-container: 100%;
+}
+
 /* Residual bespoke CSS retained only where Nuxt UI has no equivalent:
    - status dots (header indicator + services page)
    - live log tail (.logs / .log-line / .log-ts / .log-msg / .log-step / mark)

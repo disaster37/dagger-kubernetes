@@ -2,7 +2,7 @@
   <UHeader title="Dagger Kubernetes">
     <template #title>
       <NuxtLink to="/" class="flex items-center gap-2">
-        <AppLogo class="size-7" aria-hidden="true" />
+        <AppLogo class="size-9" aria-hidden="true" />
         <span class="font-semibold">Dagger Kubernetes</span>
       </NuxtLink>
     </template>
@@ -23,10 +23,32 @@
   </UHeader>
 
   <UMain>
-    <div class="mx-auto max-w-[1400px] p-6">
+    <div class="p-6">
       <slot />
     </div>
   </UMain>
+
+  <UFooter>
+    <!-- default slot = centered -->
+    <p class="text-sm text-muted">
+      Dagger Kubernetes · {{ appVersion }}
+    </p>
+
+    <template #right>
+      <UButton
+        icon="i-lucide-github"
+        color="neutral"
+        variant="link"
+        size="sm"
+        to="https://github.com/disaster37/dagger-kubernetes/issues"
+        target="_blank"
+        rel="noopener noreferrer"
+        aria-label="Report an issue on GitHub"
+      >
+        Issues
+      </UButton>
+    </template>
+  </UFooter>
 </template>
 
 <script setup lang="ts">
@@ -37,6 +59,9 @@ import { useStatusStore } from '~/stores/status'
 const auth = useAuthStore()
 const status = useStatusStore()
 const router = useRouter()
+
+const config = useRuntimeConfig()
+const appVersion = computed(() => String((config.public as { appVersion?: unknown }).appVersion || 'unknown'))
 
 const navItems = computed(() => {
   const items: { label: string; to: string }[] = [
