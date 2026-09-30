@@ -618,9 +618,15 @@ mirrors (the default). With `imageCache.tls.enabled: true` the mirrors serve
 HTTPS instead — `http = true` is dropped (BuildKit dials TLS), the kubelet
 needs the mirror CA in its trust store, and when the `registry.dagger.io`
 preset is enabled the fleet engine StatefulSet pulls the engine image through
-the mirror too. See docs/README.md, "Local image cache (Zot mirror)", and
+the mirror too. `imageCache.registryIngress` exposes that `registry.dagger.io`
+mirror through a dedicated, TLS-terminated ingress
+(`imageCache.registryIngress.host`, a node-reachable hostname) so the kubelet
+pulls the engine image through the local cache automatically — no node-level
+`/etc/hosts` pin or CA trust required. See docs/README.md, "Local image cache
+(Zot mirror)", and
 [ADR-033](../../../docs/design/ADR-033-local-image-mirror.md) /
-[ADR-043](../../../docs/design/ADR-043-engine-image-via-cache.md).
+[ADR-043](../../../docs/design/ADR-043-engine-image-via-cache.md) /
+[ADR-046](../../../docs/design/ADR-046-engine-image-via-mirror-ingress.md).
 
 Grafana datasources (Tempo, Loki, VictoriaMetrics) are auto-provisioned via a
 ConfigMap with label `grafana_datasource: "1"`, picked up by the `k8s-sidecar`.
@@ -801,6 +807,11 @@ subchart values.
 | `imageCache.tls.secretName` | string | `""` | Secret with `tls.crt` + `tls.key` valid for every mirror hostname (a wildcard `*.<namespace>.svc` cert covers all mirrors). Required when enabled. |
 | `imageCache.tls.caSecretName` | string | `""` | Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors. |
 | `imageCache.tls.caSecretKey` | string | `"ca.crt"` | Key inside `imageCache.tls.caSecretName` (default "ca.crt"). |
+| `imageCache.registryIngress.enabled` | bool | `false` | Expose the `registry.dagger.io` mirror via a dedicated TLS-terminated ingress so the node kubelet can pull the engine image through it (no node-level `/etc/hosts` pin or CA trust). Requires the `registry.dagger.io` preset enabled. |
+| `imageCache.registryIngress.host` | string | `"mirror-registry.example.com"` | Node-reachable hostname for the mirror ingress (must resolve from the engine nodes). Used as `image_cache.mirrors[].external_addr`. |
+| `imageCache.registryIngress.className` | string | `""` | Ingress class name. |
+| `imageCache.registryIngress.annotations` | object | `{}` | Ingress annotations (e.g. `cert-manager.io/cluster-issuer` for a public cert). |
+| `imageCache.registryIngress.tls.secretName` | string | `""` | TLS cert Secret name for the ingress host (e.g. a cert-manager Let's Encrypt cert). Required in practice so the kubelet trusts the pull; the ingress terminates TLS, so this does NOT require `imageCache.tls.enabled`. |
 | `imageCache.resources.requests.cpu` | string | `"100m"` | Mirror CPU request. |
 | `imageCache.resources.requests.memory` | string | `"128Mi"` | Mirror memory request. |
 | `imageCache.resources.limits.cpu` | string | `"500m"` | Mirror CPU limit. |

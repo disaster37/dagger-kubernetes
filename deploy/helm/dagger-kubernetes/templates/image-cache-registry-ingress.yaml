@@ -1,0 +1,43 @@
+{{- if .Values.imageCache.enabled }}
+{{- $preset := index .Values.imageCache.presets "registry.dagger.io" | default dict }}
+{{- if and $preset.enabled .Values.imageCache.registryIngress.enabled }}
+{{- $slug := include "dagger-kubernetes.imageCacheSlug" "registry.dagger.io" }}
+{{- $svc := printf "%s-%s-mirror" .Release.Name $slug }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $svc }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+  annotations:
+    {{- if .Values.imageCache.tls.enabled }}
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    {{- end }}
+    {{- with .Values.imageCache.registryIngress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.imageCache.registryIngress.className }}
+  ingressClassName: {{ .Values.imageCache.registryIngress.className }}
+  {{- end }}
+  tls:
+    - hosts:
+        - {{ .Values.imageCache.registryIngress.host | quote }}
+      {{- if .Values.imageCache.registryIngress.tls.secretName }}
+      secretName: {{ .Values.imageCache.registryIngress.tls.secretName | quote }}
+      {{- end }}
+  rules:
+    - host: {{ .Values.imageCache.registryIngress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $svc }}
+                port:
+                  number: 5000
+{{- end }}
+{{- end }}
