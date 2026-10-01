@@ -20,11 +20,10 @@ import (
 
 const execTraceID = "0123456789abcdef0123456789abcdef"
 
-// dagCallWithExec is a real captured dagger.io/dag.call value (engine v0.21.8)
-// for a Container.withExec call. The capture's receiverDigest length byte was
-// one short, so it is corrected here; the payload bytes are otherwise
-// untouched.
-const dagCallWithExec = "ChZ4eHhoMzpiNDNkNjFjNmFiNGExOTQ5Eg0KCUNvbnRhaW5lchgBGgh3aXRoRXhlYyI5CgRhcmdzEjFCLwoEOgJzaAoEOgItYwohOh9lY2hvIGhlbGxvLWZyb20taXNzdWU2MDsgZXhpdCAwShV4eGgzOmUzYmE4NWY1NTcxZDdiODJSB3YwLjIxLjg="
+// dagCallWithExec is the verbatim dagger.io/dag.call value emitted by engine
+// v0.21.8 for a Container.withExec call whose args are
+// `sh -c "echo hello-from-issue60; exit 0"`.
+const dagCallWithExec = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIjkKBGFyZ3MSMUIvCgQ6AnNoCgQ6Ai1jCiE6H2VjaG8gaGVsbG8tZnJvbS1pc3N1ZTYwOyBleGl0IDBKFXh4aDM6ZTNiYTg1ZjU1NzFkN2I4MlIHdjAuMjEuOA=="
 
 // fakeExecTempo serves a root -> {exec, plain} span tree for execTraceID. The
 // exec span carries Dagger exec attributes (argv array, cwd, env, secret env)

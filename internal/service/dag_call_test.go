@@ -7,20 +7,19 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// Real captured dagger.io/dag.call values (engine v0.21.8). The captures as
-// transcribed carried inconsistent length prefixes (the receiverDigest length
-// byte was one short, and the from call's trailing string length one long), so
-// the fixtures below have those length bytes corrected; the payload bytes are
-// otherwise untouched. The verbatim captures are exercised as malformed input
-// in TestParseDagCallMalformed.
+// Verbatim dagger.io/dag.call captures from a live engine v0.21.8 trace
+// (service dagger-cli). dagCallWithExec is the Container.withExec span whose
+// args are `sh -c "echo hello-from-issue60; exit 0"`; dagCallFrom is the
+// Container.from span whose address argument is `alpine`. Both are the exact
+// base64 attribute values emitted by the engine, unmodified.
 const (
-	dagCallWithExec = "ChZ4eHhoMzpiNDNkNjFjNmFiNGExOTQ5Eg0KCUNvbnRhaW5lchgBGgh3aXRoRXhlYyI5CgRhcmdzEjFCLwoEOgJzaAoEOgItYwohOh9lY2hvIGhlbGxvLWZyb20taXNzdWU2MDsgZXhpdCAwShV4eGgzOmUzYmE4NWY1NTcxZDdiODJSB3YwLjIxLjg="
-	dagCallFrom     = "ChZ4eHhoMzpmYzY2ZGY4NGFkZjljNWI1Eg0KCUNvbnRhaW5lchgBGgRmcm9tIhMKB2FkZHJlc3MSCDoGYWxwaW5lShV4eGgzOjY5NWNhMzBhOWIxN2ZlMTN6LgoQZnJvbVNlc3Npb25TY29wZRIbOhg5emNpcDNyY3p5cGtvMGVrcmJ1ZHMzemw="
+	dagCallWithExec = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIjkKBGFyZ3MSMUIvCgQ6AnNoCgQ6Ai1jCiE6H2VjaG8gaGVsbG8tZnJvbS1pc3N1ZTYwOyBleGl0IDBKFXh4aDM6ZTNiYTg1ZjU1NzFkN2I4MlIHdjAuMjEuOA=="
+	dagCallFrom     = "ChV4eGgzOmZjNjZkZjg0YWRmOWM1YjUSDQoJQ29udGFpbmVyGAEaBGZyb20iEwoHYWRkcmVzcxIIOgZhbHBpbmVKFXh4aDM6Njk1Y2EzMGE5YjE3ZmUxM3ovChBmcm9tU2Vzc2lvblNjb3BlEhs6GTl6Y2lweDNyY3p5cGtvMGVrcmJ1ZHMzemw="
 
-	// Verbatim captures from the live trace, kept to prove the parser rejects
-	// them safely rather than panicking.
-	dagCallWithExecVerbatim = "ChV4eHhoMzpiNDNkNjFjNmFiNGExOTQ5Eg0KCUNvbnRhaW5lchgBGgh3aXRoRXhlYyI5CgRhcmdzEjFCLwoEOgJzaAoEOgItYwohOh9lY2hvIGhlbGxvLWZyb20taXNzdWU2MDsgZXhpdCAwShV4eGgzOmUzYmE4NWY1NTcxZDdiODJSB3YwLjIxLjg="
-	dagCallFromVerbatim     = "ChV4eHhoMzpmYzY2ZGY4NGFkZjljNWI1Eg0KCUNvbnRhaW5lchgBGgRmcm9tIhMKB2FkZHJlc3MSCDoGYWxwaW5lShV4eGgzOjY5NWNhMzBhOWIxN2ZlMTN6LwoQZnJvbVNlc3Npb25TY29wZRIbOhk5emNpcDNyY3p5cGtvMGVrcmJ1ZHMzemw="
+	// Deliberate mutations of dagCallWithExec (not captures), used to prove the
+	// parser rejects corrupt input safely rather than panicking.
+	dagCallWithExecTruncated = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIjkKBGFyZ3MSMUIvCgQ6AnNoCgQ6Ai1jCiE6H2VjaG8gaGVsbG8tZnJvbS1pc3N1ZTYwOyBleGl0IDBKFXh4aDM6ZTNiYTg1ZjU1NzFkN2I4MlIHdjAuMjEu"
+	dagCallWithExecBadLength = "ChZ4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIjkKBGFyZ3MSMUIvCgQ6AnNoCgQ6Ai1jCiE6H2VjaG8gaGVsbG8tZnJvbS1pc3N1ZTYwOyBleGl0IDBKFXh4aDM6ZTNiYTg1ZjU1NzFkN2I4MlIHdjAuMjEuOA=="
 )
 
 func TestParseDagCall(t *testing.T) {
@@ -82,8 +81,8 @@ func TestParseDagCallMalformed(t *testing.T) {
 		{"unknown wire type", base64.StdEncoding.EncodeToString([]byte{0x0f})},
 		{"over-long varint", base64.StdEncoding.EncodeToString([]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x01})},
 		{"non-proto bytes", base64.StdEncoding.EncodeToString([]byte("hello world"))},
-		{"verbatim withExec capture", dagCallWithExecVerbatim},
-		{"verbatim from capture", dagCallFromVerbatim},
+		{"truncated real withExec mutation", dagCallWithExecTruncated},
+		{"real withExec with corrupted digest length", dagCallWithExecBadLength},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
