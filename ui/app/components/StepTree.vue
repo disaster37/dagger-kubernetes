@@ -33,8 +33,8 @@
       </div>
 
       <div v-if="focusExec" class="exec-block">
-        <div class="exec-command" title="Click to copy" @click="copyCommand">
-          <code>{{ formatArgv(focusExec) }}</code>
+        <div v-if="focusCommand" class="exec-command" title="Click to copy" @click="copyCommand">
+          <code>{{ focusCommand }}</code>
         </div>
         <div class="exec-badges">
           <UBadge v-if="focusExec.cwd" color="neutral" variant="soft">cwd: {{ focusExec.cwd }}</UBadge>
@@ -190,6 +190,9 @@ let nowTimer: number | undefined
 
 const focus = computed<SpanNode | null>(() => focusPath.value[focusPath.value.length - 1] ?? null)
 const focusExec = computed(() => focus.value?.exec ?? null)
+// focusCommand is the formatted command line; empty for exec-like spans that
+// carry no argv (e.g. a publish operation), which hides the copy affordance.
+const focusCommand = computed(() => (focusExec.value ? formatArgv(focusExec.value) : ''))
 
 // exitBadgeColor maps the exec exit-code tone to a UBadge color.
 function exitBadgeColor(code: number | null | undefined): 'success' | 'error' | 'neutral' {
@@ -199,9 +202,9 @@ function exitBadgeColor(code: number | null | undefined): 'success' | 'error' | 
 
 // copyCommand copies the focused step's command line to the clipboard.
 async function copyCommand() {
-  if (!focusExec.value) return
+  if (!focusCommand.value) return
   try {
-    await navigator.clipboard.writeText(formatArgv(focusExec.value))
+    await navigator.clipboard.writeText(focusCommand.value)
   } catch {
     // Clipboard unavailable (insecure context / denied); ignore.
   }

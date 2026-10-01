@@ -175,6 +175,12 @@ func mergeSpanNode(dst, src *domain.SpanNode) {
 			dst.Attributes[k] = v
 		}
 	}
+	// Span events only exist on the finish record: the start record is exported
+	// before any event (e.g. "Container exited" with exit.code) can have fired,
+	// so whichever record carries events must win.
+	if len(dst.Events) == 0 && len(src.Events) > 0 {
+		dst.Events = src.Events
+	}
 }
 
 // traceStatus derives the overall trace status from the root span. The root

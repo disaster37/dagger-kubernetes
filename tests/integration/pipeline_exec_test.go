@@ -41,7 +41,7 @@ func fakeExecTempo(t *testing.T) *httptest.Server {
 						 "attributes":[
 							{"key":"dagger.io/exec.args","value":{"arrayValue":{"values":[{"stringValue":"go"},{"stringValue":"build"},{"stringValue":"./..."}]}}},
 							{"key":"dagger.io/exec.cwd","value":{"stringValue":"/src"}},
-							{"key":"dagger.io/exec.env","value":{"arrayValue":{"values":[{"stringValue":"FOO=bar"}]}}},
+							{"key":"dagger.io/exec.env","value":{"arrayValue":{"values":[{"stringValue":"FOO=bar"},{"stringValue":"DB_PASSWORD=supersecret123"}]}}},
 							{"key":"dagger.io/exec.secret.env","value":{"arrayValue":{"values":[{"stringValue":"DB_PASSWORD"}]}}}
 						 ],
 						 "events":[
@@ -157,10 +157,13 @@ func TestPipelineExecEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read body: %v", err)
 	}
-	// Dagger never emits secret values; the derived view must not fabricate one
-	// for a declared secret name.
-	if strings.Contains(string(raw), `DB_PASSWORD":"`) {
-		t.Fatal("secret value leaked into the trace response")
+	// The fixture declares DB_PASSWORD as a secret AND gives it a value in the
+	// env array ("supersecret123", which legitimately appears inside the raw
+	// dagger.io/exec.env attribute). The derived secret entry must carry no
+	// value: its JSON shape is {"name":"DB_PASSWORD","is_secret":true}, so the
+	// leaked shape {"name":"DB_PASSWORD","value":...} must be absent.
+	if strings.Contains(string(raw), `DB_PASSWORD","value"`) {
+		t.Fatal("secret value leaked into the derived exec view")
 	}
 
 	var trace domain.TraceInfo

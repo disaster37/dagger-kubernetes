@@ -636,6 +636,81 @@ func TestReconstructMergesDuplicateSpans(t *testing.T) {
 	}
 }
 
+// TestReconstructMergesDuplicateSpanEvents proves the finish record's span
+// events survive the duplicate-span merge. The Dagger CLI exports the start
+// record (no events — none can have fired yet) before the finish record, which
+// carries "Container exited" with exit.code; whichever order Tempo returns the
+// records in, the merged node must keep the event or the exec exit code is
+// lost.
+func TestReconstructMergesDuplicateSpanEvents(t *testing.T) {
+	startRecord := func() map[string]interface{} {
+		return map[string]interface{}{
+			"spanId":            "root",
+			"traceId":           "test-trace",
+			"name":              "exec.run",
+			"startTimeUnixNano": "1000000",
+		}
+	}
+	finishRecord := func() map[string]interface{} {
+		return map[string]interface{}{
+			"spanId":            "root",
+			"traceId":           "test-trace",
+			"name":              "exec.run",
+			"startTimeUnixNano": "1000000",
+			"endTimeUnixNano":   "4000000",
+			"status":            map[string]interface{}{"code": "STATUS_CODE_OK"},
+			"events": []interface{}{
+				map[string]interface{}{
+					"name":         "Container exited",
+					"timeUnixNano": "4000000",
+					"attributes": []interface{}{
+						map[string]interface{}{
+							"key":   "exit.code",
+							"value": map[string]interface{}{"intValue": "1"},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name  string
+		order []map[string]interface{}
+	}{
+		{"start then finish", []map[string]interface{}{startRecord(), finishRecord()}},
+		{"finish then start", []map[string]interface{}{finishRecord(), startRecord()}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			spans := make([]interface{}, 0, len(tc.order))
+			for _, s := range tc.order {
+				spans = append(spans, s)
+			}
+			r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
+			info := r.reconstruct("test-trace", map[string]interface{}{
+				"batches": []interface{}{
+					map[string]interface{}{
+						"scopeSpans": []interface{}{
+							map[string]interface{}{"spans": spans},
+						},
+					},
+				},
+			})
+			if info == nil || info.RootSpan == nil {
+				t.Fatal("nil root span")
+			}
+			if len(info.RootSpan.Events) != 1 {
+				t.Fatalf("events = %d, want 1 (finish record's event must survive the merge)", len(info.RootSpan.Events))
+			}
+			ev := info.RootSpan.Events[0]
+			if ev.Name != "Container exited" || ev.Attributes["exit.code"] != "1" {
+				t.Fatalf("event = %+v, want Container exited with exit.code=1", ev)
+			}
+		})
+	}
+}
+
 func TestTraceDurationMSAcrossSpans(t *testing.T) {
 	r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
 	info := r.reconstruct("test-trace", map[string]interface{}{
