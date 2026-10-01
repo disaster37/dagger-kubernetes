@@ -1934,6 +1934,10 @@ The UI is an embedded Nuxt 4 + Nuxt UI v4 SPA (static, `ssr: false`, packaged in
 It is always served by the control plane at `/` and single-pipeline views at
 `/pipelines/<id>`. No separate configuration is needed.
 
+The page footer shows the application version and a link to the GitHub issues
+page. The version is baked in at UI build time from `NUXT_PUBLIC_APP_VERSION`
+(default `unknown` when unset).
+
 Features:
 - **Pipeline list** — every run identified by a friendly name (`@username · org/repo`,
   or the root-folder/module name when there is no git repo) with status,

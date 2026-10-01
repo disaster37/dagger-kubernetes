@@ -4,6 +4,14 @@ export default defineNuxtConfig({
   modules: ['@nuxt/ui', '@pinia/nuxt'],
   css: ['~/assets/css/main.css'],
   ssr: false,
+  runtimeConfig: {
+    public: {
+      // Build-time application version shown in the footer. Override with
+      // NUXT_PUBLIC_APP_VERSION=<version> at build time; falls back to
+      // "unknown" when unset (local dev / unversioned builds).
+      appVersion: 'unknown',
+    },
+  },
   app: {
     buildAssetsDir: '/assets/',
     head: {
