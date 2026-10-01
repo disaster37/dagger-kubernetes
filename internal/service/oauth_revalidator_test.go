@@ -286,6 +286,87 @@ func TestRevalidatorExpiredRecoversAfterRelogin(t *testing.T) {
 	}
 }
 
+// TestRevalidatorFollowerRefreshDoesNotStrand covers issue #61 D1=B: when the
+// provider reports errOAuthNotLeaderRefresh (this pod is a follower and must
+// not rotate a credential it cannot persist), the revalidator records
+// stateUnavailable — never stateOK with a stale credential — and serves cached
+// groups within grace. The leader then recovers to stateOK.
+func TestRevalidatorFollowerRefreshDoesNotStrand(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeRevalidateProvider{groups: []string{"g1"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	now := base
+	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
+	ctx := context.Background()
+
+	// 1) Healthy baseline on the leader (last-known-good set).
+	if gids, err := rv.Check(ctx, u); err != nil || len(gids) == 0 {
+		t.Fatalf("baseline check: gids=%v err=%v", gids, err)
+	}
+
+	// 2) The request now lands on a follower: it must not rotate.
+	provider.err = errOAuthNotLeaderRefresh
+	provider.groups = nil
+	now = base.Add(10 * time.Minute)
+	gids, err := rv.Check(ctx, u)
+	if err != nil {
+		t.Fatalf("follower check: %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("follower must serve cached groups within grace")
+	}
+	if entry := rv.cache[u.ID]; entry.state != stateUnavailable {
+		t.Fatalf("state = %v, want stateUnavailable (never stateOK with a stale credential)", entry.state)
+	}
+	if u.DeactivatedAt != nil {
+		t.Fatal("follower must not deactivate the user")
+	}
+
+	// 3) The leader revalidates successfully and recovers to stateOK.
+	provider.err = nil
+	provider.groups = []string{"g1"}
+	now = base.Add(20 * time.Minute)
+	gids, err = rv.Check(ctx, u)
+	if err != nil {
+		t.Fatalf("leader check: %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("leader must recover to stateOK")
+	}
+	if entry := rv.cache[u.ID]; entry.state != stateOK {
+		t.Fatalf("state = %v, want stateOK after leader recovery", entry.state)
+	}
+}
+
+// TestRevalidatorColdFollowerServesReplicatedMembership covers the issue #61
+// cold-start gap: after a rollout every revalidator cache is empty, so a
+// follower must seed its cache from the replicated store (the user's group
+// memberships) and serve them, instead of denying until it happens to become
+// the leader.
+func TestRevalidatorColdFollowerServesReplicatedMembership(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeRevalidateProvider{err: errOAuthNotLeaderRefresh}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	now := base
+	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
+	ctx := context.Background()
+
+	// Cold cache: the very first Check lands on a follower.
+	gids, err := rv.Check(ctx, u)
+	if err != nil {
+		t.Fatalf("cold follower check: %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("cold follower must serve the replicated membership, not deny")
+	}
+	if entry := rv.cache[u.ID]; entry.state != stateUnavailable {
+		t.Fatalf("state = %v, want stateUnavailable", entry.state)
+	}
+	if u.DeactivatedAt != nil {
+		t.Fatal("cold follower must not deactivate the user")
+	}
+}
+
 // TestRevalidatorRefreshResnapshotsRotatedCredential: Revalidate's
 // refreshingSource may rotate and persist the credential mid-check; the
 // success block must re-snapshot entry.credential so a later stateExpired

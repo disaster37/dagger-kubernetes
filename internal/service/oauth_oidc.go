@@ -35,6 +35,16 @@ const oidcDiscoverTimeout = 15 * time.Second
 // fresh credential and recovers immediately.
 var errOAuthCredentialExpired = errors.New("oauth credential expired; re-authentication required")
 
+// errOAuthNotLeaderRefresh signals that an OIDC revalidation needs to refresh
+// the upstream credential but this pod is not the Raft leader (or lost
+// leadership mid-refresh), so the rotated credential could not be persisted.
+// Followers must never rotate a credential they cannot persist: Dex rotates the
+// refresh token on every grant, and a dropped persist strands the old token
+// until Dex's reuse window closes (issue #61). The revalidator records
+// stateUnavailable (non-destructive) and serves cached groups within grace; the
+// leader is the source of truth and replicates the fresh credential.
+var errOAuthNotLeaderRefresh = errors.New("oauth refresh requires raft leadership")
+
 // OIDCOAuthService implements the generic OIDC authorization-code login flow
 // for provider: "oidc" (covers Dex, Keycloak, Google, Auth0, etc.). Design
 // notes:
@@ -88,6 +98,13 @@ type OIDCOAuthService struct {
 	// oidcProvider backed by an httptest.Server.
 	providerFactory func(ctx context.Context, issuerURL string) (oidcProvider, error)
 
+	// isLeader reports whether this pod is the Raft leader. Only the leader may
+	// refresh (and thus rotate) the upstream OIDC credential, because only the
+	// leader can persist the rotation through the Raft FSM. Followers
+	// short-circuit to errOAuthNotLeaderRefresh and serve revalidation from the
+	// replicated store. nil defaults to true (single-node / tests).
+	isLeader func() bool
+
 	mu     sync.Mutex
 	cached oidcProvider // nil until the first successful discovery
 }
@@ -110,8 +127,9 @@ func defaultOIDCProviderFactory(ctx context.Context, issuerURL string) (oidcProv
 // when missing; empty claim names fall back to preferred_username/groups.
 // httpClient is the HTTP client for OIDC provider calls; nil uses the default.
 // encKey is the AES-256 key used to encrypt upstream OAuth credentials at rest;
-// nil disables encryption.
-func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, httpClient *http.Client, encKey []byte) *OIDCOAuthService {
+// nil disables encryption. isLeader gates upstream refresh on Raft leadership
+// (nil defaults to true).
+func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *UserService, groups domain.GroupRepository, jwtSvc *JWTService, logger *logrus.Logger, httpClient *http.Client, encKey []byte, isLeader func() bool) *OIDCOAuthService {
 	scopes := make([]string, 0, len(cfg.Scopes)+2)
 	scopes = append(scopes, cfg.Scopes...)
 	hasOpenID := false
@@ -161,7 +179,15 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *Us
 		httpClient:                   httpClient,
 		providerFactory:              defaultOIDCProviderFactory,
 		encKey:                       encKey,
+		isLeader:                     isLeader,
 	}
+}
+
+// leader reports whether this pod may refresh the upstream credential. A nil
+// isLeader defaults to true so single-node deployments and tests that do not
+// care about leadership keep refreshing.
+func (s *OIDCOAuthService) leader() bool {
+	return s.isLeader == nil || s.isLeader()
 }
 
 // oauth2Config builds an oauth2.Config from the discovered endpoint.
@@ -431,6 +457,13 @@ func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]st
 	if err != nil || cred == nil {
 		return nil, errOAuthCredentialExpired
 	}
+	// Leader-only refresh (issue #61): a follower cannot persist a rotated
+	// credential (Raft apply returns ErrNotLeader), so it must not rotate one.
+	// It serves revalidation from the replicated store instead; the leader
+	// refreshes and replicates the fresh credential.
+	if !s.leader() {
+		return nil, errOAuthNotLeaderRefresh
+	}
 	if s.httpClient != nil {
 		ctx = oidc.ClientContext(ctx, s.httpClient)
 	}
@@ -452,6 +485,9 @@ func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]st
 		// unusable (CWE-613 residual risk: clock-skew false revocation).
 		s.logger.WithField("user_id", u.ID).Debug("oidc: userinfo returned 401, attempting token refresh")
 		if _, refreshErr := ts.Token(); refreshErr != nil {
+			if errors.Is(refreshErr, errOAuthNotLeaderRefresh) {
+				return nil, errOAuthNotLeaderRefresh
+			}
 			if oauthTokenRevoked(refreshErr) {
 				return nil, errOAuthCredentialExpired
 			}
@@ -551,6 +587,16 @@ func (rs *refreshingSource) Token() (*oauth2.Token, error) {
 			persistCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 			if err := rs.s.users.Update(persistCtx, rs.u); err != nil {
+				// After leader-only gating (issue #61) this persist runs only on
+				// the leader, so ErrNotLeader here means leadership was lost
+				// mid-refresh: the rotation did not land. Surface it as
+				// errOAuthNotLeaderRefresh so the revalidator records
+				// stateUnavailable (retry) instead of stateOK with a credential
+				// that was never persisted.
+				if errors.Is(err, domain.ErrNotLeader) {
+					rs.logger.WithError(err).WithField("user_id", rs.u.ID).Error("oauth: persist refreshed credential failed: not the raft leader (leadership lost mid-refresh)")
+					return nil, errOAuthNotLeaderRefresh
+				}
 				rs.logger.WithError(err).WithField("user_id", rs.u.ID).Warn("oauth: persist refreshed credential failed")
 			}
 		}

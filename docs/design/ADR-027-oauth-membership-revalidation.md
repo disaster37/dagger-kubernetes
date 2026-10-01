@@ -149,6 +149,46 @@ No config keys changed; the existing `revalidate_grace` /
 revalidate_interval`, and use `session_max_age` as the hard backstop (see
 `docs/README.md`).
 
+## Revision (issue #61): leader-only refresh + surfaced re-auth failures
+
+The issue #30 revision above left a leader-follower caveat: revalidation runs
+on **whichever pod serves the request**, including followers, but only the Raft
+leader can persist a rotated credential (`RaftStore.applyResponse` returns
+`domain.ErrNotLeader` without forwarding). Dex rotates the refresh token on
+every grant, so a follower-side refresh rotated the token server-side while the
+store kept the stale one; once Dex's `reuseInterval` closed, presenting the old
+token was a reuse violation and Dex revoked the whole refresh-token family.
+Every subsequent refresh returned `invalid_grant` → `stateExpired` → deny, and
+a same-user re-login re-stranded on the next follower that served `/me`. The
+failure was silent on both sides (the callback discarded the underlying
+`Complete` error; the SPA bounced to the login screen with no `error` param).
+
+The fix (D1=B, leader-only refresh):
+
+- `OIDCOAuthService` takes an `isLeader func() bool` seam (wired from
+  `RaftStore.IsLeader`). When it reports false, `Revalidate` returns the new
+  sentinel `errOAuthNotLeaderRefresh` **before** contacting the IdP token or
+  userinfo endpoints — a follower never rotates a credential it cannot persist.
+- `OAuthRevalidator.refresh` maps `errOAuthNotLeaderRefresh` to
+  `stateUnavailable` (non-destructive, retry on `min(interval, grace)`). On
+  this path the follower seeds its cache from the **replicated store** (the
+  user's current supervisor group memberships) and serves them within grace, so
+  a cold follower after a rollout does not lock out a valid OIDC user. The
+  leader remains the source of truth: it refreshes and replicates the fresh
+  credential + reconciled memberships through the Raft FSM, and a user
+  deactivated by the leader is replicated as deactivated (denied on followers
+  too).
+- If the leader loses leadership mid-refresh, the persist returns
+  `domain.ErrNotLeader`; `refreshingSource.Token` logs at `Error` and returns
+  `errOAuthNotLeaderRefresh` so the rotation is never recorded as `stateOK`.
+- The OAuth callback now logs the underlying `Complete` error server-side
+  (client-facing hint stays generic), and the SPA surfaces a distinct
+  `error=session` when the callback succeeded but `/me` could not be restored.
+
+Trade-off (accepted): followers serve membership up to one
+`revalidate_interval` staler than the leader. This is bounded and strictly
+better than the silent strand. No new network surface is added.
+
 ### References
 
 - ADR-017: Auth always enforced + multi-provider OAuth

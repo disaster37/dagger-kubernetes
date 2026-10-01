@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,8 +24,8 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
-// oidcIssuer is a loopback httptest OIDC issuer serving discovery, JWKS, and
-// token endpoints. go-oidc supports http loopback issuers, so the real
+// oidcIssuer is a loopback httptest OIDC issuer serving discovery, JWKS, token,
+// and userinfo endpoints. go-oidc supports http loopback issuers, so the real
 // defaultOIDCProviderFactory can discover against it.
 type oidcIssuer struct {
 	t        *testing.T
@@ -31,6 +33,18 @@ type oidcIssuer struct {
 	clientID string
 	signKey  *rsa.PrivateKey
 	groups   []any
+
+	// Refresh-token rotation knobs (issue #61 integration test).
+	issueRefresh bool          // issue a refresh token on the authorization_code grant
+	expiresIn    int           // expires_in served by /token (negative = already expired)
+	reuseWindow  time.Duration // how long the previous refresh token stays valid
+
+	mu           sync.Mutex
+	refreshToken string
+	oldRefresh   string
+	reuseUntil   time.Time
+	tokenCalls   int
+	invalidGrant bool
 }
 
 func newOIDCIssuer(t *testing.T, clientID string, groups []any) *oidcIssuer {
@@ -45,6 +59,7 @@ func newOIDCIssuer(t *testing.T, clientID string, groups []any) *oidcIssuer {
 	mux.HandleFunc("/.well-known/openid-configuration", f.handleDiscovery)
 	mux.HandleFunc("/jwks", f.handleJWKS)
 	mux.HandleFunc("/token", f.handleToken)
+	mux.HandleFunc("/userinfo", f.handleUserinfo)
 	f.srv = httptest.NewServer(mux)
 	t.Cleanup(f.srv.Close)
 	return f
@@ -68,14 +83,53 @@ func (f *oidcIssuer) handleJWKS(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(jose.JSONWebKeySet{Keys: []jose.JSONWebKey{jwk}})
 }
 
-func (f *oidcIssuer) handleToken(w http.ResponseWriter, _ *http.Request) {
+func (f *oidcIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
+	_ = r.ParseForm()
+	f.mu.Lock()
+	f.tokenCalls++
+	if f.refreshToken == "" {
+		f.refreshToken = "refresh-1"
+	}
+	if r.Form.Get("grant_type") == "refresh_token" {
+		presented := r.Form.Get("refresh_token")
+		switch {
+		case presented == f.refreshToken:
+			// Rotate: the presented token becomes the previous one.
+			f.oldRefresh = f.refreshToken
+			f.refreshToken = fmt.Sprintf("refresh-%d", f.tokenCalls)
+			f.reuseUntil = time.Now().Add(f.reuseWindow)
+		case presented == f.oldRefresh && time.Now().Before(f.reuseUntil):
+			// Dex reuseInterval: the previous token is still accepted.
+		default:
+			f.invalidGrant = true
+			f.mu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(map[string]any{"error": "invalid_grant"})
+			return
+		}
+	}
+	refresh := f.refreshToken
+	f.mu.Unlock()
+
 	resp := map[string]any{
 		"access_token": "test-access-token",
 		"token_type":   "Bearer",
 		"id_token":     f.mintIDToken(),
 	}
+	if f.issueRefresh {
+		resp["refresh_token"] = refresh
+	}
+	if f.expiresIn != 0 {
+		resp["expires_in"] = f.expiresIn
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func (f *oidcIssuer) handleUserinfo(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{"groups": f.groups})
 }
 
 func (f *oidcIssuer) mintIDToken() string {
@@ -151,7 +205,7 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGroupMapper: %v", err)
 	}
-	oauthSvc := service.NewOIDCOAuthService(oauthCfg, mapper, usersSvc, groupRepo, jwtSvc, logger, nil, nil)
+	oauthSvc := service.NewOIDCOAuthService(oauthCfg, mapper, usersSvc, groupRepo, jwtSvc, logger, nil, nil, nil)
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
@@ -242,6 +296,221 @@ func TestOIDCLoginForbiddenFlow(t *testing.T) {
 	if loc := cbResp.Header.Get("Location"); loc != "/auth/login?error=group_required" {
 		t.Fatalf("callback Location = %q, want /auth/login?error=group_required", loc)
 	}
+}
+
+// TestOIDCReLoginAfterExpiryRecovers is the issue #61 black-box regression:
+// after the access token expires, a follower must not rotate the credential it
+// cannot persist (leader-only refresh), and a same-user re-login must recover
+// to a working /me without stranding the refresh token.
+func TestOIDCReLoginAfterExpiryRecovers(t *testing.T) {
+	const clientID = "integration-client"
+	controlLn, dataLn := freeListener(t), freeListener(t)
+	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
+	issuer := newOIDCIssuer(t, clientID, []any{"devs"})
+	issuer.issueRefresh = true
+	issuer.expiresIn = -1 // every revalidation must refresh
+
+	logger := observ.NewTestLogger()
+	store := newIntegrationStore(t)
+
+	userRepo := repository.NewUserRepo(store)
+	groupRepo := repository.NewGroupRepo(store)
+	tokenRepo := repository.NewTokenRepo(store)
+	traceMetaRepo := repository.NewTraceMetaRepo(store)
+
+	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
+	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
+	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
+	jwtSvc := service.NewJWTService([]byte("integration-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
+	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+
+	oauthCfg := &domain.OAuthConfig{
+		Enabled:       true,
+		Provider:      "oidc",
+		ClientID:      clientID,
+		ClientSecret:  "csec",
+		RedirectURL:   fmt.Sprintf("http://localhost%s/api/v1/auth/oauth/oidc/callback", controlAddr),
+		IssuerURL:     issuer.srv.URL,
+		Scopes:        []string{"openid", "profile", "email"},
+		UsernameClaim: "preferred_username",
+		GroupsClaim:   "groups",
+		AllowedGroups: []string{"devs"},
+	}
+	mapper, err := service.NewGroupMapper([]domain.GroupMappingRule{{Pattern: "^devs$", Replacement: "devs"}})
+	if err != nil {
+		t.Fatalf("NewGroupMapper: %v", err)
+	}
+	var leader atomic.Bool
+	leader.Store(true)
+	oauthSvc := service.NewOIDCOAuthService(oauthCfg, mapper, usersSvc, groupRepo, jwtSvc, logger, nil, []byte("0123456789abcdef0123456789abcdef"), leader.Load)
+
+	revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, nil, 0, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
+		Interval: 50 * time.Millisecond,
+		Grace:    2 * time.Second,
+	})
+	authSvc.SetOAuthRevalidator(revalidator)
+
+	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
+	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
+	sessions := service.NewStore(2 * time.Minute)
+	store.SetSessionSink(sessions)
+	provider := repository.NewStubProvider()
+	fleetManager := service.NewManager(provider, sessions, service.ManagerConfig{
+		MaxReplicasPerVersion: 3, MaxSessionsPerReplica: 8, ReplicaIdleTTL: 5 * time.Minute,
+	}, logger, observ.NewMetrics(nil))
+	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
+	attributionSvc := service.NewAttributionService(service.NewProjectService(repository.NewProjectRepo(store), groupRepo, logger), groupRepo, traceMetaRepo, logger)
+	traces := repository.NewSpanTreeReconstructor("")
+	logsClient := repository.NewLogsClient("")
+
+	srv := handler.NewServer(&handler.ServerConfig{
+		ControlAddr:     controlAddr,
+		DataAddr:        dataAddr,
+		ControlListener: controlLn,
+		DataListener:    dataLn,
+		DataHost:        "localhost",
+	}, &handler.Deps{
+		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
+		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
+		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
+		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
+		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient,
+		JWT: jwtSvc, OAuth: oauthSvc, OAuthProvider: "oidc",
+		CookieCfg: domain.CookieConfig{
+			AccessName:  "dagger_kubernetes_access",
+			RefreshName: "dagger_kubernetes_refresh",
+		},
+	})
+
+	serverTLS, _ := mintingCA.TLSCertificate()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := srv.Start(ctx, serverTLS); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		_ = srv.Shutdown(shutdownCtx)
+	})
+	time.Sleep(500 * time.Millisecond)
+
+	baseURL := fmt.Sprintf("http://localhost%s", controlAddr)
+	noRedirect := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}}
+
+	login := func(t *testing.T) string {
+		t.Helper()
+		loginResp, err := noRedirect.Get(baseURL + "/api/v1/auth/oauth/oidc/login?redirect=/pipelines")
+		if err != nil {
+			t.Fatalf("GET oidc login: %v", err)
+		}
+		defer loginResp.Body.Close()
+		if loginResp.StatusCode != http.StatusFound {
+			t.Fatalf("login status = %d, want 302", loginResp.StatusCode)
+		}
+		nonce := responseCookie(loginResp, "oauth_state")
+		if nonce == "" {
+			t.Fatal("login must set the oauth_state nonce cookie")
+		}
+		parsed, err := url.Parse(loginResp.Header.Get("Location"))
+		if err != nil {
+			t.Fatalf("parse authorize url: %v", err)
+		}
+		state := parsed.Query().Get("state")
+		if state == "" {
+			t.Fatal("authorize URL must carry the state token")
+		}
+		callbackURL := baseURL + "/api/v1/auth/oauth/oidc/callback?code=code&state=" + url.QueryEscape(state)
+		req, err := http.NewRequest("GET", callbackURL, http.NoBody)
+		if err != nil {
+			t.Fatalf("new callback request: %v", err)
+		}
+		req.Header.Set("Cookie", "oauth_state="+nonce)
+		cbResp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatalf("GET oidc callback: %v", err)
+		}
+		defer cbResp.Body.Close()
+		if cbResp.StatusCode != http.StatusFound {
+			t.Fatalf("callback status = %d, want 302", cbResp.StatusCode)
+		}
+		if loc := cbResp.Header.Get("Location"); !strings.HasPrefix(loc, "/auth/callback?redirect=") {
+			t.Fatalf("callback Location = %q, want /auth/callback", loc)
+		}
+		access := responseCookie(cbResp, "dagger_kubernetes_access")
+		if access == "" {
+			t.Fatal("callback must set the access cookie")
+		}
+		return access
+	}
+
+	me := func(t *testing.T, access string) (int, map[string]any) {
+		t.Helper()
+		req, err := http.NewRequest("GET", baseURL+"/api/v1/auth/me", http.NoBody)
+		if err != nil {
+			t.Fatalf("new me request: %v", err)
+		}
+		req.Header.Set("Cookie", "dagger_kubernetes_access="+access)
+		resp, err := noRedirect.Do(req)
+		if err != nil {
+			t.Fatalf("GET /me: %v", err)
+		}
+		defer resp.Body.Close()
+		var out map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&out)
+		return resp.StatusCode, out
+	}
+
+	// 1. Login on the leader and confirm /me works.
+	access := login(t)
+	status, body := me(t, access)
+	if status != http.StatusOK {
+		t.Fatalf("/me status = %d, want 200 (body=%v)", status, body)
+	}
+	if body["oauth_provider"] != "oidc" {
+		t.Fatalf("oauth_provider = %v, want oidc", body["oauth_provider"])
+	}
+
+	// 2. The request now lands on a follower: it must serve cached groups
+	// within grace WITHOUT rotating the credential (leader-only refresh).
+	leader.Store(false)
+	time.Sleep(150 * time.Millisecond)
+	before := issuer.tokenCalls
+	status, body = me(t, access)
+	if status != http.StatusOK {
+		t.Fatalf("follower /me status = %d, want 200 within grace (body=%v)", status, body)
+	}
+	if issuer.tokenCalls != before {
+		t.Fatalf("follower must not call the token endpoint: calls %d -> %d", before, issuer.tokenCalls)
+	}
+
+	// 3. Same-user re-login persists a fresh credential; the leader then
+	// recovers to a working /me without stranding the refresh token.
+	access = login(t)
+	leader.Store(true)
+	time.Sleep(150 * time.Millisecond)
+	status, body = me(t, access)
+	if status != http.StatusOK {
+		t.Fatalf("post-re-login /me status = %d, want 200 (body=%v)", status, body)
+	}
+	if body["oauth_provider"] != "oidc" {
+		t.Fatalf("post-re-login oauth_provider = %v, want oidc", body["oauth_provider"])
+	}
+	if issuer.invalidGrant {
+		t.Fatal("refresh token was stranded (issuer rejected a reused token)")
+	}
+}
+
+// responseCookie extracts name=value from a response's Set-Cookie headers.
+func responseCookie(resp *http.Response, name string) string {
+	for _, sc := range resp.Header.Values("Set-Cookie") {
+		if v := cookieValue(sc, name); v != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // cookieValue extracts name=value from a Set-Cookie header value.

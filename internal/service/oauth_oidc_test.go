@@ -181,7 +181,7 @@ func newOIDCService(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *
 	if err != nil {
 		t.Fatalf("NewGroupMapper: %v", err)
 	}
-	svc := NewOIDCOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger, nil, nil)
+	svc := NewOIDCOAuthService(cfg, mapper, usvc, r.groups, jwtSvc, logger, nil, nil, nil)
 	return svc, gsvc
 }
 
@@ -812,6 +812,23 @@ func newOIDCServiceForKey(t *testing.T, cfg *domain.OAuthConfig) *OIDCOAuthServi
 	return svc
 }
 
+// newOIDCServiceStub builds an OIDC service backed by stub repos so tests can
+// inject persist failures (e.g. a lost-leadership domain.ErrNotLeader).
+func newOIDCServiceStub(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthService, *stubUserRepo) {
+	t.Helper()
+	urepo := newStubUserRepo()
+	grepo := newStubGroupRepo()
+	logger := testLogger()
+	usvc := NewUserService(urepo, grepo, logger)
+	jwtSvc := NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
+	mapper, err := NewGroupMapper(cfg.GroupMappings)
+	if err != nil {
+		t.Fatalf("NewGroupMapper: %v", err)
+	}
+	svc := NewOIDCOAuthService(cfg, mapper, usvc, grepo, jwtSvc, logger, nil, []byte(oidcTestEncKey), nil)
+	return svc, urepo
+}
+
 // seedOIDCUser creates a local user with a stored (optionally encrypted)
 // OAuth credential and returns it.
 func seedOIDCUser(t *testing.T, svc *OIDCOAuthService, cred *oauthCredential) *domain.User {
@@ -976,6 +993,101 @@ func TestOIDCRevalidateRefreshRotatesAndPersistsCredential(t *testing.T) {
 	if decoded.RefreshToken != "rotated-refresh" || decoded.AccessToken != "rotated-access" {
 		t.Fatalf("persisted credential = %+v, want rotated tokens", decoded)
 	}
+}
+
+// TestOIDCRevalidateLeaderOnlyRefresh covers issue #61 D1=B: a follower must
+// not contact the IdP token endpoint (it cannot persist a rotation), while the
+// leader refreshes and persists. A leader that loses leadership mid-refresh
+// must surface errOAuthNotLeaderRefresh instead of silently dropping the
+// rotation.
+func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
+	t.Run("follower short-circuits without contacting the IdP", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.userinfo = map[string]any{"groups": []any{"devs"}}
+		svc, _ := newOIDCServiceStub(t, oidcCfg(issuer.srv.URL, nil))
+		svc.isLeader = func() bool { return false }
+		u := seedOIDCUser(t, svc, &oauthCredential{
+			Provider:     "oidc",
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			ExpiresAt:    time.Now().Add(-time.Hour),
+		})
+
+		_, err := svc.Revalidate(context.Background(), u)
+		if !errors.Is(err, errOAuthNotLeaderRefresh) {
+			t.Fatalf("Revalidate err = %v, want errOAuthNotLeaderRefresh", err)
+		}
+		if issuer.tokenCallCount != 0 {
+			t.Fatalf("follower must not call the token endpoint, got %d calls", issuer.tokenCallCount)
+		}
+	})
+
+	t.Run("leader refreshes and persists", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.userinfo = map[string]any{"groups": []any{"devs"}}
+		issuer.accessToken = "rotated-access"
+		issuer.refreshToken = "rotated-refresh"
+		svc, _ := newOIDCServiceStub(t, oidcCfg(issuer.srv.URL, nil))
+		svc.isLeader = func() bool { return true }
+		u := seedOIDCUser(t, svc, &oauthCredential{
+			Provider:     "oidc",
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			ExpiresAt:    time.Now().Add(-time.Hour),
+		})
+
+		groups, err := svc.Revalidate(context.Background(), u)
+		if err != nil {
+			t.Fatalf("Revalidate: %v", err)
+		}
+		if len(groups) != 1 || groups[0] != "devs" {
+			t.Fatalf("groups = %v, want [devs]", groups)
+		}
+		if issuer.tokenCallCount == 0 {
+			t.Fatal("leader must call the token endpoint to refresh")
+		}
+		got, err := svc.users.Get(context.Background(), u.ID)
+		if err != nil {
+			t.Fatalf("get user: %v", err)
+		}
+		decoded, err := decryptOAuthCredential(svc.encKey, got.OAuthTokenCiphertext)
+		if err != nil {
+			t.Fatalf("decrypt persisted credential: %v", err)
+		}
+		if decoded.RefreshToken != "rotated-refresh" {
+			t.Fatalf("persisted refresh token = %q, want rotated-refresh", decoded.RefreshToken)
+		}
+	})
+
+	t.Run("leader losing leadership mid-refresh surfaces the sentinel", func(t *testing.T) {
+		issuer := newFakeOIDCIssuer(t)
+		issuer.userinfo = map[string]any{"groups": []any{"devs"}}
+		issuer.accessToken = "rotated-access"
+		issuer.refreshToken = "rotated-refresh"
+		svc, urepo := newOIDCServiceStub(t, oidcCfg(issuer.srv.URL, nil))
+		svc.isLeader = func() bool { return true }
+		u := seedOIDCUser(t, svc, &oauthCredential{
+			Provider:     "oidc",
+			AccessToken:  "old-access",
+			RefreshToken: "old-refresh",
+			ExpiresAt:    time.Now().Add(-time.Hour),
+		})
+		// The Raft apply now reports ErrNotLeader (leadership lost mid-check).
+		urepo.updateErr = domain.ErrNotLeader
+
+		cred, err := decryptOAuthCredential(svc.encKey, u.OAuthTokenCiphertext)
+		if err != nil {
+			t.Fatalf("decrypt credential: %v", err)
+		}
+		p, err := svc.discover(context.Background())
+		if err != nil {
+			t.Fatalf("discover: %v", err)
+		}
+		ts := svc.tokenSource(context.Background(), p, u, cred)
+		if _, err := ts.Token(); !errors.Is(err, errOAuthNotLeaderRefresh) {
+			t.Fatalf("Token err = %v, want errOAuthNotLeaderRefresh", err)
+		}
+	})
 }
 
 // TestOAuthTokenRevokedClassification pins the oauthTokenRevoked semantics:

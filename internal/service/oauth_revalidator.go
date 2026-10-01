@@ -286,6 +286,26 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 			entry.checkedAt = now
 			entry.expiresAt = now.Add(jitteredTTL(stateExpired, r.cfg.Interval, r.cfg.Grace))
 			return
+		case errors.Is(err, errOAuthNotLeaderRefresh):
+			// This pod is not the Raft leader (or lost leadership mid-refresh):
+			// it must not rotate a credential it cannot persist (issue #61).
+			// Serve the leader's replicated membership from the store instead of
+			// denying — the leader is the only writer, so the replicated groups
+			// are its last reconciled view. Record stateUnavailable (never
+			// deactivate); the leader refreshes and replicates the fresh
+			// credential. Without this seeding a follower would deny every OIDC
+			// user after a rollout (its cache is cold and it never revalidates),
+			// which is exactly the same-user lockout #61 fixes.
+			r.logger.WithFields(logrus.Fields{
+				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
+			}).Debug("oauth: refresh requires raft leadership, serving replicated membership")
+			entry.state = stateUnavailable
+			gs, _ := r.groups.GroupsForUser(ctx, u.ID)
+			entry.groupIDs = groupIDs(gs)
+			entry.lastGood = now
+			entry.checkedAt = now
+			entry.expiresAt = now.Add(jitteredTTL(stateUnavailable, r.cfg.Interval, r.cfg.Grace))
+			return
 		case errors.Is(err, domain.ErrForbidden), errors.Is(err, domain.ErrSessionRevoked):
 			r.revoke(ctx, u)
 			entry.state = stateRevoked

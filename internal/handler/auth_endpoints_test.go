@@ -1,8 +1,10 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -280,6 +282,20 @@ func (forbiddenOAuthProvider) Revalidate(context.Context, *domain.User) ([]strin
 	return nil, domain.ErrForbidden
 }
 
+// errorOAuthProvider is an OAuthProvider stub whose Complete fails with a
+// non-forbidden error (e.g. a token exchange failure).
+type errorOAuthProvider struct{}
+
+func (errorOAuthProvider) LoginURL(state string) string {
+	return fmt.Sprintf("https://provider/auth?state=%s", state)
+}
+func (errorOAuthProvider) Complete(context.Context, string) (accessToken, refreshToken string, user *domain.User, err error) {
+	return "", "", nil, errors.New("exchange boom")
+}
+func (errorOAuthProvider) Revalidate(context.Context, *domain.User) ([]string, error) {
+	return nil, errors.New("exchange boom")
+}
+
 // TestHandleProvidersOIDC verifies providers reports oauth_oidc for the oidc
 // provider.
 func TestHandleProvidersOIDC(t *testing.T) {
@@ -486,6 +502,38 @@ func TestOAuthCallbackForbidden(t *testing.T) {
 	}
 	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=group_required" {
 		t.Fatalf("Location = %q, want group_required error redirect", loc)
+	}
+}
+
+// TestOAuthCallbackCompleteErrorLogged covers issue #61 D2: the underlying
+// Complete error is logged server-side while the client still gets the generic
+// error=oauth redirect (no IdP/token detail leaks).
+func TestOAuthCallbackCompleteErrorLogged(t *testing.T) {
+	env := newTestEnv(t)
+	env.server.oauth = errorOAuthProvider{}
+	env.server.oauthProvider = "oidc"
+	var buf bytes.Buffer
+	env.server.logger.SetOutput(&buf)
+	e := newAuthEngine(env.server)
+
+	state, err := env.server.jwt.IssueOAuthState("/pipelines", "n1")
+	if err != nil {
+		t.Fatalf("IssueOAuthState: %v", err)
+	}
+	resp := ut.PerformRequest(e, "GET", oauthCallbackPath(state), nil,
+		ut.Header{Key: "Cookie", Value: "oauth_state=n1"})
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("status = %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want generic oauth error redirect", loc)
+	}
+	logged := buf.String()
+	if !strings.Contains(logged, "oauth: callback complete failed") {
+		t.Fatalf("expected the Complete error to be logged, got %q", logged)
+	}
+	if !strings.Contains(logged, "exchange boom") {
+		t.Fatalf("expected the underlying error in the log, got %q", logged)
 	}
 }
 
