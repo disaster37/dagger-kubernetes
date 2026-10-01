@@ -963,7 +963,12 @@ telemetry ages out via backend retention).
   the Loki **compactor** with `limits_config.deletion_mode: filter-and-delete`,
   `compactor.retention_enabled: true`, and a `delete_request_store`
   (`filesystem` by default). For object-storage deployments, set
-  `delete_request_store` to the S3/GCS bucket used for delete requests.
+  `delete_request_store` to the S3/GCS bucket used for delete requests. The
+  chart also raises `limits_config.max_global_streams_per_user` from Loki's
+  5000 default to 100000: even with one stream per trace × level (the
+  collector keeps `span_id` out of labels), a busy deployment crosses 5000
+  within the stream-retention window and Loki then rejects the collector with
+  HTTP 429, dropping every log line. Set it to 0 to disable the limit.
 - **VictoriaMetrics** — `delete_series` is admin-only and deletes the entire
   series matching `match[]` (no time range; space is reclaimed lazily during
   background merges). If `-deleteAuthKey` is set on the VM deployment, the

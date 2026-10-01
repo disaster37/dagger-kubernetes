@@ -74,15 +74,17 @@ Ordering is enforced in `HistoryPurgeService` (new `internal/service/history_pur
   `compactor.retention_enabled: true`,
   `compactor.delete_request_store: filesystem`), so no operator action is
   needed for filesystem deployments; object-storage deployments must point
-  `delete_request_store` at S3/GCS.
+  `delete_request_store` at S3/GCS. The chart also raises
+  `limits_config.max_global_streams_per_user` from Loki's 5000 default to
+  100000 (`0` disables the limit).
 - **VictoriaMetrics**: `delete_series` is admin-only and deletes the **entire
   series** matching `match[]` (no time range); space is reclaimed lazily. If
   `-deleteAuthKey` is set on the VM deployment, the delete request must include
   that key (out of scope for v1; documented as a prerequisite). The
   OpenTelemetry collector's `transform/logs` processor promotes `trace_id` to
   a **log** stream label only; `span_id` stays out of the labels (one active
-  stream per span trips Loki's `max_active_streams_per_user` limit and drops
-  every log line) and the supervisor recovers it from the JSON log line. The
+  stream per span trips Loki's stream limit and drops every log line) and the
+  supervisor recovers it from the JSON log line. The
   metrics pipeline
   (`otlp → batch → prometheusremotewrite`) has no such transform, and the
   metrics currently emitted (BuildKit cache hit/miss counters, engine metrics)

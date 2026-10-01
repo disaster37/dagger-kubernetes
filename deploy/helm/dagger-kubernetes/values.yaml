@@ -1072,6 +1072,8 @@ loki:
     ## compactor.delete_request_store to the S3/GCS bucket used for delete requests.
     limits_config:
       deletion_mode: filter-and-delete
+      ## @param loki.limits_config.max_global_streams_per_user Maximum number of active Loki streams per user across the cluster. Loki 3.x defaults this to 5000, and a busy deployment (a few streams per pipeline trace, each active for hours until chunk flush + stream retention) can cross it — Loki then answers the OTel collector with HTTP 429 "maximum active stream limit exceeded" and drops every log line. The collector promotes `trace_id` only (one stream per trace x level, no per-span streams), so 100000 is generous headroom while keeping a safety net against runaway cardinality. Set to 0 to disable the limit entirely.
+      max_global_streams_per_user: 100000
     compactor:
       retention_enabled: true
       delete_request_store: filesystem

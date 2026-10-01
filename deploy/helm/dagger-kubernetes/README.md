@@ -390,7 +390,11 @@ grafana:
   `compactor.retention_enabled: true`, and a `delete_request_store`
   (`filesystem` by default). For object-storage deployments, set
   `loki.loki.compactor.delete_request_store` to the S3/GCS bucket used for
-  delete requests.
+  delete requests. The chart also raises
+  `loki.loki.limits_config.max_global_streams_per_user` from Loki's 5000
+  default to 100000 — busy deployments cross 5000 active streams within the
+  stream-retention window and Loki then rejects the OTel collector with
+  HTTP 429, dropping every log line; set it to 0 to disable the limit.
 - VictoriaMetrics `delete_series` is admin-only — ensure no `-deleteAuthKey`
   is set on the VictoriaMetrics server (or provide the matching key to the
   supervisor) so series deletion is not rejected.
