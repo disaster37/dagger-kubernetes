@@ -18,11 +18,42 @@ type SpanNode struct {
 	Attributes   map[string]string `json:"attributes"`
 	Children     []*SpanNode       `json:"children"`
 	Logs         []SpanLog         `json:"logs,omitempty"`
+	Events       []SpanEvent       `json:"events,omitempty"`
+	Exec         *ExecInfo         `json:"exec,omitempty"`
 }
 
 type SpanLog struct {
 	Timestamp time.Time `json:"timestamp"`
 	Message   string    `json:"message"`
+}
+
+// SpanEvent is one OTLP span event (name + flattened string/int attributes).
+// Dagger carries the exec exit code on a "Container exited" event.
+type SpanEvent struct {
+	Name       string            `json:"name"`
+	TimeUnixNs int64             `json:"time_unix_nano,omitempty"`
+	Attributes map[string]string `json:"attributes,omitempty"`
+}
+
+// ExecEnvVar is one environment variable visible on an exec span. Secret
+// values are never carried by telemetry; a secret entry has IsSecret=true and
+// an empty Value (rendered as "<secret>").
+type ExecEnvVar struct {
+	Name     string `json:"name"`
+	Value    string `json:"value,omitempty"`
+	IsSecret bool   `json:"is_secret,omitempty"`
+}
+
+// ExecInfo is the derived "what ran" view-model for a span. It is nil on
+// spans that are not exec-like (no command attributes).
+type ExecInfo struct {
+	Command  string       `json:"command"`        // argv[0] or best-effort program
+	Args     []string     `json:"args,omitempty"` // full argv (program + args)
+	Cwd      string       `json:"cwd,omitempty"`
+	User     string       `json:"user,omitempty"`
+	Env      []ExecEnvVar `json:"env,omitempty"`
+	ExitCode *int         `json:"exit_code,omitempty"` // nil = still running / unknown
+	Kind     string       `json:"kind,omitempty"`      // exec | service_start | io | call | other
 }
 
 type TraceInfo struct {

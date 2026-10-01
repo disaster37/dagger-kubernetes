@@ -32,6 +32,27 @@
         />
       </div>
 
+      <div v-if="focusExec" class="exec-block">
+        <div class="exec-command" title="Click to copy" @click="copyCommand">
+          <code>{{ formatArgv(focusExec) }}</code>
+        </div>
+        <div class="exec-badges">
+          <UBadge v-if="focusExec.cwd" color="neutral" variant="soft">cwd: {{ focusExec.cwd }}</UBadge>
+          <UBadge v-if="focusExec.user" color="neutral" variant="soft">user: {{ focusExec.user }}</UBadge>
+          <UBadge :color="exitBadgeColor(focusExec.exit_code)" variant="soft">
+            {{ focusExec.exit_code === null || focusExec.exit_code === undefined ? 'running' : `exit ${focusExec.exit_code}` }}
+          </UBadge>
+          <UBadge v-if="focusExec.kind" color="neutral" variant="soft">{{ focusExec.kind }}</UBadge>
+        </div>
+        <details v-if="focusExec.env && focusExec.env.length" class="exec-env">
+          <summary>Environment ({{ focusExec.env.length }})</summary>
+          <div v-for="e in focusExec.env" :key="e.name" class="exec-env-row">
+            <span class="exec-env-name">{{ e.name }}</span>
+            <span class="exec-env-value">{{ e.is_secret ? '<secret>' : (e.value ?? '') }}</span>
+          </div>
+        </details>
+      </div>
+
       <LogPanel
         v-if="panelOpen"
         :key="focus?.span_id ?? 'none'"
@@ -111,8 +132,10 @@ import type { LogSearchMode, SpanNode, TraceDetail, TraceLogEntry } from '~/api/
 import {
   computeRowOwners,
   entryKey,
+  exitCodeTone,
   findSpanByID,
   flattenVisibleChildren,
+  formatArgv,
   formatCount,
   formatDuration,
   liveSpanDuration,
@@ -166,6 +189,23 @@ const now = ref<number>(Date.now())
 let nowTimer: number | undefined
 
 const focus = computed<SpanNode | null>(() => focusPath.value[focusPath.value.length - 1] ?? null)
+const focusExec = computed(() => focus.value?.exec ?? null)
+
+// exitBadgeColor maps the exec exit-code tone to a UBadge color.
+function exitBadgeColor(code: number | null | undefined): 'success' | 'error' | 'neutral' {
+  const tone = exitCodeTone(code)
+  return tone === 'muted' ? 'neutral' : tone
+}
+
+// copyCommand copies the focused step's command line to the clipboard.
+async function copyCommand() {
+  if (!focusExec.value) return
+  try {
+    await navigator.clipboard.writeText(formatArgv(focusExec.value))
+  } catch {
+    // Clipboard unavailable (insecure context / denied); ignore.
+  }
+}
 
 const breadcrumbItems = computed(() =>
   focusPath.value.map((crumb) => ({ label: crumb.name || crumb.span_id }))

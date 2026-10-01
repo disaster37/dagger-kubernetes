@@ -355,6 +355,172 @@ func TestMapToSpanNodeBoolAttribute(t *testing.T) {
 	}
 }
 
+func TestMapToSpanNodeArrayAttribute(t *testing.T) {
+	node := mapToSpanNode(map[string]interface{}{
+		"spanId": "abc123",
+		"attributes": []interface{}{
+			map[string]interface{}{
+				"key": "dagger.io/exec.args",
+				"value": map[string]interface{}{
+					"arrayValue": map[string]interface{}{
+						"values": []interface{}{
+							map[string]interface{}{"stringValue": "go"},
+							map[string]interface{}{"stringValue": "build"},
+							map[string]interface{}{"stringValue": "./..."},
+						},
+					},
+				},
+			},
+		},
+	})
+	if node == nil {
+		t.Fatal("nil node")
+	}
+	if got := node.Attributes["dagger.io/exec.args"]; got != `["go","build","./..."]` {
+		t.Fatalf("array attribute = %q, want JSON array string", got)
+	}
+}
+
+func TestMapToSpanNodeArrayAttributeSkipsNonStrings(t *testing.T) {
+	node := mapToSpanNode(map[string]interface{}{
+		"spanId": "abc123",
+		"attributes": []interface{}{
+			map[string]interface{}{
+				"key": "dagger.io/exec.args",
+				"value": map[string]interface{}{
+					"arrayValue": map[string]interface{}{
+						"values": []interface{}{
+							"not-a-map",
+							map[string]interface{}{"intValue": "7"},
+							map[string]interface{}{"stringValue": "go"},
+						},
+					},
+				},
+			},
+		},
+	})
+	if node == nil {
+		t.Fatal("nil node")
+	}
+	if got := node.Attributes["dagger.io/exec.args"]; got != `["go"]` {
+		t.Fatalf("array attribute = %q, want only the string element", got)
+	}
+}
+
+func TestMapToSpanNodeIntAttribute(t *testing.T) {
+	tests := []struct {
+		name  string
+		value map[string]interface{}
+		want  string
+	}{
+		{"string int", map[string]interface{}{"intValue": "42"}, "42"},
+		{"numeric int", map[string]interface{}{"intValue": float64(7)}, "7"},
+		{"double", map[string]interface{}{"doubleValue": 1.5}, "1.5"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			node := mapToSpanNode(map[string]interface{}{
+				"spanId": "abc123",
+				"attributes": []interface{}{
+					map[string]interface{}{"key": "exit.code", "value": tc.value},
+				},
+			})
+			if node == nil {
+				t.Fatal("nil node")
+			}
+			if got := node.Attributes["exit.code"]; got != tc.want {
+				t.Fatalf("attribute = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestMapToSpanNodeUnrepresentableAttributeSkipped(t *testing.T) {
+	node := mapToSpanNode(map[string]interface{}{
+		"spanId": "abc123",
+		"attributes": []interface{}{
+			map[string]interface{}{"key": "empty.array", "value": map[string]interface{}{
+				"arrayValue": map[string]interface{}{"values": []interface{}{}},
+			}},
+			map[string]interface{}{"key": "kvlist", "value": map[string]interface{}{
+				"kvlistValue": map[string]interface{}{"values": []interface{}{}},
+			}},
+			map[string]interface{}{"key": "no.value"},
+		},
+	})
+	if node == nil {
+		t.Fatal("nil node")
+	}
+	if len(node.Attributes) != 0 {
+		t.Fatalf("attributes = %v, want none", node.Attributes)
+	}
+}
+
+func TestParseSpanEvents(t *testing.T) {
+	node := mapToSpanNode(map[string]interface{}{
+		"spanId": "abc123",
+		"events": []interface{}{
+			map[string]interface{}{
+				"name":         "Container exited",
+				"timeUnixNano": "1700000000000000000",
+				"attributes": []interface{}{
+					map[string]interface{}{
+						"key":   "exit.code",
+						"value": map[string]interface{}{"intValue": "1"},
+					},
+				},
+			},
+		},
+	})
+	if node == nil {
+		t.Fatal("nil node")
+	}
+	if len(node.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(node.Events))
+	}
+	ev := node.Events[0]
+	if ev.Name != "Container exited" {
+		t.Fatalf("event name = %q", ev.Name)
+	}
+	if ev.TimeUnixNs != 1700000000000000000 {
+		t.Fatalf("event time = %d", ev.TimeUnixNs)
+	}
+	if ev.Attributes["exit.code"] != "1" {
+		t.Fatalf("event exit.code = %q, want 1", ev.Attributes["exit.code"])
+	}
+}
+
+func TestParseSpanEventsMalformed(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  interface{}
+	}{
+		{"not a slice", "nope"},
+		{"non-map element", []interface{}{"nope"}},
+		{"empty", []interface{}{}},
+		{"bad timestamp", []interface{}{map[string]interface{}{"name": "x", "timeUnixNano": "not-a-number"}}},
+		{"bad attribute", []interface{}{map[string]interface{}{
+			"name":       "x",
+			"attributes": []interface{}{"nope", map[string]interface{}{"key": "k"}},
+		}}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Must not panic.
+			got := parseSpanEvents(tc.raw)
+			if tc.name == "bad timestamp" || tc.name == "bad attribute" {
+				if len(got) != 1 {
+					t.Fatalf("events = %d, want 1 (malformed fields skipped)", len(got))
+				}
+				return
+			}
+			if got != nil {
+				t.Fatalf("events = %v, want nil", got)
+			}
+		})
+	}
+}
+
 func TestReconstructEmptyTrace(t *testing.T) {
 	r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
 	info := r.reconstruct("test-trace", map[string]interface{}{})

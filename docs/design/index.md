@@ -54,3 +54,4 @@ the decision.
 | 044  | [Pipelines overview updates live via a sentinel-topic SSE stream](ADR-044-pipelines-overview-live-stream.md) |
 | 045  | [Server-side JWT revocation via `token_version`](ADR-045-server-side-jwt-revocation-token-version.md) |
 | 046  | [Engine image routed through a TLS-terminated mirror ingress](ADR-046-engine-image-via-mirror-ingress.md) |
+| 047  | [Surface executed commands (exec spans) in the pipeline view](ADR-047-pipeline-exec-view.md) |

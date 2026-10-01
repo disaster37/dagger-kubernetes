@@ -327,16 +327,108 @@ func mapToSpanNode(m map[string]interface{}) *domain.SpanNode {
 			}
 			key, _ := attrMap["key"].(string)
 			if v, ok := attrMap["value"].(map[string]interface{}); ok {
-				if sv, ok := v["stringValue"].(string); ok {
-					node.Attributes[key] = sv
-				} else if bv, ok := v["boolValue"].(bool); ok {
-					// Dagger UI hints (dagger.io/ui.*) are boolean attributes;
-					// encode them so the frontend can collapse/passthrough.
-					node.Attributes[key] = strconv.FormatBool(bv)
+				if s, ok := flattenAttrValue(v); ok {
+					node.Attributes[key] = s
 				}
 			}
 		}
 	}
 
+	node.Events = parseSpanEvents(m["events"])
+
 	return node
+}
+
+// flattenAttrValue returns the string form of any OTLP AnyValue: string, bool,
+// int, double, or an array of strings (encoded as a JSON array string, e.g.
+// `["go","build"]`). The second return is false when the value carries no
+// representable scalar. Array elements that are not strings are skipped
+// (Dagger exec arrays are string-valued).
+func flattenAttrValue(v map[string]interface{}) (string, bool) {
+	if sv, ok := v["stringValue"].(string); ok {
+		return sv, true
+	}
+	if bv, ok := v["boolValue"].(bool); ok {
+		// Dagger UI hints (dagger.io/ui.*) are boolean attributes; encode them
+		// so the frontend can collapse/passthrough.
+		return strconv.FormatBool(bv), true
+	}
+	// protojson encodes int64 as a string; accept a JSON number too.
+	if iv, ok := v["intValue"].(string); ok {
+		return iv, true
+	}
+	if iv, ok := v["intValue"].(float64); ok {
+		return strconv.FormatInt(int64(iv), 10), true
+	}
+	if dv, ok := v["doubleValue"].(float64); ok {
+		return strconv.FormatFloat(dv, 'g', -1, 64), true
+	}
+	if av, ok := v["arrayValue"].(map[string]interface{}); ok {
+		values := asSlice(av["values"])
+		strs := make([]string, 0, len(values))
+		for _, item := range values {
+			im, ok := item.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if sv, ok := im["stringValue"].(string); ok {
+				strs = append(strs, sv)
+			}
+		}
+		if len(strs) == 0 {
+			return "", false
+		}
+		encoded, err := json.Marshal(strs)
+		if err != nil {
+			return "", false
+		}
+		return string(encoded), true
+	}
+	return "", false
+}
+
+// parseSpanEvents decodes the OTLP events array (each {name, timeUnixNano,
+// attributes[]}) into []domain.SpanEvent, flattening each attribute value.
+// Malformed entries are skipped rather than failing the whole span.
+func parseSpanEvents(raw interface{}) []domain.SpanEvent {
+	events := asSlice(raw)
+	if len(events) == 0 {
+		return nil
+	}
+	out := make([]domain.SpanEvent, 0, len(events))
+	for _, e := range events {
+		em, ok := e.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		name, _ := em["name"].(string)
+		ev := domain.SpanEvent{Name: name}
+		if ts, ok := em["timeUnixNano"].(string); ok {
+			if ns, err := strconv.ParseInt(ts, 10, 64); err == nil {
+				ev.TimeUnixNs = ns
+			}
+		}
+		if attrs := asSlice(em["attributes"]); len(attrs) > 0 {
+			ev.Attributes = make(map[string]string, len(attrs))
+			for _, a := range attrs {
+				am, ok := a.(map[string]interface{})
+				if !ok {
+					continue
+				}
+				key, _ := am["key"].(string)
+				vm, ok := am["value"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				if s, ok := flattenAttrValue(vm); ok {
+					ev.Attributes[key] = s
+				}
+			}
+		}
+		out = append(out, ev)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
