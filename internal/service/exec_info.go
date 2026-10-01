@@ -30,6 +30,7 @@ var execAttrKeys = struct {
 	secretEnv []string
 	exitCode  []string
 	opKind    []string
+	call      []string
 }{
 	argv: []string{
 		"dagger.io/exec.args",
@@ -43,6 +44,9 @@ var execAttrKeys = struct {
 	secretEnv: []string{"dagger.io/exec.secret.env"},
 	exitCode:  []string{"dagger.io/exec.exitCode", "exit.code"},
 	opKind:    []string{"dagger.io/cache.type", "wcprof.op.kind"},
+	// The real engine (v0.21.8) carries the operation and its arguments in a
+	// base64 callpbv1.Call protobuf, not in the argv keys above.
+	call: []string{"dagger.io/dag.call"},
 }
 
 // execNameMarkers identify exec-like span names when no command attribute is
@@ -71,6 +75,9 @@ func execFromSpan(node *domain.SpanNode) *domain.ExecInfo {
 		return nil
 	}
 	argv := parseArgv(node.Attributes)
+	if len(argv) == 0 {
+		argv = ioOperationArgv(node.Attributes)
+	}
 	cwd := firstAttr(node.Attributes, execAttrKeys.cwd)
 	env := parseEnv(node.Attributes)
 	exit := parseExitCode(node)
@@ -104,6 +111,41 @@ func parseArgv(attrs map[string]string) []string {
 		if argv := decodeArgv(raw); len(argv) > 0 {
 			return capArgv(argv)
 		}
+	}
+	// The real engine carries exec argv inside the base64 callpbv1.Call in
+	// dagger.io/dag.call rather than in a dedicated argv attribute.
+	for _, key := range execAttrKeys.call {
+		raw := attrs[key]
+		if raw == "" {
+			continue
+		}
+		field, args, ok := parseDagCall(raw)
+		if !ok || !isExecCallField(field) {
+			continue
+		}
+		if argv := args["args"]; len(argv) > 0 {
+			return capArgv(argv)
+		}
+	}
+	return nil
+}
+
+// ioOperationArgv synthesizes a command line for an io operation (publish,
+// export, import, push) from its dagger.io/dag.call, e.g.
+// ["publish","ghcr.io/org/image:tag"]. It returns nil when the span carries no
+// io-operation call; when the call has no address the argv is just the field
+// name.
+func ioOperationArgv(attrs map[string]string) []string {
+	for _, key := range execAttrKeys.call {
+		raw := attrs[key]
+		if raw == "" {
+			continue
+		}
+		field, args, ok := parseDagCall(raw)
+		if !ok || !isIOOperationField(field) {
+			continue
+		}
+		return capArgv(append([]string{field}, args["address"]...))
 	}
 	return nil
 }

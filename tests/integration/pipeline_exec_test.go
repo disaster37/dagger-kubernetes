@@ -20,6 +20,12 @@ import (
 
 const execTraceID = "0123456789abcdef0123456789abcdef"
 
+// dagCallWithExec is a real captured dagger.io/dag.call value (engine v0.21.8)
+// for a Container.withExec call. The capture's receiverDigest length byte was
+// one short, so it is corrected here; the payload bytes are otherwise
+// untouched.
+const dagCallWithExec = "ChZ4eHhoMzpiNDNkNjFjNmFiNGExOTQ5Eg0KCUNvbnRhaW5lchgBGgh3aXRoRXhlYyI5CgRhcmdzEjFCLwoEOgJzaAoEOgItYwohOh9lY2hvIGhlbGxvLWZyb20taXNzdWU2MDsgZXhpdCAwShV4eGgzOmUzYmE4NWY1NTcxZDdiODJSB3YwLjIxLjg="
+
 // fakeExecTempo serves a root -> {exec, plain} span tree for execTraceID. The
 // exec span carries Dagger exec attributes (argv array, cwd, env, secret env)
 // and a "Container exited" event with the exit code; the plain span carries
@@ -47,11 +53,15 @@ func fakeExecTempo(t *testing.T) *httptest.Server {
 						 "events":[
 							{"name":"Container exited","timeUnixNano":"5000000000","attributes":[{"key":"exit.code","value":{"intValue":"0"}}]}
 						 ]},
+						{"spanId":"ZGFnY2FsbA==","parentSpanId":"cm9vdA==","traceId":%q,"name":"Container.withExec","startTimeUnixNano":"5500000000","endTimeUnixNano":"5800000000","status":{"code":"STATUS_CODE_OK"},
+						 "attributes":[
+							{"key":"dagger.io/dag.call","value":{"stringValue":%q}}
+						 ]},
 						{"spanId":"cGxhaW4=","parentSpanId":"cm9vdA==","traceId":%q,"name":"compile","startTimeUnixNano":"6000000000","endTimeUnixNano":"7000000000","status":{"code":"STATUS_CODE_OK"}}
 					]
 				}]
 			}]
-		}`, execTraceID, execTraceID, execTraceID)
+		}`, execTraceID, execTraceID, execTraceID, dagCallWithExec, execTraceID)
 	}))
 }
 
@@ -211,6 +221,19 @@ func TestPipelineExecEndpoint(t *testing.T) {
 	}
 	if !secret {
 		t.Fatalf("DB_PASSWORD not rendered as secret: %+v", execSpan.Exec.Env)
+	}
+
+	// The real engine carries exec argv in dagger.io/dag.call, not in a
+	// dedicated argv attribute; the endpoint must derive it from the call.
+	dagCallSpan := byID["ZGFnY2FsbA=="]
+	if dagCallSpan == nil || dagCallSpan.Exec == nil {
+		t.Fatalf("dag.call span missing exec view-model: %+v", dagCallSpan)
+	}
+	if dagCallSpan.Exec.Command != "sh" {
+		t.Fatalf("dag.call command = %q, want sh", dagCallSpan.Exec.Command)
+	}
+	if len(dagCallSpan.Exec.Args) == 0 {
+		t.Fatal("dag.call args empty, want non-empty")
 	}
 
 	plainSpan := byID["cGxhaW4="]

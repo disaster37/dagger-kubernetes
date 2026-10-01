@@ -1991,8 +1991,10 @@ Features:
   server-side from the OTLP span attributes + events (argv arrays, cwd, env,
   the `Container exited`/`exit.code` event) and rides the existing
   `GET /api/v1/traces/:id` response, so it refreshes live with the rest of the
-  trace. Image build/push operations surface their operation span and any argv,
-  so a `docker push`/`Publish` command is visible. See
+  trace. On current engines the operation and its arguments arrive in the
+  `dagger.io/dag.call` attribute (a base64 `callpbv1.Call` protobuf), so a
+  `withExec` shows its argv and a publish/export/import/push shows a synthesized
+  command line such as `publish ghcr.io/org/image:tag`. See
   [ADR-047](design/ADR-047-pipeline-exec-view.md).
 - **Aggregated logs per level** — the step tree shows a log panel for the
   currently focused level, aggregating the logs of that node **and all its

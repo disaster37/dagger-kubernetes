@@ -58,13 +58,49 @@ present wins, so a future engine rename is a one-line change:
 
 | Fact | Keys (priority order) |
 |---|---|
-| argv / command | `dagger.io/exec.args`, `process.command_args`, `wcprof.exec.argv`, `dagger.io/exec.argv` |
+| argv / command | `dagger.io/exec.args`, `process.command_args`, `wcprof.exec.argv`, `dagger.io/exec.argv`; then `dagger.io/dag.call` (see D3a) |
 | working dir | `dagger.io/exec.cwd`, `process.cwd` |
 | user | `dagger.io/exec.user`, `process.owner` |
 | env (non-secret) | `dagger.io/exec.env`, `process.environment_variable.<name>` |
 | secret env names | `dagger.io/exec.secret.env` |
 | exit code | span event `Container exited` → `exit.code`; then `dagger.io/exec.exitCode`, `exit.code` |
 | operation kind | `dagger.io/cache.type`, `wcprof.op.kind`; else derived from the span name |
+
+### D3a — Verified reality: argv arrives in `dagger.io/dag.call`
+
+A live trace from engine **v0.21.8** showed that the argv keys above are **not
+emitted**. The only carrier of the operation and its arguments is the span
+attribute **`dagger.io/dag.call`**: a base64-encoded `callpbv1.Call` protobuf
+(`dagger/dagger` `dagql/call/callpbv1`). For example a `Container.withExec`
+span decodes to field `withExec` with `args = ["sh","-c","echo …; exit 0"]`.
+
+`internal/service/dag_call.go` is a hand-rolled, panic-free protobuf wire
+parser (stdlib only) for that message. Field numbers:
+
+| Message | Field | Number | Type |
+|---|---|---|---|
+| `Call` | `field` | 3 | string |
+| `Call` | `args` | 4 | repeated `Argument` |
+| `Argument` | `name` | 1 | string |
+| `Argument` | `value` | 2 | `Literal` |
+| `Literal` | `string` | 7 | string |
+| `Literal` | `list` | 8 | `List` |
+| `List` | `values` | 1 | repeated `Literal` |
+
+`parseArgv` falls back to `parseDagCall` after the dedicated argv keys: when the
+call field is `withExec`/`exec` (case-insensitive) and the `args` argument is
+non-empty, that argv is used. The dedicated keys keep precedence, so a future
+engine that emits them still wins.
+
+For io operations (`publish`, `export`, `import`, `push`) the target rides an
+`address` argument. When no argv was found, `execFromSpan` synthesizes a command
+line `append([]string{field}, args["address"]...)` — e.g.
+`publish ghcr.io/org/image:tag` — and keeps `Kind = io` from
+`classifyExecKind`. When the address is absent the argv is just the field name;
+nothing is fabricated.
+
+The exit code is unchanged: on v0.21.8 it rides the child `resume withExec`
+span's `Container exited` event (`exit.code`), which D1 already preserves.
 
 ### D4 — Secret redaction
 
@@ -116,8 +152,10 @@ compatible: older clients ignore unknown fields, and the CI event stream
   interpolation only (no `v-html`), per ADR-038.
 - **Risk — attribute-key drift:** the exact keys vary across Dagger engine
   versions. The priority table plus tolerant parsing mitigates this; adding a
-  key is a one-line change with no data-model change.
+  key is a one-line change with no data-model change. The v0.21.8 live trace
+  resolved the main open question: argv rides `dagger.io/dag.call` (D3a), not
+  the documented argv keys.
 - **Risk — image "push" visibility:** a `Container.publish`/`Export` may not
-  emit a classic exec span. The operation span's name + any argv/op-kind
-  attributes surface the row; a dedicated publish view is a follow-up, not
-  #60.
+  emit a classic exec span. The operation span's name plus the synthesized
+  `publish <address>` command line (D3a) surface the row; a dedicated publish
+  view is a follow-up, not #60.
