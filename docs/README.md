@@ -1994,7 +1994,11 @@ Features:
   trace. On current engines the operation and its arguments arrive in the
   `dagger.io/dag.call` attribute (a base64 `callpbv1.Call` protobuf), so a
   `withExec` shows its argv and a publish/export/import/push shows a synthesized
-  command line such as `publish ghcr.io/org/image:tag`. See
+  command line such as `publish ghcr.io/org/image:tag`. The same attribute
+  carries `withEnvVariable`/`withEnvironmentVariable` (name + value) and
+  `withSecretVariable` (name only, rendered `<secret>`; the secret id is never
+  surfaced), so those spans show their environment even though they emit no
+  `dagger.io/exec.env` attribute. See
   [ADR-047](design/ADR-047-pipeline-exec-view.md).
 - **Aggregated logs per level** — the step tree shows a log panel for the
   currently focused level, aggregating the logs of that node **and all its

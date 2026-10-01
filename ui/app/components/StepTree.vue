@@ -39,7 +39,11 @@
         <div class="exec-badges">
           <UBadge v-if="focusExec.cwd" color="neutral" variant="soft">cwd: {{ focusExec.cwd }}</UBadge>
           <UBadge v-if="focusExec.user" color="neutral" variant="soft">user: {{ focusExec.user }}</UBadge>
-          <UBadge :color="exitBadgeColor(focusExec.exit_code)" variant="soft">
+          <UBadge
+            v-if="(focusExec.exit_code !== null && focusExec.exit_code !== undefined) || focusExec.kind === 'exec'"
+            :color="exitBadgeColor(focusExec.exit_code)"
+            variant="soft"
+          >
             {{ focusExec.exit_code === null || focusExec.exit_code === undefined ? 'running' : `exit ${focusExec.exit_code}` }}
           </UBadge>
           <UBadge v-if="focusExec.kind" color="neutral" variant="soft">{{ focusExec.kind }}</UBadge>

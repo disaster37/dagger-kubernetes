@@ -8,6 +8,16 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// Verbatim dagger.io/dag.call values emitted by engine v0.21.8, extracted from
+// live traces (base64 callpbv1.Call protobufs).
+const (
+	dagCallWithEnvVariable    = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaD3dpdGhFbnZWYXJpYWJsZSINCgRuYW1lEgU6A0ZPTyIOCgV2YWx1ZRIFOgNiYXJKFXh4aDM6ZDE1YjFjYTJiYWZjNDhmMA=="
+	dagCallWithSecretVariable = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaEndpdGhTZWNyZXRWYXJpYWJsZSIUCgRuYW1lEgw6CkFQSV9TRUNSRVQiIQoGc2VjcmV0EhcKFXh4aDM6MTJhZjc0MTZiYmQxMWZhOUoVeHhoMzo5N2MzNTYxZTExZTdjMzU5"
+	// Synthetic variant of dagCallWithEnvVariable with a secret-ish name and a
+	// value, to prove defense-in-depth redaction.
+	dagCallWithTokenVariable = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaD3dpdGhFbnZWYXJpYWJsZSITCgRuYW1lEgs6CUFQSV9UT0tFTiIRCgV2YWx1ZRIIOgZsZWFrZWRKFXh4aDM6ZDE1YjFjYTJiYWZjNDhmMA=="
+)
+
 func TestParseArgv(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -145,6 +155,59 @@ func TestParseEnv(t *testing.T) {
 	}
 }
 
+func TestCallEnv(t *testing.T) {
+	tests := []struct {
+		name  string
+		attrs map[string]string
+		want  []domain.ExecEnvVar
+	}{
+		{
+			name:  "withEnvVariable",
+			attrs: map[string]string{"dagger.io/dag.call": dagCallWithEnvVariable},
+			want:  []domain.ExecEnvVar{{Name: "FOO", Value: "bar"}},
+		},
+		{
+			name:  "withSecretVariable",
+			attrs: map[string]string{"dagger.io/dag.call": dagCallWithSecretVariable},
+			want:  []domain.ExecEnvVar{{Name: "API_SECRET", IsSecret: true}},
+		},
+		{
+			name:  "non-env call",
+			attrs: map[string]string{"dagger.io/dag.call": dagCallWithExec},
+			want:  nil,
+		},
+		{
+			name:  "secret-ish name redacted",
+			attrs: map[string]string{"dagger.io/dag.call": dagCallWithTokenVariable},
+			want:  []domain.ExecEnvVar{{Name: "API_TOKEN", Value: "<redacted>"}},
+		},
+		{
+			name:  "no call",
+			attrs: map[string]string{},
+			want:  nil,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := callEnv(tc.attrs)
+			if len(got) != len(tc.want) {
+				t.Fatalf("callEnv = %+v, want %+v", got, tc.want)
+			}
+			for i := range got {
+				if got[i] != tc.want[i] {
+					t.Fatalf("callEnv[%d] = %+v, want %+v", i, got[i], tc.want[i])
+				}
+			}
+			// The secret id must never surface in the derived env.
+			for _, e := range got {
+				if strings.Contains(e.Value, "xxh3:") {
+					t.Fatalf("secret id leaked into env value: %+v", e)
+				}
+			}
+		})
+	}
+}
+
 func TestParseExitCode(t *testing.T) {
 	code := func(n int) *int { return &n }
 
@@ -272,6 +335,28 @@ func TestExecFromSpan(t *testing.T) {
 			node: &domain.SpanNode{Name: "compile", Attributes: map[string]string{"process.cwd": "/work"}},
 			want: &domain.ExecInfo{Cwd: "/work", Kind: "other"},
 		},
+		{
+			name: "withEnvVariable call",
+			node: &domain.SpanNode{
+				Name:       "Container.withEnvVariable",
+				Attributes: map[string]string{"dagger.io/dag.call": dagCallWithEnvVariable},
+			},
+			want: &domain.ExecInfo{
+				Env:  []domain.ExecEnvVar{{Name: "FOO", Value: "bar"}},
+				Kind: "env",
+			},
+		},
+		{
+			name: "withSecretVariable call",
+			node: &domain.SpanNode{
+				Name:       "Container.withSecretVariable",
+				Attributes: map[string]string{"dagger.io/dag.call": dagCallWithSecretVariable},
+			},
+			want: &domain.ExecInfo{
+				Env:  []domain.ExecEnvVar{{Name: "API_SECRET", IsSecret: true}},
+				Kind: "env",
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -290,6 +375,11 @@ func TestExecFromSpan(t *testing.T) {
 			}
 			if len(got.Env) != len(tc.want.Env) {
 				t.Fatalf("env = %v, want %v", got.Env, tc.want.Env)
+			}
+			for i := range got.Env {
+				if got.Env[i] != tc.want.Env[i] {
+					t.Fatalf("env[%d] = %+v, want %+v", i, got.Env[i], tc.want.Env[i])
+				}
 			}
 			if (got.ExitCode == nil) != (tc.want.ExitCode == nil) {
 				t.Fatalf("exit = %v, want %v", got.ExitCode, tc.want.ExitCode)

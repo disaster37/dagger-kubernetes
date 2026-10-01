@@ -25,6 +25,14 @@ const execTraceID = "0123456789abcdef0123456789abcdef"
 // `sh -c "echo hello-from-issue60; exit 0"`.
 const dagCallWithExec = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIjkKBGFyZ3MSMUIvCgQ6AnNoCgQ6Ai1jCiE6H2VjaG8gaGVsbG8tZnJvbS1pc3N1ZTYwOyBleGl0IDBKFXh4aDM6ZTNiYTg1ZjU1NzFkN2I4MlIHdjAuMjEuOA=="
 
+// Verbatim dagger.io/dag.call values emitted by engine v0.21.8 for
+// Container.withEnvVariable (FOO=bar) and Container.withSecretVariable
+// (API_SECRET, whose secret id is never in telemetry).
+const (
+	dagCallWithEnvVariable    = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaD3dpdGhFbnZWYXJpYWJsZSINCgRuYW1lEgU6A0ZPTyIOCgV2YWx1ZRIFOgNiYXJKFXh4aDM6ZDE1YjFjYTJiYWZjNDhmMA=="
+	dagCallWithSecretVariable = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaEndpdGhTZWNyZXRWYXJpYWJsZSIUCgRuYW1lEgw6CkFQSV9TRUNSRVQiIQoGc2VjcmV0EhcKFXh4aDM6MTJhZjc0MTZiYmQxMWZhOUoVeHhoMzo5N2MzNTYxZTExZTdjMzU5"
+)
+
 // fakeExecTempo serves a root -> {exec, plain} span tree for execTraceID. The
 // exec span carries Dagger exec attributes (argv array, cwd, env, secret env)
 // and a "Container exited" event with the exit code; the plain span carries
@@ -56,11 +64,19 @@ func fakeExecTempo(t *testing.T) *httptest.Server {
 						 "attributes":[
 							{"key":"dagger.io/dag.call","value":{"stringValue":%q}}
 						 ]},
+						{"spanId":"ZW52dmFy","parentSpanId":"cm9vdA==","traceId":%q,"name":"Container.withEnvVariable","startTimeUnixNano":"5850000000","endTimeUnixNano":"5860000000","status":{"code":"STATUS_CODE_OK"},
+						 "attributes":[
+							{"key":"dagger.io/dag.call","value":{"stringValue":%q}}
+						 ]},
+						{"spanId":"c2VjcmV0","parentSpanId":"cm9vdA==","traceId":%q,"name":"Container.withSecretVariable","startTimeUnixNano":"5870000000","endTimeUnixNano":"5880000000","status":{"code":"STATUS_CODE_OK"},
+						 "attributes":[
+							{"key":"dagger.io/dag.call","value":{"stringValue":%q}}
+						 ]},
 						{"spanId":"cGxhaW4=","parentSpanId":"cm9vdA==","traceId":%q,"name":"compile","startTimeUnixNano":"6000000000","endTimeUnixNano":"7000000000","status":{"code":"STATUS_CODE_OK"}}
 					]
 				}]
 			}]
-		}`, execTraceID, execTraceID, execTraceID, dagCallWithExec, execTraceID)
+		}`, execTraceID, execTraceID, execTraceID, dagCallWithExec, execTraceID, dagCallWithEnvVariable, execTraceID, dagCallWithSecretVariable, execTraceID)
 	}))
 }
 
@@ -233,6 +249,36 @@ func TestPipelineExecEndpoint(t *testing.T) {
 	}
 	if len(dagCallSpan.Exec.Args) == 0 {
 		t.Fatal("dag.call args empty, want non-empty")
+	}
+
+	// A Container.withEnvVariable span carries no exec attributes; the env
+	// entry is derived from its dagger.io/dag.call.
+	envSpan := byID["ZW52dmFy"]
+	if envSpan == nil || envSpan.Exec == nil {
+		t.Fatalf("withEnvVariable span missing exec view-model: %+v", envSpan)
+	}
+	if envSpan.Exec.Kind != "env" {
+		t.Fatalf("withEnvVariable kind = %q, want env", envSpan.Exec.Kind)
+	}
+	if len(envSpan.Exec.Env) != 1 || envSpan.Exec.Env[0].Name != "FOO" || envSpan.Exec.Env[0].Value != "bar" {
+		t.Fatalf("withEnvVariable env = %+v, want [{FOO bar}]", envSpan.Exec.Env)
+	}
+
+	// A Container.withSecretVariable span renders the name as a secret with no
+	// value; the secret id must never surface in the response.
+	secretSpan := byID["c2VjcmV0"]
+	if secretSpan == nil || secretSpan.Exec == nil {
+		t.Fatalf("withSecretVariable span missing exec view-model: %+v", secretSpan)
+	}
+	if secretSpan.Exec.Kind != "env" {
+		t.Fatalf("withSecretVariable kind = %q, want env", secretSpan.Exec.Kind)
+	}
+	if len(secretSpan.Exec.Env) != 1 || secretSpan.Exec.Env[0].Name != "API_SECRET" ||
+		!secretSpan.Exec.Env[0].IsSecret || secretSpan.Exec.Env[0].Value != "" {
+		t.Fatalf("withSecretVariable env = %+v, want [{API_SECRET <secret>}]", secretSpan.Exec.Env)
+	}
+	if strings.Contains(string(raw), "xxh3:12af7416bbd11fa9") {
+		t.Fatal("secret id leaked into the trace response")
 	}
 
 	plainSpan := byID["cGxhaW4="]

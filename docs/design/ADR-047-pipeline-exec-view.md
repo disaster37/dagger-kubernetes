@@ -102,11 +102,29 @@ nothing is fabricated.
 The exit code is unchanged: on v0.21.8 it rides the child `resume withExec`
 span's `Container exited` event (`exit.code`), which D1 already preserves.
 
+### D3b — Verified reality: env vars arrive in `dagger.io/dag.call`
+
+The same live trace showed that `Container.withEnvVariable` and
+`Container.withSecretVariable` spans carry **no** `dagger.io/exec.env` /
+`process.environment_variable.*` attributes; `dagger.io/dag.call` is the only
+signal. `callEnv` decodes it and derives the env entry:
+
+| Call field (case-insensitive) | Derived entry |
+|---|---|
+| `withEnvVariable`, `withEnvironmentVariable` | `{name, value}` from the `name`/`value` arguments, via `envVar` (secret-name redaction + value cap) |
+| `withSecretVariable` | `{name, is_secret: true}` from the `name` argument; the `secret` argument is a `Literal.id` and is **never** surfaced |
+
+`execFromSpan` tries `parseEnv` first (dedicated attributes keep precedence)
+and falls back to `callEnv`; when the call yields entries and the span kind was
+`other`, the kind is set to `env`. A span with only a `withEnvVariable` call
+therefore renders as an env operation rather than a bare `other` span.
+
 ### D4 — Secret redaction
 
-Secret env names come from `dagger.io/exec.secret.env`; their values are never
-present in telemetry, so they render as `is_secret: true` with an empty value
-(the UI shows `<secret>`). As defense-in-depth, any non-secret value whose
+Secret env names come from `dagger.io/exec.secret.env` (or a
+`withSecretVariable` call, D3b); their values are never present in telemetry,
+so they render as `is_secret: true` with an empty value (the UI shows
+`<secret>`). As defense-in-depth, any non-secret value whose
 **name** matches a secret-ish pattern (`*TOKEN*`, `*SECRET*`, `*PASSWORD*`,
 `*KEY*`, `*AUTH*`, case-insensitive) is redacted to `<redacted>`. The raw
 `Attributes` map is unchanged (already bounded by the OTLP body cap).

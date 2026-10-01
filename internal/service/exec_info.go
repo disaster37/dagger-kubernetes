@@ -80,6 +80,15 @@ func execFromSpan(node *domain.SpanNode) *domain.ExecInfo {
 	}
 	cwd := firstAttr(node.Attributes, execAttrKeys.cwd)
 	env := parseEnv(node.Attributes)
+	kind := classifyExecKind(node)
+	if len(env) == 0 {
+		if callEnvVars := callEnv(node.Attributes); len(callEnvVars) > 0 {
+			env = callEnvVars
+			if kind == "other" {
+				kind = "env"
+			}
+		}
+	}
 	exit := parseExitCode(node)
 
 	if len(argv) == 0 && cwd == "" && len(env) == 0 && exit == nil && !isExecLikeName(node.Name) {
@@ -91,7 +100,7 @@ func execFromSpan(node *domain.SpanNode) *domain.ExecInfo {
 		User:     firstAttr(node.Attributes, execAttrKeys.user),
 		Env:      env,
 		ExitCode: exit,
-		Kind:     classifyExecKind(node),
+		Kind:     kind,
 	}
 	if len(argv) > 0 {
 		info.Command = argv[0]
@@ -230,6 +239,42 @@ func parseEnv(attrs map[string]string) []domain.ExecEnvVar {
 		return nil
 	}
 	return capEnv(env)
+}
+
+// callEnv derives env entries from a dagql call that sets an environment
+// variable (withEnvVariable/withEnvironmentVariable) or a secret variable
+// (withSecretVariable). The real engine carries these in dagger.io/dag.call;
+// secret values are never in telemetry, so they render as is_secret.
+func callEnv(attrs map[string]string) []domain.ExecEnvVar {
+	for _, key := range execAttrKeys.call {
+		raw := attrs[key]
+		if raw == "" {
+			continue
+		}
+		field, args, ok := parseDagCall(raw)
+		if !ok {
+			continue
+		}
+		name := firstString(args["name"])
+		if name == "" {
+			continue
+		}
+		switch strings.ToLower(field) {
+		case "withenvvariable", "withenvironmentvariable":
+			return []domain.ExecEnvVar{envVar(name, firstString(args["value"]), false)}
+		case "withsecretvariable":
+			return []domain.ExecEnvVar{{Name: name, IsSecret: true}}
+		}
+	}
+	return nil
+}
+
+// firstString returns the first element of values, or "" when empty.
+func firstString(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 // envVar builds one env entry, applying secret redaction and the value cap.
