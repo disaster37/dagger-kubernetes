@@ -1903,6 +1903,7 @@ image_cache:
       host: "docker.io"
       upstream: "https://registry-1.docker.io"
       internal_addr: "rel-docker-io-mirror.dagger.svc:5000"
+      external_addr: "mirror.example.com"
       backend: "s3"
     - id: "ghcr-io"
       host: "ghcr.io"
@@ -1925,6 +1926,9 @@ image_cache:
 	if m.ID != "docker-io" || m.Host != "docker.io" || m.Upstream != "https://registry-1.docker.io" ||
 		m.InternalAddr != "rel-docker-io-mirror.dagger.svc:5000" || m.Backend != "s3" {
 		t.Fatalf("mirror[0] = %+v", m)
+	}
+	if m.ExternalAddr != "mirror.example.com" {
+		t.Fatalf("mirror[0].external_addr = %q, want mirror.example.com", m.ExternalAddr)
 	}
 	if m.TLS {
 		t.Fatalf("mirror[0].tls = true, want false (unset)")

@@ -308,7 +308,8 @@ type ImageCacheMirror struct {
 	ID           string `mapstructure:"id"`            // slug, e.g. "docker-io"
 	Host         string `mapstructure:"host"`          // upstream host, e.g. "docker.io"
 	Upstream     string `mapstructure:"upstream"`      // upstream base URL
-	InternalAddr string `mapstructure:"internal_addr"` // "<release>-<slug>-mirror.<ns>.svc:5000"
+	InternalAddr string `mapstructure:"internal_addr"` // "<release>-<slug>-mirror.<ns>.svc:5000" (in-cluster BuildKit)
+	ExternalAddr string `mapstructure:"external_addr"` // node-reachable ingress host for the engine-image pull (ADR-046); "" = no ingress
 	Backend      string `mapstructure:"backend"`       // "s3" | "pvc" (informational)
 	TLS          bool   `mapstructure:"tls"`           // true = mirror is served over HTTPS (imageCache.tls.enabled)
 }

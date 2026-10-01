@@ -442,7 +442,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `s3.endpoint`                             | `""` (chart: MinIO Service)                              | S3-compatible endpoint (`host[:port]`) for the shared S3 client (CLI cache). Empty = the supervisor logs a WARN and disables the S3-backed CLI cache. |
 |                 | `s3.use_ssl`                              | `true`                                                   | Use HTTPS for the S3 endpoint.                                                                                                                |
 |                 | `s3.access_key` / `s3.secret_key`         | `""`                                                     | S3 credentials (env/Secret only; empty falls back to the AWS env chain).                                                                      |
-| `image_cache`   | `mirrors`                                 | `[]` (chart: generated mirrors)                          | Read-only mirror endpoints `{id, host, upstream, internal_addr, backend, tls}` rendered from the deployed Zot mirrors. `tls: true` marks an HTTPS mirror and enables engine-image routing through it (see "Local image cache"). |
+| `image_cache`   | `mirrors`                                 | `[]` (chart: generated mirrors)                          | Read-only mirror endpoints `{id, host, upstream, internal_addr, external_addr, backend, tls}` rendered from the deployed Zot mirrors. `external_addr` is the node-reachable mirror ingress host used for engine-image routing; `tls: true` marks an HTTPS mirror and is the legacy engine-image routing fallback (see "Local image cache"). |
 |                 | `tls_ca_path`                             | `""`                                                     | PEM CA bundle used to verify HTTPS mirrors (`tls: true`); empty = system trust pool. Chart: mounted from `imageCache.tls.caSecretName` at `/etc/dagger-kubernetes/image-cache-ca/<key>`; a load failure fails startup. |
 | `history`       | `gc.enabled`                              | `false`                                                  | Master switch for the history auto-purge sweeper.                                                                                             |
 |                 | `gc.max_age`                              | `720h`                                                   | Purge traces whose last update is older than this (30d).                                                                                      |
@@ -841,18 +841,27 @@ With TLS enabled the chart:
   `engine.toml` no longer emits `http = true` and BuildKit dials the mirrors
   over HTTPS instead of plaintext.
 
-**Engine-image routing:** when a TLS mirror's `host` matches the host of
+**Engine-image routing:** when a mirror's `host` matches the host of
 `fleet.engine_image_registry` (the `registry.dagger.io` preset produces
 exactly that), the supervisor automatically rewrites the engine image so the
 fleet runner StatefulSet pulls `registry.dagger.io/engine:<version>` through
-`<release>-registry-dagger-io-mirror.<namespace>.svc:5000/engine:<version>` —
-no extra supervisor flag. The rewrite is gated on `tls: true`: a plaintext
-mirror never triggers it, because the kubelet cannot pull from it without
-node-level insecure-registry configuration. See
+the mirror — no extra supervisor flag. The mirror's `external_addr` (the
+node-reachable hostname of the dedicated, TLS-terminated mirror ingress,
+`imageCache.registryIngress`) wins whenever it is set: the kubelet dials
+`mirror-registry.example.com:443` and the ingress terminates TLS in front of
+the mirror, so no node-level `/etc/hosts` pin or CA trust is needed — only a
+DNS-resolvable ingress host (and, in practice, a real cert in
+`imageCache.registryIngress.tls.secretName`). Without `external_addr` the
+legacy ADR-043 path applies: a `tls: true` mirror rewrites to its
+`internal_addr` (`<release>-registry-dagger-io-mirror.<namespace>.svc:5000/engine:<version>`),
+and a plaintext mirror never triggers the rewrite, because the kubelet cannot
+pull from it without node-level insecure-registry configuration. See
+[ADR-046](design/ADR-046-engine-image-via-mirror-ingress.md) and
 [ADR-043](design/ADR-043-engine-image-via-cache.md).
 
-Operator prerequisite (not automated by the chart): nodes must trust the
-mirror CA for the kubelet's pull (containerd/CRI-O `certs.d`/`hosts.toml`).
+Operator prerequisite (not automated by the chart): the ingress hostname must
+resolve from the engine nodes, and with the legacy TLS path nodes must trust
+the mirror CA for the kubelet's pull (containerd/CRI-O `certs.d`/`hosts.toml`).
 A mirror that is down at pull time produces `ImagePullBackOff` for the engine
 pod; the supervisor does not orchestrate pulls.
 
@@ -900,11 +909,15 @@ sections:
 
 `engine.toml` mirrors cover the images pipelines pull (`container from`,
 `with-exec`, …). The **engine image** is pulled by the kubelet before the pod
-starts; it is routed through the mirror only when a TLS image-cache mirror's
-host matches `fleet.engine_image_registry` — with the `registry.dagger.io`
-preset enabled and `imageCache.tls.enabled`, the StatefulSet image is rewritten
-to the mirror address automatically (see "TLS mirrors and the engine image"
-above and [ADR-043](design/ADR-043-engine-image-via-cache.md)). Otherwise it
+starts; it is routed through the mirror when an image-cache mirror's host
+matches `fleet.engine_image_registry` — with the `registry.dagger.io` preset
+enabled and `imageCache.registryIngress` configured (the mirror's
+`external_addr`, a node-reachable TLS-terminated ingress), the StatefulSet
+image is rewritten to the ingress host automatically; with
+`imageCache.tls.enabled` instead, it is rewritten to the mirror's
+`internal_addr` (see "TLS mirrors and the engine image" above and
+[ADR-046](design/ADR-046-engine-image-via-mirror-ingress.md) /
+[ADR-043](design/ADR-043-engine-image-via-cache.md)). Otherwise it
 remains `fleet.engine_image_registry` + `engine-image-auth`. If a mirror is down
 the engine fails that pull; BuildKit does not silently fall back to the upstream
 for a configured mirror. Disabling `imageCache` removes the mirror workloads

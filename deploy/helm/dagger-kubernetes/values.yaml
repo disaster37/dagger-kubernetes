@@ -507,6 +507,24 @@ imageCache:
     secretName: ""
     caSecretName: ""
     caSecretKey: "ca.crt"
+  ## @param imageCache.registryIngress.enabled Expose the registry.dagger.io mirror via a
+  ##   dedicated TLS-terminated ingress so the node kubelet can pull the engine image through it
+  ##   (no node-level /etc/hosts pin or CA trust). Requires the registry.dagger.io preset enabled.
+  ## @param imageCache.registryIngress.host Node-reachable hostname for the mirror ingress
+  ##   (must resolve from the engine nodes). Used as image_cache.mirrors[].external_addr.
+  ## @param imageCache.registryIngress.className Ingress class name.
+  ## @param imageCache.registryIngress.annotations [object] Ingress annotations (e.g.
+  ##   cert-manager.io/cluster-issuer for a public cert).
+  ## @param imageCache.registryIngress.tls.secretName TLS cert Secret name for the ingress host
+  ##   (e.g. a cert-manager Let's Encrypt cert). Required in practice so the kubelet trusts the
+  ##   pull; the ingress terminates TLS, so this does NOT require imageCache.tls.enabled.
+  registryIngress:
+    enabled: false
+    host: "mirror-registry.example.com"
+    className: ""
+    annotations: {}
+    tls:
+      secretName: ""
   resources:
     requests:
       cpu: "100m"
