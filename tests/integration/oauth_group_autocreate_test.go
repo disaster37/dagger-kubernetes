@@ -60,7 +60,7 @@ func TestOAuthGroupMappingAutoCreateFlow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewGroupMapper: %v", err)
 	}
-	oauthSvc := service.NewOIDCOAuthService(oauthCfg, mapper, usersSvc, groupRepo, jwtSvc, logger, nil, nil)
+	oauthSvc := service.NewOIDCOAuthService(oauthCfg, mapper, usersSvc, groupRepo, jwtSvc, logger, nil, nil, nil)
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)

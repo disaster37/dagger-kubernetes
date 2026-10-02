@@ -24,6 +24,13 @@
         variant="soft"
         description="OAuth login failed. Please try again."
       />
+      <UAlert
+        v-if="errorCode === 'session'"
+        class="mb-3"
+        color="error"
+        variant="soft"
+        description="Your session could not be restored. Please sign in again."
+      />
       <UForm @submit="handleLogin">
         <div class="mb-3">
           <label class="mb-1 block text-sm">Username</label>

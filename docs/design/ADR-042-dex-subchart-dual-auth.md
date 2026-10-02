@@ -100,11 +100,16 @@ questions had to be settled first:
    `Refresh` re-queries the directory, and group changes are detected within
    one `revalidate_interval`. `reuseInterval` was widened from the planned `1m`
    to `5m` during live validation: Dex rotates the refresh token on every
-   grant, but only the Raft leader can persist a rotation (followers log
-   `not the raft leader`); with `1m` the leader missed the reuse window by
-   seconds under sparse traffic and the stored credential stranded until the
-   next login. Production keeps the `docs/README.md` Dex recipe
-   instead: persistent storage, no `absoluteLifetime`, generous
+   grant, and at the time only the Raft leader could persist a rotation
+   (followers logged `not the raft leader`); with `1m` the leader missed the
+   reuse window by seconds under sparse traffic and the stored credential
+   stranded until the next login. **Issue #61 fixed the root cause**: refresh
+   is now leader-only (`OIDCOAuthService` gates on `RaftStore.IsLeader` and
+   followers short-circuit to `errOAuthNotLeaderRefresh`), so a follower can no
+   longer rotate a credential it cannot persist and the strand cannot form.
+   `reuseInterval` widening is therefore no longer the sole mitigation (it
+   remains a useful safety margin). Production keeps the `docs/README.md` Dex
+   recipe instead: persistent storage, no `absoluteLifetime`, generous
    `validIfNotUsedFor`, `reuseInterval > revalidate_interval`, plus a finite
    `session_max_age` backstop (and, if fast de-provisioning matters, a shorter
    `expiry.idTokens` than the 24h default).

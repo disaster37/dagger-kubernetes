@@ -108,15 +108,21 @@ auth:
     #     deactivated and the API token is never deleted. Re-auth on the UI
     #     stores a fresh credential and recovers on the very next check.
     #   - IdP unreachable (transport)          -> same grace/fail policy as above.
+    # Leader-only refresh (issue #61): only the Raft leader refreshes (and thus
+    # rotates) the upstream OIDC credential, because only the leader can persist
+    # the rotation through the Raft FSM. Followers short-circuit and serve the
+    # user's replicated supervisor memberships from the store, so they can be up
+    # to one revalidate_interval staler than the leader; the leader replicates
+    # the fresh credential + reconciled memberships. A user deactivated by the
+    # leader is replicated as deactivated and denied on followers too.
     # Dex recipe for "never force re-auth while keeping revocation polling":
     #   - persistent storage (kubernetes/sqlite3/postgres) so refresh tokens
     #     survive Dex restarts,
     #   - oauth2.refreshTokens: unset/large absoluteLifetime, generous
     #     validIfNotUsedFor,
-    #   - reuseInterval > revalidate_interval (the supervisor polls per user;
-    #     also avoids multi-pod refresh races),
+    #   - reuseInterval > revalidate_interval (a safety margin for rotation),
     #   - session_max_age below as the hard backstop forcing periodic re-login.
-    revalidate_interval: "5m"   # per-user cache TTL for successful IdP re-checks; bounds the detection delay.
+    revalidate_interval: "5m"   # per-user cache TTL for successful IdP re-checks; bounds the detection delay and follower convergence.
     revalidate_grace: "1h"      # serve last-known-good membership for this long when the IdP is unreachable or the OIDC credential is unusable.
     revalidate_fail_open: false # after grace, false = deny (fail-closed), true = allow (fail-open).
                                 #   WARNING: fail_open: true COMBINED with session_max_age: "0" (disabled) trusts the

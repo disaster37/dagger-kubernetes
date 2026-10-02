@@ -31,7 +31,11 @@ onMounted(async () => {
   if (auth.isAuthenticated) {
     router.push(safeRedirect(route.query.redirect as string | null))
   } else {
-    router.push('/auth/login?error=oauth')
+    // The callback itself succeeded but the session could not be restored
+    // (e.g. a follower still denied revalidation). Surface a distinct error so
+    // the login screen can explain it, and preserve the intended target.
+    const redirect = safeRedirect(route.query.redirect as string | null)
+    router.push(`/auth/login?error=session&redirect=${encodeURIComponent(redirect)}`)
   }
 })
 </script>

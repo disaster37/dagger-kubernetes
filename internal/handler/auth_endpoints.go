@@ -331,6 +331,10 @@ func (s *Server) completeOAuthCallback(ctx context.Context, c *app.RequestContex
 			redirectOAuthErrorCode(c, "group_required")
 			return
 		}
+		// Log the underlying cause server-side (issue #61): the client-facing
+		// hint stays generic so no token/IdP detail leaks, but operators can
+		// diagnose a failed exchange or persist.
+		s.logger.WithError(err).Warn("oauth: callback complete failed")
 		redirectOAuthErrorCode(c, "oauth")
 		return
 	}

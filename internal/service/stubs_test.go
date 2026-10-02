@@ -13,6 +13,9 @@ type stubUserRepo struct {
 	users   map[string]*domain.User
 	byName  map[string]*domain.User
 	byOAuth map[string]*domain.User
+	// updateErr, when non-nil, is returned by Update — used to simulate a
+	// lost-leadership domain.ErrNotLeader on the OIDC credential persist.
+	updateErr error
 }
 
 func newStubUserRepo(users ...*domain.User) *stubUserRepo {
@@ -71,6 +74,9 @@ func (r *stubUserRepo) List(context.Context) ([]*domain.User, error) {
 	return out, nil
 }
 func (r *stubUserRepo) Update(_ context.Context, u *domain.User) error {
+	if r.updateErr != nil {
+		return r.updateErr
+	}
 	if _, ok := r.users[u.ID]; !ok {
 		return domain.ErrNotFound
 	}

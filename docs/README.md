@@ -1296,13 +1296,24 @@ oauth2:
   refreshTokens:
     # absoluteLifetime: unset (or very large) — no hard refresh-token expiry.
     validIfNotUsedFor: 90d    # generous idle window, comfortably > revalidate_grace.
-    reuseInterval: 10m        # > auth.oauth.revalidate_interval; also defuses
-                              # multi-pod refresh-token rotation races.
+    reuseInterval: 10m        # > auth.oauth.revalidate_interval; a safety
+                              # margin for refresh-token rotation.
 ```
 
 Pair it with `auth.oauth.session_max_age` (e.g. `"720h"`) as the hard backstop
 that forces a full re-login — and therefore a fresh allowlist evaluation — on a
 bounded schedule.
+
+**Leader-only refresh (issue #61).** OIDC revalidation refreshes the upstream
+credential only on the Raft leader (`OIDCOAuthService` gates on
+`RaftStore.IsLeader`); followers short-circuit and serve the user's replicated
+supervisor memberships from the store. This is required because only the leader
+can persist a rotated refresh token through the Raft FSM — a follower that
+rotated one would strand it once Dex's `reuseInterval` closed. The practical
+effect is that followers serve membership up to one `revalidate_interval`
+staler than the leader; the leader replicates the fresh credential and
+reconciled memberships so followers converge. A user deactivated by the leader
+is replicated as deactivated and denied on followers too.
 
 **Bundled test IdP (Dex + OpenLDAP subcharts).** The Helm chart ships Dex and
 OpenLDAP as optional, condition-gated dependencies (`dex.enabled` /
@@ -1337,7 +1348,9 @@ test tuning only — it forces periodic re-auth. Production keeps the recipe
 above instead: persistent Dex storage (`kubernetes`), no `absoluteLifetime`,
 generous `validIfNotUsedFor`, `reuseInterval > revalidate_interval`, a finite
 `session_max_age` backstop, and an `expiry.idTokens` aligned with your
-required de-provisioning latency.
+required de-provisioning latency. The tight `reuseInterval` no longer risks
+stranding a credential: refresh is leader-only (issue #61), so a follower never
+rotates a token it cannot persist.
 - **Per-user API tokens** (`dct_<32 random bytes hex>`) for CI. Each user has
   at most one token; the plaintext is shown once at creation/regeneration.
   Tokens are stored as a SHA-256 hash plus an AES-256-GCM-encrypted ciphertext

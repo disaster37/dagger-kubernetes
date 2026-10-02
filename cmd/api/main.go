@@ -236,7 +236,7 @@ func run(c *cli.Context) error {
 		case "github":
 			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, tokenEncKey)
 		case "oidc":
-			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient, tokenEncKey)
+			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient, tokenEncKey, raftStore.IsLeader)
 		default:
 			// validateAuthConfig already rejected this, but fail closed.
 			return fmt.Errorf("unsupported oauth provider: %s", cfg.Auth.OAuth.Provider)
