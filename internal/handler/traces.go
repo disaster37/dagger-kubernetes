@@ -10,6 +10,7 @@ import (
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
+	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
 // handleTracesList returns a scoped list of trace metadata. Admins see all
@@ -113,6 +114,10 @@ func (s *Server) handleTracesDetail(ctx context.Context, c *app.RequestContext) 
 	if u, ok := s.pipelineViewURL(traceID); ok {
 		trace.URL = u
 	}
+
+	// Derive the per-span exec view-model (command/args/env/exit/kind) from the
+	// flattened span attributes + events. Additive: non-exec spans stay nil.
+	service.DeriveExec(trace.RootSpan)
 
 	writeJSON(c, trace)
 }

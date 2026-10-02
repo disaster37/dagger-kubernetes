@@ -118,6 +118,78 @@ func TestHandleTracesDetailEnrichesUser(t *testing.T) {
 	}
 }
 
+// TestHandleTracesDetailDerivesExec proves handleTracesDetail enriches the
+// span tree with the derived exec view-model: an exec span carries
+// command/args/env/exit_code, while a plain span omits the exec field.
+func TestHandleTracesDetailDerivesExec(t *testing.T) {
+	env := newTestEnv(t)
+	bearer := env.loginAsAdmin(t)
+
+	execSpan := &domain.SpanNode{
+		SpanID: "exec-span",
+		Name:   "exec.run",
+		Status: "success",
+		Attributes: map[string]string{
+			"dagger.io/exec.args":       `["go","build","./..."]`,
+			"dagger.io/exec.cwd":        "/src",
+			"dagger.io/exec.env":        `["FOO=bar"]`,
+			"dagger.io/exec.secret.env": `["DB_PASSWORD"]`,
+		},
+		Events: []domain.SpanEvent{
+			{Name: "Container exited", Attributes: map[string]string{"exit.code": "0"}},
+		},
+	}
+	plainSpan := &domain.SpanNode{SpanID: "plain-span", Name: "compile", Status: "success"}
+	root := &domain.SpanNode{
+		SpanID:   "root",
+		Name:     "build",
+		Status:   "success",
+		Children: []*domain.SpanNode{execSpan, plainSpan},
+	}
+	env.server.traces = &stubTraceRepo{trace: &domain.TraceInfo{TraceID: "trace-exec", RootSpan: root, Status: "success"}}
+	e := newAuthEngine(env.server)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/traces/trace-exec", nil, ut.Header{Key: "Authorization", Value: bearer})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Result().StatusCode())
+	}
+
+	var body struct {
+		RootSpan struct {
+			Exec     *domain.ExecInfo `json:"exec"`
+			Children []struct {
+				SpanID string           `json:"span_id"`
+				Exec   *domain.ExecInfo `json:"exec"`
+			} `json:"children"`
+		} `json:"root_span"`
+	}
+	if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.RootSpan.Exec != nil {
+		t.Fatalf("root exec = %+v, want nil", body.RootSpan.Exec)
+	}
+	if len(body.RootSpan.Children) != 2 {
+		t.Fatalf("children = %d, want 2", len(body.RootSpan.Children))
+	}
+	got := body.RootSpan.Children[0].Exec
+	if got == nil {
+		t.Fatal("exec span exec = nil, want derived ExecInfo")
+	}
+	if got.Command != "go" || len(got.Args) != 3 || got.Cwd != "/src" {
+		t.Fatalf("exec = %+v, want go build ./... in /src", got)
+	}
+	if got.ExitCode == nil || *got.ExitCode != 0 {
+		t.Fatalf("exit_code = %v, want 0", got.ExitCode)
+	}
+	if len(got.Env) != 2 {
+		t.Fatalf("env = %+v, want 2 entries", got.Env)
+	}
+	if body.RootSpan.Children[1].Exec != nil {
+		t.Fatalf("plain span exec = %+v, want nil", body.RootSpan.Children[1].Exec)
+	}
+}
+
 // assertOmitOrEqual checks that body[key] is omitted when want is empty and
 // otherwise equals want.
 func assertOmitOrEqual(t *testing.T, body map[string]any, key, want string) {

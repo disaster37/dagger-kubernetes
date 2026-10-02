@@ -1,4 +1,4 @@
-import type { LogSearchMode, SpanNode, TraceLogEntry } from '~/api/types'
+import type { ExecInfo, LogSearchMode, SpanNode, TraceLogEntry } from '~/api/types'
 
 // Internal-span name rules, ported from internal/service/ci_steps.go
 // (internalSpanPrefixes/internalSpanExact) so the pipeline UI folds the same
@@ -166,6 +166,21 @@ export function flattenVisible(node: SpanNode, depth: number): { spans: DisplayS
     result.hidden += r.hidden
   }
   return result
+}
+
+// --- Exec view-model helpers ----------------------------------------------
+
+// formatArgv renders an exec's full command line (program + args) for display.
+export function formatArgv(exec: ExecInfo): string {
+  const parts = exec.args && exec.args.length > 0 ? exec.args : exec.command ? [exec.command] : []
+  return parts.join(' ')
+}
+
+// exitCodeTone maps an exit code to a badge tone: 0 = success, non-zero =
+// error, null/undefined (still running or unknown) = muted.
+export function exitCodeTone(code: number | null | undefined): 'success' | 'error' | 'muted' {
+  if (code === null || code === undefined) return 'muted'
+  return code === 0 ? 'success' : 'error'
 }
 
 // --- Duration helpers -----------------------------------------------------

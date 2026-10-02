@@ -1982,6 +1982,24 @@ Features:
   legacy/anonymous runs) next to the status badge, and the Details table
   includes a "User" row — so the pipeline owner is always visible on the
   detail view, matching the list view's `@username · org/repo` identity.
+- **Executed commands** — the focused-step header shows the command that ran:
+  the full argv (program + args, click to copy), `cwd`, `user`, the exit code
+  (green `0` / red non-zero / muted "running" while unknown), and the operation
+  kind (`exec`, `service_start`, `io`, `call`, `other`). A collapsible
+  **Environment** list shows each variable; secret entries render as
+  `<secret>` and secret-ish names as `<redacted>`. The data is derived
+  server-side from the OTLP span attributes + events (argv arrays, cwd, env,
+  the `Container exited`/`exit.code` event) and rides the existing
+  `GET /api/v1/traces/:id` response, so it refreshes live with the rest of the
+  trace. On current engines the operation and its arguments arrive in the
+  `dagger.io/dag.call` attribute (a base64 `callpbv1.Call` protobuf), so a
+  `withExec` shows its argv and a publish/export/import/push shows a synthesized
+  command line such as `publish ghcr.io/org/image:tag`. The same attribute
+  carries `withEnvVariable`/`withEnvironmentVariable` (name + value) and
+  `withSecretVariable` (name only, rendered `<secret>`; the secret id is never
+  surfaced), so those spans show their environment even though they emit no
+  `dagger.io/exec.env` attribute. See
+  [ADR-047](design/ADR-047-pipeline-exec-view.md).
 - **Aggregated logs per level** — the step tree shows a log panel for the
   currently focused level, aggregating the logs of that node **and all its
   descendants** (internal-span logs are dropped as noise). The panel is

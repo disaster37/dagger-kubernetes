@@ -67,6 +67,28 @@ export interface TraceFilterParams {
   user?: string // substring
 }
 
+export interface ExecEnvVar {
+  name: string
+  value?: string
+  is_secret?: boolean
+}
+
+export interface ExecInfo {
+  command: string
+  args?: string[]
+  cwd?: string
+  user?: string
+  env?: ExecEnvVar[]
+  exit_code?: number | null
+  kind?: string
+}
+
+export interface SpanEvent {
+  name: string
+  time_unix_nano?: number
+  attributes?: Record<string, string>
+}
+
 export interface SpanNode {
   span_id: string
   parent_span_id: string
@@ -78,6 +100,8 @@ export interface SpanNode {
   duration_ms: number
   attributes: Record<string, string>
   children: SpanNode[]
+  events?: SpanEvent[]
+  exec?: ExecInfo | null
 }
 
 export interface TraceDetail {
