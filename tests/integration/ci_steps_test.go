@@ -29,7 +29,48 @@ type stepsTraceRepo struct {
 	trace *domain.TraceInfo
 }
 
-func (s *stepsTraceRepo) GetTrace(string) (*domain.TraceInfo, error) { return s.trace, nil }
+// GetTrace returns a fresh copy per call. handleTracesDetail mutates the
+// returned TraceInfo (trace_meta enrichment) and its whole span tree
+// (service.DeriveExec writes node.Exec), and the CI wrapper's 50ms steps poll
+// lets consecutive requests overlap — a shared pointer would data-race
+// (CWE-362) exactly like the -race integration failures this stub fixed.
+// Production's SpanTreeReconstructor likewise builds a fresh tree per call.
+func (s *stepsTraceRepo) GetTrace(string) (*domain.TraceInfo, error) {
+	return copyTraceInfo(s.trace), nil
+}
+
+// copyTraceInfo deep-copies a TraceInfo's span tree so concurrent handlers
+// never share mutable nodes. Logs/Events stay shared: the handler only reads
+// them. Exec is dropped — the handler re-derives it via service.DeriveExec.
+func copyTraceInfo(in *domain.TraceInfo) *domain.TraceInfo {
+	if in == nil {
+		return nil
+	}
+	cp := *in
+	cp.RootSpan = copySpanTree(in.RootSpan)
+	return &cp
+}
+
+func copySpanTree(n *domain.SpanNode) *domain.SpanNode {
+	if n == nil {
+		return nil
+	}
+	cp := *n
+	if n.Attributes != nil {
+		cp.Attributes = make(map[string]string, len(n.Attributes))
+		for k, v := range n.Attributes {
+			cp.Attributes[k] = v
+		}
+	}
+	cp.Exec = nil
+	if len(n.Children) > 0 {
+		cp.Children = make([]*domain.SpanNode, len(n.Children))
+		for i, c := range n.Children {
+			cp.Children[i] = copySpanTree(c)
+		}
+	}
+	return &cp
+}
 
 type stepsLogRepo struct {
 	entries []domain.LogEntry
