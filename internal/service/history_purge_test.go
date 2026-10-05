@@ -77,6 +77,23 @@ func (r *fakeTraceMetaRepo) ListBefore(_ context.Context, cutoff time.Time, prot
 	sort.Slice(out, func(i, j int) bool { return out[i].TraceID < out[j].TraceID })
 	return out, nil
 }
+func (r *fakeTraceMetaRepo) ListRunning(context.Context) ([]*domain.TraceMeta, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []*domain.TraceMeta
+	for _, m := range r.traces {
+		if m.Status != "" && m.Status != "running" {
+			continue
+		}
+		if m.Version == "" {
+			continue
+		}
+		cp := *m
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].TraceID < out[j].TraceID })
+	return out, nil
+}
 func (r *fakeTraceMetaRepo) Delete(_ context.Context, traceID string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()

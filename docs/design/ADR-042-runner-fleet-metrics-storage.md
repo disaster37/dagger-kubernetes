@@ -65,3 +65,4 @@ trace time window), and the Kubernetes PVC API exposes `capacity` but never
 ## Cross-references
 
 - ADR-037 — the trace-scoped metrics path this endpoint mirrors.
+- ADR-048 — the shared `{rate}` window and the trace-metrics recorder.

@@ -33,25 +33,35 @@ type FleetMetricsService struct {
 	queryer      domain.MetricsQueryer
 	namespace    string
 	step         time.Duration
+	rateWindow   time.Duration
 	storageBytes int64 // per-pod fallback capacity (0 = unknown)
 	logger       *logrus.Logger
 }
 
 // NewFleetMetricsService constructs the service. step is the query_range
-// resolution; values below one second are clamped. storageBytes is the
-// configured per-pod PVC size used when cAdvisor reports no capacity (0 =
-// unknown).
-func NewFleetMetricsService(queryer domain.MetricsQueryer, namespace string, step time.Duration, storageBytes int64, logger *logrus.Logger) *FleetMetricsService {
+// resolution and rateWindow the rate() lookback; values below one second are
+// clamped. storageBytes is the configured per-pod PVC size used when cAdvisor
+// reports no capacity (0 = unknown).
+func NewFleetMetricsService(queryer domain.MetricsQueryer, namespace string, step, rateWindow time.Duration, storageBytes int64, logger *logrus.Logger) *FleetMetricsService {
 	if step < time.Second {
 		step = time.Second
+	}
+	if rateWindow < time.Second {
+		rateWindow = time.Second
 	}
 	return &FleetMetricsService{
 		queryer:      queryer,
 		namespace:    namespace,
 		step:         step,
+		rateWindow:   rateWindow,
 		storageBytes: storageBytes,
 		logger:       logger,
 	}
+}
+
+// rateString renders the rate window as a PromQL duration, e.g. "60s".
+func (s *FleetMetricsService) rateString() string {
+	return fmt.Sprintf("%ds", int64(s.rateWindow.Seconds()))
 }
 
 // FleetMetrics builds the scoped PromQL for the version's fleet over
@@ -85,8 +95,7 @@ func (s *FleetMetricsService) FleetMetrics(ctx context.Context, version string, 
 	pod := escapePromQLLabelValue(domain.StsName(version))
 	var lastErr error
 	for _, q := range defaultMetricQueries {
-		promql := strings.ReplaceAll(q.promql, "{ns}", ns)
-		promql = strings.ReplaceAll(promql, "{pod}", pod)
+		promql := buildPromQL(q.promql, ns, pod, s.rateString())
 		points, err := s.queryer.QueryRange(ctx, promql, start, end, s.step)
 		if err != nil {
 			lastErr = err

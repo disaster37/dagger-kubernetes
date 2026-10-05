@@ -78,7 +78,7 @@ func TestFleetMetricsEndpoint(t *testing.T) {
 	logsClient := repository.NewLogsClient("")
 
 	metricsClient := repository.NewMetricsClient(vm.URL)
-	fleetMetrics := service.NewFleetMetricsService(metricsClient, "dagger-kubernetes", 15*time.Second, 50<<30, logger)
+	fleetMetrics := service.NewFleetMetricsService(metricsClient, "dagger-kubernetes", 15*time.Second, time.Minute, 50<<30, logger)
 
 	srv := handler.NewServer(&handler.ServerConfig{
 		ControlAddr:     controlAddr,

@@ -291,10 +291,12 @@ func run(c *cli.Context) error {
 	// --- History / status wiring ---
 	metricsClient := repository.NewMetricsClient(cfg.Telemetry.VictoriaURL)
 
+	rateWindow := cfg.Pipeline.Metrics.RateWindow
+
 	// Trace-scoped engine resource metrics (cAdvisor container_* series).
 	var engineMetricsSvc *service.EngineMetricsService
 	if cfg.Pipeline.Metrics.Enabled {
-		engineMetricsSvc = service.NewEngineMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, logger)
+		engineMetricsSvc = service.NewEngineMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, rateWindow, logger)
 	}
 
 	// Runners-page fleet metrics: same cAdvisor source + feature flag, plus the
@@ -310,7 +312,15 @@ func run(c *cli.Context) error {
 	}
 	var fleetMetricsSvc *service.FleetMetricsService
 	if cfg.Pipeline.Metrics.Enabled {
-		fleetMetricsSvc = service.NewFleetMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, engineStorageBytes, logger)
+		fleetMetricsSvc = service.NewFleetMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, rateWindow, engineStorageBytes, logger)
+	}
+
+	// Leader-only recorder that persists engine samples tagged with trace_id so
+	// the pipeline view can show a run's metrics after the engine scales down.
+	var metricsRecorder *service.TraceMetricsRecorder
+	if cfg.Pipeline.Metrics.Enabled {
+		metricsRecorder = service.NewTraceMetricsRecorder(metricsClient, traceMetaRepo, cfg.Fleet.Namespace,
+			cfg.Pipeline.Metrics.RecordInterval, rateWindow, cfg.Pipeline.Metrics.MaxRecordWindow, raftStore.IsLeader, logger)
 	}
 
 	// Shared S3 client for the S3-backed CLI cache.
@@ -427,6 +437,12 @@ func run(c *cli.Context) error {
 
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
+
+	stopMetricsRecorder := func() {}
+	if metricsRecorder != nil {
+		stopMetricsRecorder = metricsRecorder.Start(ctx)
+	}
+	defer stopMetricsRecorder()
 
 	sweepTicker := time.NewTicker(30 * time.Second)
 	defer sweepTicker.Stop()

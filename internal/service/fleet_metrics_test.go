@@ -50,7 +50,7 @@ func (q *recordingQueryer) QueryRange(_ context.Context, query string, _, _ time
 
 func TestFleetMetricsUnsafeVersion(t *testing.T) {
 	q := &recordingQueryer{}
-	svc := NewFleetMetricsService(q, "dagger-kubernetes", 15*time.Second, 0, testLogger())
+	svc := NewFleetMetricsService(q, "dagger-kubernetes", 15*time.Second, time.Minute, 0, testLogger())
 
 	fm, err := svc.FleetMetrics(context.Background(), `bad"} OR up{`, 1)
 	if err != nil {
@@ -68,7 +68,7 @@ func TestFleetMetricsUnsafeVersion(t *testing.T) {
 }
 
 func TestFleetMetricsNilQueryer(t *testing.T) {
-	svc := NewFleetMetricsService(nil, "dagger-kubernetes", 15*time.Second, 0, testLogger())
+	svc := NewFleetMetricsService(nil, "dagger-kubernetes", 15*time.Second, time.Minute, 0, testLogger())
 	fm, err := svc.FleetMetrics(context.Background(), "v0.21.4", 1)
 	if err != nil {
 		t.Fatalf("err = %v, want nil", err)
@@ -79,7 +79,7 @@ func TestFleetMetricsNilQueryer(t *testing.T) {
 }
 
 func TestFleetMetricsStepClamp(t *testing.T) {
-	svc := NewFleetMetricsService(&recordingQueryer{}, "ns", 0, 0, testLogger())
+	svc := NewFleetMetricsService(&recordingQueryer{}, "ns", 0, time.Minute, 0, testLogger())
 	if svc.step != time.Second {
 		t.Fatalf("step = %v, want 1s", svc.step)
 	}
@@ -87,7 +87,7 @@ func TestFleetMetricsStepClamp(t *testing.T) {
 
 func TestFleetMetricsQueryTemplate(t *testing.T) {
 	q := &recordingQueryer{metric: []domain.MetricPoint{{T: 1, V: 2}}}
-	svc := NewFleetMetricsService(q, "my-ns", 15*time.Second, 0, testLogger())
+	svc := NewFleetMetricsService(q, "my-ns", 15*time.Second, time.Minute, 0, testLogger())
 
 	fm, err := svc.FleetMetrics(context.Background(), "v0.21.4", 1)
 	if err != nil {
@@ -98,7 +98,7 @@ func TestFleetMetricsQueryTemplate(t *testing.T) {
 	}
 	sts := "dagger-engine-v0-21-4"
 	for _, query := range q.queries {
-		if strings.Contains(query, "{ns}") || strings.Contains(query, "{pod}") {
+		if strings.Contains(query, "{ns}") || strings.Contains(query, "{pod}") || strings.Contains(query, "{rate}") {
 			t.Fatalf("unsubstituted template var in %q", query)
 		}
 		if !strings.Contains(query, `namespace="my-ns"`) {
@@ -106,6 +106,9 @@ func TestFleetMetricsQueryTemplate(t *testing.T) {
 		}
 		if !strings.Contains(query, fmt.Sprintf(`pod=~"%s-.*"`, sts)) {
 			t.Fatalf("pod selector missing in %q (want %s)", query, sts)
+		}
+		if strings.Contains(query, "rate(") && !strings.Contains(query, "[60s]") {
+			t.Fatalf("rate window missing in %q", query)
 		}
 	}
 }
@@ -177,7 +180,7 @@ func TestFleetMetricsStorage(t *testing.T) {
 				usage:  tc.usage, usageErr: tc.usageErr,
 				limit: tc.limit, limitErr: tc.limitErr,
 			}
-			svc := NewFleetMetricsService(q, "ns", 15*time.Second, tc.storageBytes, testLogger())
+			svc := NewFleetMetricsService(q, "ns", 15*time.Second, time.Minute, tc.storageBytes, testLogger())
 			fm, err := svc.FleetMetrics(context.Background(), "v0.21.4", tc.replicas)
 			if err != nil {
 				t.Fatalf("err = %v", err)
@@ -212,7 +215,7 @@ func TestFleetMetricsPartialFailure(t *testing.T) {
 	}
 	q.usage = []domain.MetricPoint{{T: 1, V: 10}}
 	q.limit = []domain.MetricPoint{{T: 1, V: 100}}
-	svc := NewFleetMetricsService(q, "ns", 15*time.Second, 0, testLogger())
+	svc := NewFleetMetricsService(q, "ns", 15*time.Second, time.Minute, 0, testLogger())
 
 	// 2 of 6 metric queries fail: the remaining 4 series are returned and no
 	// error is surfaced (per-query failures are logged + skipped).
@@ -231,7 +234,7 @@ func TestFleetMetricsPartialFailure(t *testing.T) {
 func TestFleetMetricsAllQueriesFail(t *testing.T) {
 	q := &recordingQueryer{metric: nil, metricErr: errQuery}
 	q.usageErr, q.limitErr = errQuery, errQuery
-	svc := NewFleetMetricsService(q, "ns", 15*time.Second, 0, testLogger())
+	svc := NewFleetMetricsService(q, "ns", 15*time.Second, time.Minute, 0, testLogger())
 
 	// Every query failed: the last error is surfaced so the handler can log
 	// it and answer with an empty-but-valid payload.
@@ -243,7 +246,7 @@ func TestFleetMetricsAllQueriesFail(t *testing.T) {
 func TestFleetMetricsStorageOnlyFailureKeepsSeries(t *testing.T) {
 	q := &recordingQueryer{metric: []domain.MetricPoint{{T: 1, V: 2}}}
 	q.usageErr, q.limitErr = errQuery, errQuery
-	svc := NewFleetMetricsService(q, "ns", 15*time.Second, 0, testLogger())
+	svc := NewFleetMetricsService(q, "ns", 15*time.Second, time.Minute, 0, testLogger())
 
 	fm, err := svc.FleetMetrics(context.Background(), "v0.21.4", 1)
 	if err != nil {

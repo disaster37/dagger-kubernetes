@@ -133,3 +133,8 @@ collector's `max_request_body_size` to match. The control-API cap is unchanged.
   (constants isolated for one-line tuning).
 - cAdvisor metric availability/labels on the target cluster (endpoint tolerant
   of empty data).
+
+## Cross-references
+
+- ADR-048 — records the trace-scoped engine metrics during the run so the card
+  survives engine scale-down and short trace windows.

@@ -467,6 +467,15 @@ func TestPipelineMetricsDefaults(t *testing.T) {
 	if cfg.Pipeline.Metrics.Step != 15*time.Second {
 		t.Fatalf("pipeline.metrics.step default = %v, want 15s", cfg.Pipeline.Metrics.Step)
 	}
+	if cfg.Pipeline.Metrics.RateWindow != time.Minute {
+		t.Fatalf("pipeline.metrics.rate_window default = %v, want 1m", cfg.Pipeline.Metrics.RateWindow)
+	}
+	if cfg.Pipeline.Metrics.RecordInterval != 15*time.Second {
+		t.Fatalf("pipeline.metrics.record_interval default = %v, want 15s", cfg.Pipeline.Metrics.RecordInterval)
+	}
+	if cfg.Pipeline.Metrics.MaxRecordWindow != 24*time.Hour {
+		t.Fatalf("pipeline.metrics.max_record_window default = %v, want 24h", cfg.Pipeline.Metrics.MaxRecordWindow)
+	}
 }
 
 func TestPipelineMetricsEnvOverride(t *testing.T) {
@@ -486,12 +495,27 @@ func TestPipelineMetricsEnvOverride(t *testing.T) {
 }
 
 func TestLoadRejectsInvalidPipelineMetrics(t *testing.T) {
-	t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_ENABLED", "true")
-	t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_STEP", "0s")
+	cases := []struct {
+		name    string
+		envKey  string
+		envVal  string
+		wantErr string
+	}{
+		{"step", "DAGGER_KUBERNETES_PIPELINE_METRICS_STEP", "0s", "pipeline.metrics.step must be > 0"},
+		{"rate_window", "DAGGER_KUBERNETES_PIPELINE_METRICS_RATE_WINDOW", "0s", "pipeline.metrics.rate_window must be > 0"},
+		{"record_interval", "DAGGER_KUBERNETES_PIPELINE_METRICS_RECORD_INTERVAL", "0s", "pipeline.metrics.record_interval must be > 0"},
+		{"max_record_window", "DAGGER_KUBERNETES_PIPELINE_METRICS_MAX_RECORD_WINDOW", "0s", "pipeline.metrics.max_record_window must be > 0"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DAGGER_KUBERNETES_PIPELINE_METRICS_ENABLED", "true")
+			t.Setenv(tc.envKey, tc.envVal)
 
-	_, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
-	if err == nil || !strings.Contains(err.Error(), "pipeline.metrics.step must be > 0") {
-		t.Fatalf("err = %v, want pipeline.metrics.step must be > 0", err)
+			_, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+			if err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v, want %s", err, tc.wantErr)
+			}
+		})
 	}
 }
 

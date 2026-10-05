@@ -131,6 +131,20 @@ type MetricsQueryer interface {
 	QueryRange(ctx context.Context, query string, start, end time.Time, step time.Duration) ([]MetricPoint, error)
 }
 
+// TraceMetricsRecorderStore is the backend the trace-metrics recorder samples and
+// writes through: instant PromQL queries against the engine's cAdvisor metrics, and
+// persisted samples tagged with trace_id so the pipeline endpoint can read them back
+// and history purge can delete them.
+type TraceMetricsRecorderStore interface {
+	// QueryInstant runs an instant PromQL query at ts and returns the summed first
+	// finite sample value (ok=false when no finite value exists).
+	QueryInstant(ctx context.Context, query string, ts time.Time) (float64, bool, error)
+	// WriteSamples imports points for metricName under labels into the metrics
+	// backend. The caller is responsible for validating/sanitizing metricName and
+	// label values.
+	WriteSamples(ctx context.Context, metricName string, labels map[string]string, points []MetricPoint) error
+}
+
 type TraceRepository interface {
 	GetTrace(traceID string) (*TraceInfo, error)
 }

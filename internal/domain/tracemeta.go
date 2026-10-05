@@ -88,6 +88,11 @@ type TraceMetaRepository interface {
 	// purge candidates without the 500-row List cap.
 	ListBefore(ctx context.Context, cutoff time.Time, protectRunning bool) ([]*TraceMeta, error)
 
+	// ListRunning returns trace_meta rows with a non-terminal status ("" or
+	// "running") and a non-empty engine version, sorted for determinism. Used by
+	// the metrics recorder to enumerate in-flight pipelines.
+	ListRunning(ctx context.Context) ([]*TraceMeta, error)
+
 	// Delete removes a single trace_meta row. Idempotent: a missing row
 	// returns nil.
 	Delete(ctx context.Context, traceID string) error

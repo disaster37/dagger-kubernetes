@@ -410,10 +410,16 @@ supervisor:
       ingestMaxBodySize: 67108864
 ## @param supervisor.config.pipeline.metrics.enabled Enable the trace-scoped engine resource metrics endpoint (GET /api/v1/traces/:id/metrics).
 ## @param supervisor.config.pipeline.metrics.step query_range resolution for engine metrics (Go duration; must be > 0 when enabled).
+## @param supervisor.config.pipeline.metrics.rateWindow rate() lookback for cpu/disk/net engine series (Go duration; must be > 0 when enabled).
+## @param supervisor.config.pipeline.metrics.recordInterval Leader-only recorder sampling tick that persists running-trace samples tagged with trace_id (Go duration; must be > 0 when enabled).
+## @param supervisor.config.pipeline.metrics.maxRecordWindow Per-trace recording cap; traces older than this are no longer sampled (Go duration; must be > 0 when enabled).
     pipeline:
       metrics:
         enabled: true
         step: "15s"
+        rateWindow: "1m"
+        recordInterval: "15s"
+        maxRecordWindow: "24h"
 
 ## @section Local image cache (Zot mirror)
 

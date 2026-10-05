@@ -153,6 +153,10 @@ mark {
   vector-effect: non-scaling-stroke;
 }
 
+.metric-dot {
+  fill: #58a6ff;
+}
+
 .metric-axis {
   display: flex;
   justify-content: space-between;

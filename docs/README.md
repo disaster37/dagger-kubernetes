@@ -1015,6 +1015,13 @@ pipeline:
     enabled: true           # serve GET /api/v1/traces/:id/metrics and GET
                              # /api/v1/fleet/:version/metrics (engine charts).
     step: "15s"             # query_range resolution; must be > 0 when enabled.
+    rate_window: "1m"       # rate() lookback for cpu/disk/net series; shorter
+                            # windows make charts appear sooner after an engine
+                            # starts. Must be > 0 when enabled.
+    record_interval: "15s"  # leader-only recorder sampling tick; persists running
+                            # traces into VictoriaMetrics tagged with trace_id.
+                            # Must be > 0 when enabled.
+    max_record_window: "24h" # per-trace recording cap. Must be > 0 when enabled.
 ```
 
 `GET /api/v1/traces/:id` returns the `failure_reason` field on the merged
@@ -1038,6 +1045,20 @@ summed series. The endpoint is auth-gated by the same visibility rules as the
 trace detail endpoint; a missing `trace_meta` or absent cAdvisor data yields an
 empty-but-valid payload (HTTP 200), and a disabled/unconfigured backend returns
 `501`. See [ADR-037](design/ADR-037-pipeline-view-observability.md).
+
+**Recorded during the run.** A leader-only background recorder samples every
+running trace every `pipeline.metrics.record_interval` and writes the six
+cAdvisor-derived series into VictoriaMetrics under distinct `dagger_engine_*`
+metric names tagged `{trace_id="<id>",version="<version>"}`. The endpoint reads
+those recorded series first and only falls back to the live cAdvisor query when
+nothing was recorded. This makes the pipeline card survive engine scale-down
+(~310s idle TTL) and short trace windows, and the existing history purge deletes
+the recorded series through the same `{trace_id="..."}` matcher
+(`DeleteTraceSeries`). Recording is bounded by `pipeline.metrics.max_record_window`
+per trace, "only while running", and VictoriaMetrics retention. The `rate()`
+lookback is `pipeline.metrics.rate_window` (default `1m`, down from `5m`) so
+charts appear promptly after an engine starts. See
+[ADR-048](design/ADR-048-pipeline-metrics-recording.md).
 
 ### Fleet metrics (Runners page)
 

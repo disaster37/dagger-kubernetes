@@ -470,6 +470,29 @@ func TestFSMListTracesBefore(t *testing.T) {
 	}
 }
 
+func TestFSMListRunningTraces(t *testing.T) {
+	f := newTestFSM(t)
+	base := time.Now().UTC()
+
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "running", Status: "running", Version: "v0.21.4", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "empty-status", Version: "v0.21.4", StartedAt: base.Add(-time.Hour), UpdatedAt: base.Add(-time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "success", Status: "success", Version: "v0.21.4", StartedAt: base.Add(-3 * time.Hour), UpdatedAt: base.Add(-3 * time.Hour)})
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "no-version", Status: "running", StartedAt: base.Add(-4 * time.Hour), UpdatedAt: base.Add(-4 * time.Hour)})
+	// Same sort key as "running": tie broken by trace_id.
+	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "aaa", Status: "running", Version: "v0.21.4", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
+
+	got := f.listRunningTraces()
+	want := []string{"aaa", "running", "empty-status"}
+	if len(got) != len(want) {
+		t.Fatalf("running = %v, want %v", traceMetaIDs(got), want)
+	}
+	for i, id := range want {
+		if got[i].TraceID != id {
+			t.Fatalf("running order = %v, want %v", traceMetaIDs(got), want)
+		}
+	}
+}
+
 func TestFSMTraceStats(t *testing.T) {
 	f := newTestFSM(t)
 	base := time.Now().UTC()

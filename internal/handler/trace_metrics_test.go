@@ -43,7 +43,7 @@ func TestHandleTraceMetrics(t *testing.T) {
 
 	env.server.engineMetrics = service.NewEngineMetricsService(
 		&stubMetricsQueryer{points: []domain.MetricPoint{{T: 1, V: 2}}},
-		"dagger-kubernetes", 15*time.Second, env.server.logger)
+		"dagger-kubernetes", 15*time.Second, time.Minute, env.server.logger)
 
 	e := route.NewEngine(config.NewOptions(nil))
 	e.GET("/api/v1/traces/:traceID/metrics", env.server.handleTraceMetrics)
@@ -75,7 +75,7 @@ func TestHandleTraceMetricsUnknownTrace(t *testing.T) {
 	bearer := env.loginAsAdmin(t)
 
 	env.server.engineMetrics = service.NewEngineMetricsService(
-		&stubMetricsQueryer{}, "dagger-kubernetes", 15*time.Second, env.server.logger)
+		&stubMetricsQueryer{}, "dagger-kubernetes", 15*time.Second, time.Minute, env.server.logger)
 
 	e := route.NewEngine(config.NewOptions(nil))
 	e.GET("/api/v1/traces/:traceID/metrics", env.server.handleTraceMetrics)

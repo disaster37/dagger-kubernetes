@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,7 +20,10 @@ type MetricsClient struct {
 	httpClient  *http.Client
 }
 
-var _ domain.TraceSeriesDeleter = (*MetricsClient)(nil)
+var (
+	_ domain.TraceSeriesDeleter        = (*MetricsClient)(nil)
+	_ domain.TraceMetricsRecorderStore = (*MetricsClient)(nil)
+)
 
 func NewMetricsClient(victoriaURL string) *MetricsClient {
 	return &MetricsClient{
@@ -148,6 +152,138 @@ func (c *MetricsClient) QueryRange(ctx context.Context, query string, start, end
 	}
 	sort.Slice(points, func(i, j int) bool { return points[i].T < points[j].T })
 	return points, nil
+}
+
+// promInstantResponse is the Prometheus/VictoriaMetrics /api/v1/query envelope.
+type promInstantResponse struct {
+	Status string `json:"status"`
+	Data   struct {
+		ResultType string `json:"resultType"`
+		Result     []struct {
+			Metric map[string]string `json:"metric"`
+			Value  []interface{}     `json:"value"` // [unixSeconds, "value"]
+		} `json:"result"`
+	} `json:"data"`
+}
+
+// QueryInstant runs GET /api/v1/query at ts and returns the summed first finite
+// sample value. ok=false when no finite value exists.
+func (c *MetricsClient) QueryInstant(ctx context.Context, query string, ts time.Time) (value float64, found bool, err error) {
+	if c.victoriaURL == "" {
+		return 0, false, fmt.Errorf("victoria URL not configured")
+	}
+	if query == "" {
+		return 0, false, fmt.Errorf("query must not be empty")
+	}
+
+	params := url.Values{}
+	params.Set("query", query)
+	params.Set("time", strconv.FormatInt(ts.Unix(), 10))
+	queryURL := fmt.Sprintf("%s/api/v1/query?%s", c.victoriaURL, params.Encode())
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, queryURL, http.NoBody)
+	if err != nil {
+		return 0, false, fmt.Errorf("victoria query request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return 0, false, fmt.Errorf("victoria query failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return 0, false, fmt.Errorf("victoria query returned status %d", resp.StatusCode)
+	}
+
+	var decoded promInstantResponse
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		return 0, false, fmt.Errorf("decode victoria query response: %w", err)
+	}
+
+	var sum float64
+	for _, series := range decoded.Data.Result {
+		if len(series.Value) != 2 {
+			continue
+		}
+		raw, isStr := series.Value[1].(string)
+		if !isStr {
+			continue
+		}
+		sample, parseErr := strconv.ParseFloat(raw, 64)
+		if parseErr != nil {
+			continue
+		}
+		// PromQL can legitimately yield NaN/Inf (e.g. a single sample in the
+		// window); those are not JSON-encodable and must not be persisted.
+		if math.IsNaN(sample) || math.IsInf(sample, 0) {
+			continue
+		}
+		sum += sample
+		found = true
+	}
+	return sum, found, nil
+}
+
+// importSample is one VictoriaMetrics /api/v1/import JSON line.
+type importSample struct {
+	Metric     map[string]string `json:"metric"`
+	Values     []float64         `json:"values"`
+	Timestamps []int64           `json:"timestamps"` // unix milliseconds
+}
+
+// WriteSamples imports points (POST /api/v1/import, JSON-line protocol) under
+// metricName + labels. Timestamps are unix seconds -> ms. Success = 200/204.
+func (c *MetricsClient) WriteSamples(ctx context.Context, metricName string, labels map[string]string, points []domain.MetricPoint) error {
+	if len(points) == 0 {
+		return nil
+	}
+	if c.victoriaURL == "" {
+		return fmt.Errorf("victoria URL not configured")
+	}
+	if metricName == "" {
+		return fmt.Errorf("metric name must not be empty")
+	}
+
+	metric := make(map[string]string, len(labels)+1)
+	for k, v := range labels {
+		metric[k] = v
+	}
+	metric["__name__"] = metricName
+
+	var body bytes.Buffer
+	for _, p := range points {
+		if math.IsNaN(p.V) || math.IsInf(p.V, 0) {
+			continue
+		}
+		line, err := json.Marshal(importSample{
+			Metric:     metric,
+			Values:     []float64{p.V},
+			Timestamps: []int64{p.T * 1000},
+		})
+		if err != nil {
+			return fmt.Errorf("encode import sample: %w", err)
+		}
+		body.Write(line)
+		body.WriteByte('\n')
+	}
+	if body.Len() == 0 {
+		return nil
+	}
+
+	importURL := fmt.Sprintf("%s/api/v1/import", c.victoriaURL)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, importURL, &body)
+	if err != nil {
+		return fmt.Errorf("victoria import request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("victoria import failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
+		return nil
+	}
+	return fmt.Errorf("victoria import returned status %d", resp.StatusCode)
 }
 
 // DeleteTraceSeries deletes all metrics tagged with trace_id=<traceID>.

@@ -777,6 +777,9 @@ subchart values.
 | `supervisor.config.otel.ingestMaxBodySize` | int | `67108864` | OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). Keep the ingress `proxyBodySize` and the collector `max_request_body_size` at least this large. |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
+| `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |
+| `supervisor.config.pipeline.metrics.recordInterval` | string | `"15s"` | Leader-only recorder sampling tick that persists running-trace samples tagged with `trace_id` (must be > 0 when enabled). |
+| `supervisor.config.pipeline.metrics.maxRecordWindow` | string | `"24h"` | Per-trace recording cap; traces older than this are no longer sampled (must be > 0 when enabled). |
 
 ### Local image cache (Zot mirror)
 

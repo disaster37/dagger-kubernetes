@@ -354,6 +354,15 @@ pipeline:
                                  # (runners page charts + storage card).
     enabled: true                # serve both endpoints (cAdvisor container_* series).
     step: "15s"                  # query_range resolution; must be > 0 when enabled.
+    rate_window: "1m"            # rate() lookback for cpu/disk/net series; shorter
+                                 # windows make charts appear sooner after an engine
+                                 # starts. Must be > 0 when enabled.
+    record_interval: "15s"       # leader-only recorder sampling tick; samples running
+                                 # traces into VictoriaMetrics tagged with trace_id so
+                                 # the pipeline view survives engine scale-down.
+                                 # Must be > 0 when enabled.
+    max_record_window: "24h"     # per-trace recording cap; traces older than this are
+                                 # no longer sampled. Must be > 0 when enabled.
 
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
