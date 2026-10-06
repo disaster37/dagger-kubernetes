@@ -1041,7 +1041,25 @@ The data source is kubelet **cAdvisor** `container_*` metrics, scraped into
 VictoriaMetrics by the subchart's default `kubernetes-nodes-cadvisor` scrape job
 (enabled via `victoria.server.scrape.enabled`; the subchart's ClusterRole grants
 `nodes/metrics`). Do not add a second cAdvisor job — duplicate jobs double every
-summed series. The endpoint is auth-gated by the same visibility rules as the
+summed series.
+
+**VictoriaMetrics label limit.** The `kubernetes-nodes-cadvisor` job copies all
+node labels onto each series (target ≈120 labels per series), so the chart sets
+`victoria.server.extraArgs.maxLabelsPerTimeseries: "300"`. VictoriaMetrics'
+default `-maxLabelsPerTimeseries` of 40 silently rejects **every** cAdvisor
+series with `reason="too_many_labels"` (the scrape target still reports `up`);
+`container_*` queries then return nothing and both the pipeline-view engine card
+and the Runners page render empty. Lowering this value below the job's
+per-series label count re-breaks both views with no scrape error, so keep it
+above the cAdvisor target with headroom.
+
+Admitting that high-cardinality label set also raises VictoriaMetrics' memory
+footprint to ≈0.9 GiB at idle, so the chart sets
+`victoria.server.resources.limits.memory: 4Gi`. A 1Gi limit leaves no headroom
+and PromQL queries are OOMKilled (the scraper itself survives); raise the limit
+alongside `maxLabelsPerTimeseries` when the node carries many labels.
+
+The endpoint is auth-gated by the same visibility rules as the
 trace detail endpoint; a missing `trace_meta` or absent cAdvisor data yields an
 empty-but-valid payload (HTTP 200), and a disabled/unconfigured backend returns
 `501`. See [ADR-037](design/ADR-037-pipeline-view-observability.md).
@@ -1908,7 +1926,17 @@ requests.
 ### VictoriaMetrics
 PromQL-compatible metrics backend. Stores OTLP metrics via the Prometheus
 remote write protocol. Exposes the HTTP API on port 8428. Single-server
-deployment with persistent volumes. **Deletion**: the history purge calls
+deployment with persistent volumes. The chart raises
+`-maxLabelsPerTimeseries` to `300`
+(`victoria.server.extraArgs.maxLabelsPerTimeseries`) because the subchart's
+`kubernetes-nodes-cadvisor` job maps all node labels onto each series
+(≈120/series); VictoriaMetrics' default of 40 drops every cAdvisor series with
+`reason="too_many_labels"`, which empties the engine metrics cards. Admitting
+those high-cardinality series also raises VictoriaMetrics' idle memory to
+≈0.9 GiB, so the chart sets `victoria.server.resources.limits.memory` to `4Gi`
+(a 1Gi limit leaves no query headroom and OOMKills PromQL requests).
+**Deletion**:
+the history purge calls
 `POST /api/v1/admin/tsdb/delete_series`, which is admin-only and deletes the
 entire series matching `match[]` (no time range); space is reclaimed lazily
 during background merges. If `-deleteAuthKey` is set on the VM deployment, the

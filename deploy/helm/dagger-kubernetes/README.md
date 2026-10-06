@@ -948,6 +948,8 @@ subchart values.
 | `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |
 | `victoria.enabled` | bool | `true` | Install VictoriaMetrics subchart (metrics). |
 | `victoria.server.scrape.enabled` | bool | `true` | Enable VictoriaMetrics' built-in Prometheus scraper. The subchart's default scrape config already includes the `kubernetes-nodes-cadvisor` job (kubelet `/metrics/cadvisor`), which supplies the `container_*` series the pipeline-view engine-metrics card queries; the subchart's ClusterRole grants `nodes/metrics` when scraping is enabled. Do not add a second cAdvisor job — duplicate jobs double every summed series. |
+| `victoria.server.extraArgs.maxLabelsPerTimeseries` | string | `"300"` | VictoriaMetrics `-maxLabelsPerTimeseries` limit. The subchart's `kubernetes-nodes-cadvisor` job copies all node labels onto each series (target ≈120 labels); VictoriaMetrics' default limit of 40 rejects every cAdvisor series with `reason="too_many_labels"`, silently emptying the runner and pipeline metrics views. 300 covers the target with headroom. |
+| `victoria.server.resources.limits.memory` | string | `"4Gi"` | VictoriaMetrics memory limit. Once the cAdvisor job's node-label fan-out is admitted by `maxLabelsPerTimeseries`, the process sits at ~0.9 GiB idle; a 1Gi limit leaves no headroom and PromQL queries are OOMKilled. Raise alongside `maxLabelsPerTimeseries` when the node carries many labels. |
 | `grafana.enabled` | bool | `true` | Install Grafana subchart (dashboards with auto-provisioned datasources). |
 
 ## Upgrading
