@@ -4,7 +4,7 @@
       <span class="metric-label">{{ series.label }}</span>
       <span class="metric-value">{{ lastValue }}</span>
     </div>
-    <div v-if="series.points.length < 2" class="metric-empty">no data</div>
+    <div v-if="series.points.length === 0" class="metric-empty">no data</div>
     <svg
       v-else
       class="metric-svg"
@@ -13,8 +13,9 @@
       role="img"
       :aria-label="`${series.label} over time`"
     >
-      <polygon class="metric-area" :points="areaPoints" />
-      <polyline class="metric-line" :points="linePoints" />
+      <polygon v-if="series.points.length >= 2" class="metric-area" :points="areaPoints" />
+      <polyline v-if="series.points.length >= 2" class="metric-line" :points="linePoints" />
+      <circle v-else :cx="WIDTH / 2" :cy="HEIGHT / 2" r="3" class="metric-dot" />
     </svg>
     <div class="metric-axis">
       <span>{{ formatValue(min) }}</span>
@@ -49,10 +50,12 @@ const range = computed(() => max.value - min.value || 1)
 
 function x(i: number): number {
   const n = props.series.points.length
+  if (n <= 1) return WIDTH / 2
   return PAD + (i / (n - 1)) * (WIDTH - 2 * PAD)
 }
 
 function y(v: number): number {
+  if (props.series.points.length <= 1) return HEIGHT / 2
   return HEIGHT - PAD - ((v - min.value) / range.value) * (HEIGHT - 2 * PAD)
 }
 

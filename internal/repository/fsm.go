@@ -1109,6 +1109,32 @@ func (f *FSM) listTracesBefore(cutoff time.Time, protectRunning bool) []*domain.
 	return out
 }
 
+// listRunningTraces returns deep copies of non-terminal traces with a non-empty
+// version, sorted by COALESCE(started_at, updated_at) then trace_id.
+func (f *FSM) listRunningTraces() []*domain.TraceMeta {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	var out []*domain.TraceMeta
+	for _, m := range f.state.traces {
+		if m.Status != "" && m.Status != "running" {
+			continue
+		}
+		if m.Version == "" {
+			continue
+		}
+		cp := *m
+		out = append(out, &cp)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		ki, kj := traceSortKey(out[i]), traceSortKey(out[j])
+		if ki.Equal(kj) {
+			return out[i].TraceID < out[j].TraceID
+		}
+		return ki.Before(kj)
+	})
+	return out
+}
+
 // traceStats returns the total trace count and the oldest trace sort key
 // (zero time when no trace has a known age).
 func (f *FSM) traceStats() (int, time.Time) {

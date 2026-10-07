@@ -18,7 +18,7 @@
 
     <UCard v-if="metrics" class="mb-4 border-l-4 border-l-success">
       <h3 class="font-semibold">Engine metrics</h3>
-      <div v-if="metrics.series.length === 0" class="empty">No metrics</div>
+      <div v-if="!hasMetricData" class="empty">No metrics</div>
       <div v-else class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5 py-2">
         <MetricChart
           v-for="s in metrics.series"
@@ -124,6 +124,7 @@ const trace = ref<TraceDetail>({
 })
 const logs = ref<TraceLogEntry[]>([])
 const metrics = ref<TraceMetrics | null>(null)
+const hasMetricData = computed(() => (metrics.value?.series ?? []).some(s => s.points.length > 0))
 
 // Bumped on every live logs_update / poll so StepTree refreshes its search
 // results (debounced there) while preserving focus + query.

@@ -410,10 +410,16 @@ supervisor:
       ingestMaxBodySize: 67108864
 ## @param supervisor.config.pipeline.metrics.enabled Enable the trace-scoped engine resource metrics endpoint (GET /api/v1/traces/:id/metrics).
 ## @param supervisor.config.pipeline.metrics.step query_range resolution for engine metrics (Go duration; must be > 0 when enabled).
+## @param supervisor.config.pipeline.metrics.rateWindow rate() lookback for cpu/disk/net engine series (Go duration; must be > 0 when enabled).
+## @param supervisor.config.pipeline.metrics.recordInterval Leader-only recorder sampling tick that persists running-trace samples tagged with trace_id (Go duration; must be > 0 when enabled).
+## @param supervisor.config.pipeline.metrics.maxRecordWindow Per-trace recording cap; traces older than this are no longer sampled (Go duration; must be > 0 when enabled).
     pipeline:
       metrics:
         enabled: true
         step: "15s"
+        rateWindow: "1m"
+        recordInterval: "15s"
+        maxRecordWindow: "24h"
 
 ## @section Local image cache (Zot mirror)
 
@@ -1093,15 +1099,19 @@ victoria:
       enabled: true
       size: 20Gi
       storageClassName: ""
+    ## @param victoria.server.resources.limits.memory VictoriaMetrics memory limit. Once the `kubernetes-nodes-cadvisor` job's node-label fan-out (≈120 labels/series) is admitted by `maxLabelsPerTimeseries`, the process sits at ~0.9 GiB idle; a 1Gi limit leaves no headroom and PromQL queries are OOMKilled (the scraper itself survives). Raise alongside `maxLabelsPerTimeseries` when the node carries many labels.
     resources:
       requests:
         cpu: 100m
         memory: 256Mi
       limits:
         cpu: 1000m
-        memory: 1Gi
+        memory: 4Gi
     scrape:
       enabled: true
+    ## @param victoria.server.extraArgs.maxLabelsPerTimeseries VictoriaMetrics `-maxLabelsPerTimeseries` limit. The subchart's `kubernetes-nodes-cadvisor` scrape job copies all node labels onto each series (target ≈120 labels), and VictoriaMetrics' default limit of 40 rejects every cAdvisor series with `reason="too_many_labels"` — silently emptying the runner and pipeline metrics views. 300 covers the target with headroom.
+    extraArgs:
+      maxLabelsPerTimeseries: "300"
 
 ## @skip grafana
 ## @param grafana.enabled Install Grafana subchart (dashboards with auto-provisioned datasources).

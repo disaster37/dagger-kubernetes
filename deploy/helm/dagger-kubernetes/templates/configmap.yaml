@@ -221,5 +221,8 @@ data:
       metrics:
         enabled: {{ .metrics.enabled }}
         step: {{ .metrics.step | quote }}
+        rate_window: {{ .metrics.rateWindow | quote }}
+        record_interval: {{ .metrics.recordInterval | quote }}
+        max_record_window: {{ .metrics.maxRecordWindow | quote }}
 {{- end }}
 {{- end }}

@@ -75,6 +75,20 @@ series. The Dagger engine's own OTLP metrics are BuildKit/engine aggregates and
 do not include the engine pod's CPU/memory/disk/network, so cAdvisor is the
 canonical source.
 
+**Label limit (operational constraint).** The `kubernetes-nodes-cadvisor` job
+maps every node label onto each series (target ≈120 labels), so the chart raises
+VictoriaMetrics' `-maxLabelsPerTimeseries` to `300`
+(`victoria.server.extraArgs.maxLabelsPerTimeseries`). VictoriaMetrics' default
+of 40 rejects **every** cAdvisor series at ingestion with
+`reason="too_many_labels"` while the scrape target still reports `up`;
+`container_*` queries then return nothing and both the pipeline-view engine card
+and the Runners page render empty with no scrape error. The limit must stay
+above the job's per-series label count with headroom. Admitting those
+high-cardinality series also raises VictoriaMetrics' idle memory to ≈0.9 GiB, so
+the chart sets `victoria.server.resources.limits.memory` to `4Gi`; a 1Gi limit
+leaves no query headroom and PromQL requests are OOMKilled (the scraper itself
+survives).
+
 **Query path.** A new, auth-gated `GET /api/v1/traces/:traceID/metrics`
 endpoint builds scoped PromQL server-side and queries VictoriaMetrics; the UI
 never writes PromQL. The raw `/api/v1/metrics` proxy is unchanged for
@@ -124,6 +138,13 @@ collector's `max_request_body_size` to match. The control-API cap is unchanged.
   shape are isolated constants/config, verified against the installed chart
   (`victoria.server.scrape.enabled`, whose default config already scrapes
   kubelet cAdvisor) and tunable after a live inspection.
+- The chart raises VictoriaMetrics' `-maxLabelsPerTimeseries` to 300
+  (`victoria.server.extraArgs.maxLabelsPerTimeseries`) to fit the cAdvisor job's
+  node-label fan-out; lowering it below the target silently drops every
+  `container_*` series and re-empties both metrics surfaces. The chart also
+  raises the VM memory limit to 4Gi
+  (`victoria.server.resources.limits.memory`) to hold those high-cardinality
+  series and serve queries without OOMKill.
 - The 4 MiB control-API cap is untouched; OTLP ingest is bounded by the
   collector's own limit for chunked bodies.
 
@@ -133,3 +154,8 @@ collector's `max_request_body_size` to match. The control-API cap is unchanged.
   (constants isolated for one-line tuning).
 - cAdvisor metric availability/labels on the target cluster (endpoint tolerant
   of empty data).
+
+## Cross-references
+
+- ADR-048 — records the trace-scoped engine metrics during the run so the card
+  survives engine scale-down and short trace windows.

@@ -777,6 +777,9 @@ subchart values.
 | `supervisor.config.otel.ingestMaxBodySize` | int | `67108864` | OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). Keep the ingress `proxyBodySize` and the collector `max_request_body_size` at least this large. |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
+| `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |
+| `supervisor.config.pipeline.metrics.recordInterval` | string | `"15s"` | Leader-only recorder sampling tick that persists running-trace samples tagged with `trace_id` (must be > 0 when enabled). |
+| `supervisor.config.pipeline.metrics.maxRecordWindow` | string | `"24h"` | Per-trace recording cap; traces older than this are no longer sampled (must be > 0 when enabled). |
 
 ### Local image cache (Zot mirror)
 
@@ -945,6 +948,8 @@ subchart values.
 | `loki.enabled` | bool | `true` | Install Grafana Loki subchart (logs). |
 | `victoria.enabled` | bool | `true` | Install VictoriaMetrics subchart (metrics). |
 | `victoria.server.scrape.enabled` | bool | `true` | Enable VictoriaMetrics' built-in Prometheus scraper. The subchart's default scrape config already includes the `kubernetes-nodes-cadvisor` job (kubelet `/metrics/cadvisor`), which supplies the `container_*` series the pipeline-view engine-metrics card queries; the subchart's ClusterRole grants `nodes/metrics` when scraping is enabled. Do not add a second cAdvisor job — duplicate jobs double every summed series. |
+| `victoria.server.extraArgs.maxLabelsPerTimeseries` | string | `"300"` | VictoriaMetrics `-maxLabelsPerTimeseries` limit. The subchart's `kubernetes-nodes-cadvisor` job copies all node labels onto each series (target ≈120 labels); VictoriaMetrics' default limit of 40 rejects every cAdvisor series with `reason="too_many_labels"`, silently emptying the runner and pipeline metrics views. 300 covers the target with headroom. |
+| `victoria.server.resources.limits.memory` | string | `"4Gi"` | VictoriaMetrics memory limit. Once the cAdvisor job's node-label fan-out is admitted by `maxLabelsPerTimeseries`, the process sits at ~0.9 GiB idle; a 1Gi limit leaves no headroom and PromQL queries are OOMKilled. Raise alongside `maxLabelsPerTimeseries` when the node carries many labels. |
 | `grafana.enabled` | bool | `true` | Install Grafana subchart (dashboards with auto-provisioned datasources). |
 
 ## Upgrading

@@ -211,6 +211,9 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("pipeline.stale_sweep.stale_after", 5*time.Minute)
 	v.SetDefault("pipeline.metrics.enabled", true)
 	v.SetDefault("pipeline.metrics.step", 15*time.Second)
+	v.SetDefault("pipeline.metrics.rate_window", time.Minute)
+	v.SetDefault("pipeline.metrics.record_interval", 15*time.Second)
+	v.SetDefault("pipeline.metrics.max_record_window", 24*time.Hour)
 
 	v.SetDefault("fleet.namespace", "dagger-kubernetes")
 	v.SetDefault("fleet.max_replicas_per_version", 3)
@@ -861,8 +864,20 @@ func validateOTelConfig(cfg *domain.Config) error {
 // /api/v1/traces/:id/metrics and the runners-page GET
 // /api/v1/fleet/:version/metrics endpoint.
 func validatePipelineMetricsConfig(cfg *domain.Config) error {
-	if cfg.Pipeline.Metrics.Enabled && cfg.Pipeline.Metrics.Step <= 0 {
+	if !cfg.Pipeline.Metrics.Enabled {
+		return nil
+	}
+	if cfg.Pipeline.Metrics.Step <= 0 {
 		return fmt.Errorf("pipeline.metrics.step must be > 0 when pipeline.metrics.enabled is true")
+	}
+	if cfg.Pipeline.Metrics.RateWindow <= 0 {
+		return fmt.Errorf("pipeline.metrics.rate_window must be > 0 when pipeline.metrics.enabled is true")
+	}
+	if cfg.Pipeline.Metrics.RecordInterval <= 0 {
+		return fmt.Errorf("pipeline.metrics.record_interval must be > 0 when pipeline.metrics.enabled is true")
+	}
+	if cfg.Pipeline.Metrics.MaxRecordWindow <= 0 {
+		return fmt.Errorf("pipeline.metrics.max_record_window must be > 0 when pipeline.metrics.enabled is true")
 	}
 	return nil
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,20 +17,13 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
-// TestTraceMetricsEndpoint proves the real handler wiring end-to-end: a fake
-// VictoriaMetrics backend answers query_range, and
-// GET /api/v1/traces/:id/metrics returns the curated engine series for a trace
-// whose meta carries a version + start/duration.
-func TestTraceMetricsEndpoint(t *testing.T) {
-	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/v1/query_range" {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":[[100,"1.5"],[110,"2.5"]]}]}}`))
-	}))
-	defer vm.Close()
+const traceMetricsTraceID = "abcdef0123456789abcdef0123456789"
+
+// startTraceMetricsServer wires the real handler + engine metrics service
+// against a fake VictoriaMetrics backend and returns the control address, the
+// trace_meta repo, and an admin bearer token.
+func startTraceMetricsServer(t *testing.T, vmURL string) (addr string, repo *repository.TraceMetaRepo, token string) {
+	t.Helper()
 
 	controlLn, dataLn := freeListener(t), freeListener(t)
 	controlAddr, dataAddr := listenerAddr(controlLn), listenerAddr(dataLn)
@@ -71,8 +65,8 @@ func TestTraceMetricsEndpoint(t *testing.T) {
 	traces := repository.NewSpanTreeReconstructor("")
 	logsClient := repository.NewLogsClient("")
 
-	metricsClient := repository.NewMetricsClient(vm.URL)
-	engineMetrics := service.NewEngineMetricsService(metricsClient, "dagger-kubernetes", 15*time.Second, logger)
+	metricsClient := repository.NewMetricsClient(vmURL)
+	engineMetrics := service.NewEngineMetricsService(metricsClient, "dagger-kubernetes", 15*time.Second, time.Minute, logger)
 
 	srv := handler.NewServer(&handler.ServerConfig{
 		ControlAddr:     controlAddr,
@@ -103,18 +97,25 @@ func TestTraceMetricsEndpoint(t *testing.T) {
 	})
 	time.Sleep(500 * time.Millisecond)
 
-	const traceID = "abcdef0123456789abcdef0123456789"
-	if err := traceMetaRepo.UpsertIngest(context.Background(), &domain.TraceMeta{
-		TraceID:    traceID,
+	return controlAddr, traceMetaRepo, adminToken
+}
+
+func seedTraceMetricsMeta(t *testing.T, repo *repository.TraceMetaRepo) {
+	t.Helper()
+	if err := repo.UpsertIngest(context.Background(), &domain.TraceMeta{
+		TraceID:    traceMetricsTraceID,
 		Version:    "v0.21.4",
 		StartedAt:  time.Now().Add(-time.Minute),
 		DurationMS: 30000,
 	}); err != nil {
 		t.Fatalf("seed trace meta: %v", err)
 	}
+}
 
-	req, _ := http.NewRequest("GET", fmt.Sprintf("http://localhost%s/api/v1/traces/%s/metrics", controlAddr, traceID), http.NoBody)
-	req.Header.Set("Authorization", "Bearer "+adminToken)
+func getTraceMetrics(t *testing.T, controlAddr, token string) domain.TraceMetrics {
+	t.Helper()
+	req, _ := http.NewRequest("GET", fmt.Sprintf("http://localhost%s/api/v1/traces/%s/metrics", controlAddr, traceMetricsTraceID), http.NoBody)
+	req.Header.Set("Authorization", "Bearer "+token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET metrics: %v", err)
@@ -123,13 +124,37 @@ func TestTraceMetricsEndpoint(t *testing.T) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("status = %d, want 200", resp.StatusCode)
 	}
-
 	var body domain.TraceMetrics
 	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if body.TraceID != traceID {
-		t.Fatalf("trace_id = %q, want %q", body.TraceID, traceID)
+	return body
+}
+
+// TestTraceMetricsEndpointFallbackToLive proves the real handler wiring
+// end-to-end: with no recorded samples, the endpoint falls back to the live
+// cAdvisor query and returns the curated engine series.
+func TestTraceMetricsEndpointFallbackToLive(t *testing.T) {
+	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query_range" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Query().Get("query"), "dagger_engine_") {
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":[[100,"1.5"],[110,"2.5"]]}]}}`))
+	}))
+	defer vm.Close()
+
+	controlAddr, traceMetaRepo, adminToken := startTraceMetricsServer(t, vm.URL)
+	seedTraceMetricsMeta(t, traceMetaRepo)
+
+	body := getTraceMetrics(t, controlAddr, adminToken)
+	if body.TraceID != traceMetricsTraceID {
+		t.Fatalf("trace_id = %q, want %q", body.TraceID, traceMetricsTraceID)
 	}
 	if len(body.Series) != 6 {
 		t.Fatalf("series = %d, want 6", len(body.Series))
@@ -139,5 +164,37 @@ func TestTraceMetricsEndpoint(t *testing.T) {
 	}
 	if len(body.Series[0].Points) != 2 || body.Series[0].Points[0].V != 1.5 {
 		t.Fatalf("series[0].points = %+v, want two points starting at 1.5", body.Series[0].Points)
+	}
+}
+
+// TestTraceMetricsEndpointRecordedFirst proves recorded dagger_engine_* samples
+// are served when present, even though the live cAdvisor query is empty.
+func TestTraceMetricsEndpointRecordedFirst(t *testing.T) {
+	vm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/query_range" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if strings.HasPrefix(r.URL.Query().Get("query"), "dagger_engine_cpu") {
+			_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[{"metric":{},"values":[[100,"1.5"],[110,"2.5"]]}]}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"status":"success","data":{"resultType":"matrix","result":[]}}`))
+	}))
+	defer vm.Close()
+
+	controlAddr, traceMetaRepo, adminToken := startTraceMetricsServer(t, vm.URL)
+	seedTraceMetricsMeta(t, traceMetaRepo)
+
+	body := getTraceMetrics(t, controlAddr, adminToken)
+	if len(body.Series) != 6 {
+		t.Fatalf("series = %d, want 6", len(body.Series))
+	}
+	if body.Series[0].Name != "cpu" || body.Series[0].Unit != "cores" {
+		t.Fatalf("series[0] = %+v, want cpu/cores", body.Series[0])
+	}
+	if len(body.Series[0].Points) != 2 || body.Series[0].Points[0].V != 1.5 {
+		t.Fatalf("series[0].points = %+v, want recorded two points starting at 1.5", body.Series[0].Points)
 	}
 }

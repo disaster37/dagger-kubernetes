@@ -223,6 +223,9 @@ func (errorTraceMetaRepo) List(context.Context, *domain.TraceFilter) ([]*domain.
 func (errorTraceMetaRepo) ListBefore(context.Context, time.Time, bool) ([]*domain.TraceMeta, error) {
 	return nil, nil
 }
+func (errorTraceMetaRepo) ListRunning(context.Context) ([]*domain.TraceMeta, error) {
+	return nil, nil
+}
 func (errorTraceMetaRepo) Delete(context.Context, string) error { return nil }
 func (errorTraceMetaRepo) MarkFailed(context.Context, string, string) (bool, error) {
 	return false, errors.New("boom")

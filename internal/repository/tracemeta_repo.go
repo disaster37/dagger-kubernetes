@@ -90,6 +90,11 @@ func (r *TraceMetaRepo) ListBefore(ctx context.Context, cutoff time.Time, protec
 	return r.store.fsmRead().listTracesBefore(cutoff, protectRunning), nil
 }
 
+// ListRunning implements domain.TraceMetaRepository (see fsm.go).
+func (r *TraceMetaRepo) ListRunning(ctx context.Context) ([]*domain.TraceMeta, error) {
+	return r.store.fsmRead().listRunningTraces(), nil
+}
+
 // Delete removes a single trace_meta row. Idempotent: the FSM delete(map, key)
 // on a missing key is a no-op (returns nil).
 func (r *TraceMetaRepo) Delete(ctx context.Context, traceID string) error {

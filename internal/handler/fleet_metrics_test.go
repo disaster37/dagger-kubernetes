@@ -37,7 +37,7 @@ func TestHandleFleetMetricsInvalidVersion(t *testing.T) {
 	bearer := env.loginAsAdmin(t)
 	env.server.fleetMetrics = service.NewFleetMetricsService(
 		&stubMetricsQueryer{points: []domain.MetricPoint{{T: 1, V: 2}}},
-		"dagger-kubernetes", 15*time.Second, 0, env.server.logger)
+		"dagger-kubernetes", 15*time.Second, time.Minute, 0, env.server.logger)
 	e := newFleetMetricsEngine(env.server)
 
 	for _, version := range []string{"bad", "v0.19", "v0.19.0-rc1"} {
@@ -66,7 +66,7 @@ func TestHandleFleetMetricsSuccess(t *testing.T) {
 	bearer := env.loginAsAdmin(t)
 	env.server.fleetMetrics = service.NewFleetMetricsService(
 		&stubMetricsQueryer{points: []domain.MetricPoint{{T: 1, V: 2}}},
-		"dagger-kubernetes", 15*time.Second, 50<<30, env.server.logger)
+		"dagger-kubernetes", 15*time.Second, time.Minute, 50<<30, env.server.logger)
 	e := newFleetMetricsEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet/v0.21.4/metrics", nil,

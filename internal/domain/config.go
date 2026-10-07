@@ -341,8 +341,11 @@ type PipelineConfig struct {
 // endpoint (GET /api/v1/traces/:traceID/metrics) that queries cAdvisor
 // container_* series from VictoriaMetrics.
 type PipelineMetricsConfig struct {
-	Enabled bool          `mapstructure:"enabled"`
-	Step    time.Duration `mapstructure:"step"` // query_range step; default 15s
+	Enabled         bool          `mapstructure:"enabled"`
+	Step            time.Duration `mapstructure:"step"`              // query_range step; default 15s
+	RateWindow      time.Duration `mapstructure:"rate_window"`       // rate() lookback; default 1m
+	RecordInterval  time.Duration `mapstructure:"record_interval"`   // recorder sampling tick; default 15s
+	MaxRecordWindow time.Duration `mapstructure:"max_record_window"` // per-trace recording cap; default 24h
 }
 
 // PipelineStaleSweep governs the background staleness sweeper that recovers

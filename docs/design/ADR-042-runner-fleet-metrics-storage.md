@@ -54,7 +54,17 @@ trace time window), and the Kubernetes PVC API exposes `capacity` but never
 
 - One new service (`FleetMetricsService`), one new auth-gated endpoint, and a
   metrics grid + storage card on the Runners page; no charting dependency, no
-  new scrape job, no new config key, no Helm values change.
+  new scrape job, no new config key.
+- The shared cAdvisor path requires VictoriaMetrics'
+  `-maxLabelsPerTimeseries` to be raised for the `kubernetes-nodes-cadvisor`
+  job's node-label fan-out (target ≈120 labels/series). The chart sets it to 300
+  via `victoria.server.extraArgs.maxLabelsPerTimeseries`; with VM's default of
+  40, every cAdvisor series is rejected at ingestion
+  (`reason="too_many_labels"`) and this page renders empty even though the
+  scrape target reports `up` (see ADR-037). The chart also raises the VM memory
+  limit to 4Gi (`victoria.server.resources.limits.memory`), because admitting
+  those series leaves a 1Gi limit with no query headroom (PromQL requests are
+  OOMKilled).
 - The `pipeline.metrics.*` config now gates both metrics endpoints (documented
   in `docs/README.md` and `config/config.app.yaml.sample`).
 - If cAdvisor does not emit `container_fs_limit_bytes` for the engine PVC on a
@@ -65,3 +75,4 @@ trace time window), and the Kubernetes PVC API exposes `capacity` but never
 ## Cross-references
 
 - ADR-037 — the trace-scoped metrics path this endpoint mirrors.
+- ADR-048 — the shared `{rate}` window and the trace-metrics recorder.
