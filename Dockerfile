@@ -1,12 +1,18 @@
 # syntax=docker/dockerfile:1
 
+# APP_VERSION is baked into the UI footer (NUXT_PUBLIC_APP_VERSION). The
+# release workflow passes the release tag; other builds fall back to "unknown".
+ARG APP_VERSION=unknown
+
 # ---------- UI builder ----------
 FROM node:22-alpine AS ui-builder
+ARG APP_VERSION
 WORKDIR /ui
 COPY ui/package.json ui/package-lock.json* ./
 RUN --mount=type=cache,target=/root/.npm \
     npm ci
 COPY ui/ ./
+ENV NUXT_PUBLIC_APP_VERSION=$APP_VERSION
 RUN npm run build
 
 # ---------- Go builder ----------

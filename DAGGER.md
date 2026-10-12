@@ -55,7 +55,7 @@ Outputs:
 | `test` | `dagger call -m ./dagger --src . test export --path coverage.out` | `coverage.out` file |
 | `ui` | `dagger call -m ./dagger --src . ui export --path ui-dist` | `.output/public/` directory |
 | `build` | `dagger call -m ./dagger --src . build export --path .` | `bin/` directory with both binaries (the returned directory already contains `bin/`, so export to `.`) |
-| `docker` | `dagger call -m ./dagger --src . docker` | built `Container` |
+| `docker` | `dagger call -m ./dagger --src . docker --version dev` | built `Container` (`--version` optional: baked into the UI footer via the `APP_VERSION` build arg; empty = `unknown`) |
 | `helm` | `dagger call -m ./dagger --src . helm` | (no return value; fails on error) |
 | `publish` | `dagger call -m ./dagger --src . publish --tag dev --registry-username env:GHCR_USERNAME --registry-password env:GHCR_TOKEN` | image reference + digest (string) |
 | `jenkins-libs` | `dagger call -m ./dagger --src . jenkins-libs --version v0.1.0 export --path jenkins-libs-v0.1.0.tar.gz` | deterministic `tar.gz` of the `ci-integrations/jenkins` submodule (repo `disaster37/dagger-kubernetes-jenkins`, `vars/` at the archive root) |
@@ -97,9 +97,15 @@ the value from the local environment without printing it. The PAT needs the
 
 **Semver normalization:** the `image` module normalizes semver tags —
 `--tag v0.1.0` publishes as `0.1.0` (leading `v` stripped). Non-semver tags
-(`dev`, `1h`, a git SHA) pass through verbatim. Note this differs from
-`release.yml`, which pushes `ghcr.io/…:v0.1.0` *with* the `v`; `release.yml`
+(`dev`, `1h`, a git SHA) pass through verbatim. `release.yml` pushes
+`ghcr.io/…:<ref_name>` from the raw release tag (repo tags carry no `v`); it
 stays the canonical release path, `publish` is the dev/adhoc path.
+
+**UI footer version:** both paths bake the version into the UI footer through
+the Dockerfile's `APP_VERSION` build arg (→ `NUXT_PUBLIC_APP_VERSION` at UI
+build time). `publish` passes `--tag` verbatim (so `dev` images show `dev`);
+`release.yml` passes the release tag (so a chart release shows its version,
+e.g. `0.0.9`). Manual `docker build` without the arg falls back to `unknown`.
 
 **Mutable tags:** `dev` and `latest` are mutable by design — the cluster runs
 `imagePullPolicy: Always` and expects re-publishes under the same tag. Treat
