@@ -2003,7 +2003,11 @@ It is always served by the control plane at `/` and single-pipeline views at
 
 The page footer shows the application version and a link to the GitHub issues
 page. The version is baked in at UI build time from `NUXT_PUBLIC_APP_VERSION`
-(default `unknown` when unset).
+(default `unknown` when unset). The image build passes it through the
+`APP_VERSION` Dockerfile build arg: the release workflow passes the release
+tag (so a chart release shows its version, e.g. `0.0.9`), the Dagger
+`publish` function passes the published tag (`dev` images show `dev`), and
+unversioned local builds fall back to `unknown`.
 
 Features:
 - **Pipeline list** — every run identified by a friendly name (`@username · org/repo`,

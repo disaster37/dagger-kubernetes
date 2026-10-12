@@ -252,9 +252,14 @@ func (m *DaggerKubernetes) Build(ctx context.Context) (*dagger.Directory, error)
 //
 // Implemented locally because the upstream golang module has no Dockerfile
 // support. The image entrypoint is `supervisor`, so `-h` exercises the
-// urfave/cli help path.
-func (m *DaggerKubernetes) Docker(ctx context.Context) (*dagger.Container, error) {
-	ctr := m.Src.DockerBuild().
+// urfave/cli help path. version is baked into the UI footer through the
+// Dockerfile's APP_VERSION build arg (empty = the Dockerfile default).
+func (m *DaggerKubernetes) Docker(ctx context.Context, version string) (*dagger.Container, error) {
+	opts := dagger.DirectoryDockerBuildOpts{}
+	if version != "" {
+		opts.BuildArgs = []dagger.BuildArg{{Name: "APP_VERSION", Value: version}}
+	}
+	ctr := m.Src.DockerBuild(opts).
 		WithExec([]string{"-h"}, dagger.ContainerWithExecOpts{UseEntrypoint: true})
 
 	if _, err := ctr.Sync(ctx); err != nil {
@@ -308,8 +313,9 @@ func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 // Publish builds the root Docker image and pushes it to a container registry
 // (GHCR by default) under the given tag. It reuses Docker (Dockerfile build +
 // `-h` smoke test), optionally runs the full quality gate, then delegates the
-// push to the disaster37/dagger-library-go image module (2.0.19). Returns the
-// published image reference including its digest.
+// push to the disaster37/dagger-library-go image module (2.0.19). The tag is
+// baked into the UI footer through the Dockerfile's APP_VERSION build arg.
+// Returns the published image reference including its digest.
 //
 // For GHCR, pass --registry-username env:GHCR_USERNAME and
 // --registry-password env:GHCR_TOKEN (a PAT with write:packages).
@@ -367,7 +373,7 @@ func (m *DaggerKubernetes) Publish(
 		}
 	}
 
-	ctr, err := m.Docker(ctx)
+	ctr, err := m.Docker(ctx, tag)
 	if err != nil {
 		return "", fmt.Errorf("docker: %w", err)
 	}
@@ -452,7 +458,7 @@ func (m *DaggerKubernetes) Ci(ctx context.Context) (*dagger.Directory, error) {
 		return nil, err
 	}
 
-	if _, err := m.Docker(ctx); err != nil {
+	if _, err := m.Docker(ctx, ""); err != nil {
 		return nil, err
 	}
 

@@ -7,8 +7,10 @@ export default defineNuxtConfig({
   runtimeConfig: {
     public: {
       // Build-time application version shown in the footer. Override with
-      // NUXT_PUBLIC_APP_VERSION=<version> at build time; falls back to
-      // "unknown" when unset (local dev / unversioned builds).
+      // NUXT_PUBLIC_APP_VERSION=<version> at build time (the Dockerfile wires
+      // this to the APP_VERSION build arg; the release workflow and the Dagger
+      // publish function pass the image tag); falls back to "unknown" when
+      // unset (local dev / unversioned builds).
       appVersion: 'unknown',
     },
   },
