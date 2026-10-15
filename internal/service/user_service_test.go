@@ -363,3 +363,43 @@ func TestUserServicePasswordChangeBumpsTokenVersion(t *testing.T) {
 		t.Fatalf("after failed change TokenVersion = %d, want 2", v)
 	}
 }
+
+// TestUserServiceBlockedAuthentication covers the generic rejection of a
+// disabled/tombstoned internal login and the blocked OAuth re-provisioning
+// guard (ADR-049).
+func TestUserServiceBlockedAuthentication(t *testing.T) {
+	ctx := context.Background()
+	r := newServiceDB(t)
+	svc := NewUserService(r.users, r.groups, testLogger())
+
+	hash, err := hashPassword("password123")
+	if err != nil {
+		t.Fatalf("hash: %v", err)
+	}
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, PasswordHash: hash, OAuthProvider: "oidc", OAuthID: "s1"}
+	if err := r.users.Create(ctx, u); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	if _, err := svc.SetState(ctx, "admin", u.ID, domain.UserDisable); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	if _, err := svc.Authenticate(ctx, "alice", "password123"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("disabled login = %v, want generic ErrInvalidCredential", err)
+	}
+	// EnsureOAuthUser refuses a disabled account (never clears an admin ban).
+	if _, _, err := svc.EnsureOAuthUser(ctx, "oidc", "s1", "alice"); !errors.Is(err, domain.ErrAccountBlocked) {
+		t.Fatalf("EnsureOAuthUser disabled = %v, want ErrAccountBlocked", err)
+	}
+
+	// A tombstone reserves the identity and is also refused.
+	if err := svc.Delete(ctx, "admin", u.ID); err != nil {
+		t.Fatalf("delete: %v", err)
+	}
+	if _, _, err := svc.EnsureOAuthUser(ctx, "oidc", "s1", "alice"); !errors.Is(err, domain.ErrAccountBlocked) {
+		t.Fatalf("EnsureOAuthUser tombstone = %v, want ErrAccountBlocked", err)
+	}
+	if _, err := svc.Authenticate(ctx, "alice", "password123"); !errors.Is(err, domain.ErrInvalidCredential) {
+		t.Fatalf("tombstone login = %v, want generic ErrInvalidCredential", err)
+	}
+}

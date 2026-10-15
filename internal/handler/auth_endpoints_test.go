@@ -417,6 +417,18 @@ func TestSafeRedirectPath(t *testing.T) {
 		{"/\\evil.com", "/pipelines"},
 		{"https://evil.com", "/pipelines"},
 		{"evil.com", "/pipelines"},
+		// Encoded protocol-relative, backslash and control forms are rejected
+		// after net/url parsing normalizes them.
+		{"/%2F%2Fevil.com", "/pipelines"},
+		{"/%5Cevil.com", "/pipelines"},
+		{"/pipelines\n", "/pipelines"},
+		{"/pipelines%00", "/pipelines"},
+		// A successful login may never be redirected back into auth.
+		{"/auth/login", "/pipelines"},
+		{"/auth/callback?redirect=/x", "/pipelines"},
+		{"/api/v1/auth/me", "/pipelines"},
+		// Scheme-relative with userinfo.
+		{"//user@evil.com/x", "/pipelines"},
 	}
 	for _, tc := range cases {
 		if got := safeRedirectPath(tc.in); got != tc.want {
