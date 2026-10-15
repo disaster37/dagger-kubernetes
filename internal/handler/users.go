@@ -2,6 +2,8 @@ package handler
 
 import (
 	"context"
+	"mime"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -17,6 +19,9 @@ type userRow struct {
 	OAuthGroups   []string       `json:"oauth_groups,omitempty"`
 	Groups        []groupSummary `json:"groups"`
 	CreatedAt     string         `json:"created_at"`
+	DisabledAt    *string        `json:"disabled_at,omitempty"`
+	DeletedAt     *string        `json:"deleted_at,omitempty"`
+	DeactivatedAt *string        `json:"deactivated_at,omitempty"`
 	Token         *tokenMeta     `json:"token,omitempty"`
 }
 
@@ -43,6 +48,10 @@ type resetPasswordRequest struct {
 
 type setUserGroupsRequest struct {
 	GroupIDs []string `json:"group_ids"`
+}
+
+type userStateRequest struct {
+	Action domain.UserStateAction `json:"action"`
 }
 
 // All handlers below are registered through adminOnly, which enforces the
@@ -102,18 +111,44 @@ func (s *Server) handleUserUpdate(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, s.toUserRow(ctx, u))
 }
 
-// handleUserDelete removes a user. Self-delete is rejected with 409.
+// handleUserDelete soft-deletes a user. Self-delete is rejected with 409.
 func (s *Server) handleUserDelete(ctx context.Context, c *app.RequestContext) {
 	targetID := c.Param("id")
-	if id := identityOf(c); id != nil && id.UserID == targetID {
-		writeError(c, consts.StatusConflict, "cannot delete self")
-		return
+	actorID := ""
+	if id := identityOf(c); id != nil {
+		if id.UserID == targetID {
+			writeError(c, consts.StatusConflict, "cannot delete self")
+			return
+		}
+		actorID = id.UserID
 	}
-	if err := s.users.Delete(ctx, targetID); err != nil {
+	if err := s.users.Delete(ctx, actorID, targetID); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
 	c.SetStatusCode(consts.StatusNoContent)
+}
+
+// handleUserState applies an administrator disable/enable/restore action.
+func (s *Server) handleUserState(ctx context.Context, c *app.RequestContext) {
+	if !requireJSONContentType(c) {
+		return
+	}
+	id := c.Param("id")
+	var req userStateRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	actorID := ""
+	if ident := identityOf(c); ident != nil {
+		actorID = ident.UserID
+	}
+	u, err := s.users.SetState(ctx, actorID, id, req.Action)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.JSON(consts.StatusOK, s.toUserRow(ctx, u))
 }
 
 // handleUserResetPassword sets a new password for a user (admin-set).
@@ -181,12 +216,41 @@ func (s *Server) toUserRow(ctx context.Context, u *domain.User) userRow {
 		OAuthProvider: u.OAuthProvider,
 		OAuthGroups:   u.OAuthGroups,
 		CreatedAt:     formatTime(u.CreatedAt),
+		DisabledAt:    formatTimePtr(u.DisabledAt),
+		DeletedAt:     formatTimePtr(u.DeletedAt),
+		DeactivatedAt: formatTimePtr(u.DeactivatedAt),
 		Groups:        toGroupSummaries(gs),
 	}
 	if t, err := s.tokens.Meta(ctx, u.ID); err == nil {
 		row.Token = toTokenMeta(t)
 	}
 	return row
+}
+
+// formatTimePtr renders an optional timestamp in the API's canonical form.
+func formatTimePtr(t *time.Time) *string {
+	if t == nil {
+		return nil
+	}
+	s := formatTime(*t)
+	return &s
+}
+
+// requireJSONContentType rejects a mutating JSON request without an
+// application/json content type (a charset suffix is allowed). Returns false
+// after writing 415 when the header is missing or wrong.
+func requireJSONContentType(c *app.RequestContext) bool {
+	ct := string(c.GetHeader("Content-Type"))
+	if ct == "" {
+		writeError(c, consts.StatusUnsupportedMediaType, "content-type must be application/json")
+		return false
+	}
+	mediaType, _, err := mime.ParseMediaType(ct)
+	if err != nil || mediaType != "application/json" {
+		writeError(c, consts.StatusUnsupportedMediaType, "content-type must be application/json")
+		return false
+	}
+	return true
 }
 
 // toGroupSummaries maps groups to their id/name summary form.

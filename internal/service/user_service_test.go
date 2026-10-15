@@ -147,11 +147,20 @@ func TestUserServiceCRUD(t *testing.T) {
 		t.Fatalf("ChangePassword wrong current: %v, want ErrInvalidCredential", err)
 	}
 
-	if err := svc.Delete(ctx, u.ID); err != nil {
+	// Add a second active administrator so the last-admin guard does not reject
+	// the delete (u was promoted above).
+	if _, err := svc.Create(ctx, "root", "password123", domain.RoleAdmin); err != nil {
+		t.Fatalf("create second admin: %v", err)
+	}
+	if err := svc.Delete(ctx, "", u.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, err := svc.Get(ctx, u.ID); !errors.Is(err, domain.ErrNotFound) {
+	deleted, err := svc.Get(ctx, u.ID)
+	if err != nil {
 		t.Fatalf("Get after delete: %v", err)
+	}
+	if deleted.DeletedAt == nil {
+		t.Fatalf("expected a soft-deleted tombstone, got %+v", deleted)
 	}
 }
 

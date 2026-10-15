@@ -339,8 +339,11 @@ func TestHandleOAuthOIDCLoginNotEnabled(t *testing.T) {
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
-	if resp.Result().StatusCode() != http.StatusNotFound {
-		t.Fatalf("oidc login not enabled: %d, want 404", resp.Result().StatusCode())
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("oidc login not enabled: %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want fixed oauth error", loc)
 	}
 }
 
@@ -351,8 +354,11 @@ func TestHandleOAuthOIDCLoginWrongProvider(t *testing.T) {
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/oidc/login", nil)
-	if resp.Result().StatusCode() != http.StatusNotFound {
-		t.Fatalf("oidc login wrong provider: %d, want 404", resp.Result().StatusCode())
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("oidc login wrong provider: %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want fixed oauth error", loc)
 	}
 }
 
@@ -363,8 +369,11 @@ func TestHandleOAuthGitHubLoginWrongProvider(t *testing.T) {
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/login", nil)
-	if resp.Result().StatusCode() != http.StatusNotFound {
-		t.Fatalf("github login wrong provider: %d, want 404", resp.Result().StatusCode())
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("github login wrong provider: %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want fixed oauth error", loc)
 	}
 }
 
@@ -373,8 +382,11 @@ func TestHandleOAuthLoginDisabled(t *testing.T) {
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/login", nil)
-	if resp.Result().StatusCode() != http.StatusNotFound {
-		t.Fatalf("oauth disabled: %d, want 404", resp.Result().StatusCode())
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("oauth disabled: %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want fixed oauth error", loc)
 	}
 }
 
@@ -383,8 +395,11 @@ func TestHandleOAuthCallbackDisabled(t *testing.T) {
 	e := newAuthEngine(env.server)
 
 	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/callback?code=x&state=y", nil)
-	if resp.Result().StatusCode() != http.StatusNotFound {
-		t.Fatalf("oauth callback disabled: %d, want 404", resp.Result().StatusCode())
+	if resp.Result().StatusCode() != http.StatusFound {
+		t.Fatalf("oauth callback disabled: %d, want 302", resp.Result().StatusCode())
+	}
+	if loc := string(resp.Result().Header.Peek("Location")); loc != "/auth/login?error=oauth" {
+		t.Fatalf("Location = %q, want fixed oauth error", loc)
 	}
 }
 
@@ -529,11 +544,11 @@ func TestOAuthCallbackCompleteErrorLogged(t *testing.T) {
 		t.Fatalf("Location = %q, want generic oauth error redirect", loc)
 	}
 	logged := buf.String()
-	if !strings.Contains(logged, "oauth: callback complete failed") {
-		t.Fatalf("expected the Complete error to be logged, got %q", logged)
+	if !strings.Contains(logged, "oauth: authentication failed") {
+		t.Fatalf("expected a sanitized failure log, got %q", logged)
 	}
-	if !strings.Contains(logged, "exchange boom") {
-		t.Fatalf("expected the underlying error in the log, got %q", logged)
+	if strings.Contains(logged, "exchange boom") {
+		t.Fatalf("raw IdP error must never be logged, got %q", logged)
 	}
 }
 

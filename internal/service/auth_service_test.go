@@ -94,7 +94,7 @@ func TestAuthResolveDeletedUserJWT(t *testing.T) {
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	access, _, _ := asvc.jwt.IssuePair(u, nil)
 	// Delete the user; the JWT is still valid cryptographically but the user is gone.
-	urepo.Delete(ctx, u.ID)
+	urepo.Delete(ctx, "", u.ID)
 	if _, err := asvc.Resolve(ctx, access); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("deleted user jwt: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestAuthResolveOrphanedTokenHash(t *testing.T) {
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	plaintext, _, _ := asvc.tokens.Generate(ctx, u.ID)
 	// Delete the user but leave the token hash in place (orphaned token).
-	urepo.Delete(ctx, u.ID)
+	urepo.Delete(ctx, "", u.ID)
 	if _, err := asvc.Resolve(ctx, plaintext); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("orphaned token: %v", err)
 	}

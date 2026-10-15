@@ -111,9 +111,15 @@ onUnmounted(() => {
   status.stop()
 })
 
-function handleLogout() {
+async function handleLogout() {
   status.stop()
-  auth.logout()
+  try {
+    await auth.logout()
+  } catch {
+    // The local session is already cleared; server-side revocation may have
+    // failed, so the user is signed out locally without claiming revocation.
+    useToast().add({ title: 'Signed out locally; the server session may still be active', color: 'warning' })
+  }
   router.push('/auth/login')
 }
 </script>

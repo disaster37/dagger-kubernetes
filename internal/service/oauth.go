@@ -140,26 +140,61 @@ func ensureGroupByName(
 	return g, nil
 }
 
-// joinGroupByName best-effort adds userID to the named group. Missing groups
-// and membership errors are logged (never fatal). It serves both the mapped
-// (group_mappings) and default_group auto-join paths, so the log message is
-// worded to cover both.
-func joinGroupByName(ctx context.Context, groups domain.GroupRepository, name, userID string, logger *logrus.Logger) {
+// resolveOAuthGroupIDs resolves the desired OAuth-managed supervisor group IDs
+// from mapped upstream names, auto-creating valid missing groups (see
+// ensureGroupByName). An invalid mapped name is logged and skipped; a store
+// lookup/creation failure aborts preparation so the caller never commits a
+// partial membership set. The result is de-duplicated and sorted.
+func resolveOAuthGroupIDs(
+	ctx context.Context,
+	groups domain.GroupRepository,
+	logger *logrus.Logger,
+	mappedNames []string,
+	defaultMaxRunnerSessions int,
+) ([]string, error) {
+	seen := make(map[string]struct{}, len(mappedNames))
+	out := make([]string, 0, len(mappedNames))
+	for _, name := range mappedNames {
+		g, err := ensureGroupByName(ctx, groups, name, defaultMaxRunnerSessions, logger)
+		if err != nil {
+			return nil, err
+		}
+		if g == nil {
+			continue // invalid name (already logged)
+		}
+		if _, dup := seen[g.ID]; dup {
+			continue
+		}
+		seen[g.ID] = struct{}{}
+		out = append(out, g.ID)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// resolveFallbackGroupID resolves the configured default_group (falling back to
+// "default") to a group ID without creating it. A missing group yields an empty
+// ID (no fallback); an operational store error is surfaced.
+func resolveFallbackGroupID(ctx context.Context, groups domain.GroupRepository, defaultGroup string) (string, error) {
+	name := defaultGroup
+	if name == "" {
+		name = "default"
+	}
 	g, err := groups.GetByName(ctx, name)
-	if err != nil {
-		logger.WithError(err).WithField("group", name).Warn("oauth: group not found, skipping")
-		return
+	if err == nil {
+		return g.ID, nil
 	}
-	if err := addGroupMember(ctx, groups, g.ID, userID); err != nil {
-		logger.WithError(err).WithField("group", name).Warn("oauth: group auto-join failed")
+	if errors.Is(err, domain.ErrNotFound) {
+		return "", nil
 	}
+	return "", fmt.Errorf("resolve default group %q: %w", name, err)
 }
 
 // completeOAuthLogin is the shared post-verification tail for both OAuth
-// providers: ensure the local user exists, clear any prior deactivation,
-// reconcile OAuth-managed memberships, fall back to the configured default_group
-// (or "default") when the user still has zero memberships, persist the stored
-// credential, and issue a JWT pair.
+// providers. It ensures the local user exists, prepares the desired OAuth-managed
+// membership set (auto-creating mapped groups) and the default-group fallback,
+// then applies the login as ONE revision-checked atomic commit. No membership
+// write happens before the CAS, and no JWT is issued on a rejected commit.
 func completeOAuthLogin(
 	ctx context.Context,
 	users *UserService,
@@ -179,37 +214,19 @@ func completeOAuthLogin(
 		return "", "", nil, err
 	}
 
-	// A successful IdP login re-authorizes: clear any prior deactivation.
-	if u.DeactivatedAt != nil {
-		u.DeactivatedAt = nil
+	// Prepare the desired OAuth-managed memberships and the fallback BEFORE the
+	// commit. Group creation is allowed here; membership writes are not.
+	managedIDs, err := resolveOAuthGroupIDs(ctx, groups, logger, mappedGroups, mappedGroupMaxRunnerSessions)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("prepare oauth groups: %w", err)
+	}
+	fallbackID, err := resolveFallbackGroupID(ctx, groups, defaultGroup)
+	if err != nil {
+		return "", "", nil, err
 	}
 
-	// Reconcile OAuth-managed memberships: add new, remove stale. Called even
-	// when mappedGroups is empty so memberships that no longer map are removed.
-	if oauthGids, rerr := reconcileMemberships(ctx, groups, logger, u, mappedGroups, mappedGroupMaxRunnerSessions); rerr != nil {
-		logger.WithError(rerr).WithField("user_id", u.ID).Warn("oauth: membership reconciliation failed")
-	} else {
-		u.OAuthGroupIDs = oauthGids
-	}
-
-	memberGroups, _ := groups.GroupsForUser(ctx, u.ID)
-	// If the user still has zero group memberships after mapping rules ran,
-	// add them to the configured default_group (falling back to "default")
-	// on every login, not just first creation. This ensures every OAuth user
-	// can always provision engines.
-	fallbackGroup := defaultGroup
-	if fallbackGroup == "" {
-		fallbackGroup = "default"
-	}
-	if len(memberGroups) == 0 {
-		joinGroupByName(ctx, groups, fallbackGroup, u.ID, logger)
-		memberGroups, _ = groups.GroupsForUser(ctx, u.ID)
-	}
-
-	// Persist upstream OAuth groups for display.
-	u.OAuthGroups = normalizeGroupList(upstreamGroups)
-
-	// Apply admin_groups role promotion/demotion.
+	// A successful IdP login re-authorizes: it clears ONLY IdP deactivation.
+	// applyOAuthAdminRole mutates u (a private copy returned by the repository).
 	if roleChanged := applyOAuthAdminRole(u, adminGroups, upstreamGroups); roleChanged {
 		logger.WithFields(logrus.Fields{
 			"user_id":        u.ID,
@@ -219,83 +236,41 @@ func completeOAuthLogin(
 		}).Info("oauth: admin role changed via admin_groups")
 	}
 
-	logger.WithFields(logrus.Fields{
-		"user_id":         u.ID,
-		"oauth_provider":  provider,
-		"upstream_groups": upstreamGroups,
-		"mapped_groups":   mappedGroups,
-		"oauth_group_ids": u.OAuthGroupIDs,
-	}).Info("oauth: group mapping applied")
-
-	// Persist the encrypted credential.
 	ct, err := encryptOAuthCredential(encKey, credential)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("encrypt oauth credential: %w", err)
 	}
-	u.OAuthTokenCiphertext = ct
 
-	if err := users.Update(ctx, u); err != nil {
-		return "", "", nil, fmt.Errorf("persist oauth user: %w", err)
+	res, err := users.CommitOAuth(ctx, domain.OAuthUserMutation{
+		Kind: domain.OAuthLoginCommit,
+		User: &domain.User{
+			ID:                   u.ID,
+			OAuthProvider:        provider,
+			OAuthID:              oauthID,
+			Role:                 u.Role,
+			OAuthAdmin:           u.OAuthAdmin,
+			OAuthGroups:          normalizeGroupList(upstreamGroups),
+			OAuthTokenCiphertext: ct,
+		},
+		ExpectedRevision: u.Revision,
+		ManagedGroupIDs:  managedIDs,
+		FallbackGroupID:  fallbackID,
+	})
+	if err != nil {
+		return "", "", nil, fmt.Errorf("persist oauth login: %w", err)
 	}
 
-	access, refresh, err = jwt.IssuePair(u, groupIDs(memberGroups))
-	return access, refresh, u, err
-}
+	logger.WithFields(logrus.Fields{
+		"user_id":         res.User.ID,
+		"oauth_provider":  provider,
+		"upstream_groups": upstreamGroups,
+		"mapped_groups":   mappedGroups,
+		"oauth_group_ids": res.User.OAuthGroupIDs,
+	}).Info("oauth: group mapping applied")
 
-// reconcileMemberships applies the desired OAuth-managed supervisor group
-// memberships for u: add memberships for names that newly resolve (auto-creating
-// the group when missing, see ensureGroupByName), remove memberships for
-// previously OAuth-managed names that no longer resolve. Admin-managed
-// memberships (groups not in u.OAuthGroupIDs) are never touched. Returns the
-// resulting supervisor group IDs.
-func reconcileMemberships(
-	ctx context.Context,
-	groups domain.GroupRepository,
-	logger *logrus.Logger,
-	u *domain.User,
-	mappedNames []string,
-	defaultMaxRunnerSessions int,
-) ([]string, error) {
-	wanted := make(map[string]bool, len(mappedNames))
-	for _, name := range mappedNames {
-		g, err := ensureGroupByName(ctx, groups, name, defaultMaxRunnerSessions, logger)
-		if err != nil {
-			logger.WithError(err).WithField("group", name).Warn("oauth: ensure mapped group failed, skipping")
-			continue
-		}
-		if g == nil {
-			continue // invalid name (already logged)
-		}
-		wanted[g.ID] = true
+	access, refresh, err = jwt.IssuePair(res.User, res.GroupIDs)
+	if err != nil {
+		return "", "", nil, fmt.Errorf("issue oauth session: %w", err)
 	}
-
-	previous := make(map[string]bool, len(u.OAuthGroupIDs))
-	for _, gid := range u.OAuthGroupIDs {
-		previous[gid] = true
-	}
-
-	// adds
-	for gid := range wanted {
-		if !previous[gid] {
-			if err := addGroupMember(ctx, groups, gid, u.ID); err != nil {
-				return nil, fmt.Errorf("add oauth group %s: %w", gid, err)
-			}
-		}
-	}
-	// removes (only within the previously OAuth-managed set)
-	for gid := range previous {
-		if !wanted[gid] {
-			if err := removeGroupMember(ctx, groups, gid, u.ID); err != nil {
-				return nil, fmt.Errorf("remove oauth group %s: %w", gid, err)
-			}
-		}
-	}
-
-	out := make([]string, 0, len(wanted))
-	for gid := range wanted {
-		out = append(out, gid)
-	}
-	sort.Strings(out)
-	u.OAuthGroupIDs = out
-	return out, nil
+	return access, refresh, res.User, nil
 }

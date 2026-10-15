@@ -20,6 +20,9 @@ type fakeRevalidateProvider struct {
 	groups    []string
 	err       error
 	callCount int
+	// persist, when set, is invoked after rotateTo mutates u, emulating the
+	// OIDC refreshingSource persisting the rotated credential atomically.
+	persist func(ctx context.Context, u *domain.User) error
 }
 
 func (f *fakeRevalidateProvider) LoginURL(state string) string { return "" }
@@ -35,6 +38,11 @@ func (f *fakeRevalidateProvider) Revalidate(ctx context.Context, u *domain.User)
 	}
 	if f.rotateTo != "" {
 		u.OAuthTokenCiphertext = f.rotateTo
+		if f.persist != nil {
+			if err := f.persist(ctx, u); err != nil {
+				return nil, err
+			}
+		}
 	}
 	out := make([]string, len(f.groups))
 	copy(out, f.groups)
@@ -135,7 +143,11 @@ func TestRevalidatorRevokes(t *testing.T) {
 	if _, err := rv.Check(context.Background(), u); !errors.Is(err, domain.ErrSessionRevoked) {
 		t.Fatalf("expected ErrSessionRevoked, got %v", err)
 	}
-	if !u.Deactivated() {
+	revokedRow, err := r.users.Get(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("reload after revoke: %v", err)
+	}
+	if !revokedRow.Deactivated() {
 		t.Fatal("expected user to be deactivated")
 	}
 	// Regression (issue #30): positive revocation (ErrForbidden) still deletes
@@ -379,6 +391,21 @@ func TestRevalidatorRefreshResnapshotsRotatedCredential(t *testing.T) {
 	now := base
 	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
 	ctx := context.Background()
+	// Emulate the OIDC provider persisting the rotated credential atomically
+	// (the refreshingSource does this through OAuthCredentialCommit).
+	provider.persist = func(ctx context.Context, u *domain.User) error {
+		res, err := rv.users.CommitOAuth(ctx, domain.OAuthUserMutation{
+			Kind:             domain.OAuthCredentialCommit,
+			User:             &domain.User{ID: u.ID, OAuthTokenCiphertext: u.OAuthTokenCiphertext},
+			ExpectedRevision: u.Revision,
+		})
+		if err != nil {
+			return err
+		}
+		u.OAuthTokenCiphertext = res.User.OAuthTokenCiphertext
+		u.Revision = res.User.Revision
+		return nil
+	}
 
 	// The successful Revalidate rotated the credential from the fixture's
 	// "cred-v1" to "rotated"; the entry must snapshot the rotated value.
@@ -386,8 +413,12 @@ func TestRevalidatorRefreshResnapshotsRotatedCredential(t *testing.T) {
 	if err != nil || len(gids) == 0 {
 		t.Fatalf("check: gids=%v err=%v", gids, err)
 	}
-	if u.OAuthTokenCiphertext != "rotated" {
-		t.Fatalf("user credential = %q, want %q", u.OAuthTokenCiphertext, "rotated")
+	persisted, err := rv.users.Get(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("reload rotated credential: %v", err)
+	}
+	if persisted.OAuthTokenCiphertext != "rotated" {
+		t.Fatalf("persisted credential = %q, want %q", persisted.OAuthTokenCiphertext, "rotated")
 	}
 	if got := rv.cache[u.ID].credential; got != "rotated" {
 		t.Fatalf("entry.credential = %q, want %q (re-snapshot after mid-check rotation)", got, "rotated")
@@ -396,6 +427,9 @@ func TestRevalidatorRefreshResnapshotsRotatedCredential(t *testing.T) {
 	// A same-TTL follow-up Check must be a cache hit: the rotated credential
 	// must not be mistaken for a re-login and force a second IdP call.
 	now = base.Add(time.Minute)
+	if u, err = rv.users.Get(ctx, u.ID); err != nil {
+		t.Fatalf("reload before second check: %v", err)
+	}
 	if gids, err := rv.Check(ctx, u); err != nil || len(gids) == 0 {
 		t.Fatalf("second check: gids=%v err=%v", gids, err)
 	}
@@ -523,15 +557,35 @@ func TestRevalidatorReLoginAfterRevocation(t *testing.T) {
 	if _, err := rv.Check(context.Background(), u); !errors.Is(err, domain.ErrSessionRevoked) {
 		t.Fatalf("expected revocation, got %v", err)
 	}
-	if !u.Deactivated() {
+	revokedRow, err := r.users.Get(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("reload after revoke: %v", err)
+	}
+	if !revokedRow.Deactivated() {
 		t.Fatal("expected user to be deactivated")
 	}
 
-	// Re-login: DB deactivation is cleared and the IdP allows again. The
-	// revoked cache entry must be re-checked rather than denying forever.
-	u.DeactivatedAt = nil
+	// Re-login: persist a fresh login generation (clears IdP deactivation and
+	// bumps the login version) and let the IdP allow again. The revoked cache
+	// entry must be re-checked rather than denying forever.
 	provider.err = nil
 	provider.groups = []string{"g1"}
+	loaded, err := r.users.Get(context.Background(), u.ID)
+	if err != nil {
+		t.Fatalf("reload after revoke: %v", err)
+	}
+	if _, err := r.users.CommitOAuth(context.Background(), domain.OAuthUserMutation{
+		Kind:             domain.OAuthLoginCommit,
+		User:             &domain.User{ID: u.ID, OAuthProvider: "github", OAuthID: "s1", Role: domain.RoleUser},
+		ExpectedRevision: loaded.Revision,
+	}); err != nil {
+		t.Fatalf("persist re-login: %v", err)
+	}
+	// AuthService always passes a freshly loaded user; refresh the local copy
+	// so the revoked entry observes the new login generation.
+	if u, err = r.users.Get(context.Background(), u.ID); err != nil {
+		t.Fatalf("reload re-login: %v", err)
+	}
 
 	gids, err := rv.Check(context.Background(), u)
 	if err != nil {
@@ -1026,5 +1080,117 @@ func TestValidateGroupName(t *testing.T) {
 				t.Fatalf("ValidateGroupName(%q) = %v, want %v", tt.input, got, tt.want)
 			}
 		})
+	}
+}
+
+// TestRevalidatorSameAccountReloginClearsUnavailableDenial is the primary
+// regression for the OAuth same-account re-login loop: a cached
+// stateUnavailable denial for a user must NOT survive a fresh, accepted login
+// of the SAME identity. The login advances OAuthLoginVersion (and, with
+// encryption enabled, the ciphertext); the next Check — WITHOUT advancing the
+// clock past the negative TTL — must re-call the IdP and allow.
+func TestRevalidatorSameAccountReloginClearsUnavailableDenial(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeRevalidateProvider{groups: []string{"g1"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	now := base
+	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
+	ctx := context.Background()
+
+	// Healthy baseline.
+	if _, err := rv.Check(ctx, u); err != nil {
+		t.Fatalf("baseline check: %v", err)
+	}
+
+	// Advance beyond the successful TTL AND grace, then make the IdP fail: the
+	// cached result becomes a stateUnavailable denial with no last-good served.
+	now = base.Add(2 * time.Hour)
+	provider.err = errors.New("idp down")
+	if _, err := rv.Check(ctx, u); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("expected denial while IdP is down, got %v", err)
+	}
+	callsAfterFailure := provider.callCount
+
+	// Same-account re-login: the IdP recovers and a fresh login persists a new
+	// login generation (and ciphertext) for the SAME local user id.
+	provider.err = nil
+	loaded, err := rv.users.Get(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("reload before re-login: %v", err)
+	}
+	if _, err := rv.users.CommitOAuth(ctx, domain.OAuthUserMutation{
+		Kind: domain.OAuthLoginCommit,
+		User: &domain.User{
+			ID:                   u.ID,
+			OAuthProvider:        "oidc",
+			OAuthID:              "s1",
+			Role:                 domain.RoleUser,
+			OAuthTokenCiphertext: "cred-v2",
+			OAuthGroups:          []string{"g1"},
+		},
+		ExpectedRevision: loaded.Revision,
+	}); err != nil {
+		t.Fatalf("persist same-account re-login: %v", err)
+	}
+	// AuthService always passes a freshly loaded user.
+	if u, err = rv.users.Get(ctx, u.ID); err != nil {
+		t.Fatalf("reload after re-login: %v", err)
+	}
+
+	// Do NOT advance the clock: the negative TTL has not expired. The changed
+	// login generation must force a re-check that now succeeds.
+	gids, err := rv.Check(ctx, u)
+	if err != nil {
+		t.Fatalf("same-account re-login must recheck and allow, got %v", err)
+	}
+	if len(gids) == 0 {
+		t.Fatal("expected effective group IDs after re-login")
+	}
+	if provider.callCount <= callsAfterFailure {
+		t.Fatalf("provider calls = %d, want > %d (cache must not serve the old denial)", provider.callCount, callsAfterFailure)
+	}
+	if u.Deactivated() {
+		t.Fatal("re-login must not leave the user deactivated")
+	}
+}
+
+// TestRevalidatorSameAccountReloginEncryptionDisabled covers the same recovery
+// when encryption is disabled: both ciphertexts are empty, so OAuthLoginVersion
+// alone must invalidate the cached denial.
+func TestRevalidatorSameAccountReloginEncryptionDisabled(t *testing.T) {
+	base := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
+	provider := &fakeRevalidateProvider{groups: []string{"g1"}}
+	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
+	now := base
+	rv, u, _ := newExpiredFixture(t, provider, cfg, &now)
+	u.OAuthTokenCiphertext = "" // encryption disabled: no ciphertext marker
+	ctx := context.Background()
+
+	if _, err := rv.Check(ctx, u); err != nil {
+		t.Fatalf("baseline check: %v", err)
+	}
+	now = base.Add(2 * time.Hour)
+	provider.err = errors.New("idp down")
+	if _, err := rv.Check(ctx, u); !errors.Is(err, domain.ErrUnauthenticated) {
+		t.Fatalf("expected denial while IdP is down, got %v", err)
+	}
+
+	provider.err = nil
+	loaded, err := rv.users.Get(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("reload before re-login: %v", err)
+	}
+	if _, err := rv.users.CommitOAuth(ctx, domain.OAuthUserMutation{
+		Kind:             domain.OAuthLoginCommit,
+		User:             &domain.User{ID: u.ID, OAuthProvider: "oidc", OAuthID: "s1", Role: domain.RoleUser},
+		ExpectedRevision: loaded.Revision,
+	}); err != nil {
+		t.Fatalf("persist same-account re-login: %v", err)
+	}
+	if u, err = rv.users.Get(ctx, u.ID); err != nil {
+		t.Fatalf("reload after re-login: %v", err)
+	}
+	if _, err := rv.Check(ctx, u); err != nil {
+		t.Fatalf("login-version-only change must clear the cached denial, got %v", err)
 	}
 }

@@ -1073,7 +1073,7 @@ func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
 			ExpiresAt:    time.Now().Add(-time.Hour),
 		})
 		// The Raft apply now reports ErrNotLeader (leadership lost mid-check).
-		urepo.updateErr = domain.ErrNotLeader
+		urepo.commitErr = domain.ErrNotLeader
 
 		cred, err := decryptOAuthCredential(svc.encKey, u.OAuthTokenCiphertext)
 		if err != nil {

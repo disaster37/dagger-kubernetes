@@ -92,7 +92,18 @@ func (s *UserService) Create(ctx context.Context, username, password string, rol
 // unknown users so timing does not leak username existence (CWE-208).
 func (s *UserService) Authenticate(ctx context.Context, username, password string) (*domain.User, error) {
 	u, err := s.users.GetByUsername(ctx, username)
-	if err != nil || u.PasswordHash == "" {
+	if err != nil {
+		if !isNotFound(err) {
+			// An operational store failure must not be laundered into a
+			// credential failure (which would hide outages and lock users out).
+			return nil, fmt.Errorf("load user for authentication: %w", err)
+		}
+		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+		return nil, domain.ErrInvalidCredential
+	}
+	if u.PasswordHash == "" || u.AccessBlocked() {
+		// A blocked (disabled/deleted/IdP-revoked) account is indistinguishable
+		// from an unknown one: generic credential failure, same bcrypt timing.
 		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
 		return nil, domain.ErrInvalidCredential
 	}
@@ -133,20 +144,66 @@ func (s *UserService) UpdateRole(ctx context.Context, id string, role domain.Rol
 	return u, nil
 }
 
-// Delete removes a user (cascades tokens + memberships via FK).
-func (s *UserService) Delete(ctx context.Context, id string) error {
+// Delete soft-deletes a user (tombstone: reserves identity, removes tokens and
+// memberships). actorID records the administrator performing the action.
+func (s *UserService) Delete(ctx context.Context, actorID, id string) error {
 	u, err := s.users.Get(ctx, id)
 	if err != nil {
 		return err
 	}
-	if err := s.users.Delete(ctx, id); err != nil {
+	if err := s.users.Delete(ctx, actorID, id); err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"actor_id": actorID,
+			"user_id":  id,
+		}).Warn("user delete rejected")
 		return err
 	}
 	s.logger.WithFields(logrus.Fields{
+		"actor_id": actorID,
 		"user_id":  u.ID,
 		"username": u.Username,
-	}).Info("user deleted")
+	}).Info("user soft-deleted")
 	return nil
+}
+
+// SetState applies an administrator disable/enable/restore lifecycle action.
+func (s *UserService) SetState(ctx context.Context, actorID, id string, action domain.UserStateAction) (*domain.User, error) {
+	switch action {
+	case domain.UserDisable, domain.UserEnable, domain.UserRestore:
+	default:
+		return nil, fmt.Errorf("invalid action %q: %w", action, domain.ErrValidation)
+	}
+	u, err := s.users.SetState(ctx, actorID, id, action)
+	if err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"actor_id": actorID,
+			"user_id":  id,
+			"action":   action,
+		}).Warn("user state change rejected")
+		return nil, err
+	}
+	s.logger.WithFields(logrus.Fields{
+		"actor_id":    actorID,
+		"user_id":     u.ID,
+		"action":      action,
+		"revision":    u.Revision,
+		"disabled_at": u.DisabledAt != nil,
+		"deleted_at":  u.DeletedAt != nil,
+	}).Info("user state changed")
+	return u, nil
+}
+
+// CommitOAuth applies a revision-checked atomic OAuth account mutation.
+func (s *UserService) CommitOAuth(ctx context.Context, mutation domain.OAuthUserMutation) (*domain.OAuthUserResult, error) {
+	if mutation.User == nil {
+		return nil, fmt.Errorf("oauth mutation: missing user: %w", domain.ErrValidation)
+	}
+	switch mutation.Kind {
+	case domain.OAuthLoginCommit, domain.OAuthMembershipCommit, domain.OAuthCredentialCommit, domain.OAuthRevocationCommit:
+	default:
+		return nil, fmt.Errorf("oauth mutation: invalid kind %q: %w", mutation.Kind, domain.ErrValidation)
+	}
+	return s.users.CommitOAuth(ctx, mutation)
 }
 
 // ResetPassword sets a new password for a user (admin-set; no current pw
@@ -210,6 +267,9 @@ func (s *UserService) setPassword(ctx context.Context, u *domain.User, newPasswo
 // was created.
 func (s *UserService) EnsureOAuthUser(ctx context.Context, provider, oauthID, username string) (*domain.User, bool, error) {
 	if existing, err := s.users.GetByOAuth(ctx, provider, oauthID); err == nil {
+		if err := oauthExistingBlocked(existing); err != nil {
+			return nil, false, err
+		}
 		return existing, false, nil
 	} else if !isNotFound(err) {
 		return nil, false, err
@@ -239,6 +299,16 @@ func (s *UserService) EnsureOAuthUser(ctx context.Context, provider, oauthID, us
 		OAuthID:       oauthID,
 	}
 	if err := s.users.Create(ctx, u); err != nil {
+		// A concurrent first login may have created the same identity. Re-fetch
+		// by provider+subject exactly once (never by username/email) so the
+		// loser of the race adopts the winner rather than failing login.
+		existing, ferr := s.users.GetByOAuth(ctx, provider, oauthID)
+		if ferr == nil {
+			if berr := oauthExistingBlocked(existing); berr != nil {
+				return nil, false, berr
+			}
+			return existing, false, nil
+		}
 		return nil, false, err
 	}
 	s.logger.WithFields(logrus.Fields{
@@ -247,6 +317,16 @@ func (s *UserService) EnsureOAuthUser(ctx context.Context, provider, oauthID, us
 		"oauth_provider": provider,
 	}).Info("oauth user created")
 	return u, true, nil
+}
+
+// oauthExistingBlocked maps an existing OAuth row to a login decision: a
+// disabled or tombstoned account is blocked, while an IdP-deactivated row is
+// returned so a fresh, IdP-verified login can clear only the deactivation.
+func oauthExistingBlocked(u *domain.User) error {
+	if u.DisabledAt != nil || u.DeletedAt != nil {
+		return domain.ErrAccountBlocked
+	}
+	return nil
 }
 
 // Count returns the total number of users.

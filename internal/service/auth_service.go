@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -95,7 +97,16 @@ func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Ident
 func (a *AuthService) identityForUser(ctx context.Context, userID string, method domain.AuthMethod, tokenVersion int) (*domain.Identity, error) {
 	u, err := a.users.Get(ctx, userID)
 	if err != nil {
+		if !isNotFound(err) {
+			// Operational store failure: propagate so the handler can return
+			// 500/503 rather than a misleading unauthenticated result.
+			return nil, fmt.Errorf("resolve user %s: %w", userID, err)
+		}
 		a.logger.WithError(err).Debug("resolved user missing")
+		return nil, domain.ErrUnauthenticated
+	}
+	if u.AccessBlocked() {
+		a.logger.WithField("user_id", u.ID).Debug("resolved user is disabled/deleted/deactivated")
 		return nil, domain.ErrUnauthenticated
 	}
 	if method == domain.AuthJWT && u.TokenVersion != tokenVersion {
@@ -123,21 +134,33 @@ func (a *AuthService) identityForUser(ctx context.Context, userID string, method
 // IDs, enforcing deactivation and (for OAuth users) IdP revalidation. A
 // non-nil error means DENY (unauthenticated).
 func (a *AuthService) loadAuthorizedGroups(ctx context.Context, u *domain.User) ([]string, error) {
-	if u.Deactivated() {
-		a.logger.WithField("user_id", u.ID).Debug("user deactivated by IdP revalidation")
+	if u.AccessBlocked() {
+		a.logger.WithField("user_id", u.ID).Debug("user disabled/deleted/deactivated; access denied")
 		return nil, domain.ErrUnauthenticated
 	}
 	if u.OAuthProvider != "" && a.revalidator != nil {
 		gids, err := a.revalidator.Check(ctx, u)
 		if err != nil {
-			a.logger.WithError(err).WithFields(logrus.Fields{
-				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
-			}).Warn("oauth revalidation denied")
-			return nil, domain.ErrUnauthenticated
+			// Denials map to unauthenticated; operational failures propagate.
+			if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				a.logger.WithError(err).WithFields(logrus.Fields{
+					"user_id": u.ID, "oauth_provider": u.OAuthProvider,
+				}).Warn("oauth revalidation denied")
+				return nil, domain.ErrUnauthenticated
+			}
+			return nil, fmt.Errorf("oauth revalidation: %w", err)
 		}
 		return gids, nil
 	}
-	gids, _ := a.groups.GroupsForUser(ctx, u.ID)
+	gids, err := a.groups.GroupsForUser(ctx, u.ID)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, domain.ErrUnauthenticated
+		}
+		// Never collapse an operational membership failure into a successful
+		// empty membership (which would silently drop group authorization).
+		return nil, fmt.Errorf("load groups for %s: %w", u.ID, err)
+	}
 	return groupIDs(gids), nil
 }
 
@@ -167,6 +190,12 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (access,
 	}
 	u, err := a.users.Get(ctx, claims.UserID)
 	if err != nil {
+		if !isNotFound(err) {
+			return "", "", fmt.Errorf("refresh load user: %w", err)
+		}
+		return "", "", domain.ErrUnauthenticated
+	}
+	if u.AccessBlocked() {
 		return "", "", domain.ErrUnauthenticated
 	}
 
@@ -197,7 +226,21 @@ func (a *AuthService) Refresh(ctx context.Context, refreshToken string) (access,
 	if err != nil {
 		return "", "", err
 	}
-	return a.jwt.IssuePair(u, gids)
+	// Post-revalidation fresh read: a concurrent ban or token-version bump
+	// (from a race or another pod) must not be overwritten by a new pair
+	// minted from the stale snapshot.
+	fresh, err := a.users.Get(ctx, claims.UserID)
+	if err != nil {
+		if isNotFound(err) {
+			return "", "", domain.ErrUnauthenticated
+		}
+		return "", "", fmt.Errorf("refresh reload user: %w", err)
+	}
+	if fresh.AccessBlocked() || fresh.TokenVersion != claims.TokenVersion {
+		a.logger.WithField("user_id", fresh.ID).Debug("session changed during refresh; refusing new pair")
+		return "", "", domain.ErrSessionRevoked
+	}
+	return a.jwt.IssuePair(fresh, gids)
 }
 
 func groupIDs(gs []*domain.Group) []string {
