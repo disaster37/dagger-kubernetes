@@ -76,7 +76,6 @@ type OAuthRevalidator struct {
 	mappedGroupMaxRunnerSessions int
 	users                        *UserService
 	groups                       domain.GroupRepository
-	tokens                       *TokenService
 	logger                       *logrus.Logger
 	cfg                          OAuthRevalidatorConfig
 	clock                        func() time.Time
@@ -86,10 +85,8 @@ type OAuthRevalidator struct {
 }
 
 // NewOAuthRevalidator returns an OAuthRevalidator. Pass nil for any field that
-// should be skipped.
-// The tokens parameter is retained for signature compatibility, but API-token
-// revocation is now performed atomically by the OAuthRevocationCommit FSM
-// command rather than a separate TokenService.Revoke call.
+// should be skipped. API-token revocation is performed atomically by the
+// OAuthRevocationCommit FSM command, so no TokenService dependency is needed.
 func NewOAuthRevalidator(
 	provider OAuthProvider,
 	mapper *GroupMapper,
@@ -97,7 +94,6 @@ func NewOAuthRevalidator(
 	mappedGroupMaxRunnerSessions int,
 	users *UserService,
 	groups domain.GroupRepository,
-	tokens *TokenService,
 	logger *logrus.Logger,
 	cfg OAuthRevalidatorConfig,
 ) *OAuthRevalidator {
@@ -109,7 +105,7 @@ func NewOAuthRevalidator(
 		provider: provider, mapper: mapper, adminGroups: adminGroups,
 		mappedGroupMaxRunnerSessions: mappedGroupMaxRunnerSessions,
 		users:                        users, groups: groups,
-		tokens: tokens, logger: logger, cfg: cfg,
+		logger: logger, cfg: cfg,
 		clock: clock,
 		cache: make(map[string]*revalidationEntry),
 	}

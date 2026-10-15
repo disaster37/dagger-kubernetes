@@ -54,7 +54,7 @@ func newTestRevalidator(t *testing.T, provider *fakeRevalidateProvider, cfg OAut
 	r := newServiceDB(t)
 	logger := testLogger()
 	usersSvc := NewUserService(r.users, r.groups, logger)
-	revalidator := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, nil, logger, cfg)
+	revalidator := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, logger, cfg)
 	// Override clock for deterministic testing.
 	now := time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC)
 	revalidator.clock = func() time.Time { return now }
@@ -81,7 +81,7 @@ func TestRevalidatorCacheHit(t *testing.T) {
 	r.groups.SetMembers(context.Background(), g.ID, []string{"u1"})
 	usersSvc := NewUserService(r.users, r.groups, testLogger())
 
-	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	gids, err := rv.Check(context.Background(), u)
@@ -134,7 +134,6 @@ func TestRevalidatorRevokes(t *testing.T) {
 	}
 	rv.users = NewUserService(r.users, r.groups, testLogger())
 	tokenSvc := NewTokenService(r.tokens, testLogger(), nil)
-	rv.tokens = tokenSvc
 	plaintext, _, err := tokenSvc.Generate(context.Background(), u.ID)
 	if err != nil {
 		t.Fatalf("generate api token: %v", err)
@@ -180,7 +179,7 @@ func newExpiredFixture(t *testing.T, provider *fakeRevalidateProvider, cfg OAuth
 		t.Fatalf("set members: %v", err)
 	}
 	tokenSvc := NewTokenService(r.tokens, logger, nil)
-	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, tokenSvc, logger, cfg)
+	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, logger, cfg)
 	rv.clock = func() time.Time { return *now }
 	return rv, u, tokenSvc
 }
@@ -549,7 +548,7 @@ func TestRevalidatorReLoginAfterRevocation(t *testing.T) {
 		t.Fatalf("set members: %v", err)
 	}
 	usersSvc := NewUserService(r.users, r.groups, testLogger())
-	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	// Revoke: the IdP now denies.
@@ -632,7 +631,7 @@ func TestRevalidatorReconcileAddRemove(t *testing.T) {
 
 	provider := &fakeRevalidateProvider{groups: []string{"newteam"}}
 	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
-	rv := NewOAuthRevalidator(provider, mapper, nil, 0, usersSvc, r.groups, nil, logger, cfg)
+	rv := NewOAuthRevalidator(provider, mapper, nil, 0, usersSvc, r.groups, logger, cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	_, err = rv.Check(context.Background(), u)
@@ -669,7 +668,7 @@ func TestOAuthRevalidatorRefreshAutoCreatesMappedGroup(t *testing.T) {
 	}
 	provider := &fakeRevalidateProvider{groups: []string{"devs"}}
 	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
-	rv := NewOAuthRevalidator(provider, mapper, nil, 4, usersSvc, r.groups, nil, logger, cfg)
+	rv := NewOAuthRevalidator(provider, mapper, nil, 4, usersSvc, r.groups, logger, cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	if _, err := rv.Check(ctx, u); err != nil {
@@ -960,7 +959,7 @@ func TestRevalidatorAdminGroupPromotion(t *testing.T) {
 	}
 	usersSvc := NewUserService(r.users, r.groups, testLogger())
 
-	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, 0, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, 0, usersSvc, r.groups, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	_, err := rv.Check(context.Background(), u)
@@ -987,7 +986,7 @@ func TestRevalidatorAdminGroupDemotion(t *testing.T) {
 
 	provider := &fakeRevalidateProvider{groups: []string{"other-group"}}
 	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
-	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, 0, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, 0, usersSvc, r.groups, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	_, err := rv.Check(context.Background(), u)
@@ -1014,7 +1013,7 @@ func TestRevalidatorManualAdminNotDemoted(t *testing.T) {
 
 	provider := &fakeRevalidateProvider{groups: []string{"other-group"}}
 	cfg := OAuthRevalidatorConfig{Interval: 5 * time.Minute, Grace: time.Hour}
-	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, 0, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, []string{"platform-admins"}, 0, usersSvc, r.groups, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	_, err := rv.Check(context.Background(), u)
@@ -1042,7 +1041,7 @@ func TestRevalidatorOAuthGroupsPersisted(t *testing.T) {
 	}
 	usersSvc := NewUserService(r.users, r.groups, testLogger())
 
-	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, nil, testLogger(), cfg)
+	rv := NewOAuthRevalidator(provider, nil, nil, 0, usersSvc, r.groups, testLogger(), cfg)
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
 
 	_, err := rv.Check(context.Background(), u)
