@@ -1354,6 +1354,70 @@ staler than the leader; the leader replicates the fresh credential and
 reconciled memberships so followers converge. A user deactivated by the leader
 is replicated as deactivated and denied on followers too.
 
+**Deterministic re-login recovery (ADR-049).** A cached denial (IdP transport
+error, `stateUnavailable`, or an unusable credential, `stateExpired`) is keyed
+by local user ID but is invalidated by the account's **login generation**
+(`OAuthLoginVersion`, advanced on every accepted login) in addition to the
+encrypted credential ciphertext. This holds for every cache state, including a
+cached success. The practical effect: an authorized identity can re-login
+immediately after a transient IdP failure — there is no account-switch
+workaround and no need to wait for the negative TTL. Encryption being disabled
+(empty ciphertext) still advances the login generation, so recovery works there
+too.
+
+**Visible OAuth/authentication failures.** The SPA never silently loops back to
+the login screen. The login screen renders exactly one message from the
+whitelisted error hints `oauth`, `group_required`, `account_disabled`,
+`auth_conflict`, `session` (unknown non-empty codes render the generic OAuth
+message). The OAuth callback always terminates on the fixed local login route;
+it never restarts the provider flow or retries an already exchanged code. A
+canceled IdP callback, a state/nonce mismatch, a missing code, an exchange or
+store failure, a non-leader forward failure and a disabled provider all land on
+that fixed error target. Session cookie attributes are unchanged (names from
+`auth.cookie.*`/defaults, `Path=/`, host-only, HttpOnly, SameSite=Lax,
+`Secure` from config or TLS).
+
+**Account lifecycle: disable, delete (tombstone), restore, enable (ADR-049).**
+Administrators manage accounts through `POST /api/v1/users/:id/state` with
+`{"action":"disable"|"enable"|"restore"}` (application/json; 200 with the
+updated user; 409 for a stale write or last-active-administrator conflict; 403
+for a blocked/self action; 415 for a wrong content type):
+
+- **Disable** sets an administrator-managed `disabled_at` distinct from an IdP
+  `deactivated_at`. It revokes the API token and invalidates outstanding JWTs
+  (token-version bump). A later successful IdP login **cannot** clear it.
+- **Delete** is a soft delete (tombstone) for every account: the ID, username
+  and `(provider, subject)` identity are reserved, credentials and group
+  memberships and the API token are removed, and outstanding JWTs are
+  invalidated. Deleted rows are listed to admins and visibly marked.
+- **Restore** clears only the deletion and leaves the account disabled and
+  credentialless; an administrator then sets a password and explicitly enables
+  it (an OAuth account needs a fresh IdP login).
+- **Enable** rejects a still-deleted row and never restores a token.
+
+Explicit self-disable/self-delete and removal of the **last active
+administrator** (disable, delete or role demotion) are rejected atomically in
+the Raft FSM. IdP policy can still revoke a user's access by design; the guard
+covers administrator management only. Count includes tombstones, so bootstrap
+cannot silently recreate an administrator merely because every account was
+deleted. Accounts hard-deleted before this upgrade cannot be reconstructed.
+
+**Stale-write protection.** Account and OAuth mutations are revision-checked
+atomic Raft commands: the revision precondition is evaluated before any account,
+membership or token effect, so a stale authentication or administrator write has
+zero effect and cannot overwrite newer credentials, bans, deletions,
+memberships or token versions. The user record never exposes its revision or
+login generation to the browser.
+
+**Maintenance rollout (ADR-049).** Because old binaries ignore the new fields
+and commands, upgrading requires a coordinated all-voter maintenance window:
+stop all supervisor processes on the target StatefulSet (retain the configured
+replica count and PVCs), back up each quiesced Raft volume with the operator's
+existing process, then start every voter on the same new binary and wait for
+quorum. A mixed-version rollout and a rollback to the old binary after new
+commands/snapshots are unsupported. The Clock seam used by tests is
+service-only and not a configurable deployment option (no config/Helm key).
+
 **Bundled test IdP (Dex + OpenLDAP subcharts).** The Helm chart ships Dex and
 OpenLDAP as optional, condition-gated dependencies (`dex.enabled` /
 `openldap.enabled`, both `false` by default; ADR-042). Enabling both installs

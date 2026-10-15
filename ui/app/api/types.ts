@@ -36,6 +36,9 @@ export interface UserRow {
   oauth_groups?: string[]
   groups: GroupSummary[]
   created_at: string
+  disabled_at?: string
+  deleted_at?: string
+  deactivated_at?: string
   token?: TokenMeta | null
 }
 

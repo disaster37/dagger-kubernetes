@@ -56,3 +56,4 @@ the decision.
 | 046  | [Engine image routed through a TLS-terminated mirror ingress](ADR-046-engine-image-via-mirror-ingress.md) |
 | 047  | [Surface executed commands (exec spans) in the pipeline view](ADR-047-pipeline-exec-view.md) |
 | 048  | [Pipeline metrics recorded during the run (leader-only, trace-tagged)](ADR-048-pipeline-metrics-recording.md) |
+| 049  | [OAuth re-login recovery, visible failures, and protected account lifecycle](ADR-049-oauth-relogin-account-lifecycle.md) |

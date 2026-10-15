@@ -143,3 +143,14 @@ The following hardening is part of this design (security audit 2026-08-10):
 - Integration: black-box `TestRBACQuotaAndVisibility` against a booted server
   with temp SQLite (quota 429, visibility 404, admin sees all, regenerate
   invalidates old token, legacy compat).
+
+## Superseding reference (dated 2026-10-15, ADR-049)
+
+The historic SQLite-era delete semantics described above are superseded for the
+current Raft implementation: deleting a local account is now a **soft delete
+(tombstone)** for every account. The row, username and `(provider, subject)`
+identity are reserved permanently, credentials/API tokens/memberships are
+removed, and the token version is incremented. Administrators can restore a
+tombstone (leaving it disabled and credentialless) and then explicitly enable
+it. An account hard-deleted before the upgrade cannot be reconstructed. See
+ADR-049 for the full lifecycle and last-active-administrator guard.

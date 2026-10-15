@@ -114,7 +114,7 @@ func TestTokenRepoDeleteUserCascadesToken(t *testing.T) {
 	tok := &domain.APIToken{ID: newID(), UserID: u.ID, TokenHash: "h", Prefix: "dct_aaaaaaaa"}
 	repo.Upsert(ctx, tok)
 
-	if err := urepo.Delete(ctx, u.ID); err != nil {
+	if err := urepo.Delete(ctx, "", u.ID); err != nil {
 		t.Fatalf("Delete user: %v", err)
 	}
 	if _, err := repo.GetByUser(ctx, u.ID); !errors.Is(err, domain.ErrNotFound) {

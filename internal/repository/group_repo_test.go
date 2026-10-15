@@ -180,7 +180,7 @@ func TestGroupRepoDeleteUserCascadesMemberships(t *testing.T) {
 	u := seedUser(t, store, "u")
 	grepo.SetMembers(ctx, g.ID, []string{u.ID})
 
-	if err := urepo.Delete(ctx, u.ID); err != nil {
+	if err := urepo.Delete(ctx, "", u.ID); err != nil {
 		t.Fatalf("Delete user: %v", err)
 	}
 	members, _ := grepo.Members(ctx, g.ID)

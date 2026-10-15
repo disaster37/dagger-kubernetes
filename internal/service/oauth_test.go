@@ -171,12 +171,12 @@ func TestEnsureGroupByNameConflictReusesWinner(t *testing.T) {
 	}
 }
 
-func TestReconcileMembershipsAutoCreates(t *testing.T) {
+func TestResolveOAuthGroupIDsAutoCreates(t *testing.T) {
 	r := newServiceDB(t)
 	logger := testLogger()
 	ctx := context.Background()
 
-	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, OAuthProvider: "oidc"}
+	u := &domain.User{ID: "u1", Username: "alice", Role: domain.RoleUser, OAuthProvider: "oidc", OAuthID: "s1"}
 	if err := r.users.Create(ctx, u); err != nil {
 		t.Fatalf("create user: %v", err)
 	}
@@ -184,9 +184,9 @@ func TestReconcileMembershipsAutoCreates(t *testing.T) {
 		t.Fatalf("seed group: %v", err)
 	}
 
-	gids, err := reconcileMemberships(ctx, r.groups, logger, u, []string{"existing", "brand-new", "has space"}, 3)
+	gids, err := resolveOAuthGroupIDs(ctx, r.groups, logger, []string{"existing", "brand-new", "has space"}, 3)
 	if err != nil {
-		t.Fatalf("reconcileMemberships: %v", err)
+		t.Fatalf("resolveOAuthGroupIDs: %v", err)
 	}
 	if len(gids) != 2 {
 		t.Fatalf("group IDs = %v, want 2 (existing + auto-created)", gids)
@@ -211,6 +211,24 @@ func TestReconcileMembershipsAutoCreates(t *testing.T) {
 	}
 	if !created.AgentAvailable {
 		t.Fatal("created group must have AgentAvailable = true")
+	}
+
+	// Apply the desired memberships atomically (the login commit).
+	loaded, err := r.users.Get(ctx, u.ID)
+	if err != nil {
+		t.Fatalf("reload user: %v", err)
+	}
+	res, err := r.users.CommitOAuth(ctx, domain.OAuthUserMutation{
+		Kind:             domain.OAuthLoginCommit,
+		User:             &domain.User{ID: u.ID, OAuthProvider: "oidc", OAuthID: "s1", Role: domain.RoleUser},
+		ExpectedRevision: loaded.Revision,
+		ManagedGroupIDs:  gids,
+	})
+	if err != nil {
+		t.Fatalf("CommitOAuth: %v", err)
+	}
+	if len(res.GroupIDs) != 2 {
+		t.Fatalf("committed group IDs = %v, want 2", res.GroupIDs)
 	}
 
 	// The user is a member of the existing and the auto-created groups only.

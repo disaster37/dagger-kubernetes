@@ -13,6 +13,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -24,6 +25,76 @@ const oauthErrorRedirectBase = "/auth/login"
 const oauthStateCookie = "oauth_state"
 const oauthStateCookiePath = "/api/v1/auth/oauth"
 const oauthStateCookieMaxAge = 600 // seconds; matches the 10m oauth state TTL
+
+// allowedOAuthErrorCodes is the fixed whitelist of error hints the browser may
+// receive. Anything else is collapsed to "oauth" so IdP-supplied
+// error_description values can never reach the user.
+var allowedOAuthErrorCodes = map[string]struct{}{
+	"oauth":            {},
+	"group_required":   {},
+	"account_disabled": {},
+	"auth_conflict":    {},
+}
+
+// failOAuth logs a safe, structured cause and redirects the browser to the
+// fixed login error screen. It never logs tokens, codes, state, cookies,
+// ciphertext, full URLs or IdP response bodies.
+func (s *Server) failOAuth(c *app.RequestContext, code, stage string, err error) {
+	if _, ok := allowedOAuthErrorCodes[code]; !ok {
+		code = "oauth"
+	}
+	c.Response.Header.Set("Cache-Control", "no-store")
+	fields := logrus.Fields{
+		"provider":   oauthProviderFromPath(string(c.Path())),
+		"stage":      stage,
+		"error_code": code,
+		"status":     consts.StatusFound,
+	}
+	if err != nil {
+		fields["cause"] = sanitizeOAuthCause(err)
+	}
+	s.logger.WithFields(fields).Warn("oauth: authentication failed")
+	redirectOAuthErrorCode(c, code)
+}
+
+// oauthProviderFromPath extracts the provider slug from an OAuth request path.
+func oauthProviderFromPath(path string) string {
+	switch {
+	case strings.Contains(path, "/oauth/github/"):
+		return "github"
+	case strings.Contains(path, "/oauth/oidc/"):
+		return "oidc"
+	default:
+		return ""
+	}
+}
+
+// sanitizeOAuthCause returns a short, non-sensitive category for logging. It
+// never returns the raw error (which may embed an IdP response body or token).
+func sanitizeOAuthCause(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, domain.ErrForbidden):
+		return "forbidden"
+	case errors.Is(err, domain.ErrAccountBlocked):
+		return "account blocked"
+	case errors.Is(err, domain.ErrStaleUser):
+		return "stale account write"
+	case errors.Is(err, domain.ErrLastAdmin):
+		return "last administrator"
+	case errors.Is(err, domain.ErrConflict):
+		return "conflict"
+	case errors.Is(err, domain.ErrNotLeader):
+		return "not leader"
+	case errors.Is(err, domain.ErrRaftTimeout):
+		return "raft timeout"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "request canceled"
+	default:
+		return "oauth failure"
+	}
+}
 
 type loginRequest struct {
 	Username string `json:"username"`
@@ -191,13 +262,15 @@ func (s *Server) oauthEnabled(provider string) bool {
 	return s.oauth != nil && s.oauthProvider == provider
 }
 
-// requireOAuthProvider writes a 404 and returns false when provider is not the
-// active OAuth provider (mirrors the requireAuth bool convention).
+// requireOAuthProvider returns false and sends the browser to the fixed OAuth
+// error screen when provider is not the active OAuth provider. Browser OAuth
+// endpoints must never render a raw 404 body or bounce the user back into the
+// authorize endpoint.
 func (s *Server) requireOAuthProvider(c *app.RequestContext, provider string) bool {
 	if s.oauthEnabled(provider) {
 		return true
 	}
-	writeError(c, consts.StatusNotFound, "oauth not enabled")
+	s.failOAuth(c, "oauth", "provider_unavailable", nil)
 	return false
 }
 
@@ -263,23 +336,24 @@ func (s *Server) startOAuthLogin(c *app.RequestContext) {
 
 	// Bind the state token to a cookie nonce so the callback can only be
 	// completed by the browser that initiated the login (login-CSRF, CWE-352).
+	// The cookie is written only after the state and authorize URL are ready so
+	// a failed start does not leave a half-initialized flow behind.
 	nonce, err := newOAuthNonce()
 	if err != nil {
-		writeError(c, consts.StatusInternalServerError, "oauth state error")
+		s.failOAuth(c, "oauth", "nonce", err)
 		return
 	}
-	c.SetCookie(oauthStateCookie, nonce, oauthStateCookieMaxAge, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
-
 	state, err := s.jwt.IssueOAuthState(redirect, nonce)
 	if err != nil {
-		writeError(c, consts.StatusInternalServerError, "oauth state error")
+		s.failOAuth(c, "oauth", "state", err)
 		return
 	}
 	loginURL := s.oauth.LoginURL(state)
 	if loginURL == "" {
-		redirectOAuthErrorCode(c, "oauth")
+		s.failOAuth(c, "oauth", "discovery", nil)
 		return
 	}
+	c.SetCookie(oauthStateCookie, nonce, oauthStateCookieMaxAge, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
 	c.Redirect(consts.StatusFound, []byte(loginURL))
 }
 
@@ -306,45 +380,63 @@ func (s *Server) handleOAuthOIDCCallback(ctx context.Context, c *app.RequestCont
 func (s *Server) completeOAuthCallback(ctx context.Context, c *app.RequestContext) {
 	code := c.Query("code")
 	state := c.Query("state")
+	providerErr := c.Query("error")
 
 	// The state token must be accompanied by the nonce cookie set at login
-	// time; compare in constant time (login-CSRF, CWE-352).
+	// time; compare in constant time (login-CSRF, CWE-352). Only a fully
+	// matching flow consumes the nonce cookie: a missing/expired/invalid state
+	// or nonce mismatch MUST NOT erase another concurrently running flow's
+	// cookie.
 	cookieVal := c.Cookie(oauthStateCookie)
 	stateClaims, err := s.jwt.ParseOAuthState(state)
-	if code == "" || state == "" || err != nil || len(cookieVal) == 0 {
-		s.clearOAuthStateCookie(c)
-		redirectOAuthErrorCode(c, "oauth")
+	if state == "" || err != nil || len(cookieVal) == 0 {
+		s.failOAuth(c, "oauth", "state_validation", err)
 		return
 	}
 	if subtle.ConstantTimeCompare([]byte(stateClaims.Nonce), cookieVal) != 1 {
-		s.clearOAuthStateCookie(c)
-		redirectOAuthErrorCode(c, "oauth")
+		s.failOAuth(c, "oauth", "nonce_mismatch", nil)
 		return
 	}
+	// Matching flow: consume the nonce before any external call.
 	s.clearOAuthStateCookie(c)
 
-	// Validate the state token, then exchange the code. Any failure lands the
-	// browser back on the login screen with an error hint.
+	// A canceled/denied IdP callback passed validation: show the generic
+	// failure without exchanging anything. The IdP error_description is never
+	// surfaced.
+	if providerErr != "" || code == "" {
+		s.failOAuth(c, "oauth", "provider_error", nil)
+		return
+	}
+
+	// Exchange the code. Any failure lands the browser back on the login screen
+	// with a fixed, whitelisted error hint.
 	access, refresh, _, err := s.oauth.Complete(ctx, code)
 	if err != nil {
-		if errors.Is(err, domain.ErrForbidden) {
-			redirectOAuthErrorCode(c, "group_required")
-			return
-		}
-		// Log the underlying cause server-side (issue #61): the client-facing
-		// hint stays generic so no token/IdP detail leaks, but operators can
-		// diagnose a failed exchange or persist.
-		s.logger.WithError(err).Warn("oauth: callback complete failed")
-		redirectOAuthErrorCode(c, "oauth")
+		s.failOAuth(c, oauthCallbackErrorCode(err), "complete", err)
 		return
 	}
 
 	s.setAuthCookies(c, access, refresh)
+	// Re-validate the stored redirect at callback time (defense in depth).
 	redirectPath := safeRedirectPath(stateClaims.Username)
 	// Hand tokens to the SPA via httpOnly cookies (no URL fragment); the
 	// redirect path is percent-encoded so it cannot corrupt the query.
 	target := fmt.Sprintf("/auth/callback?redirect=%s", url.QueryEscape(redirectPath))
 	c.Redirect(consts.StatusFound, []byte(target))
+}
+
+// oauthCallbackErrorCode maps an OAuth completion error to a whitelisted hint.
+func oauthCallbackErrorCode(err error) string {
+	switch {
+	case errors.Is(err, domain.ErrForbidden):
+		return "group_required"
+	case errors.Is(err, domain.ErrAccountBlocked):
+		return "account_disabled"
+	case errors.Is(err, domain.ErrStaleUser), errors.Is(err, domain.ErrLastAdmin), errors.Is(err, domain.ErrConflict):
+		return "auth_conflict"
+	default:
+		return "oauth"
+	}
 }
 
 // clearOAuthStateCookie removes the login nonce cookie (best-effort).
@@ -376,21 +468,61 @@ func (s *Server) setAuthCookie(c *app.RequestContext, name, value string, maxAge
 }
 
 // safeRedirectPath validates a post-login SPA redirect target. Only internal
-// absolute paths are allowed; anything else falls back to /pipelines. This
-// prevents open redirects via the OAuth flow (CWE-601): "//host" is rejected
-// (protocol-relative URL) and so are backslashes, which some browsers
-// historically normalized into slashes.
+// absolute paths are allowed; anything else falls back to /pipelines. net/url
+// parsing rejects scheme/host/userinfo, and encoded forms of "//", backslashes
+// and control characters are normalized before the checks (CWE-601). Targets
+// under the authentication routes are rejected so a successful login can never
+// be redirected back into the auth flow.
 func safeRedirectPath(redirect string) string {
-	if redirect == "" || !strings.HasPrefix(redirect, "/") ||
-		strings.HasPrefix(redirect, "//") || strings.Contains(redirect, "\\") {
-		return "/pipelines"
+	const fallback = "/pipelines"
+	if redirect == "" || hasUnsafeChars(redirect) {
+		return fallback
 	}
-	return redirect
+	u, err := url.Parse(redirect)
+	if err != nil {
+		return fallback
+	}
+	if u.Scheme != "" || u.Host != "" || u.User != nil || u.Opaque != "" {
+		return fallback
+	}
+	p := u.Path
+	if !isSafeLocalPath(p) || isAuthRedirectPath(p) {
+		return fallback
+	}
+	if u.RawQuery == "" {
+		return p
+	}
+	return fmt.Sprintf("%s?%s", p, u.RawQuery)
+}
+
+// hasUnsafeChars reports whether s contains a control character or backslash.
+func hasUnsafeChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == '\\' {
+			return true
+		}
+	}
+	return false
+}
+
+// isSafeLocalPath reports whether p is an internal absolute path (rejecting
+// protocol-relative and backslash forms).
+func isSafeLocalPath(p string) bool {
+	return p != "" && strings.HasPrefix(p, "/") && !strings.HasPrefix(p, "//") && !strings.Contains(p, "\\") && !hasUnsafeChars(p)
+}
+
+// isAuthRedirectPath reports whether p targets an authentication route, which
+// must never be used as a post-login destination.
+func isAuthRedirectPath(p string) bool {
+	return p == "/auth" || strings.HasPrefix(p, "/auth/") || strings.HasPrefix(p, "/api/v1/auth/")
 }
 
 // redirectOAuthErrorCode sends the browser to the SPA login screen with the
-// given error hint.
+// given (whitelisted) error hint and disables caching of the redirect.
 func redirectOAuthErrorCode(c *app.RequestContext, code string) {
+	if _, ok := allowedOAuthErrorCodes[code]; !ok {
+		code = "oauth"
+	}
 	c.Redirect(consts.StatusFound, []byte(fmt.Sprintf("%s?error=%s", oauthErrorRedirectBase, code)))
 }
 
