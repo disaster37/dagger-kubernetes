@@ -39,3 +39,24 @@ stdlib `httputil` package.
 - Reverse proxies are constructed once at startup (not per-request).
 - Request body reads are capped at 1 MB (DoS mitigation).
 - Internal error strings are never leaked to clients.
+
+## Enforcement
+
+- `internal/handler/hertz_server_test.go` (`TestServerConfigureUsesHertz`,
+  `TestServerStartAndShutdownSetsHertzEngine`,
+  `TestServerShutdownBeforeStartIsSafe`) asserts that `Server.configure()` and
+  `Server.Start()` construct and populate a `*server.Hertz` engine, honor
+  pre-bound listener injection (`ControlListener`), validate TLS certificate
+  loading, and shut down cleanly.
+- `internal/handler/hertz_only_test.go` (`TestProductionHTTPServerUsesHertzOnly`,
+  `TestCheckSourceForStdlibHTTPServerDetectsViolations`) parses all production
+  `.go` files across `cmd/`, `config/`, `internal/`, and `scripts/` and fails
+  if any production file imports `net/http` inside `internal/handler/` or
+  references stdlib HTTP server symbols (`http.Server`, `http.ListenAndServe`,
+  `http.ListenAndServeTLS`, `http.Serve`, `http.ServeTLS`, `http.NewServeMux`,
+  `http.ServeMux`, `http.DefaultServeMux`, `http.Handle`, `http.HandleFunc`,
+  `http.Handler`, `http.HandlerFunc`, `http.FileServer`,
+  `httputil.NewSingleHostReverseProxy`, `httputil.ReverseProxy`), while
+  preserving the documented allowlist: the raw L4 mTLS data plane (`net`,
+  `crypto/tls`), outbound HTTP clients (ADR-007), and
+  `adaptor.HertzHandler(promhttp.Handler())` for `/metrics`.
