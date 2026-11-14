@@ -1163,7 +1163,10 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 			s.touchSession(fp)
 			_ = conn.SetDeadline(time.Now().Add(tunnelIdleTimeout))
 			_ = backend.SetDeadline(time.Now().Add(tunnelIdleTimeout))
-		case <-errc:
+		case err := <-errc:
+			if err != nil {
+				s.logger.WithField("fp", fp).WithError(err).Debug("data tunnel copy ended")
+			}
 			_ = conn.Close()
 			_ = backend.Close()
 			return
