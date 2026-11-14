@@ -923,6 +923,107 @@ func TestUserOAuthFieldsRoundTrip(t *testing.T) {
 	}
 }
 
+// TestFSMAccountLifecycleFieldsSnapshotRoundTrip verifies that the ADR-049
+// account-lifecycle fields (Revision, OAuthLoginVersion, DisabledAt, DeletedAt,
+// the token-version bump) and a soft-delete tombstone survive a full
+// snapshot → restore cycle. ExpectedRevision is command-only and must never be
+// serialized.
+func TestFSMAccountLifecycleFieldsSnapshotRoundTrip(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+
+	// Create an OAuth user, apply a login commit (advances revision + login
+	// version), then administratively disable it.
+	if err := applyCmd(t, f, kindUpsertUser, &cmdUser{
+		ID: "u1", Username: "alice", Role: domain.RoleUser,
+		OAuthProvider: "oidc", OAuthID: "sub1",
+		CreatedAt: now, UpdatedAt: now, Create: true,
+	}); err != nil {
+		t.Fatalf("create user: %v", err)
+	}
+	if err := applyCmd(t, f, kindOAuthUserMutation, &cmdOAuthUserMutation{
+		Kind:             domain.OAuthLoginCommit,
+		User:             &cmdUser{ID: "u1", OAuthProvider: "oidc", OAuthID: "sub1", Role: domain.RoleUser, OAuthTokenCiphertext: "ct-v1"},
+		ExpectedRevision: 1,
+		At:               now,
+	}); err != nil {
+		t.Fatalf("login commit: %v", err)
+	}
+	if err := applyCmd(t, f, kindUserState, cmdUserState{ActorID: "admin", ID: "u1", Action: domain.UserDisable, At: now}); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+
+	// Create a second user and soft-delete it into a tombstone.
+	if err := applyCmd(t, f, kindUpsertUser, &cmdUser{
+		ID: "u2", Username: "bob", Role: domain.RoleUser,
+		CreatedAt: now, UpdatedAt: now, Create: true,
+	}); err != nil {
+		t.Fatalf("create user 2: %v", err)
+	}
+	if err := applyCmd(t, f, kindSoftDeleteUser, cmdSoftDeleteUser{ActorID: "admin", ID: "u2", At: now}); err != nil {
+		t.Fatalf("soft delete: %v", err)
+	}
+
+	// Snapshot and restore into a fresh FSM.
+	snap, err := f.Snapshot()
+	if err != nil {
+		t.Fatalf("Snapshot: %v", err)
+	}
+	sink := &memSink{}
+	if err := snap.Persist(sink); err != nil {
+		t.Fatalf("Persist: %v", err)
+	}
+	snap.Release()
+	restored := NewFSM()
+	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
+		t.Fatalf("Restore: %v", err)
+	}
+
+	// The disabled OAuth user keeps its revision, login version and disable
+	// timestamp; the disable's token-version bump survives too.
+	u1, err := restored.readUserByID("u1")
+	if err != nil {
+		t.Fatalf("readUserByID u1: %v", err)
+	}
+	if u1.Revision != 3 {
+		t.Fatalf("u1 revision = %d, want 3", u1.Revision)
+	}
+	if u1.OAuthLoginVersion != 1 {
+		t.Fatalf("u1 login version = %d, want 1", u1.OAuthLoginVersion)
+	}
+	if u1.DisabledAt == nil || !u1.DisabledAt.Equal(now) {
+		t.Fatalf("u1 disabled_at = %v, want %v", u1.DisabledAt, now)
+	}
+	if u1.TokenVersion != 1 {
+		t.Fatalf("u1 token version = %d, want 1", u1.TokenVersion)
+	}
+	if u1.OAuthTokenCiphertext != "ct-v1" {
+		t.Fatalf("u1 ciphertext = %q, want ct-v1", u1.OAuthTokenCiphertext)
+	}
+
+	// The tombstone survives with its reservation: deleted + disabled set,
+	// credentials removed, but the row/username/identity still resolvable.
+	u2, err := restored.readUserByID("u2")
+	if err != nil {
+		t.Fatalf("readUserByID u2: %v", err)
+	}
+	if u2.DeletedAt == nil || !u2.DeletedAt.Equal(now) {
+		t.Fatalf("u2 deleted_at = %v, want %v", u2.DeletedAt, now)
+	}
+	if u2.DisabledAt == nil {
+		t.Fatal("tombstone must also be disabled")
+	}
+	if u2.PasswordHash != "" || u2.OAuthTokenCiphertext != "" {
+		t.Fatalf("tombstone credentials must be cleared: hash=%q ct=%q", u2.PasswordHash, u2.OAuthTokenCiphertext)
+	}
+	if u2.Revision != 2 {
+		t.Fatalf("u2 revision = %d, want 2", u2.Revision)
+	}
+	if _, err := restored.readUserByUsername("bob"); err != nil {
+		t.Fatalf("tombstone username reservation lost: %v", err)
+	}
+}
+
 // TestFSMRestoreConcurrentReads guards against regressions where Restore swaps
 // the fsmState pointer, racing with lock-free read-helper dereferences. Run
 // under -race in CI.

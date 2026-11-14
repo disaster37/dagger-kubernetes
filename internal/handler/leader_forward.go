@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net"
 	"strconv"
 	"strings"
@@ -85,12 +86,12 @@ func (s *Server) leaderForward() app.HandlerFunc {
 			return
 		}
 		if _, _, ok := s.controlForwardTarget(s.leaderInfo.LeaderAddress()); !ok {
-			writeError(c, consts.StatusServiceUnavailable, "no raft leader available")
+			s.leaderForwardFailure(c, consts.StatusServiceUnavailable, "no raft leader available")
 			c.Abort()
 			return
 		}
 		if s.leaderProxy == nil {
-			writeError(c, consts.StatusServiceUnavailable, "no raft leader available")
+			s.leaderForwardFailure(c, consts.StatusServiceUnavailable, "no raft leader available")
 			c.Abort()
 			return
 		}
@@ -161,8 +162,27 @@ func (s *Server) buildLeaderForward() error {
 	})
 	p.SetErrorHandler(func(c *app.RequestContext, err error) {
 		s.logger.WithError(err).Error("leader forward failed")
-		writeError(c, consts.StatusBadGateway, "leader unreachable")
+		s.leaderForwardFailure(c, consts.StatusBadGateway, "leader unreachable")
 	})
 	s.leaderProxy = p
 	return nil
+}
+
+// leaderForwardFailure returns the fixed OAuth error screen for browser OAuth
+// GETs so an infrastructure failure never renders a raw body or bounces the
+// user back into the authorize endpoint. Every other route keeps the existing
+// writeError behavior.
+func (s *Server) leaderForwardFailure(c *app.RequestContext, status int, message string) {
+	if isOAuthBrowserRoute(string(c.Method()), string(c.Path())) {
+		c.Response.Header.Set("Cache-Control", "no-store")
+		c.Redirect(consts.StatusFound, []byte(fmt.Sprintf("%s?error=oauth", oauthErrorRedirectBase)))
+		return
+	}
+	writeError(c, status, message)
+}
+
+// isOAuthBrowserRoute reports whether (method, path) is a browser OAuth
+// login/callback GET.
+func isOAuthBrowserRoute(method, path string) bool {
+	return method == "GET" && strings.HasPrefix(path, "/api/v1/auth/oauth/")
 }

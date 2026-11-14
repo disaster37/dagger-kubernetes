@@ -45,6 +45,12 @@ type oidcIssuer struct {
 	reuseUntil   time.Time
 	tokenCalls   int
 	invalidGrant bool
+
+	// userinfoErrCode, when non-zero, makes /userinfo respond with that HTTP
+	// status instead of the configured groups (used to emulate a transient IdP
+	// transport failure). It is atomic so tests can flip it without holding the
+	// token mutex.
+	userinfoErrCode atomic.Int32
 }
 
 func newOIDCIssuer(t *testing.T, clientID string, groups []any) *oidcIssuer {
@@ -128,6 +134,10 @@ func (f *oidcIssuer) handleToken(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *oidcIssuer) handleUserinfo(w http.ResponseWriter, _ *http.Request) {
+	if code := f.userinfoErrCode.Load(); code != 0 {
+		w.WriteHeader(int(code))
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{"groups": f.groups})
 }
@@ -344,7 +354,7 @@ func TestOIDCReLoginAfterExpiryRecovers(t *testing.T) {
 	leader.Store(true)
 	oauthSvc := service.NewOIDCOAuthService(oauthCfg, mapper, usersSvc, groupRepo, jwtSvc, logger, nil, []byte("0123456789abcdef0123456789abcdef"), leader.Load)
 
-	revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, nil, 0, usersSvc, groupRepo, tokensSvc, logger, service.OAuthRevalidatorConfig{
+	revalidator := service.NewOAuthRevalidator(oauthSvc, mapper, nil, 0, usersSvc, groupRepo, logger, service.OAuthRevalidatorConfig{
 		Interval: 50 * time.Millisecond,
 		Grace:    2 * time.Second,
 	})

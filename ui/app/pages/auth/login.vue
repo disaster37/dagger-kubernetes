@@ -1,14 +1,14 @@
 <template>
   <div class="mx-auto mt-20 max-w-[400px]">
-    <!-- group_required info card — shown above the login form so it is immediately visible -->
+    <!-- One stable alert for every callback/redirect error hint. -->
     <UAlert
-      v-if="errorCode === 'group_required'"
+      v-if="errorMessage"
       class="mb-5"
-      color="info"
+      :color="errorCode === 'group_required' ? 'info' : 'error'"
       variant="soft"
-      icon="i-lucide-lock"
-      title="Access Restricted"
-      description="Your account was authenticated successfully, but you are not a member of any authorized group. Please contact your administrator to request access."
+      :icon="errorCode === 'group_required' ? 'i-lucide-lock' : 'i-lucide-circle-alert'"
+      :title="errorCode === 'group_required' ? 'Access Restricted' : 'Sign-in problem'"
+      :description="errorMessage"
     />
 
     <div class="mb-6 flex justify-center">
@@ -17,20 +17,6 @@
 
     <UCard>
       <h2 class="mb-4 text-xl font-semibold">Login</h2>
-      <UAlert
-        v-if="errorCode === 'oauth'"
-        class="mb-3"
-        color="error"
-        variant="soft"
-        description="OAuth login failed. Please try again."
-      />
-      <UAlert
-        v-if="errorCode === 'session'"
-        class="mb-3"
-        color="error"
-        variant="soft"
-        description="Your session could not be restored. Please sign in again."
-      />
       <UForm @submit="handleLogin">
         <div class="mb-3">
           <label class="mb-1 block text-sm">Username</label>
@@ -63,12 +49,17 @@
         variant="soft"
         :description="error"
       />
+      <UAlert
+        v-if="providersError"
+        class="mt-3"
+        color="warning"
+        variant="soft"
+        :description="providersError"
+      />
       <div v-if="providers.oauth_github" class="mt-4 text-center">
         <USeparator class="mb-4" />
         <!-- `external` forces a full-page navigation: these are backend OAuth
-             endpoints that redirect to the provider, not SPA routes. Without it
-             NuxtLink would intercept the click and the auth middleware would
-             bounce back to /auth/login. -->
+             endpoints that redirect to the provider, not SPA routes. -->
         <UButton :to="githubLoginUrl" external color="neutral" variant="outline" block>
           Login with GitHub
         </UButton>
@@ -86,6 +77,7 @@
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth'
 import { fetchProviders } from '~/api/client'
+import { authErrorMessage, safeAuthRedirect } from '~/utils/auth-navigation'
 import type { Providers } from '~/api/types'
 
 definePageMeta({ public: true })
@@ -97,28 +89,28 @@ const auth = useAuthStore()
 const username = ref('')
 const password = ref('')
 const error = ref('')
+const providersError = ref('')
 const loading = ref(false)
 const providers = ref<Providers>({ internal: true, oauth_github: false, oauth_oidc: false })
 
-const errorCode = computed(() => (route.query.error as string) || null)
+const errorCode = computed(() => {
+  const raw = route.query.error
+  return Array.isArray(raw) ? String(raw[0] ?? '') : (typeof raw === 'string' ? raw : '')
+})
+const errorMessage = computed(() => authErrorMessage(errorCode.value))
+// The redirect query param is attacker-influenceable (login links); only
+// internal absolute paths are accepted (CWE-601). The backend re-validates for
+// the OAuth flow.
+const redirectTarget = computed(() => safeAuthRedirect(route.query.redirect))
 const githubLoginUrl = computed(() => `/api/v1/auth/oauth/github/login?redirect=${encodeURIComponent(redirectTarget.value)}`)
 const oidcLoginUrl = computed(() => `/api/v1/auth/oauth/oidc/login?redirect=${encodeURIComponent(redirectTarget.value)}`)
-// The redirect query param is attacker-influenceable (login links); only
-// internal absolute paths are accepted (CWE-601). The backend re-validates
-// for the OAuth flow.
-const redirectTarget = computed(() => {
-  const raw = route.query.redirect as string | undefined
-  if (!raw || !raw.startsWith('/') || raw.startsWith('//') || raw.includes('\\')) {
-    return '/pipelines'
-  }
-  return raw
-})
 
 onMounted(async () => {
   try {
     providers.value = await fetchProviders()
   } catch {
-    // ignore — defaults keep internal auth visible
+    // Keep internal auth visible; surface the discovery failure on screen.
+    providersError.value = 'Could not load sign-in providers. Internal sign-in may still work.'
   }
 })
 
@@ -131,9 +123,13 @@ async function handleLogin() {
   loading.value = true
   try {
     await auth.login(username.value, password.value)
-    router.push(redirectTarget.value)
-  } catch {
-    error.value = 'Invalid username or password'
+    await router.push(redirectTarget.value)
+  } catch (e: any) {
+    // A credential failure is generic; a transport/internal failure must not be
+    // misreported as bad credentials and must stay on the form.
+    error.value = e?.response
+      ? 'Invalid username or password'
+      : 'Sign-in is temporarily unavailable. Please try again.'
   } finally {
     loading.value = false
   }

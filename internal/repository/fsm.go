@@ -49,6 +49,11 @@ const (
 	kindUpsertSession
 	kindTouchSession
 	kindTouchManifestRoute
+	// Account-lifecycle commands (appended after every existing kind so the
+	// persisted numeric IDs above never change on replay).
+	kindUserState
+	kindSoftDeleteUser
+	kindOAuthUserMutation
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -102,10 +107,20 @@ type (
 		OAuthGroups          []string    `json:"oauth_groups,omitempty"`
 		OAuthAdmin           bool        `json:"oauth_admin,omitempty"`
 		DeactivatedAt        *time.Time  `json:"deactivated_at,omitempty"`
+		DisabledAt           *time.Time  `json:"disabled_at,omitempty"`
+		DeletedAt            *time.Time  `json:"deleted_at,omitempty"`
+		Revision             uint64      `json:"revision,omitempty"`
+		OAuthLoginVersion    uint64      `json:"oauth_login_version,omitempty"`
 		TokenVersion         int         `json:"token_version"`
 		CreatedAt            time.Time   `json:"created_at"`
 		UpdatedAt            time.Time   `json:"updated_at"`
 		Create               bool        `json:"create,omitempty"` // true = insert-only; false = update-only
+		// ExpectedRevision is a command-only optimistic-concurrency
+		// precondition. It is never populated when building a snapshot (see
+		// cmdUserFrom), so snapshots never serialize it. A nil pointer means a
+		// legacy replay without a precondition; a pointer to zero is a valid
+		// CAS update of a pre-upgrade row.
+		ExpectedRevision *uint64 `json:"expected_revision,omitempty"`
 	}
 
 	cmdGroup struct {
@@ -177,6 +192,33 @@ type (
 		CertFP string    `json:"cert_fp"`
 		At     time.Time `json:"at"`
 	}
+
+	// cmdUserState applies an administrator lifecycle action. At is computed
+	// by the leader; the FSM never reads the clock.
+	cmdUserState struct {
+		ActorID string                 `json:"actor_id"`
+		ID      string                 `json:"id"`
+		Action  domain.UserStateAction `json:"action"`
+		At      time.Time              `json:"at"`
+	}
+
+	// cmdSoftDeleteUser tombstones a user account.
+	cmdSoftDeleteUser struct {
+		ActorID string    `json:"actor_id"`
+		ID      string    `json:"id"`
+		At      time.Time `json:"at"`
+	}
+
+	// cmdOAuthUserMutation is a revision-checked atomic OAuth account
+	// mutation. ExpectedRevision is check-only and never stored.
+	cmdOAuthUserMutation struct {
+		Kind             domain.OAuthUserMutationKind `json:"kind"`
+		User             *cmdUser                     `json:"user"`
+		ExpectedRevision uint64                       `json:"expected_revision"`
+		ManagedGroupIDs  []string                     `json:"managed_group_ids,omitempty"`
+		FallbackGroupID  string                       `json:"fallback_group_id,omitempty"`
+		At               time.Time                    `json:"at"`
+	}
 )
 
 // toDomain converts a command user payload into a domain.User.
@@ -193,6 +235,10 @@ func (c *cmdUser) toDomain() *domain.User {
 		OAuthGroups:          c.OAuthGroups,
 		OAuthAdmin:           c.OAuthAdmin,
 		DeactivatedAt:        c.DeactivatedAt,
+		DisabledAt:           c.DisabledAt,
+		DeletedAt:            c.DeletedAt,
+		Revision:             c.Revision,
+		OAuthLoginVersion:    c.OAuthLoginVersion,
 		TokenVersion:         c.TokenVersion,
 		CreatedAt:            c.CreatedAt,
 		UpdatedAt:            c.UpdatedAt,
@@ -200,7 +246,8 @@ func (c *cmdUser) toDomain() *domain.User {
 }
 
 // cmdUserFrom converts a domain.User into a command user payload (preserving
-// the password hash that the domain JSON tag hides).
+// the password hash that the domain JSON tag hides). ExpectedRevision is left
+// nil so snapshots never serialize a precondition.
 func cmdUserFrom(u *domain.User) *cmdUser {
 	return &cmdUser{
 		ID:                   u.ID,
@@ -214,6 +261,10 @@ func cmdUserFrom(u *domain.User) *cmdUser {
 		OAuthGroups:          u.OAuthGroups,
 		OAuthAdmin:           u.OAuthAdmin,
 		DeactivatedAt:        u.DeactivatedAt,
+		DisabledAt:           u.DisabledAt,
+		DeletedAt:            u.DeletedAt,
+		Revision:             u.Revision,
+		OAuthLoginVersion:    u.OAuthLoginVersion,
 		TokenVersion:         u.TokenVersion,
 		CreatedAt:            u.CreatedAt,
 		UpdatedAt:            u.UpdatedAt,
@@ -333,8 +384,8 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if err, handled := s.applyEntityCommand(cmd); handled {
-		return nil, err
+	if result, err, handled := s.applyEntityCommand(cmd); handled {
+		return result, err
 	}
 	if result, err, handled := s.applyTraceCacheCommand(cmd); handled {
 		return result, err
@@ -345,47 +396,72 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 	return nil, fmt.Errorf("unknown raft command kind %d", cmd.Kind)
 }
 
-// applyEntityCommand handles user/group/project/token commands.
-func (s *fsmState) applyEntityCommand(cmd *command) (error, bool) {
+// applyEntityCommand handles user/group/project/token commands. Handled
+// commands may return a non-nil response object (the committed snapshot) which
+// the repository layer type-checks.
+func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 	switch cmd.Kind {
 	case kindUpsertUser:
-		return applyPayload(cmd, "user", func(p cmdUser) error {
-			return s.upsertUser(p.toDomain(), p.Create)
-		}), true
+		var out *domain.User
+		err := applyPayload(cmd, "user", func(p cmdUser) error {
+			u, err := s.upsertUser(&p)
+			out = u
+			return err
+		})
+		return out, err, true
 	case kindDeleteUser:
-		return applyPayload(cmd, "delete user", s.deleteUser), true
+		// Legacy hard-delete replay semantics: unchanged.
+		return nil, applyPayload(cmd, "delete user", s.deleteUser), true
+	case kindUserState:
+		var out *domain.User
+		err := applyPayload(cmd, "user state", func(p cmdUserState) error {
+			u, err := s.setUserState(p)
+			out = u
+			return err
+		})
+		return out, err, true
+	case kindSoftDeleteUser:
+		return nil, applyPayload(cmd, "soft delete user", s.softDeleteUser), true
+	case kindOAuthUserMutation:
+		var out *domain.OAuthUserResult
+		err := applyPayload(cmd, "oauth user mutation", func(p cmdOAuthUserMutation) error {
+			res, err := s.commitOAuthUser(&p)
+			out = res
+			return err
+		})
+		return out, err, true
 	case kindUpsertGroup:
-		return applyPayload(cmd, "group", func(p cmdGroup) error {
+		return nil, applyPayload(cmd, "group", func(p cmdGroup) error {
 			return s.upsertGroup(&p.Group, p.Create)
 		}), true
 	case kindDeleteGroup:
-		return applyPayload(cmd, "delete group", s.deleteGroup), true
+		return nil, applyPayload(cmd, "delete group", s.deleteGroup), true
 	case kindSetMembers:
-		return applyPayload(cmd, "set members", func(p cmdSetMembers) error {
+		return nil, applyPayload(cmd, "set members", func(p cmdSetMembers) error {
 			return s.setMembers(p.GroupID, p.UserIDs)
 		}), true
 	case kindUpsertProject:
-		return applyPayload(cmd, "project", func(p cmdProject) error {
+		return nil, applyPayload(cmd, "project", func(p cmdProject) error {
 			return s.upsertProject(&p.Project, p.Create)
 		}), true
 	case kindDeleteProject:
-		return applyPayload(cmd, "delete project", s.deleteProject), true
+		return nil, applyPayload(cmd, "delete project", s.deleteProject), true
 	case kindUpsertToken:
-		return applyPayload(cmd, "api token", func(p cmdToken) error {
+		return nil, applyPayload(cmd, "api token", func(p cmdToken) error {
 			return s.upsertToken(p.toDomain())
 		}), true
 	case kindDeleteToken:
-		return applyPayload(cmd, "delete token", func(p cmdDeleteToken) error {
+		return nil, applyPayload(cmd, "delete token", func(p cmdDeleteToken) error {
 			s.deleteToken(p.UserID)
 			return nil
 		}), true
 	case kindTouchToken:
-		return applyPayload(cmd, "touch token", func(p cmdTouchToken) error {
+		return nil, applyPayload(cmd, "touch token", func(p cmdTouchToken) error {
 			s.touchToken(p.ID, p.At)
 			return nil
 		}), true
 	default:
-		return nil, false
+		return nil, nil, false
 	}
 }
 
@@ -464,62 +540,149 @@ func (s *fsmState) applySessionCommand(cmd *command) (error, bool) {
 
 // --- users ------------------------------------------------------------------
 
-func (s *fsmState) upsertUser(u *domain.User, create bool) error {
-	lower := strings.ToLower(u.Username)
-	if existing, ok := s.users[u.ID]; ok {
-		if create {
-			return fmt.Errorf("user %s: %w", u.ID, domain.ErrConflict)
-		}
-		// Update path: reject a username that collides with another user.
-		if other, ok := s.usersByName[lower]; ok && other != u.ID {
-			return fmt.Errorf("user %s: %w", u.Username, domain.ErrConflict)
-		}
-		if u.OAuthID != "" {
-			if other, ok := s.usersByOAuth[oauthKey(u.OAuthProvider, u.OAuthID)]; ok && other != u.ID {
-				return fmt.Errorf("user oauth %s/%s: %w", u.OAuthProvider, u.OAuthID, domain.ErrConflict)
-			}
-		}
-		u.CreatedAt = existing.CreatedAt
-		if u.UpdatedAt.IsZero() {
-			u.UpdatedAt = existing.UpdatedAt
-		}
-		// Refresh reverse indices (username/oauth may have changed).
-		if existing.Username != "" {
-			delete(s.usersByName, strings.ToLower(existing.Username))
-		}
-		if existing.OAuthID != "" {
-			delete(s.usersByOAuth, oauthKey(existing.OAuthProvider, existing.OAuthID))
-		}
-		s.storeUser(u)
-		return nil
+// upsertUser applies a create or CAS-tagged update and returns the committed
+// snapshot. Immutable identity, administrator timestamps and OAuthLoginVersion
+// may only change through their dedicated commands.
+func (s *fsmState) upsertUser(c *cmdUser) (*domain.User, error) {
+	if c.Create {
+		return s.createUser(c)
 	}
+	return s.updateUser(c)
+}
 
-	if !create {
-		return fmt.Errorf("update user %s: %w", u.ID, domain.ErrNotFound)
+// createUser inserts a new record, starting its revision at 1.
+func (s *fsmState) createUser(c *cmdUser) (*domain.User, error) {
+	if _, ok := s.users[c.ID]; ok {
+		return nil, fmt.Errorf("user %s: %w", c.ID, domain.ErrConflict)
 	}
-	// Create path: reject duplicates.
-	if _, ok := s.usersByName[lower]; ok {
-		return fmt.Errorf("user %s: %w", u.Username, domain.ErrConflict)
+	if _, ok := s.usersByName[strings.ToLower(c.Username)]; ok {
+		return nil, fmt.Errorf("user %s: %w", c.Username, domain.ErrConflict)
 	}
-	if u.OAuthID != "" {
-		if _, ok := s.usersByOAuth[oauthKey(u.OAuthProvider, u.OAuthID)]; ok {
-			return fmt.Errorf("user oauth %s/%s: %w", u.OAuthProvider, u.OAuthID, domain.ErrConflict)
+	if c.OAuthID != "" {
+		if _, ok := s.usersByOAuth[oauthKey(c.OAuthProvider, c.OAuthID)]; ok {
+			return nil, fmt.Errorf("user oauth %s/%s: %w", c.OAuthProvider, c.OAuthID, domain.ErrConflict)
 		}
 	}
+	u := c.toDomain()
+	u.Revision = 1
 	if u.UpdatedAt.IsZero() {
 		u.UpdatedAt = u.CreatedAt
 	}
 	s.storeUser(u)
+	return copyUser(u), nil
+}
+
+// updateUser applies a CAS-tagged update. Immutable identity, administrator
+// timestamps and OAuthLoginVersion are preserved; the revision is advanced.
+func (s *fsmState) updateUser(c *cmdUser) (*domain.User, error) {
+	existing, ok := s.users[c.ID]
+	if !ok {
+		return nil, fmt.Errorf("update user %s: %w", c.ID, domain.ErrNotFound)
+	}
+	if existing.DeletedAt != nil {
+		// A general update may not resurrect (or touch) a tombstone.
+		return nil, fmt.Errorf("user %s: %w", c.ID, domain.ErrAccountBlocked)
+	}
+	if c.ExpectedRevision != nil && existing.Revision != *c.ExpectedRevision {
+		return nil, fmt.Errorf("user %s: %w", c.ID, domain.ErrStaleUser)
+	}
+	if err := s.checkUserUniqueness(c, existing.ID); err != nil {
+		return nil, err
+	}
+	// An explicit role demotion must not remove the last active administrator.
+	if existing.Role == domain.RoleAdmin && c.Role != domain.RoleAdmin && isActiveAdmin(existing) && s.activeAdminCount() <= 1 {
+		return nil, fmt.Errorf("user %s: %w", c.ID, domain.ErrLastAdmin)
+	}
+
+	u := c.toDomain()
+	// Preserve identity and dedicated-command-only fields.
+	u.OAuthProvider = existing.OAuthProvider
+	u.OAuthID = existing.OAuthID
+	u.DisabledAt = existing.DisabledAt
+	u.DeletedAt = existing.DeletedAt
+	u.OAuthLoginVersion = existing.OAuthLoginVersion
+	u.CreatedAt = existing.CreatedAt
+	if u.UpdatedAt.IsZero() {
+		u.UpdatedAt = existing.UpdatedAt
+	}
+	u.Revision = existing.Revision + 1
+
+	// Refresh reverse indices (username may have changed).
+	if existing.Username != "" {
+		delete(s.usersByName, strings.ToLower(existing.Username))
+	}
+	if existing.OAuthID != "" {
+		delete(s.usersByOAuth, oauthKey(existing.OAuthProvider, existing.OAuthID))
+	}
+	s.storeUser(u)
+	return copyUser(u), nil
+}
+
+// checkUserUniqueness rejects a username/identity that collides with a
+// different user.
+func (s *fsmState) checkUserUniqueness(c *cmdUser, selfID string) error {
+	if other, ok := s.usersByName[strings.ToLower(c.Username)]; ok && other != selfID {
+		return fmt.Errorf("user %s: %w", c.Username, domain.ErrConflict)
+	}
+	if c.OAuthID != "" {
+		if other, ok := s.usersByOAuth[oauthKey(c.OAuthProvider, c.OAuthID)]; ok && other != selfID {
+			return fmt.Errorf("user oauth %s/%s: %w", c.OAuthProvider, c.OAuthID, domain.ErrConflict)
+		}
+	}
 	return nil
 }
 
 func (s *fsmState) storeUser(u *domain.User) {
-	cp := *u
-	s.users[u.ID] = &cp
+	s.users[u.ID] = copyUser(u)
 	s.usersByName[strings.ToLower(u.Username)] = u.ID
 	if u.OAuthID != "" {
 		s.usersByOAuth[oauthKey(u.OAuthProvider, u.OAuthID)] = u.ID
 	}
+}
+
+// copyUser returns a deep copy of u so callers can never mutate FSM-owned
+// slices or timestamp pointers outside the write mutex. A nil user yields nil.
+func copyUser(u *domain.User) *domain.User {
+	if u == nil {
+		return nil
+	}
+	cp := *u
+	if u.OAuthGroupIDs != nil {
+		cp.OAuthGroupIDs = append([]string(nil), u.OAuthGroupIDs...)
+	}
+	if u.OAuthGroups != nil {
+		cp.OAuthGroups = append([]string(nil), u.OAuthGroups...)
+	}
+	cp.DeactivatedAt = copyTime(u.DeactivatedAt)
+	cp.DisabledAt = copyTime(u.DisabledAt)
+	cp.DeletedAt = copyTime(u.DeletedAt)
+	return &cp
+}
+
+// copyTime returns a pointer to a copy of t, or nil.
+func copyTime(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	cp := *t
+	return &cp
+}
+
+// activeAdminCount returns the number of administrators that are not blocked
+// by disable, deletion or IdP revocation.
+func (s *fsmState) activeAdminCount() int {
+	n := 0
+	for _, u := range s.users {
+		if u.Role == domain.RoleAdmin && !u.AccessBlocked() {
+			n++
+		}
+	}
+	return n
+}
+
+// isActiveAdmin reports whether u counts toward the last-admin guard.
+func isActiveAdmin(u *domain.User) bool {
+	return u != nil && u.Role == domain.RoleAdmin && !u.AccessBlocked()
 }
 
 func (s *fsmState) storeGroup(g *domain.Group) {
@@ -566,6 +729,327 @@ func (s *fsmState) deleteUser(id string) error {
 	return nil
 }
 
+// removeUserMemberships deletes every membership edge for userID in both
+// directions.
+func (s *fsmState) removeUserMemberships(userID string) {
+	for gid := range s.membershipsByUser[userID] {
+		delete(s.memberships[gid], userID)
+		if len(s.memberships[gid]) == 0 {
+			delete(s.memberships, gid)
+		}
+	}
+	delete(s.membershipsByUser, userID)
+}
+
+// setUserState applies an administrator disable/enable/restore action
+// atomically, enforcing self and last-active-admin guards in the FSM itself.
+func (s *fsmState) setUserState(p cmdUserState) (*domain.User, error) {
+	u, ok := s.users[p.ID]
+	if !ok {
+		return nil, fmt.Errorf("user state %s: %w", p.ID, domain.ErrNotFound)
+	}
+	switch p.Action {
+	case domain.UserDisable:
+		if p.ActorID != "" && p.ActorID == p.ID {
+			return nil, fmt.Errorf("disable user %s: %w", p.ID, domain.ErrForbidden)
+		}
+		if u.DisabledAt != nil {
+			return copyUser(u), nil // idempotent: no counter bump
+		}
+		if isActiveAdmin(u) && s.activeAdminCount() <= 1 {
+			return nil, fmt.Errorf("disable user %s: %w", p.ID, domain.ErrLastAdmin)
+		}
+		u.DisabledAt = copyTime(&p.At)
+		u.TokenVersion++
+		s.deleteToken(p.ID)
+		u.Revision++
+		u.UpdatedAt = p.At
+		s.storeUser(u)
+		return copyUser(s.users[p.ID]), nil
+	case domain.UserEnable:
+		if u.DeletedAt != nil {
+			return nil, fmt.Errorf("enable user %s: %w", p.ID, domain.ErrAccountBlocked)
+		}
+		if u.DisabledAt == nil {
+			return copyUser(u), nil // idempotent
+		}
+		u.DisabledAt = nil
+		// Never restore an API token; the user must generate a new one.
+		u.Revision++
+		u.UpdatedAt = p.At
+		s.storeUser(u)
+		return copyUser(s.users[p.ID]), nil
+	case domain.UserRestore:
+		if u.DeletedAt == nil {
+			return copyUser(u), nil // idempotent
+		}
+		u.DeletedAt = nil
+		if u.DisabledAt == nil {
+			// A restored account stays disabled until explicitly enabled.
+			u.DisabledAt = copyTime(&p.At)
+		}
+		u.Revision++
+		u.UpdatedAt = p.At
+		s.storeUser(u)
+		return copyUser(s.users[p.ID]), nil
+	default:
+		return nil, fmt.Errorf("user state %s: invalid action %q: %w", p.ID, p.Action, domain.ErrValidation)
+	}
+}
+
+// softDeleteUser tombstones an account: credentials, token and memberships are
+// removed while the row, username and identity reservation are preserved.
+func (s *fsmState) softDeleteUser(p cmdSoftDeleteUser) error {
+	u, ok := s.users[p.ID]
+	if !ok {
+		return fmt.Errorf("delete user %s: %w", p.ID, domain.ErrNotFound)
+	}
+	if u.DeletedAt != nil {
+		return nil // idempotent
+	}
+	if p.ActorID != "" && p.ActorID == p.ID {
+		return fmt.Errorf("delete user %s: %w", p.ID, domain.ErrForbidden)
+	}
+	if isActiveAdmin(u) && s.activeAdminCount() <= 1 {
+		return fmt.Errorf("delete user %s: %w", p.ID, domain.ErrLastAdmin)
+	}
+	s.deleteToken(p.ID)
+	s.removeUserMemberships(p.ID)
+	u.DeletedAt = copyTime(&p.At)
+	u.DisabledAt = copyTime(&p.At)
+	u.PasswordHash = ""
+	u.OAuthTokenCiphertext = ""
+	u.OAuthGroups = nil
+	u.OAuthGroupIDs = nil
+	u.OAuthAdmin = false
+	u.TokenVersion++
+	u.Revision++
+	u.UpdatedAt = p.At
+	s.storeUser(u)
+	return nil
+}
+
+// commitOAuthUser atomically applies an OAuth account mutation. The revision
+// precondition is checked before any account, membership or token effect, so a
+// stale mutation has no effect at all.
+func (s *fsmState) commitOAuthUser(p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
+	existing, err := s.oauthTarget(p)
+	if err != nil {
+		return nil, err
+	}
+	switch p.Kind {
+	case domain.OAuthLoginCommit:
+		return s.oauthLogin(existing, p)
+	case domain.OAuthMembershipCommit:
+		return s.oauthMembership(existing, p)
+	case domain.OAuthCredentialCommit:
+		return s.oauthCredential(existing, p)
+	case domain.OAuthRevocationCommit:
+		return s.oauthRevoke(existing, p)
+	default:
+		return nil, fmt.Errorf("oauth mutation: invalid kind %q: %w", p.Kind, domain.ErrValidation)
+	}
+}
+
+// oauthTarget validates the command shape and the revision precondition before
+// any effect. It returns the current record on success.
+func (s *fsmState) oauthTarget(p *cmdOAuthUserMutation) (*domain.User, error) {
+	if p.User == nil {
+		return nil, fmt.Errorf("oauth mutation: %w", domain.ErrValidation)
+	}
+	if p.User.ID == "" {
+		return nil, fmt.Errorf("oauth mutation: missing user id: %w", domain.ErrValidation)
+	}
+	existing, ok := s.users[p.User.ID]
+	if !ok {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrNotFound)
+	}
+	// Revision precondition first: no effect whatsoever on mismatch.
+	if existing.Revision != p.ExpectedRevision {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrStaleUser)
+	}
+	if existing.DeletedAt != nil {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrAccountBlocked)
+	}
+	if p.Kind != domain.OAuthLoginCommit && p.Kind != domain.OAuthMembershipCommit {
+		return existing, nil
+	}
+	// Login/membership only apply to OAuth-backed targets.
+	if existing.OAuthProvider == "" {
+		return nil, fmt.Errorf("oauth user %s: not an oauth account: %w", p.User.ID, domain.ErrValidation)
+	}
+	// Validate the desired managed memberships before any effect.
+	if err := s.validateGroupIDs(p.ManagedGroupIDs); err != nil {
+		return nil, err
+	}
+	if p.FallbackGroupID != "" {
+		if _, ok := s.groups[p.FallbackGroupID]; !ok {
+			return nil, fmt.Errorf("oauth fallback group %s: %w", p.FallbackGroupID, domain.ErrNotFound)
+		}
+	}
+	return existing, nil
+}
+
+func (s *fsmState) oauthLogin(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
+	if existing.DisabledAt != nil {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrAccountBlocked)
+	}
+	if p.User.OAuthProvider == "" || p.User.OAuthID == "" {
+		return nil, fmt.Errorf("oauth login: missing identity: %w", domain.ErrValidation)
+	}
+	u := copyUser(existing)
+	u.Role = p.User.Role
+	u.OAuthAdmin = p.User.OAuthAdmin
+	u.OAuthTokenCiphertext = p.User.OAuthTokenCiphertext
+	u.OAuthGroups = normalizeIDs(p.User.OAuthGroups)
+	u.DeactivatedAt = nil
+	u.OAuthLoginVersion++
+	u.Revision++
+	u.UpdatedAt = p.At
+	s.applyManagedMemberships(u, p.ManagedGroupIDs)
+	s.storeUser(u)
+	return s.oauthResult(u, p.FallbackGroupID), nil
+}
+
+func (s *fsmState) oauthMembership(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
+	if existing.DisabledAt != nil || existing.DeactivatedAt != nil {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrAccountBlocked)
+	}
+	u := copyUser(existing)
+	u.Role = p.User.Role
+	u.OAuthAdmin = p.User.OAuthAdmin
+	u.OAuthGroups = normalizeIDs(p.User.OAuthGroups)
+	u.Revision++
+	u.UpdatedAt = p.At
+	s.applyManagedMemberships(u, p.ManagedGroupIDs)
+	s.storeUser(u)
+	return s.oauthResult(u, ""), nil
+}
+
+func (s *fsmState) oauthCredential(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
+	if existing.DisabledAt != nil || existing.DeactivatedAt != nil {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrAccountBlocked)
+	}
+	u := copyUser(existing)
+	u.OAuthTokenCiphertext = p.User.OAuthTokenCiphertext
+	u.Revision++
+	u.UpdatedAt = p.At
+	s.storeUser(u)
+	return s.oauthResult(u, ""), nil
+}
+
+func (s *fsmState) oauthRevoke(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
+	if existing.DisabledAt != nil {
+		return nil, fmt.Errorf("oauth user %s: %w", p.User.ID, domain.ErrAccountBlocked)
+	}
+	u := copyUser(existing)
+	if u.DeactivatedAt == nil {
+		u.DeactivatedAt = copyTime(&p.At)
+		u.TokenVersion++
+		u.Revision++
+		u.UpdatedAt = p.At
+	}
+	s.deleteToken(p.User.ID)
+	s.storeUser(u)
+	return s.oauthResult(u, ""), nil
+}
+
+// validateGroupIDs rejects a managed-membership set referencing unknown groups.
+func (s *fsmState) validateGroupIDs(ids []string) error {
+	for _, gid := range ids {
+		if gid == "" {
+			return fmt.Errorf("oauth group id: %w", domain.ErrValidation)
+		}
+		if _, ok := s.groups[gid]; !ok {
+			return fmt.Errorf("oauth group %s: %w", gid, domain.ErrNotFound)
+		}
+	}
+	return nil
+}
+
+// applyManagedMemberships replaces only the OAuth-managed membership edges on
+// u.OAuthGroupIDs, leaving manual memberships untouched. A desired group that
+// is already a member (manual or managed) is retained; it is simply claimed as
+// OAuth-managed.
+func (s *fsmState) applyManagedMemberships(u *domain.User, desired []string) {
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, gid := range desired {
+		desiredSet[gid] = struct{}{}
+	}
+	previous := u.OAuthGroupIDs
+	for _, gid := range previous {
+		if _, keep := desiredSet[gid]; keep {
+			continue
+		}
+		// Drop only the OAuth-managed edge for this user.
+		if set, ok := s.memberships[gid]; ok {
+			delete(set, u.ID)
+			if len(set) == 0 {
+				delete(s.memberships, gid)
+			}
+		}
+		if set, ok := s.membershipsByUser[u.ID]; ok {
+			delete(set, gid)
+			if len(set) == 0 {
+				delete(s.membershipsByUser, u.ID)
+			}
+		}
+	}
+	for _, gid := range desired {
+		s.addMembership(gid, u.ID)
+	}
+	u.OAuthGroupIDs = normalizeIDs(desired)
+}
+
+// oauthResult builds the committed response for an OAuth mutation, optionally
+// applying the fallback group when the effective membership is still empty.
+func (s *fsmState) oauthResult(u *domain.User, fallbackGroupID string) *domain.OAuthUserResult {
+	if fallbackGroupID != "" && len(s.membershipsByUser[u.ID]) == 0 {
+		s.addMembership(fallbackGroupID, u.ID)
+	}
+	groups := s.effectiveUserGroupIDs(u.ID)
+	return &domain.OAuthUserResult{User: copyUser(s.users[u.ID]), GroupIDs: groups}
+}
+
+// effectiveUserGroupIDs returns the sorted group IDs the user is a member of.
+func (s *fsmState) effectiveUserGroupIDs(userID string) []string {
+	set := s.membershipsByUser[userID]
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for gid := range set {
+		out = append(out, gid)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// normalizeIDs de-duplicates and sorts a group-ID list, returning nil for an
+// empty set.
+func normalizeIDs(ids []string) []string {
+	if len(ids) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(ids))
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			continue
+		}
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, id)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
 // --- groups -----------------------------------------------------------------
 
 func (s *fsmState) upsertGroup(g *domain.Group, create bool) error {
@@ -603,12 +1087,14 @@ func (s *fsmState) deleteGroup(id string) error {
 	if !ok {
 		return fmt.Errorf("delete group %s: %w", id, domain.ErrNotFound)
 	}
-	// Cascade memberships.
+	// Cascade memberships and advance each affected user's revision so an
+	// in-flight OAuth mutation conflicts with the group removal.
 	for uid := range s.memberships[id] {
 		delete(s.membershipsByUser[uid], id)
 		if len(s.membershipsByUser[uid]) == 0 {
 			delete(s.membershipsByUser, uid)
 		}
+		s.bumpRevision(uid)
 	}
 	delete(s.memberships, id)
 	// Null projects.group_id (ON DELETE SET NULL).
@@ -635,14 +1121,22 @@ func (s *fsmState) setMembers(groupID string, userIDs []string) error {
 		return fmt.Errorf("group %s: %w", groupID, domain.ErrNotFound)
 	}
 	// Re-check every user deterministically (validation already done by the
-	// service, but the FSM must reject unknown users on any node).
+	// service, but the FSM must reject unknown users on any node). Soft-deleted
+	// targets are rejected; disabled-but-not-deleted targets are permitted.
 	for _, uid := range userIDs {
-		if _, ok := s.users[uid]; !ok {
+		u, ok := s.users[uid]
+		if !ok {
 			return fmt.Errorf("user %s: %w", uid, domain.ErrNotFound)
 		}
+		if u.DeletedAt != nil {
+			return fmt.Errorf("user %s: %w", uid, domain.ErrAccountBlocked)
+		}
 	}
-	// Remove old reverse edges.
+	// Track every affected user (old and new membership) so each advances its
+	// revision exactly once for this command.
+	affected := make(map[string]struct{}, len(userIDs))
 	for uid := range s.memberships[groupID] {
+		affected[uid] = struct{}{}
 		delete(s.membershipsByUser[uid], groupID)
 		if len(s.membershipsByUser[uid]) == 0 {
 			delete(s.membershipsByUser, uid)
@@ -651,16 +1145,27 @@ func (s *fsmState) setMembers(groupID string, userIDs []string) error {
 	set := make(map[string]struct{}, len(userIDs))
 	for _, uid := range userIDs {
 		set[uid] = struct{}{}
+		affected[uid] = struct{}{}
 	}
 	if len(set) == 0 {
 		delete(s.memberships, groupID)
-		return nil
+	} else {
+		s.memberships[groupID] = set
+		for uid := range set {
+			s.addMembership(groupID, uid)
+		}
 	}
-	s.memberships[groupID] = set
-	for uid := range set {
-		s.addMembership(groupID, uid)
+	for uid := range affected {
+		s.bumpRevision(uid)
 	}
 	return nil
+}
+
+// bumpRevision advances a user's revision by one, ignoring unknown users.
+func (s *fsmState) bumpRevision(userID string) {
+	if u, ok := s.users[userID]; ok {
+		u.Revision++
+	}
 }
 
 // addMembership records one (groupID, userID) edge in both directions.
@@ -721,6 +1226,15 @@ func (s *fsmState) deleteProject(id string) error {
 // --- tokens -----------------------------------------------------------------
 
 func (s *fsmState) upsertToken(t *domain.APIToken) error {
+	// The owning user must exist and not be blocked before any old token is
+	// removed or replaced. A blocked owner yields no token side effect.
+	owner, ok := s.users[t.UserID]
+	if !ok {
+		return fmt.Errorf("api token owner %s: %w", t.UserID, domain.ErrNotFound)
+	}
+	if owner.DeletedAt != nil || owner.DisabledAt != nil {
+		return fmt.Errorf("api token owner %s: %w", t.UserID, domain.ErrAccountBlocked)
+	}
 	if existingID, ok := s.tokensByUser[t.UserID]; ok {
 		// One token per user: replace the existing one.
 		old := s.tokens[existingID]
@@ -868,8 +1382,7 @@ func (f *FSM) readUserByID(id string) (*domain.User, error) {
 	if !ok {
 		return nil, fmt.Errorf("user %s: %w", id, domain.ErrNotFound)
 	}
-	cp := *u
-	return &cp, nil
+	return copyUser(u), nil
 }
 
 func (f *FSM) readUserByUsername(username string) (*domain.User, error) {
@@ -879,9 +1392,7 @@ func (f *FSM) readUserByUsername(username string) (*domain.User, error) {
 	if !ok {
 		return nil, fmt.Errorf("user %s: %w", username, domain.ErrNotFound)
 	}
-	u := f.state.users[id]
-	cp := *u
-	return &cp, nil
+	return copyUser(f.state.users[id]), nil
 }
 
 func (f *FSM) readUserByOAuth(provider, oauthID string) (*domain.User, error) {
@@ -891,9 +1402,7 @@ func (f *FSM) readUserByOAuth(provider, oauthID string) (*domain.User, error) {
 	if !ok {
 		return nil, fmt.Errorf("user oauth %s/%s: %w", provider, oauthID, domain.ErrNotFound)
 	}
-	u := f.state.users[id]
-	cp := *u
-	return &cp, nil
+	return copyUser(f.state.users[id]), nil
 }
 
 func (f *FSM) listUsers() []*domain.User {
@@ -901,8 +1410,7 @@ func (f *FSM) listUsers() []*domain.User {
 	defer f.state.mu.RUnlock()
 	out := make([]*domain.User, 0, len(f.state.users))
 	for _, u := range f.state.users {
-		cp := *u
-		out = append(out, &cp)
+		out = append(out, copyUser(u))
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].CreatedAt.Equal(out[j].CreatedAt) {

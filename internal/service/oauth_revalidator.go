@@ -32,6 +32,9 @@ type OAuthRevalidatorConfig struct {
 	Grace         time.Duration // offline grace window before fail-open/fail-closed applies
 	FailOpen      bool          // after grace, true = allow, false = deny
 	SessionMaxAge time.Duration // hard bound on OAuth session age; 0 = disabled
+	// Clock is a test-only time source. It is nil in production (UTC now) and
+	// is deliberately not a configurable config/Viper/Helm option.
+	Clock func() time.Time
 }
 
 type revalidationState int
@@ -56,6 +59,11 @@ type revalidationEntry struct {
 	expiresAt  time.Time // when this entry becomes stale (jittered TTL)
 	inflight   chan struct{}
 	credential string // snapshot of u.OAuthTokenCiphertext this entry was built from (re-login recovery)
+	// loginVersion is the snapshot of u.OAuthLoginVersion this entry was built
+	// from. It changes on every accepted login even when encryption is disabled
+	// and the ciphertext is empty, so it is the authoritative login-generation
+	// marker for cache invalidation.
+	loginVersion uint64
 }
 
 // OAuthRevalidator enforces IdP group-membership revalidation behind a bounded,
@@ -68,7 +76,6 @@ type OAuthRevalidator struct {
 	mappedGroupMaxRunnerSessions int
 	users                        *UserService
 	groups                       domain.GroupRepository
-	tokens                       *TokenService
 	logger                       *logrus.Logger
 	cfg                          OAuthRevalidatorConfig
 	clock                        func() time.Time
@@ -78,7 +85,8 @@ type OAuthRevalidator struct {
 }
 
 // NewOAuthRevalidator returns an OAuthRevalidator. Pass nil for any field that
-// should be skipped (e.g. tokens when API-token revocation is not needed).
+// should be skipped. API-token revocation is performed atomically by the
+// OAuthRevocationCommit FSM command, so no TokenService dependency is needed.
 func NewOAuthRevalidator(
 	provider OAuthProvider,
 	mapper *GroupMapper,
@@ -86,16 +94,19 @@ func NewOAuthRevalidator(
 	mappedGroupMaxRunnerSessions int,
 	users *UserService,
 	groups domain.GroupRepository,
-	tokens *TokenService,
 	logger *logrus.Logger,
 	cfg OAuthRevalidatorConfig,
 ) *OAuthRevalidator {
+	clock := cfg.Clock
+	if clock == nil {
+		clock = func() time.Time { return time.Now().UTC() }
+	}
 	r := &OAuthRevalidator{
 		provider: provider, mapper: mapper, adminGroups: adminGroups,
 		mappedGroupMaxRunnerSessions: mappedGroupMaxRunnerSessions,
 		users:                        users, groups: groups,
-		tokens: tokens, logger: logger, cfg: cfg,
-		clock: func() time.Time { return time.Now().UTC() },
+		logger: logger, cfg: cfg,
+		clock: clock,
 		cache: make(map[string]*revalidationEntry),
 	}
 	go r.sweepLoop()
@@ -125,26 +136,22 @@ func (r *OAuthRevalidator) SessionMaxAge() time.Duration {
 
 // Check returns the user's current effective supervisor group IDs, enforcing
 // IdP revalidation behind a bounded cache. It returns a non-nil error only
-// when access must be DENIED (revoked, or unavailable past grace with
-// fail-closed). On a definitive revocation it applies side effects
-// (deactivate user + revoke API token) best-effort.
+// when access must be DENIED. After waiting for or performing a refresh it
+// reloads the user so a concurrent login generation, ban or deletion is
+// observed. Stale recovery is bounded to one retry per Check.
 func (r *OAuthRevalidator) Check(ctx context.Context, u *domain.User) ([]string, error) {
-	for {
+	// cur is a per-goroutine local; the caller's u is never mutated, so
+	// concurrent Checks can safely share the same input pointer.
+	cur := u
+	for attempt := 0; ; attempt++ {
 		r.mu.Lock()
-		entry := r.cache[u.ID]
-
-		if entry == nil {
-			// Creator path: create the entry and perform the first check.
+		entry := r.cache[cur.ID]
+		switch {
+		case entry == nil:
 			entry = &revalidationEntry{inflight: make(chan struct{})}
-			r.cache[u.ID] = entry
+			r.cache[cur.ID] = entry
 			r.mu.Unlock()
-			r.refresh(ctx, u, entry)
-			r.finish(entry)
-			continue
-		}
-
-		if entry.inflight != nil {
-			// Waiter path: another goroutine is checking; wait for its result.
+		case entry.inflight != nil:
 			wait := entry.inflight
 			r.mu.Unlock()
 			select {
@@ -152,39 +159,78 @@ func (r *OAuthRevalidator) Check(ctx context.Context, u *domain.User) ([]string,
 				return nil, ctx.Err()
 			case <-wait:
 			}
+			next, err := r.loadCurrentUser(ctx, cur.ID)
+			if err != nil {
+				return nil, err
+			}
+			cur = next
 			continue
-		}
-
-		// No check in flight: serve if fresh, otherwise become the refresher.
-		now := r.clock()
-		if r.fresh(entry, u, now) {
-			gids, err := r.serve(entry, u, now)
+		default:
+			now := r.clock()
+			if r.fresh(entry, cur, now) {
+				gids, err := r.serve(entry, cur, now)
+				r.mu.Unlock()
+				return gids, err
+			}
+			entry.inflight = make(chan struct{})
 			r.mu.Unlock()
-			return gids, err
 		}
-		entry.inflight = make(chan struct{})
-		r.mu.Unlock()
 
-		r.refresh(ctx, u, entry)
+		// This goroutine owns the refresh.
+		r.refresh(ctx, cur, entry)
 		r.finish(entry)
-		// Loop to serve the freshly computed result.
+
+		if attempt >= 1 {
+			// Bounded recovery: a second conflict in a single Check denies
+			// rather than looping over a provider indefinitely.
+			r.mu.Lock()
+			e := r.cache[cur.ID]
+			if e != nil && r.fresh(e, cur, r.clock()) {
+				gids, err := r.serve(e, cur, r.clock())
+				r.mu.Unlock()
+				return gids, err
+			}
+			r.mu.Unlock()
+			return nil, domain.ErrUnauthenticated
+		}
+		next, err := r.loadCurrentUser(ctx, cur.ID)
+		if err != nil {
+			return nil, err
+		}
+		cur = next
 	}
 }
 
-// fresh reports whether entry can be served without a new IdP call at now.
-// A revoked entry is only trusted while the user is still deactivated in the
-// DB: a successful re-login clears DeactivatedAt, so a revoked cache entry
-// must be re-checked to allow recovery (rather than denying forever on this
-// pod). For a still-deactivated user the entry is re-trusted until expiresAt;
-// refresh then short-circuits without an IdP call. An expired entry (unusable
-// credential) is re-checked as soon as the user re-logs in: re-login writes a
-// fresh credential ciphertext, so a changed credential forces recovery
-// without waiting for revalidate_interval.
+// loadCurrentUser re-reads a user row so account-state and revision changes
+// applied during a refresh are observed. An administrator disable/deletion
+// denies outright; IdP deactivation is returned so the cached stateRevoked
+// result can surface ErrSessionRevoked rather than a generic denial.
+func (r *OAuthRevalidator) loadCurrentUser(ctx context.Context, id string) (*domain.User, error) {
+	cur, err := r.users.Get(ctx, id)
+	if err != nil {
+		if isNotFound(err) {
+			return nil, domain.ErrUnauthenticated
+		}
+		return nil, err
+	}
+	if cur.DeletedAt != nil || cur.DisabledAt != nil {
+		return nil, domain.ErrUnauthenticated
+	}
+	return cur, nil
+}
+
+// fresh reports whether entry can be served without a new IdP call at now. The
+// login-generation/credential check runs for EVERY state: an accepted login
+// (which advances OAuthLoginVersion and usually the ciphertext) must force an
+// immediate re-check even if the entry was a cached denial or a cached success.
+// A revoked entry is only trusted while the user is still deactivated: a
+// successful re-login clears DeactivatedAt, so a revoked cache entry must be
+// re-checked to allow recovery.
 func (r *OAuthRevalidator) fresh(entry *revalidationEntry, u *domain.User, now time.Time) bool {
-	if entry.state == stateRevoked && u.DeactivatedAt == nil {
+	if entry.loginVersion != u.OAuthLoginVersion || entry.credential != u.OAuthTokenCiphertext {
 		return false
 	}
-	if entry.state == stateExpired && entry.credential != u.OAuthTokenCiphertext {
+	if entry.state == stateRevoked && u.DeactivatedAt == nil {
 		return false
 	}
 	if entry.expiresAt.IsZero() {
@@ -248,12 +294,24 @@ func (r *OAuthRevalidator) finish(entry *revalidationEntry) {
 // reads entry while inflight is non-nil.
 func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *revalidationEntry) {
 	now := r.clock()
-	// Snapshot the credential this entry is built from so fresh() can force a
-	// re-check after re-login (AES-GCM ciphertext always differs once rotated).
+	// Work from a private snapshot of the latest persisted record so the CAS
+	// precondition is current; the caller's object is never mutated. A store
+	// failure denies; a missing/blocked account is recorded as revoked.
+	cur, err := r.users.Get(ctx, u.ID)
+	if err != nil {
+		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: reload user failed; denying")
+		r.recordDenial(entry, now)
+		return
+	}
+	u = cur
+	// Snapshot the login generation + credential this entry is built from so
+	// fresh() can force a re-check after re-login. OAuthLoginVersion changes on
+	// every accepted login even when encryption is disabled.
+	entry.loginVersion = u.OAuthLoginVersion
 	entry.credential = u.OAuthTokenCiphertext
 
-	// Already deactivated: no IdP call needed.
-	if u.DeactivatedAt != nil {
+	// Already blocked (deactivated/disabled/deleted): no IdP call needed.
+	if u.AccessBlocked() {
 		entry.state = stateRevoked
 		entry.checkedAt = now
 		entry.expiresAt = now.Add(jitteredTTL(stateRevoked, r.cfg.Interval, r.cfg.Grace))
@@ -264,9 +322,16 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 	if err != nil {
 		switch {
 		case errors.Is(err, errOAuthNoCredential):
-			// No credential: allow without deactivation (S8), bounded by session_max_age.
+			// No credential: allow without deactivation (S8), bounded by
+			// session_max_age. Never fabricate a successful entry from a store
+			// failure.
+			gids, gerr := r.groups.GroupsForUser(ctx, u.ID)
+			if gerr != nil {
+				r.logger.WithError(gerr).WithField("user_id", u.ID).Warn("oauth: load membership failed; denying")
+				r.recordDenial(entry, now)
+				return
+			}
 			r.logger.WithField("user_id", u.ID).Debug("oauth: no stored credential, allowing (bounded by session_max_age)")
-			gids, _ := r.groups.GroupsForUser(ctx, u.ID)
 			entry.state = stateOK
 			entry.groupIDs = groupIDs(gids)
 			entry.checkedAt = now
@@ -274,11 +339,8 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 			entry.expiresAt = now.Add(jitteredTTL(stateOK, r.cfg.Interval, r.cfg.Grace))
 			return
 		case errors.Is(err, errOAuthCredentialExpired):
-			// Unusable credential (expired/rotated/revoked — ambiguous per
-			// RFC 6749 §5.2): NOT evidence of revocation. Record stateExpired
-			// WITHOUT revoke() (no deactivation, no API-token deletion) and
-			// preserve any prior groupIDs/lastGood so the grace/fail policy
-			// can serve them.
+			// Unusable credential: NOT evidence of revocation. Record
+			// stateExpired WITHOUT revoke() and preserve prior groups/lastGood.
 			r.logger.WithFields(logrus.Fields{
 				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
 			}).Warn("oauth: credential expired, cannot verify membership (serving cached groups within grace / denying after grace)")
@@ -287,20 +349,18 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 			entry.expiresAt = now.Add(jitteredTTL(stateExpired, r.cfg.Interval, r.cfg.Grace))
 			return
 		case errors.Is(err, errOAuthNotLeaderRefresh):
-			// This pod is not the Raft leader (or lost leadership mid-refresh):
-			// it must not rotate a credential it cannot persist (issue #61).
-			// Serve the leader's replicated membership from the store instead of
-			// denying — the leader is the only writer, so the replicated groups
-			// are its last reconciled view. Record stateUnavailable (never
-			// deactivate); the leader refreshes and replicates the fresh
-			// credential. Without this seeding a follower would deny every OIDC
-			// user after a rollout (its cache is cold and it never revalidates),
-			// which is exactly the same-user lockout #61 fixes.
+			// Follower: serve the leader's replicated membership. A store error
+			// must deny rather than record authoritative success.
 			r.logger.WithFields(logrus.Fields{
 				"user_id": u.ID, "oauth_provider": u.OAuthProvider,
 			}).Debug("oauth: refresh requires raft leadership, serving replicated membership")
+			gs, gerr := r.groups.GroupsForUser(ctx, u.ID)
+			if gerr != nil {
+				r.logger.WithError(gerr).WithField("user_id", u.ID).Warn("oauth: load replicated membership failed; denying")
+				r.recordDenial(entry, now)
+				return
+			}
 			entry.state = stateUnavailable
-			gs, _ := r.groups.GroupsForUser(ctx, u.ID)
 			entry.groupIDs = groupIDs(gs)
 			entry.lastGood = now
 			entry.checkedAt = now
@@ -322,15 +382,19 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 		}
 	}
 
-	// Success: reconcile OAuth-managed memberships (add new, remove stale).
+	// Success: prepare the desired OAuth-managed memberships, apply the role on
+	// a private copy, then persist state+memberships in ONE revision-checked
+	// commit. The credential source may already have advanced u.Revision during
+	// Revalidate, so the final mutation uses the latest revision.
 	mapped := r.mapper.mapIfActive(groups)
-	gids, err := reconcileMemberships(ctx, r.groups, r.logger, u, mapped, r.mappedGroupMaxRunnerSessions)
-	if err != nil {
-		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: membership reconciliation failed during revalidation")
-	} else {
-		u.OAuthGroupIDs = gids
+	managedIDs, gerr := resolveOAuthGroupIDs(ctx, r.groups, r.logger, mapped, r.mappedGroupMaxRunnerSessions)
+	if gerr != nil {
+		r.logger.WithError(gerr).WithField("user_id", u.ID).Warn("oauth: prepare membership failed during revalidation")
+		entry.state = stateUnavailable
+		entry.checkedAt = now
+		entry.expiresAt = now.Add(jitteredTTL(stateUnavailable, r.cfg.Interval, r.cfg.Grace))
+		return
 	}
-	u.OAuthGroups = normalizeGroupList(groups)
 	if roleChanged := applyOAuthAdminRole(u, r.adminGroups, groups); roleChanged {
 		r.logger.WithFields(logrus.Fields{
 			"user_id":        u.ID,
@@ -339,40 +403,67 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 			"oauth_admin":    u.OAuthAdmin,
 		}).Info("oauth: admin role changed via admin_groups (revalidation)")
 	}
-	if err := r.users.Update(ctx, u); err != nil {
-		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: persist revalidated user failed")
+	res, cerr := r.users.CommitOAuth(ctx, domain.OAuthUserMutation{
+		Kind: domain.OAuthMembershipCommit,
+		User: &domain.User{
+			ID:          u.ID,
+			Role:        u.Role,
+			OAuthAdmin:  u.OAuthAdmin,
+			OAuthGroups: normalizeGroupList(groups),
+		},
+		ExpectedRevision: u.Revision,
+		ManagedGroupIDs:  managedIDs,
+	})
+	if cerr != nil {
+		if errors.Is(cerr, domain.ErrStaleUser) || errors.Is(cerr, domain.ErrAccountBlocked) || errors.Is(cerr, domain.ErrNotFound) {
+			// A concurrent login/ban/deletion won: publish a short-lived denial
+			// without reusing old groups or lastGood.
+			r.logger.WithError(cerr).WithField("user_id", u.ID).Warn("oauth: revalidation commit conflicted; denying")
+			r.recordDenial(entry, now)
+			return
+		}
+		r.logger.WithError(cerr).WithField("user_id", u.ID).Warn("oauth: persist revalidated user failed")
+		entry.state = stateUnavailable
+		entry.checkedAt = now
+		entry.expiresAt = now.Add(jitteredTTL(stateUnavailable, r.cfg.Interval, r.cfg.Grace))
+		return
 	}
-	// Re-snapshot the credential: Revalidate's refreshingSource may have rotated and
-	// persisted u.OAuthTokenCiphertext mid-check (oauth_oidc.go refreshingSource.Token).
-	// Keeping the top-of-refresh snapshot would make a later stateExpired entry appear
-	// to have a "changed credential" and force one spurious re-check.
-	entry.credential = u.OAuthTokenCiphertext
+
+	// Re-snapshot the committed generation. A committed membership mutation
+	// advanced the revision but not the login version/credential, so the entry
+	// remains fresh for the next caller without a spurious re-check.
+	entry.loginVersion = res.User.OAuthLoginVersion
+	entry.credential = res.User.OAuthTokenCiphertext
 	entry.state = stateOK
-	gs, _ := r.groups.GroupsForUser(ctx, u.ID)
-	entry.groupIDs = groupIDs(gs)
+	entry.groupIDs = append([]string(nil), res.GroupIDs...)
 	entry.checkedAt = now
 	entry.lastGood = now
 	entry.expiresAt = now.Add(jitteredTTL(stateOK, r.cfg.Interval, r.cfg.Grace))
 }
 
-// revoke marks the user as deactivated and revokes their API token. The write
-// uses a detached, bounded context so a cancelled request cannot lose the
-// revocation write (best-effort on followers, where the leader independently
-// revalidates and persists deactivation).
-func (r *OAuthRevalidator) revoke(_ context.Context, u *domain.User) {
-	now := r.clock()
-	u.DeactivatedAt = &now
+// recordDenial stores a short-lived denial with no group or lastGood reuse.
+func (r *OAuthRevalidator) recordDenial(entry *revalidationEntry, now time.Time) {
+	entry.state = stateUnavailable
+	entry.groupIDs = nil
+	entry.lastGood = time.Time{}
+	entry.checkedAt = now
+	entry.expiresAt = now.Add(jitteredTTL(stateUnavailable, r.cfg.Interval, r.cfg.Grace))
+}
 
+// revoke atomically records IdP revocation (deactivation + token deletion +
+// token-version bump) as ONE revision-checked commit. There is no separate
+// whole-user write or API-token deletion. The write uses a detached, bounded
+// context so a cancelled request cannot lose it.
+func (r *OAuthRevalidator) revoke(_ context.Context, u *domain.User) {
 	persistCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	if err := r.users.Update(persistCtx, u); err != nil {
-		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: deactivate user failed (not leader?)")
-	}
-	if r.tokens != nil {
-		if err := r.tokens.Revoke(persistCtx, u.ID); err != nil && !errors.Is(err, domain.ErrNotFound) {
-			r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: revoke api token failed")
-		}
+	if _, err := r.users.CommitOAuth(persistCtx, domain.OAuthUserMutation{
+		Kind:             domain.OAuthRevocationCommit,
+		User:             &domain.User{ID: u.ID},
+		ExpectedRevision: u.Revision,
+	}); err != nil {
+		r.logger.WithError(err).WithField("user_id", u.ID).Warn("oauth: deactivate user failed (not leader or conflict)")
 	}
 	r.logger.WithFields(logrus.Fields{
 		"user_id":        u.ID,

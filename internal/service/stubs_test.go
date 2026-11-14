@@ -3,19 +3,25 @@ package service
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// stubUserRepo is an in-memory UserRepository for service tests.
+// stubUserRepo is an in-memory, CAS-aware UserRepository for service tests. It
+// is mutex-guarded and deep-copies on read/write so concurrent tests are
+// race-clean and callers can never mutate stored state by aliasing.
 type stubUserRepo struct {
+	mu      sync.Mutex
 	users   map[string]*domain.User
 	byName  map[string]*domain.User
 	byOAuth map[string]*domain.User
 	// updateErr, when non-nil, is returned by Update — used to simulate a
 	// lost-leadership domain.ErrNotLeader on the OIDC credential persist.
 	updateErr error
+	// commitErr, when non-nil, is returned by CommitOAuth (before any effect).
+	commitErr error
 }
 
 func newStubUserRepo(users ...*domain.User) *stubUserRepo {
@@ -25,72 +31,250 @@ func newStubUserRepo(users ...*domain.User) *stubUserRepo {
 		byOAuth: make(map[string]*domain.User),
 	}
 	for _, u := range users {
-		r.users[u.ID] = u
-		r.byName[u.Username] = u
-		if u.OAuthProvider != "" {
-			r.byOAuth[u.OAuthProvider+":"+u.OAuthID] = u
-		}
+		r.store(copyStubUser(u))
 	}
 	return r
 }
 
+// copyStubUser returns a deep copy of u.
+func copyStubUser(u *domain.User) *domain.User {
+	cp := *u
+	cp.OAuthGroupIDs = append([]string(nil), u.OAuthGroupIDs...)
+	cp.OAuthGroups = append([]string(nil), u.OAuthGroups...)
+	if u.DeactivatedAt != nil {
+		t := *u.DeactivatedAt
+		cp.DeactivatedAt = &t
+	}
+	if u.DisabledAt != nil {
+		t := *u.DisabledAt
+		cp.DisabledAt = &t
+	}
+	if u.DeletedAt != nil {
+		t := *u.DeletedAt
+		cp.DeletedAt = &t
+	}
+	return &cp
+}
+
+// store indexes u's copies under id/name/oauth. Caller holds the lock (or is
+// the constructor).
+func (r *stubUserRepo) store(u *domain.User) {
+	cp := copyStubUser(u)
+	r.users[cp.ID] = cp
+	r.byName[cp.Username] = cp
+	if cp.OAuthProvider != "" {
+		r.byOAuth[cp.OAuthProvider+":"+cp.OAuthID] = cp
+	}
+}
+
+func (r *stubUserRepo) removeIndices(u *domain.User) {
+	delete(r.byName, u.Username)
+	if u.OAuthProvider != "" {
+		delete(r.byOAuth, u.OAuthProvider+":"+u.OAuthID)
+	}
+}
+
 func (r *stubUserRepo) Create(_ context.Context, u *domain.User) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if _, ok := r.byName[u.Username]; ok {
 		return errors.New("duplicate username")
 	}
-	r.users[u.ID] = u
-	r.byName[u.Username] = u
-	if u.OAuthProvider != "" {
-		r.byOAuth[u.OAuthProvider+":"+u.OAuthID] = u
-	}
+	u.Revision = 1
+	r.store(u)
 	return nil
 }
 func (r *stubUserRepo) Get(_ context.Context, id string) (*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	u, ok := r.users[id]
 	if !ok {
 		return nil, domain.ErrNotFound
 	}
-	return u, nil
+	return copyStubUser(u), nil
 }
 func (r *stubUserRepo) GetByUsername(_ context.Context, name string) (*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	u, ok := r.byName[name]
 	if !ok {
 		return nil, domain.ErrNotFound
 	}
-	return u, nil
+	return copyStubUser(u), nil
 }
 func (r *stubUserRepo) GetByOAuth(_ context.Context, provider, oauthID string) (*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	u, ok := r.byOAuth[provider+":"+oauthID]
 	if !ok {
 		return nil, domain.ErrNotFound
 	}
-	return u, nil
+	return copyStubUser(u), nil
 }
 func (r *stubUserRepo) List(context.Context) ([]*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	out := make([]*domain.User, 0, len(r.users))
 	for _, u := range r.users {
-		out = append(out, u)
+		out = append(out, copyStubUser(u))
 	}
 	return out, nil
 }
 func (r *stubUserRepo) Update(_ context.Context, u *domain.User) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	if r.updateErr != nil {
 		return r.updateErr
 	}
-	if _, ok := r.users[u.ID]; !ok {
+	cur, ok := r.users[u.ID]
+	if !ok {
 		return domain.ErrNotFound
 	}
-	r.users[u.ID] = u
+	if cur.DeletedAt != nil {
+		return domain.ErrAccountBlocked
+	}
+	if u.Revision != cur.Revision {
+		return domain.ErrStaleUser
+	}
+	r.removeIndices(cur)
+	cp := copyStubUser(u)
+	cp.Revision = cur.Revision + 1
+	r.store(cp)
+	u.Revision = cp.Revision
 	return nil
 }
-func (r *stubUserRepo) Delete(_ context.Context, id string) error {
-	if _, ok := r.users[id]; !ok {
+func (r *stubUserRepo) Delete(_ context.Context, actorID, id string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.users[id]
+	if !ok {
 		return domain.ErrNotFound
 	}
-	delete(r.users, id)
+	if u.DeletedAt != nil {
+		return nil
+	}
+	if actorID != "" && actorID == id {
+		return domain.ErrForbidden
+	}
+	now := time.Now().UTC()
+	u.DeletedAt = &now
+	u.DisabledAt = &now
+	u.PasswordHash = ""
+	u.OAuthTokenCiphertext = ""
+	u.OAuthGroups = nil
+	u.OAuthGroupIDs = nil
+	u.OAuthAdmin = false
+	u.TokenVersion++
+	u.Revision++
 	return nil
 }
-func (r *stubUserRepo) Count(context.Context) (int, error) { return len(r.users), nil }
+
+// SetState mirrors the FSM lifecycle semantics for service tests.
+func (r *stubUserRepo) SetState(_ context.Context, actorID, id string, action domain.UserStateAction) (*domain.User, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	u, ok := r.users[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	now := time.Now().UTC()
+	switch action {
+	case domain.UserDisable:
+		if actorID == id {
+			return nil, domain.ErrForbidden
+		}
+		if u.DisabledAt == nil {
+			u.DisabledAt = &now
+			u.TokenVersion++
+			u.Revision++
+		}
+	case domain.UserEnable:
+		if u.DeletedAt != nil {
+			return nil, domain.ErrAccountBlocked
+		}
+		if u.DisabledAt != nil {
+			u.DisabledAt = nil
+			u.Revision++
+		}
+	case domain.UserRestore:
+		if u.DeletedAt != nil {
+			u.DeletedAt = nil
+			if u.DisabledAt == nil {
+				u.DisabledAt = &now
+			}
+			u.Revision++
+		}
+	default:
+		return nil, domain.ErrValidation
+	}
+	return copyStubUser(u), nil
+}
+
+// CommitOAuth mirrors the FSM's whitelisted, revision-checked atomic mutation.
+func (r *stubUserRepo) CommitOAuth(_ context.Context, m domain.OAuthUserMutation) (*domain.OAuthUserResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if m.User == nil {
+		return nil, domain.ErrValidation
+	}
+	if r.commitErr != nil {
+		return nil, r.commitErr
+	}
+	cur, ok := r.users[m.User.ID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	if cur.Revision != m.ExpectedRevision {
+		return nil, domain.ErrStaleUser
+	}
+	if cur.DeletedAt != nil {
+		return nil, domain.ErrAccountBlocked
+	}
+	switch m.Kind {
+	case domain.OAuthLoginCommit:
+		if cur.DisabledAt != nil {
+			return nil, domain.ErrAccountBlocked
+		}
+		cur.Role = m.User.Role
+		cur.OAuthAdmin = m.User.OAuthAdmin
+		cur.OAuthTokenCiphertext = m.User.OAuthTokenCiphertext
+		cur.OAuthGroups = append([]string(nil), m.User.OAuthGroups...)
+		cur.DeactivatedAt = nil
+		cur.OAuthLoginVersion++
+		cur.OAuthGroupIDs = append([]string(nil), m.ManagedGroupIDs...)
+	case domain.OAuthMembershipCommit:
+		if cur.DisabledAt != nil || cur.DeactivatedAt != nil {
+			return nil, domain.ErrAccountBlocked
+		}
+		cur.Role = m.User.Role
+		cur.OAuthAdmin = m.User.OAuthAdmin
+		cur.OAuthGroups = append([]string(nil), m.User.OAuthGroups...)
+		cur.OAuthGroupIDs = append([]string(nil), m.ManagedGroupIDs...)
+	case domain.OAuthCredentialCommit:
+		if cur.DisabledAt != nil || cur.DeactivatedAt != nil {
+			return nil, domain.ErrAccountBlocked
+		}
+		cur.OAuthTokenCiphertext = m.User.OAuthTokenCiphertext
+	case domain.OAuthRevocationCommit:
+		if cur.DisabledAt != nil {
+			return nil, domain.ErrAccountBlocked
+		}
+		if cur.DeactivatedAt == nil {
+			now := time.Now().UTC()
+			cur.DeactivatedAt = &now
+			cur.TokenVersion++
+		}
+	default:
+		return nil, domain.ErrValidation
+	}
+	cur.Revision++
+	return &domain.OAuthUserResult{User: copyStubUser(cur), GroupIDs: append([]string(nil), cur.OAuthGroupIDs...)}, nil
+}
+func (r *stubUserRepo) Count(context.Context) (int, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.users), nil
+}
 
 // stubGroupRepo is an in-memory GroupRepository for service tests.
 type stubGroupRepo struct {

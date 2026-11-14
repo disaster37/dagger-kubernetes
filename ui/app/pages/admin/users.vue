@@ -15,10 +15,14 @@
 
     <UCard>
       <UTable :data="users" :columns="columns">
+        <template #status-cell="{ row }">
+          <UBadge :color="statusColor(row.original)" variant="soft">{{ statusLabel(row.original) }}</UBadge>
+        </template>
         <template #role-cell="{ row }">
           <USelect
             :model-value="row.original.role"
             :items="roleOptions"
+            :disabled="!!row.original.deleted_at || !!row.original.disabled_at"
             @update:model-value="(v) => updateRole(row.original, String(v))"
           />
         </template>
@@ -48,16 +52,56 @@
         </template>
         <template #actions-cell="{ row }">
           <div class="flex flex-wrap gap-1">
-            <UButton size="xs" color="neutral" variant="outline" @click="manageGroups(row.original)">Groups</UButton>
-            <UButton size="xs" color="neutral" variant="outline" @click="openResetPw(row.original)">Reset PW</UButton>
-            <UButton v-if="row.original.token" size="xs" color="neutral" variant="outline" @click="askRevokeToken(row.original)">Revoke token</UButton>
-            <UButton
-              size="xs"
-              color="error"
-              variant="soft"
-              :disabled="row.original.id === auth.user?.id"
-              @click="askDeleteUser(row.original)"
-            >Delete</UButton>
+            <!-- A tombstone only supports Restore: credentials and memberships
+                 were removed and identity/username stay reserved. -->
+            <template v-if="row.original.deleted_at">
+              <UButton size="xs" color="primary" variant="soft" @click="askRestore(row.original)">Restore</UButton>
+            </template>
+            <template v-else>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :disabled="!!row.original.disabled_at"
+                @click="manageGroups(row.original)"
+              >Groups</UButton>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :disabled="!!row.original.disabled_at"
+                @click="openResetPw(row.original)"
+              >Reset PW</UButton>
+              <UButton
+                v-if="row.original.token"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                @click="askRevokeToken(row.original)"
+              >Revoke token</UButton>
+              <UButton
+                v-if="row.original.disabled_at"
+                size="xs"
+                color="primary"
+                variant="soft"
+                @click="askEnable(row.original)"
+              >Enable</UButton>
+              <UButton
+                v-else
+                size="xs"
+                color="warning"
+                variant="soft"
+                :disabled="row.original.id === auth.user?.id"
+                @click="askDisable(row.original)"
+              >Disable</UButton>
+              <UButton
+                size="xs"
+                color="error"
+                variant="soft"
+                :disabled="row.original.id === auth.user?.id"
+                @click="askDeleteUser(row.original)"
+              >Delete</UButton>
+            </template>
           </div>
         </template>
       </UTable>
@@ -112,7 +156,7 @@
 
 <script setup lang="ts">
 import { useAuthStore } from '~/stores/auth'
-import { listUsers, createUser as apiCreateUser, updateUser, deleteUser as apiDeleteUser, resetPassword, setUserGroups, listGroups, revokeUserToken } from '~/api/client'
+import { listUsers, createUser as apiCreateUser, updateUser, deleteUser as apiDeleteUser, resetPassword, setUserGroups, listGroups, revokeUserToken, setUserState } from '~/api/client'
 import type { UserRow, Group } from '~/api/types'
 
 const auth = useAuthStore()
@@ -138,8 +182,23 @@ const roleOptions = [
   { label: 'admin', value: 'admin' },
 ]
 
+// statusLabel/statusColor derive the account status: Deleted > Disabled >
+// IdP-revoked > Active.
+function statusLabel(u: UserRow): string {
+  if (u.deleted_at) return 'Deleted'
+  if (u.disabled_at) return 'Disabled'
+  if (u.deactivated_at) return 'IdP revoked'
+  return 'Active'
+}
+function statusColor(u: UserRow): 'error' | 'warning' | 'success' {
+  if (u.deleted_at) return 'error'
+  if (u.disabled_at || u.deactivated_at) return 'warning'
+  return 'success'
+}
+
 const columns = [
   { id: 'username', accessorKey: 'username', header: 'Username' },
+  { id: 'status', header: 'Status' },
   { id: 'role', accessorKey: 'role', header: 'Role' },
   { id: 'groups', accessorKey: 'groups', header: 'Groups' },
   { id: 'oauth_groups', accessorKey: 'oauth_groups', header: 'OAuth groups' },
@@ -185,8 +244,29 @@ function updateRole(u: UserRow, role: string) {
 
 function askDeleteUser(u: UserRow) {
   confirmTitle.value = 'Delete user'
-  confirmMessage.value = `Delete user ${u.username}?`
+  confirmMessage.value = `Delete user ${u.username}? Their username and identity stay reserved, credentials and group memberships/tokens are removed, and outstanding sessions are invalidated. The account can later be restored (disabled, credentialless).`
   confirmAction = () => run(() => apiDeleteUser(u.id), 'Failed to delete user')
+  confirmOpen.value = true
+}
+
+function askDisable(u: UserRow) {
+  confirmTitle.value = 'Disable user'
+  confirmMessage.value = `Disable ${u.username}? Their API token is revoked and existing sessions are invalidated. They cannot sign in again until enabled.`
+  confirmAction = () => run(() => setUserState(u.id, 'disable'), 'Failed to disable user')
+  confirmOpen.value = true
+}
+
+function askEnable(u: UserRow) {
+  confirmTitle.value = 'Enable user'
+  confirmMessage.value = `Enable ${u.username}? The account becomes usable again with its existing credentials; a fresh API token can be generated.`
+  confirmAction = () => run(() => setUserState(u.id, 'enable'), 'Failed to enable user')
+  confirmOpen.value = true
+}
+
+function askRestore(u: UserRow) {
+  confirmTitle.value = 'Restore user'
+  confirmMessage.value = `Restore ${u.username}? The identity and username stay reserved. The account is restored disabled and credentialless: enable it and set a new password (or sign in again with the Identity Provider) to use it.`
+  confirmAction = () => run(() => setUserState(u.id, 'restore'), 'Failed to restore user')
   confirmOpen.value = true
 }
 

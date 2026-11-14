@@ -234,3 +234,126 @@ func TestUserTokenRevokeAdmin(t *testing.T) {
 		t.Fatalf("revoke: %d", resp.Result().StatusCode())
 	}
 }
+
+func TestUserStateLifecycle(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+	bearer := env.loginAsAdmin(t)
+
+	// Create a plain user to manage.
+	body := `{"username":"bob","password":"password123","role":"user"}`
+	resp := ut.PerformRequest(e, "POST", "/api/v1/users", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Authorization", Value: bearer},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusCreated {
+		t.Fatalf("create: %d", resp.Result().StatusCode())
+	}
+	var created map[string]any
+	if err := json.Unmarshal(resp.Result().Body(), &created); err != nil {
+		t.Fatalf("decode create: %v", err)
+	}
+	id, _ := created["id"].(string)
+	if id == "" {
+		t.Fatal("created user has no id")
+	}
+
+	state := func(action string) (*ut.ResponseRecorder, map[string]any) {
+		payload := `{"action":"` + action + `"}`
+		r := ut.PerformRequest(e, "POST", "/api/v1/users/"+id+"/state",
+			&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+			ut.Header{Key: "Authorization", Value: bearer},
+			ut.Header{Key: "Content-Type", Value: "application/json; charset=utf-8"})
+		var out map[string]any
+		_ = json.Unmarshal(r.Result().Body(), &out)
+		return r, out
+	}
+
+	// Disable -> disabled_at present.
+	r, out := state("disable")
+	if r.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("disable: %d", r.Result().StatusCode())
+	}
+	if out["disabled_at"] == nil {
+		t.Fatalf("disable must set disabled_at: %v", out)
+	}
+	// Enable -> disabled_at absent.
+	r, out = state("enable")
+	if r.Result().StatusCode() != http.StatusOK || out["disabled_at"] != nil {
+		t.Fatalf("enable: %d %v", r.Result().StatusCode(), out)
+	}
+	// Delete -> 204, tombstone listed with deleted_at.
+	dr := ut.PerformRequest(e, "DELETE", "/api/v1/users/"+id, nil, ut.Header{Key: "Authorization", Value: bearer})
+	if dr.Result().StatusCode() != http.StatusNoContent {
+		t.Fatalf("delete: %d", dr.Result().StatusCode())
+	}
+	lr := ut.PerformRequest(e, "GET", "/api/v1/users", nil, ut.Header{Key: "Authorization", Value: bearer})
+	var rows []map[string]any
+	_ = json.Unmarshal(lr.Result().Body(), &rows)
+	var tombstone map[string]any
+	for _, row := range rows {
+		if row["id"] == id {
+			tombstone = row
+		}
+	}
+	if tombstone == nil || tombstone["deleted_at"] == nil {
+		t.Fatalf("deleted user must be listed as a tombstone: %v", rows)
+	}
+	// Enable on a tombstone -> 403 account blocked.
+	r, _ = state("enable")
+	if r.Result().StatusCode() != http.StatusForbidden {
+		t.Fatalf("enable tombstone: %d, want 403", r.Result().StatusCode())
+	}
+	// Restore -> deleted_at absent, disabled_at present.
+	r, out = state("restore")
+	if r.Result().StatusCode() != http.StatusOK || out["deleted_at"] != nil || out["disabled_at"] == nil {
+		t.Fatalf("restore: %d %v", r.Result().StatusCode(), out)
+	}
+}
+
+func TestUserStateEndpointGuards(t *testing.T) {
+	env := newTestEnv(t)
+	e := newAuthEngine(env.server)
+	adminBearer := env.loginAsAdmin(t)
+
+	admin, err := env.users.GetByUsername(context.Background(), "admin")
+	if err != nil {
+		t.Fatalf("load admin: %v", err)
+	}
+
+	// Self-disable is rejected (admin is the only admin).
+	payload := `{"action":"disable"}`
+	self := ut.PerformRequest(e, "POST", "/api/v1/users/"+admin.ID+"/state",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "Authorization", Value: adminBearer},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if self.Result().StatusCode() != http.StatusForbidden {
+		t.Fatalf("self-disable: %d, want 403", self.Result().StatusCode())
+	}
+
+	// Wrong content type -> 415.
+	other := ut.PerformRequest(e, "POST", "/api/v1/users/"+admin.ID+"/state",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "Authorization", Value: adminBearer},
+		ut.Header{Key: "Content-Type", Value: "text/plain"})
+	if other.Result().StatusCode() != http.StatusUnsupportedMediaType {
+		t.Fatalf("wrong content type: %d, want 415", other.Result().StatusCode())
+	}
+
+	// Non-admin -> 403.
+	userBearer, u := env.createUserAndToken(t)
+	nonAdmin := ut.PerformRequest(e, "POST", "/api/v1/users/"+u.ID+"/state",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "Authorization", Value: userBearer},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if nonAdmin.Result().StatusCode() != http.StatusForbidden {
+		t.Fatalf("non-admin state: %d, want 403", nonAdmin.Result().StatusCode())
+	}
+
+	// Unauthenticated -> 401.
+	anon := ut.PerformRequest(e, "POST", "/api/v1/users/"+u.ID+"/state",
+		&ut.Body{Body: strings.NewReader(payload), Len: len(payload)},
+		ut.Header{Key: "Content-Type", Value: "application/json"})
+	if anon.Result().StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("anonymous state: %d, want 401", anon.Result().StatusCode())
+	}
+}

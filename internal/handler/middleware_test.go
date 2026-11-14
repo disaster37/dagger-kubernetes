@@ -36,6 +36,7 @@ func newAuthEngine(s *Server) *route.Engine {
 	e.GET("/api/v1/users/:id", s.adminOnly(s.handleUserGet))
 	e.PUT("/api/v1/users/:id", s.adminOnly(s.handleUserUpdate))
 	e.DELETE("/api/v1/users/:id", s.adminOnly(s.handleUserDelete))
+	e.POST("/api/v1/users/:id/state", s.adminOnly(s.handleUserState))
 	e.PUT("/api/v1/users/:id/password", s.adminOnly(s.handleUserResetPassword))
 	e.PUT("/api/v1/users/:id/groups", s.adminOnly(s.handleUserGroups))
 	e.GET("/api/v1/users/:id/token", s.adminOnly(s.handleUserTokenMeta))

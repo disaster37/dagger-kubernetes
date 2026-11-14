@@ -83,3 +83,14 @@ entirely).
   (bearer → API token → JWT → legacy token) is unchanged.
 - Upgrade is a no-op for existing records and tokens; downgrade (older binary
   ignoring the claim) re-opens the pre-ADR-045 window but breaks nothing.
+
+## Follow-up (dated 2026-10-15, ADR-049)
+
+Token-version writes are now CAS-protected: `UserRepository.Update` uses the
+loaded revision as an optimistic-concurrency precondition and advances it on
+success, so a delayed stale write can no longer roll back a newer version bump.
+An administrator Disable, a soft Delete and an IdP revocation each increment
+`token_version` atomically (the revocation also deletes the API token in the
+same FSM command), so a JWT minted before a revocation cannot revive after a
+later re-login. A fresh OAuth login mints the current version and does not clear
+an administrator disable or deletion.

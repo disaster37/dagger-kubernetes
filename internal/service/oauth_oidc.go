@@ -473,33 +473,9 @@ func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]st
 	}
 
 	ts := s.tokenSource(ctx, p, u, cred)
-
-	ui, err := p.UserInfo(ctx, ts)
+	ui, err := s.userInfo(ctx, p, ts, u)
 	if err != nil {
-		if !oauthTokenRevoked(err) {
-			return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport => unavailable
-		}
-		// Userinfo 401: the access token may simply be expired while the
-		// credential is still valid. Attempt one refresh via tokenSource,
-		// then retry userinfo once before concluding the credential is
-		// unusable (CWE-613 residual risk: clock-skew false revocation).
-		s.logger.WithField("user_id", u.ID).Debug("oidc: userinfo returned 401, attempting token refresh")
-		if _, refreshErr := ts.Token(); refreshErr != nil {
-			if errors.Is(refreshErr, errOAuthNotLeaderRefresh) {
-				return nil, errOAuthNotLeaderRefresh
-			}
-			if oauthTokenRevoked(refreshErr) {
-				return nil, errOAuthCredentialExpired
-			}
-			return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport on refresh => unavailable
-		}
-		ui, err = p.UserInfo(ctx, ts)
-		if err != nil {
-			if oauthTokenRevoked(err) {
-				return nil, errOAuthCredentialExpired
-			}
-			return nil, fmt.Errorf("oidc: userinfo: %w", err)
-		}
+		return nil, err
 	}
 	var claims map[string]any
 	if err := ui.Claims(&claims); err != nil {
@@ -512,9 +488,63 @@ func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]st
 	return groups, nil
 }
 
-// tokenSource returns a TokenSource for cred that refreshes (and best-effort
-// persists) the stored credential when the access token is expired.
-func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *domain.User, cred *oauthCredential) oauth2.TokenSource {
+// userInfo fetches the userinfo endpoint, retrying once through a token
+// refresh on a 401. go-oidc wraps token-source errors with %v, destroying the
+// errors.Is chain, so the refreshingSource's recorded persistErr is preferred
+// over the wrapped error for account-state classification.
+func (s *OIDCOAuthService) userInfo(ctx context.Context, p oidcProvider, ts *refreshingSource, u *domain.User) (*oidc.UserInfo, error) {
+	ui, err := p.UserInfo(ctx, ts)
+	if err == nil {
+		return ui, nil
+	}
+	if ts.persistErr != nil {
+		return nil, persistError(ts.persistErr)
+	}
+	if !oauthTokenRevoked(err) {
+		return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport => unavailable
+	}
+	// Userinfo 401: the access token may simply be expired while the credential
+	// is still valid. Attempt one refresh via tokenSource, then retry userinfo
+	// once before concluding the credential is unusable (CWE-613 residual risk:
+	// clock-skew false revocation).
+	s.logger.WithField("user_id", u.ID).Debug("oidc: userinfo returned 401, attempting token refresh")
+	if _, refreshErr := ts.Token(); refreshErr != nil {
+		if errors.Is(refreshErr, errOAuthNotLeaderRefresh) {
+			return nil, errOAuthNotLeaderRefresh
+		}
+		if ts.persistErr != nil {
+			return nil, persistError(ts.persistErr)
+		}
+		if oauthTokenRevoked(refreshErr) {
+			return nil, errOAuthCredentialExpired
+		}
+		return nil, fmt.Errorf("oidc: userinfo: %w", err) // transport on refresh => unavailable
+	}
+	ui, err = p.UserInfo(ctx, ts)
+	if err != nil {
+		if ts.persistErr != nil {
+			return nil, persistError(ts.persistErr)
+		}
+		if oauthTokenRevoked(err) {
+			return nil, errOAuthCredentialExpired
+		}
+		return nil, fmt.Errorf("oidc: userinfo: %w", err)
+	}
+	return ui, nil
+}
+
+// persistError maps a recorded persistence failure to the caller-facing error,
+// normalizing any not-leader cause to the sentinel.
+func persistError(err error) error {
+	if errors.Is(err, errOAuthNotLeaderRefresh) || errors.Is(err, domain.ErrNotLeader) {
+		return errOAuthNotLeaderRefresh
+	}
+	return err
+}
+
+// tokenSource returns a refreshingSource for cred that refreshes and persists
+// the stored credential when the access token is expired.
+func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *domain.User, cred *oauthCredential) *refreshingSource {
 	return &refreshingSource{s: s, ctx: ctx, p: p, u: u, cred: cred, logger: s.logger}
 }
 
@@ -558,6 +588,10 @@ type refreshingSource struct {
 	u      *domain.User
 	cred   *oauthCredential
 	logger *logrus.Logger
+	// persistErr records the original persistence failure (stale/blocked/
+	// encryption/leadership) so Revalidate can honor it even after go-oidc
+	// wraps the userinfo error and breaks errors.Is.
+	persistErr error
 }
 
 func (rs *refreshingSource) Token() (*oauth2.Token, error) {
@@ -570,35 +604,46 @@ func (rs *refreshingSource) Token() (*oauth2.Token, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Persist the refreshed credential best-effort (log Warn; never fail
-	// revalidation on a write error). Rotated refresh tokens are saved so
-	// subsequent revalidations use the fresh token. Uses a detached context
-	// so a cancelled request cannot lose the refreshed token (the next
-	// revalidation would try the old token, which the IdP may have rotated).
-	if tok.AccessToken != rs.cred.AccessToken || tok.RefreshToken != rs.cred.RefreshToken {
+	// Persist the refreshed credential atomically. A rotation that cannot be
+	// persisted must NOT be reported as success: the caller would keep using a
+	// token the IdP has already replaced.
+	if tok.AccessToken != rs.cred.AccessToken ||
+		tok.RefreshToken != rs.cred.RefreshToken ||
+		!tok.Expiry.Equal(rs.cred.ExpiresAt) {
 		rs.cred.AccessToken = tok.AccessToken
 		rs.cred.RefreshToken = tok.RefreshToken
 		rs.cred.ExpiresAt = tok.Expiry
-		ct, err := encryptOAuthCredential(rs.s.encKey, rs.cred)
-		if err != nil {
-			rs.logger.WithError(err).WithField("user_id", rs.u.ID).Warn("oauth: re-encrypt refreshed credential failed")
-		} else if ct != "" {
-			rs.u.OAuthTokenCiphertext = ct
+		ct, eerr := encryptOAuthCredential(rs.s.encKey, rs.cred)
+		if eerr != nil {
+			rs.persistErr = fmt.Errorf("oauth: re-encrypt refreshed credential: %w", eerr)
+			rs.logger.WithError(eerr).WithField("user_id", rs.u.ID).Warn("oauth: re-encrypt refreshed credential failed")
+			return nil, rs.persistErr
+		}
+		if ct != "" {
 			persistCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
-			if err := rs.s.users.Update(persistCtx, rs.u); err != nil {
-				// After leader-only gating (issue #61) this persist runs only on
-				// the leader, so ErrNotLeader here means leadership was lost
-				// mid-refresh: the rotation did not land. Surface it as
-				// errOAuthNotLeaderRefresh so the revalidator records
-				// stateUnavailable (retry) instead of stateOK with a credential
-				// that was never persisted.
-				if errors.Is(err, domain.ErrNotLeader) {
-					rs.logger.WithError(err).WithField("user_id", rs.u.ID).Error("oauth: persist refreshed credential failed: not the raft leader (leadership lost mid-refresh)")
+			res, perr := rs.s.users.CommitOAuth(persistCtx, domain.OAuthUserMutation{
+				Kind:             domain.OAuthCredentialCommit,
+				User:             &domain.User{ID: rs.u.ID, OAuthTokenCiphertext: ct},
+				ExpectedRevision: rs.u.Revision,
+			})
+			if perr != nil {
+				// Leadership lost mid-refresh: the rotation did not land.
+				if errors.Is(perr, domain.ErrNotLeader) {
+					rs.persistErr = errOAuthNotLeaderRefresh
+					rs.logger.WithError(perr).WithField("user_id", rs.u.ID).Error("oauth: persist refreshed credential failed: not the raft leader (leadership lost mid-refresh)")
 					return nil, errOAuthNotLeaderRefresh
 				}
-				rs.logger.WithError(err).WithField("user_id", rs.u.ID).Warn("oauth: persist refreshed credential failed")
+				rs.persistErr = fmt.Errorf("oauth: persist refreshed credential: %w", perr)
+				rs.logger.WithError(perr).WithField("user_id", rs.u.ID).Warn("oauth: persist refreshed credential failed")
+				return nil, rs.persistErr
 			}
+			// Adopt the committed snapshot (revision/login version) so the
+			// following membership mutation in the revalidator uses a current
+			// precondition.
+			rs.u.OAuthTokenCiphertext = res.User.OAuthTokenCiphertext
+			rs.u.OAuthLoginVersion = res.User.OAuthLoginVersion
+			rs.u.Revision = res.User.Revision
 		}
 	}
 	return tok, nil

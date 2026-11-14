@@ -648,6 +648,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/users/:id", s.adminOnly(s.handleUserGet))
 	h.PUT("/api/v1/users/:id", s.adminOnly(s.handleUserUpdate))
 	h.DELETE("/api/v1/users/:id", s.adminOnly(s.handleUserDelete))
+	h.POST("/api/v1/users/:id/state", s.adminOnly(s.handleUserState))
 	h.PUT("/api/v1/users/:id/password", s.adminOnly(s.handleUserResetPassword))
 	h.PUT("/api/v1/users/:id/groups", s.adminOnly(s.handleUserGroups))
 	h.GET("/api/v1/users/:id/token", s.adminOnly(s.handleUserTokenMeta))

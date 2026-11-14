@@ -94,7 +94,7 @@ func TestAuthResolveDeletedUserJWT(t *testing.T) {
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	access, _, _ := asvc.jwt.IssuePair(u, nil)
 	// Delete the user; the JWT is still valid cryptographically but the user is gone.
-	urepo.Delete(ctx, u.ID)
+	urepo.Delete(ctx, "", u.ID)
 	if _, err := asvc.Resolve(ctx, access); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("deleted user jwt: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestAuthResolveOrphanedTokenHash(t *testing.T) {
 	u, _ := usvc.Create(ctx, "alice", "password123", domain.RoleUser)
 	plaintext, _, _ := asvc.tokens.Generate(ctx, u.ID)
 	// Delete the user but leave the token hash in place (orphaned token).
-	urepo.Delete(ctx, u.ID)
+	urepo.Delete(ctx, "", u.ID)
 	if _, err := asvc.Resolve(ctx, plaintext); !errors.Is(err, domain.ErrUnauthenticated) {
 		t.Fatalf("orphaned token: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestAuthRefreshSessionMaxAge(t *testing.T) {
 
 	// Set up a revalidator with max age.
 	fakeProv := &fakeRevalidateProvider{groups: []string{"g1"}}
-	rv := NewOAuthRevalidator(fakeProv, nil, nil, 0, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
+	rv := NewOAuthRevalidator(fakeProv, nil, nil, 0, usvc, grepo, testLogger(), OAuthRevalidatorConfig{
 		SessionMaxAge: 5 * time.Minute,
 	})
 	rv.clock = func() time.Time { return time.Date(2025, 1, 1, 0, 0, 0, 0, time.UTC) }
@@ -225,7 +225,7 @@ func TestAuthRefreshRevalidatesOAuth(t *testing.T) {
 
 	// Set up OAuth user with revalidator that returns ErrForbidden.
 	fakeProv := &fakeRevalidateProvider{err: domain.ErrForbidden}
-	rv := NewOAuthRevalidator(fakeProv, nil, nil, 0, usvc, grepo, nil, testLogger(), OAuthRevalidatorConfig{
+	rv := NewOAuthRevalidator(fakeProv, nil, nil, 0, usvc, grepo, testLogger(), OAuthRevalidatorConfig{
 		Interval: 5 * time.Minute,
 		Grace:    time.Hour,
 	})

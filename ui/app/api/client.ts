@@ -1,4 +1,5 @@
-import axios, { type AxiosError, type AxiosRequestConfig } from 'axios'
+import axios from 'axios'
+import { installAuthInterceptors, type AuthRecoveryMode, type AuthRequestConfig } from '~/api/auth-interceptor'
 import { useAuthStore } from '~/stores/auth'
 import type {
   AuthUser,
@@ -35,34 +36,20 @@ const api = axios.create({
   withCredentials: true,
 })
 
-api.interceptors.response.use(
-  (response) => response,
-  async (error: AxiosError) => {
-    if (error.response?.status === 401) {
-      const auth = useAuthStore()
-      const url = error.config?.url ?? ''
-      const isAuthEndpoint = url.includes('/api/v1/auth/login') || url.includes('/api/v1/auth/refresh')
-      // Retry at most once: a successful refresh followed by another 401 must
-      // not loop refresh→retry indefinitely (CWE-400, token-issuance storm).
-      // The _retried flag is set on the config before retrying; a second 401
-      // on the retried request skips the refresh path and surfaces the error.
-      const retried = (error.config as (AxiosRequestConfig & { _retried?: boolean }) | undefined)?._retried
-      if (!isAuthEndpoint && !retried && error.config) {
-        const ok = await auth.refreshSession()
-        if (ok) {
-          // Retry the original request once; the cookie is sent automatically.
-          const retryConfig = error.config as AxiosRequestConfig & { _retried?: boolean }
-          retryConfig._retried = true
-          return api.request(retryConfig)
-        }
-      }
-      await auth.logout()
-      if (typeof window !== 'undefined') {
-        window.location.href = '/auth/login'
-      }
+// The isolated interceptor owns 401 recovery: one refresh + one retry, then a
+// single current-epoch navigation for protected APIs. Auth endpoints return to
+// their explicit caller (no recursion, no swallowed error).
+installAuthInterceptors(
+  api,
+  () => {
+    const auth = useAuthStore()
+    return {
+      get authEpoch() { return auth.authEpoch },
+      refreshSession: () => auth.refreshSession(),
+      clearLocalSession: () => auth.clearLocalSession(),
     }
-    return Promise.reject(error)
-  }
+  },
+  () => (typeof window !== 'undefined' ? window.location : null),
 )
 
 export default api
@@ -72,8 +59,8 @@ export async function fetchProviders(): Promise<Providers> {
   const { data } = await api.get('/api/v1/auth/providers')
   return data
 }
-export async function fetchMe(): Promise<AuthUser> {
-  const { data } = await api.get('/api/v1/auth/me')
+export async function fetchMe(recovery: AuthRecoveryMode = 'local'): Promise<AuthUser> {
+  const { data } = await api.get('/api/v1/auth/me', { authRecovery: recovery } as AuthRequestConfig)
   return data
 }
 export async function loginRequest(username: string, password: string): Promise<AuthUser> {
@@ -105,6 +92,10 @@ export async function updateUser(id: string, role: string): Promise<UserRow> {
 }
 export async function deleteUser(id: string): Promise<void> {
   await api.delete(`/api/v1/users/${id}`)
+}
+export async function setUserState(id: string, action: 'disable' | 'enable' | 'restore'): Promise<UserRow> {
+  const { data } = await api.post(`/api/v1/users/${id}/state`, { action })
+  return data
 }
 export async function resetPassword(id: string, password: string): Promise<void> {
   await api.put(`/api/v1/users/${id}/password`, { password })

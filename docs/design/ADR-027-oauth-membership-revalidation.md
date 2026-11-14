@@ -193,3 +193,36 @@ better than the silent strand. No new network surface is added.
 
 - ADR-017: Auth always enforced + multi-provider OAuth
 - ADR-022: OAuth group allowlists + regex group mapping
+
+## Follow-up (dated 2026-10-15, ADR-049)
+
+The leader-only refresh and follower-seeded membership above fixed issue #61's
+rollout lockout, but the cache invalidation was incomplete:
+
+- The credential-change re-check was applied only to `stateExpired`. A cached
+  `stateUnavailable` denial (transport failure) for a local user survived a
+  fresh, successful same-account login (new credential ciphertext) until the
+  negative TTL expired — the same-identity re-login loop. Retention of a cached
+  **success** had the same gap.
+- With encryption disabled both ciphertexts are empty, so ciphertext alone is
+  not a sufficient login-generation marker.
+
+The cache entry now snapshots `OAuthLoginVersion` (incremented on every accepted
+login) in addition to the ciphertext, and re-checks the IdP for **every** state
+when either changes. Store failures never create a synthetic `stateOK`
+entry or last-good result.
+
+Revalidation success, revocation and membership reconciliation are now single
+revision-checked atomic Raft commits (`OAuthMembershipCommit`,
+`OAuthRevocationCommit`); a stale/blocked/missing-user mutation publishes a
+bounded denial without reusing old groups or last-good, and `Check` reloads the
+user (at most one retry) before re-deciding. A committed membership change
+advances the user's revision, so an administrator group edit conflicts with
+in-flight OAuth work.
+
+The earlier claim that "the SPA surfaces a distinct `error=session`" described
+the intended callback behaviour but was not what shipped: the global Axios 401
+interceptor navigated away before the callback/login error rendered and could
+recurse through `logout()`. That is corrected in the same changeset (isolated,
+epoch-aware interceptor; auth endpoints return to their explicit caller; the
+callback/login screens render a stable message via `authErrorMessage`).

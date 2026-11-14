@@ -19,7 +19,14 @@ const identityKey = "auth_identity"
 func (s *Server) resolveIdentity(ctx context.Context, c *app.RequestContext) (*domain.Identity, bool) {
 	id, err := s.auth.Resolve(ctx, s.bearerFromRequest(c))
 	if err != nil {
-		writeError(c, consts.StatusUnauthorized, "unauthorized")
+		// Invalid/blocked authentication stays a 401; operational store
+		// failures propagate (503 not-leader / 504 timeout / 500) rather than
+		// masquerading as a credential problem.
+		if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) || errors.Is(err, domain.ErrInvalidCredential) {
+			writeError(c, consts.StatusUnauthorized, "unauthorized")
+			return nil, false
+		}
+		s.writeServiceError(c, err)
 		return nil, false
 	}
 	c.Set(identityKey, id)
@@ -56,7 +63,11 @@ func (s *Server) requireAuthWithQueryFallback(ctx context.Context, c *app.Reques
 	}
 	id, err := s.auth.Resolve(ctx, bearer)
 	if err != nil {
-		writeError(c, consts.StatusUnauthorized, "unauthorized")
+		if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) || errors.Is(err, domain.ErrInvalidCredential) {
+			writeError(c, consts.StatusUnauthorized, "unauthorized")
+			return false
+		}
+		s.writeServiceError(c, err)
 		return false
 	}
 	c.Set(identityKey, id)
@@ -149,6 +160,12 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusConflict, "token already exists")
 	case errors.Is(err, domain.ErrConflict):
 		writeError(c, consts.StatusConflict, "resource already exists")
+	case errors.Is(err, domain.ErrStaleUser):
+		writeError(c, consts.StatusConflict, "the account was modified concurrently; reload and try again")
+	case errors.Is(err, domain.ErrLastAdmin):
+		writeError(c, consts.StatusConflict, "cannot remove the last active administrator")
+	case errors.Is(err, domain.ErrAccountBlocked):
+		writeError(c, consts.StatusForbidden, "account access is disabled")
 	case errors.Is(err, domain.ErrNotLeader):
 		writeError(c, consts.StatusServiceUnavailable, "not the leader")
 	case errors.Is(err, domain.ErrRaftTimeout):
