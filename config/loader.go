@@ -608,10 +608,7 @@ func ToSecguardConfig(s *domain.SecurityConfig) sgconfig.Config {
 // (durations, thresholds, and trusted-proxy CIDRs).
 func validateSecurityConfig(cfg *domain.Config) error {
 	sg := ToSecguardConfig(&cfg.Auth.Security)
-	if err := sg.Validate(); err != nil {
-		return err
-	}
-	return nil
+	return sg.Validate()
 }
 
 // validateCAConfig enforces the Minting CA rotation invariant: when keyring
