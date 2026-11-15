@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	goauthoauth "github.com/disaster37/go-auth/oauth"
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -120,7 +121,7 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 
 	mappedGroups := s.mapper.mapIfActive(providerGroups)
 
-	cred := &oauthCredential{Provider: "github", AccessToken: accessToken}
+	cred := &goauthoauth.Credential{Provider: "github", AccessToken: accessToken}
 	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, s.adminGroups, providerGroups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("github oauth: %w", err)
@@ -246,7 +247,7 @@ func (s *GitHubOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]
 	if u.OAuthTokenCiphertext == "" {
 		return nil, errOAuthNoCredential
 	}
-	cred, err := decryptOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
+	cred, err := openOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
 	if err != nil || cred == nil {
 		return nil, domain.ErrSessionRevoked
 	}

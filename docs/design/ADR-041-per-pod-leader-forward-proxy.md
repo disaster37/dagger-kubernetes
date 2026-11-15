@@ -1,5 +1,10 @@
 # ADR-041: Per-pod leader-forward proxy (drop label-based leader routing)
 
+> **Revision (2026-11-15, ADR-050):** §3's `hertz-contrib/reverseproxy` leader
+> router is replaced by `go-raft/httpext.Forwarder` + `DynamicTLSProvider`,
+> preserving incremental SSE streaming and 64 MiB OTLP request-body streaming
+> via Hertz `SetBodyStream`.
+
 > **Revision (2026-09-23, unmerged branch):** §2 "Internal forward hop" changed
 > before this ADR ever merged: the hop no longer targets the leader's *public*
 > control port and no longer requires a cert-manager wildcard/DNS-01. It now

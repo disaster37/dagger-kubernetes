@@ -1,5 +1,11 @@
 # ADR-005: Embedded Minting CA
 
+> **Revision (2026-11-15, ADR-050):** the `<release>-minting-ca`, the embedded
+> server leaf, and the `cert-manager`/external server certificates now
+> auto-renew and hot-reload with zero downtime via `go-raft`'s
+> `DynamicMintingCA` + `transport.FileWatcher` (phased dual-trust rotation).
+> The CA crypto core is delegated to `go-raft/pki.MintingCA`.
+
 **Status:** Accepted · **Date:** 2025-06-01 · **Author:** dagger-kubernetes team
 **Updated:** 2026-08-28 — `tls.provider` config key renamed to
 `supervisor.dataplane.tls.provider`; the Helm chart now auto-switches the

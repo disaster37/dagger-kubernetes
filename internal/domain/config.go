@@ -55,6 +55,55 @@ type AuthConfig struct {
 	BootstrapAdmin BootstrapAdminConfig `mapstructure:"bootstrap_admin"`
 	Cookie         CookieConfig         `mapstructure:"cookie"`
 	CORS           CORSConfig           `mapstructure:"cors"`
+	Security       SecurityConfig       `mapstructure:"security"`
+}
+
+// SecurityConfig configures the go-secguard guardrails: per-account lockout,
+// per-IP auth rate limiting, credential-stuffing IP bans, and trusted-proxy
+// client IP resolution. The struct mirrors go-secguard/config.Config so it can
+// be converted without importing the library into the stdlib-only domain
+// package.
+type SecurityConfig struct {
+	Lockout   SecurityLockoutConfig   `mapstructure:"lockout"`
+	RateLimit SecurityRateLimitConfig `mapstructure:"rate_limit"`
+	Ban       SecurityBanConfig       `mapstructure:"ban"`
+	Proxy     SecurityProxyConfig     `mapstructure:"proxy"`
+}
+
+// SecurityLockoutConfig configures the exponential per-account lockout limiter.
+type SecurityLockoutConfig struct {
+	Enabled           bool          `mapstructure:"enabled"`
+	MaxFailedAttempts int           `mapstructure:"max_failed_attempts"`
+	BaseLockout       time.Duration `mapstructure:"base_lockout"`
+	MaxLockout        time.Duration `mapstructure:"max_lockout"`
+	EntryTTL          time.Duration `mapstructure:"entry_ttl"`
+	MaxEntries        int           `mapstructure:"max_entries"`
+}
+
+// SecurityRateLimitConfig configures the per-IP auth DoS limiter and the
+// distributed per-account login throttle.
+type SecurityRateLimitConfig struct {
+	Enabled               bool          `mapstructure:"enabled"`
+	MaxRequests           int           `mapstructure:"max_requests"`
+	Window                time.Duration `mapstructure:"window"`
+	LoginThrottleAttempts int           `mapstructure:"login_throttle_attempts"`
+	LoginThrottleWindow   time.Duration `mapstructure:"login_throttle_window"`
+	MaxEntries            int           `mapstructure:"max_entries"`
+}
+
+// SecurityBanConfig configures the credential-stuffing IP ban tracker.
+type SecurityBanConfig struct {
+	Enabled           bool          `mapstructure:"enabled"`
+	MaxUniqueFailures int           `mapstructure:"max_unique_failures"`
+	BanDuration       time.Duration `mapstructure:"ban_duration"`
+	Window            time.Duration `mapstructure:"window"`
+	MaxEntries        int           `mapstructure:"max_entries"`
+}
+
+// SecurityProxyConfig configures trusted reverse-proxy client IP resolution.
+type SecurityProxyConfig struct {
+	BehindReverseProxy bool     `mapstructure:"behind_reverse_proxy"`
+	TrustedProxyCIDRs  []string `mapstructure:"trusted_proxy_cidrs"`
 }
 
 // CookieConfig configures the httpOnly session cookies (access + refresh JWTs)
@@ -229,6 +278,17 @@ type RaftTLSConfig struct {
 	RotationPeriod time.Duration `mapstructure:"rotation_period"`
 	// CAValidity is the CA certificate validity period. Default: 262800h (30 years).
 	CAValidity time.Duration `mapstructure:"ca_validity"`
+	// KeyringRotationEnabled enables in-band phased CA/leaf auto-renewal.
+	// Default: true.
+	KeyringRotationEnabled bool `mapstructure:"keyring_rotation_enabled"`
+	// RotationCheckInterval is how often the leader checks whether a rotation
+	// is due. Default: 30s.
+	RotationCheckInterval time.Duration `mapstructure:"rotation_check_interval"`
+	// ReloadPollInterval is how often manual PEM files are polled for
+	// cert-manager/external renewal. Default: 5s.
+	ReloadPollInterval time.Duration `mapstructure:"reload_poll_interval"`
+	// SafetyMargin is the re-issue window before a leaf expires. Default: 7d.
+	SafetyMargin time.Duration `mapstructure:"safety_margin"`
 }
 
 // AutopilotConfig is the domain-level autopilot configuration.
@@ -402,6 +462,21 @@ type FleetConfig struct {
 type CAConfig struct {
 	MintingCASecret string        `mapstructure:"minting_ca_secret"`
 	ClientCertTTL   time.Duration `mapstructure:"client_cert_ttl"`
+	// KeyringRotationEnabled enables zero-downtime phased Minting CA rotation
+	// for the engine/data-plane/internal-control mTLS plane. Default: true.
+	KeyringRotationEnabled bool `mapstructure:"keyring_rotation_enabled"`
+	// RotationPeriod is how often the Minting CA is rotated. Default: 24h.
+	// Must be >= 2 * client_cert_ttl when rotation is enabled.
+	RotationPeriod time.Duration `mapstructure:"rotation_period"`
+	// RotationCheckInterval is how often the leader checks whether a rotation
+	// is due. Default: 30s.
+	RotationCheckInterval time.Duration `mapstructure:"rotation_check_interval"`
+	// Validity is the leaf certificate validity. Default: 8760h (1y).
+	Validity time.Duration `mapstructure:"validity"`
+	// CAValidity is the CA certificate validity. Default: 262800h (30y).
+	CAValidity time.Duration `mapstructure:"ca_validity"`
+	// SafetyMargin is the re-issue window before a leaf expires. Default: 7d.
+	SafetyMargin time.Duration `mapstructure:"safety_margin"`
 }
 
 // TLSConfig configures the server certificate the supervisor serves on the
@@ -412,6 +487,9 @@ type TLSConfig struct {
 	CAPath   string `mapstructure:"ca_path"`
 	CertPath string `mapstructure:"cert_path"`
 	KeyPath  string `mapstructure:"key_path"`
+	// ReloadPollInterval is how often cert-manager/external server cert files
+	// are polled for renewal. Default: 5s.
+	ReloadPollInterval time.Duration `mapstructure:"reload_poll_interval"`
 }
 
 type VersionConfig struct {

@@ -411,6 +411,10 @@ inline comments. The sections below summarise the most important ones.
 | `auth.cookie`   | `access_name` / `refresh_name`            | `dagger_kubernetes_access` / `dagger_kubernetes_refresh` | httpOnly session-cookie names (SPA auth).                                                                                                     |
 |                 | `secure`                                  | `false`                                                  | Force the `Secure` flag on session cookies (TLS-terminating proxy).                                                                           |
 | `auth.cors`     | `allowed_origins`                         | `[]` (same-origin)                                       | Exact-match `Origin` allowlist; empty = no `Access-Control-Allow-Origin`.                                                                     |
+| `auth.security.lockout` | `enabled` / `max_failed_attempts` / `base_lockout` / `max_lockout` / `entry_ttl` / `max_entries` | `true` / `5` / `30s` / `15m` / `30m` / `4096` | Per-account exponential lockout (CWE-307).                                                                                                    |
+| `auth.security.rate_limit` | `enabled` / `max_requests` / `window` / `login_throttle_attempts` / `login_throttle_window` / `max_entries` | `true` / `60` / `1m` / `10` / `5m` / `4096` | Per-IP auth DoS limit + per-account login throttle.                                                                                           |
+| `auth.security.ban` | `enabled` / `max_unique_failures` / `ban_duration` / `window` / `max_entries` | `true` / `10` / `15m` / `5m` / `4096` | Credential-stuffing IP bans.                                                                                                                  |
+| `auth.security.proxy` | `behind_reverse_proxy` / `trusted_proxy_cidrs` | `false` / `[]`                                     | Spoof-proof client IP extraction (CWE-290/CWE-348).                                                                                           |
 | `attribution`   | `project_mappings`                        | `[]`                                                     | Ordered `{pattern, group}` rules mapping a project name (CI repo slug) to an existing supervisor group at OTLP ingest (first-match-wins; empty = disabled). |
 | `database`      | `dir`                                     | `/var/lib/dagger-kubernetes`                             | Raft data dir: `raft.db`, `snapshots/`, `node-id`. Fresh-start store (no migration).                                                          |
 | `raft`          | `node_id`                                 | `""` (auto-generated)                                    | Stable Raft node ID (persisted at `<dir>/node-id`).                                                                                           |
@@ -435,6 +439,10 @@ inline comments. The sections below summarise the most important ones.
 |                 | `tls.ca_secret`                           | `""`                                                     | Auto/K8s mode: Secret name for sharing the internal CA.                                                                                       |
 |                 | `tls.ca_bootstrap`                        | `false`                                                  | Auto/K8s mode: force this node to generate + write the CA (auto-detects ordinal 0).                                                           |
 |                 | `tls.client_auth`                         | `true`                                                   | mTLS: require + verify peer client certs.                                                                                                     |
+|                 | `tls.keyring_rotation_enabled`            | `true`                                                   | In-band phased CA/leaf auto-renewal (zero pod restarts).                                                                                      |
+|                 | `tls.rotation_check_interval`             | `30s`                                                    | How often the leader checks whether a rotation is due.                                                                                        |
+|                 | `tls.reload_poll_interval`                | `5s`                                                     | Manual-PEM mode: cert-manager/external file poll cadence.                                                                                     |
+|                 | `tls.safety_margin`                       | `168h`                                                   | Re-issue window before a leaf expires (7d).                                                                                                   |
 | `telemetry`     | `collector_url`                           | `http://otel-collector:4318`                             | OTLP/HTTP. Helm auto-wires `<release>-opentelemetry-collector.<ns>.svc:4318`.                                                                 |
 |                 | `tempo_url` / `loki_url` / `victoria_url` | `http://tempo:3200` etc.                                 | Backend query APIs (auto-wired by Helm to `<release>-<svc>.<ns>.svc:<port>`).                                                                  |
 | `cache`         | `s3.bucket`                               | `""`                                                     | Default bucket for the CLI cache.                                                                                                             |
@@ -468,8 +476,13 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_registry_mirrors_http`            | `[]` (chart: generated plaintext mirror hosts)           | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors and omits TLS mirrors, which BuildKit dials over HTTPS). |
 | `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
+|                 | `keyring_rotation_enabled`                | `true`                                                   | Zero-downtime phased Minting CA rotation for the engine/data-plane/internal-control mTLS plane.                                               |
+|                 | `rotation_period`                         | `24h`                                                    | Minting CA rotation cadence; must be `>= 2 * client_cert_ttl` when rotation is enabled.                                                       |
+|                 | `rotation_check_interval`                 | `30s`                                                    | How often the leader checks whether a rotation is due.                                                                                        |
+|                 | `validity` / `ca_validity` / `safety_margin` | `8760h` / `262800h` / `168h`                          | Leaf validity / CA validity / re-issue window.                                                                                                |
 | `supervisor.dataplane.tls` | `provider`                        | `embedded`                                               | Server cert source: `embedded` (auto, self-signed) \| `cert-manager` \| `external`. Chart auto-switches when `dataCert.enabled` or `dataIngress.tls.secretName` is set. Minting CA is auto-bootstrapped for all. |
 |                 | `cert_path` / `key_path`                  | see loader                                               | PEM paths for the `cert-manager`/`external` providers (chart auto-wires cert-manager/dataIngress to `/etc/dagger-kubernetes/data-tls`).        |
+|                 | `reload_poll_interval`                    | `5s`                                                     | `cert-manager`/`external` mode: poll cadence for hot-reloading renewed server certs.                                                          |
 |                 | `lease_ttl`                               | `2m`                                                     | Lease TTL; clients renew before expiry.                                                                                                       |
 | `version`       | `floor`                                   | `v0.19.0`                                                | Minimum engine version.                                                                                                                       |
 |                 | `allowlist`                               | —                                                        | `major.minor` prefixes to admit.                                                                                                              |
@@ -1638,6 +1651,13 @@ cluster. On first boot with an empty FSM the store starts **fresh**: there is
 **no migration path** from the legacy SQLite store, and the `modernc.org/sqlite`
 dependency has been removed from the project entirely.
 
+The Raft node lifecycle, storage wiring, peer discovery, transport, autopilot,
+and follower→leader proxying are provided by the shared
+`github.com/disaster37/go-raft` library (see ADR-050). The relational FSM and
+the unified config loader remain supervisor-owned. Follower→leader forwarding
+uses `go-raft/httpext.Forwarder`, which preserves incremental SSE streaming and
+64 MiB OTLP request-body streaming.
+
 - **Single-node (default):** leave `raft.peers` empty; the node bootstraps with
   itself as the only voter and is always the leader.
 - **Multi-node:** the Helm chart ships a `StatefulSet` + headless Service.
@@ -1749,6 +1769,13 @@ subcommand remain (they import flat-file tokens, not SQLite data):
   protected by an in-memory per username+IP lockout: after 5 consecutive
   failures the key is locked for 30s, doubling per further failure up to
   15min. State resets on supervisor restart (single-node deployment).
+- The security guardrails are provided by the shared
+  `github.com/disaster37/go-secguard` library (see ADR-050): per-account
+  exponential lockout, per-IP auth DoS rate limiting (`60/min` on
+  `/api/v1/auth/*`), credential-stuffing IP bans (`403`), spoof-proof client
+  IP extraction behind trusted proxies, and CSRF mutation-origin checks when
+  `auth.cors.allowed_origins` is set. Admins can inspect and lift bans via
+  `GET /api/v1/security/bans` and `DELETE /api/v1/security/bans/:ip`.
 - `auth.jwt.secret`, when set explicitly, must be at least 32 bytes (HS256,
   RFC 7518); shorter values are rejected at startup. When empty, a 32-byte
   random secret is generated and persisted in the database on first boot.
@@ -1847,6 +1874,16 @@ The data plane is mTLS-only. The Supervisor:
 The **Raft transport** is likewise mTLS (chart default) with its own
 auto-bootstrapped internal CA (`<release>-raft-ca`) — see
 [Storage (Raft)](#storage-raft--multi-user-migration).
+
+**Zero-downtime renewal (ADR-050).** When `ca.keyring_rotation_enabled` is
+true (default), the leader rotates the minting CA every `ca.rotation_period`
+using a phased dual-trust scheme: it stages a new CA alongside the old one,
+waits for every follower to apply it, then switches the active signer while
+keeping the old CA trusted for `max(2 * ca.client_cert_ttl, 1h)` so in-flight
+Dagger CLIs holding a `2h` client cert are never rejected. The Raft transport
+rotates its own CA/leaf the same way (`raft.tls.keyring_rotation_enabled`). In
+`cert-manager`/`external` mode the mounted server cert is hot-reloaded from
+disk every `supervisor.dataplane.tls.reload_poll_interval` (default `5s`).
 
 ### TLS providers
 

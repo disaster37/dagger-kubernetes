@@ -89,6 +89,8 @@ func TestNewMetricsRegisters(t *testing.T) {
 	m.CLICacheTotal.WithLabelValues("hit").Inc()
 	m.CLIUpstreamFetchTotal.WithLabelValues("success").Inc()
 	m.DataHandshakeFailuresTotal.WithLabelValues("client_rejected_server_certificate").Inc()
+	m.SecurityIPBansTotal.WithLabelValues("login").Inc()
+	m.SecurityRejectionsTotal.WithLabelValues("ip_banned").Inc()
 
 	fam, err := reg.Gather()
 	if err != nil {
@@ -119,6 +121,21 @@ func TestNewMetricsRegisters(t *testing.T) {
 	}
 	if !found {
 		t.Fatal("cli_cache_total metric not registered")
+	}
+
+	for _, name := range []string{
+		"dagger_kubernetes_security_ip_bans_total",
+		"dagger_kubernetes_security_rejections_total",
+	} {
+		found = false
+		for _, f := range fam {
+			if f.GetName() == name {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%s metric not registered", name)
+		}
 	}
 }
 

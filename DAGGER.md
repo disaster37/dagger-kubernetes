@@ -8,7 +8,7 @@ The CI pipeline for this repository is a **local Dagger module** in [`dagger/`](
 
 | Function | Delegated / Local | Why |
 |----------|-------------------|-----|
-| `lint`   | Delegated to `golang` module `Lint` | Upstream provides golangci-lint; custom base image pins v2.12.2 |
+| `lint`   | Delegated to `golang` module `Lint` | Upstream provides golangci-lint; custom base image pins v2.14.0 |
 | `build`  | Delegated to `golang` module `Build` ×2 | Upstream handles CGO_ENABLED=0, ldflags, cross-compile |
 | `helm`   | Lint delegated to `helm` module; template matrix local | Upstream `Lint` = `helm dependency update` + `helm lint`; no `helm template` support. The local template matrix also covers the three data-plane TLS cases (embedded default, `dataCert.enabled`, `dataIngress.tls.secretName`) plus the external-provider keypair rendering, a `minio.enabled=false` variant that renders the chart without the bundled S3 object store, a subchart-`fullnameOverride` variant that renames tempo/loki/victoria/minio/opentelemetry-collector (in lock step with the `global.daggerKubernetes.serviceNames.*` collector-exporter keys), and a `dex.enabled=true` + `openldap.enabled=true` variant that renders the optional Dex/OpenLDAP OIDC subcharts (both disabled by default; the default variant proves they stay out when disabled). The default and subchart-rename variants additionally assert URL substrings in the rendered manifests — the default variant covers both the supervisor ConfigMap URLs and the collector's own exporter endpoints under their default Service names, the rename variant the renamed ones — so the matrix proves the auto-wired service URLs follow each dependency's own fullname rules instead of only checking that rendering succeeds; the default variant also asserts the collector config volume maps the `relay` ConfigMap key to `relay.yaml` (so the mounted file matches `--config=/conf/relay.yaml`); the dex/openldap variant asserts the `dagger-kubernetes-dex` Deployment name appears. |
 | `test`   | Local | Upstream hardcodes flags (no `-race`, `-vet=off`); `-race` requires CGO |
@@ -119,7 +119,7 @@ root) into `jenkins-libs-<version>.tar.gz` (version is validated to be
 filesystem/shell-safe; `release.yml` passes the release tag, `ci` uses `dev`).
 The source is selected with `.WithoutFile(".git")`, which strips the submodule's
 `.git` pointer file so the artifact stays deterministic across clones. The build
-runs in the pinned `golang:1.26` image with GNU `tar`
+runs in the pinned `golang:1.27` image with GNU `tar`
 `--sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner` piped through
 `gzip -n`, so identical input yields a byte-identical archive. On release
 (`release: created`), the `publish-jenkins-libs` job in `release.yml` builds
@@ -167,7 +167,7 @@ No secrets are required for CI. `publish` needs a registry username/password for
   `values.yaml` resolve to real `<service>.<namespace>.svc` URLs. The CI helm
   matrix (default + rename variants) asserts these endpoints render, so a
   subchart upgrade that drops the `tpl` fails CI.
-- **golangci-lint version drift:** The local module pins golangci-lint **v2.12.2** via a custom base image. Bump deliberately when upgrading.
+- **golangci-lint version drift:** The local module pins golangci-lint **v2.14.0** via a custom base image. Bump deliberately when upgrading.
 - **GHCR push fails with 401/403:** the PAT behind `env:GHCR_TOKEN` needs the `write:packages` scope (and the username must match the token owner). Both credentials must be passed together — see the next bullet.
 - **`publish` with only one credential:** the `image` module **silently skips auth** when only one of `WithRegistryUsername`/`WithRegistryPassword` is set; the local module therefore rejects a lone credential up front (`registryUsername and registryPassword must be provided together`). Pass both, or neither for anonymous registries (ttl.sh).
 - **Mutable `dev`/`latest` tags:** re-publishing over them is expected (`imagePullPolicy: Always`); do not re-publish a published semver tag.

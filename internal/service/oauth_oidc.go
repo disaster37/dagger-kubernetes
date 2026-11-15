@@ -2,17 +2,16 @@ package service
 
 import (
 	"context"
-	"crypto/tls"
-	"crypto/x509"
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	goauth "github.com/disaster37/go-auth"
+	goauthoauth "github.com/disaster37/go-auth/oauth"
 	"github.com/sirupsen/logrus"
 	"golang.org/x/oauth2"
 
@@ -33,7 +32,7 @@ const oidcDiscoverTimeout = 15 * time.Second
 // domain.ErrSessionRevoked it is NOT evidence of revocation: the user must not
 // be deactivated and their API token must not be deleted. Re-login stores a
 // fresh credential and recovers immediately.
-var errOAuthCredentialExpired = errors.New("oauth credential expired; re-authentication required")
+var errOAuthCredentialExpired = goauth.ErrOAuthCredentialExpired
 
 // errOAuthNotLeaderRefresh signals that an OIDC revalidation needs to refresh
 // the upstream credential but this pod is not the Raft leader (or lost
@@ -43,7 +42,7 @@ var errOAuthCredentialExpired = errors.New("oauth credential expired; re-authent
 // until Dex's reuse window closes (issue #61). The revalidator records
 // stateUnavailable (non-destructive) and serves cached groups within grace; the
 // leader is the source of truth and replicates the fresh credential.
-var errOAuthNotLeaderRefresh = errors.New("oauth refresh requires raft leadership")
+var errOAuthNotLeaderRefresh = goauth.ErrOAuthNotLeaderRefresh
 
 // OIDCOAuthService implements the generic OIDC authorization-code login flow
 // for provider: "oidc" (covers Dex, Keycloak, Google, Auth0, etc.). Design
@@ -335,7 +334,7 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 
 	mappedGroups := s.mapper.mapIfActive(groups)
 
-	cred := &oauthCredential{
+	cred := &goauthoauth.Credential{
 		Provider:     "oidc",
 		AccessToken:  tok.AccessToken,
 		RefreshToken: tok.RefreshToken,
@@ -453,7 +452,7 @@ func (s *OIDCOAuthService) Revalidate(ctx context.Context, u *domain.User) ([]st
 	if u.OAuthTokenCiphertext == "" {
 		return nil, errOAuthNoCredential
 	}
-	cred, err := decryptOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
+	cred, err := openOAuthCredential(s.encKey, u.OAuthTokenCiphertext)
 	if err != nil || cred == nil {
 		return nil, errOAuthCredentialExpired
 	}
@@ -544,7 +543,7 @@ func persistError(err error) error {
 
 // tokenSource returns a refreshingSource for cred that refreshes and persists
 // the stored credential when the access token is expired.
-func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *domain.User, cred *oauthCredential) *refreshingSource {
+func (s *OIDCOAuthService) tokenSource(ctx context.Context, p oidcProvider, u *domain.User, cred *goauthoauth.Credential) *refreshingSource {
 	return &refreshingSource{s: s, ctx: ctx, p: p, u: u, cred: cred, logger: s.logger}
 }
 
@@ -586,7 +585,7 @@ type refreshingSource struct {
 	ctx    context.Context
 	p      oidcProvider
 	u      *domain.User
-	cred   *oauthCredential
+	cred   *goauthoauth.Credential
 	logger *logrus.Logger
 	// persistErr records the original persistence failure (stale/blocked/
 	// encryption/leadership) so Revalidate can honor it even after go-oidc
@@ -613,7 +612,7 @@ func (rs *refreshingSource) Token() (*oauth2.Token, error) {
 		rs.cred.AccessToken = tok.AccessToken
 		rs.cred.RefreshToken = tok.RefreshToken
 		rs.cred.ExpiresAt = tok.Expiry
-		ct, eerr := encryptOAuthCredential(rs.s.encKey, rs.cred)
+		ct, eerr := sealOAuthCredential(rs.s.encKey, rs.cred)
 		if eerr != nil {
 			rs.persistErr = fmt.Errorf("oauth: re-encrypt refreshed credential: %w", eerr)
 			rs.logger.WithError(eerr).WithField("user_id", rs.u.ID).Warn("oauth: re-encrypt refreshed credential failed")
@@ -659,24 +658,5 @@ func NewOAuthHTTPClient(caCertPath string) (*http.Client, error) {
 	if caCertPath == "" {
 		return nil, nil
 	}
-	caCert, err := os.ReadFile(caCertPath) //nolint:gosec // G304: path is admin-configured, not user input.
-	if err != nil {
-		return nil, fmt.Errorf("read OAuth CA cert %s: %w", caCertPath, err)
-	}
-	pool, err := x509.SystemCertPool()
-	if err != nil {
-		pool = x509.NewCertPool()
-	}
-	if !pool.AppendCertsFromPEM(caCert) {
-		return nil, fmt.Errorf("OAuth CA cert %s: no valid PEM certificates found", caCertPath)
-	}
-	return &http.Client{
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				RootCAs:    pool,
-				MinVersion: tls.VersionTLS12,
-			},
-		},
-		Timeout: 30 * time.Second,
-	}, nil
+	return goauthoauth.NewOAuthHTTPClient(caCertPath, 30*time.Second)
 }

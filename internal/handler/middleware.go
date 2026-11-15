@@ -17,12 +17,19 @@ const identityKey = "auth_identity"
 // (bearer stays primary for CI), then the access cookie. A missing or
 // unparseable credential results in an unauthenticated error (401).
 func (s *Server) resolveIdentity(ctx context.Context, c *app.RequestContext) (*domain.Identity, bool) {
-	id, err := s.auth.Resolve(ctx, s.bearerFromRequest(c))
+	bearer := s.bearerFromRequest(c)
+	id, err := s.auth.Resolve(ctx, bearer)
 	if err != nil {
 		// Invalid/blocked authentication stays a 401; operational store
 		// failures propagate (503 not-leader / 504 timeout / 500) rather than
 		// masquerading as a credential problem.
 		if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) || errors.Is(err, domain.ErrInvalidCredential) {
+			// A revoked session is a legitimate state, not a brute-force
+			// signal; every other invalid non-empty credential counts toward
+			// the bearer-token ban tracker.
+			if !errors.Is(err, domain.ErrSessionRevoked) {
+				s.recordTokenFailure(s.clientIP(c), bearer)
+			}
 			writeError(c, consts.StatusUnauthorized, "unauthorized")
 			return nil, false
 		}

@@ -2,9 +2,7 @@ package handler
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/url"
@@ -13,6 +11,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/disaster37/go-auth/httpcookie"
+	goauthoauth "github.com/disaster37/go-auth/oauth"
+	"github.com/disaster37/go-secguard/lockout"
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -23,7 +24,6 @@ import (
 const oauthErrorRedirectBase = "/auth/login"
 
 const oauthStateCookie = "oauth_state"
-const oauthStateCookiePath = "/api/v1/auth/oauth"
 const oauthStateCookieMaxAge = 600 // seconds; matches the 10m oauth state TTL
 
 // allowedOAuthErrorCodes is the fixed whitelist of error hints the browser may
@@ -146,12 +146,19 @@ func (s *Server) handleLogin(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
-	// Usernames are case-insensitive (COLLATE NOCASE); normalize the limiter
-	// key so case variations cannot bypass a lockout.
-	key := loginLimitKey(req.Username, c.ClientIP())
-	if !s.limiter.allow(key) {
-		writeError(c, consts.StatusTooManyRequests, "too many failed login attempts, try again later")
-		return
+	// Usernames are case-insensitive (COLLATE NOCASE); the lockout key hashes
+	// the normalized username so case variations cannot bypass a lockout.
+	ip := s.clientIP(c)
+	key := lockout.LoginLimitKey(req.Username, ip)
+	if s.guard != nil {
+		if !s.guard.Lockout.Allow(key) {
+			writeError(c, consts.StatusTooManyRequests, "too many failed login attempts, try again later")
+			return
+		}
+		if s.guard.Config.RateLimit.Enabled && !s.guard.LoginThrottle.Allow(key, s.guard.Config.RateLimit.LoginThrottleAttempts, s.guard.Config.RateLimit.LoginThrottleWindow) {
+			writeError(c, consts.StatusTooManyRequests, "too many login attempts, try again later")
+			return
+		}
 	}
 
 	access, refresh, u, err := s.auth.Login(ctx, req.Username, req.Password)
@@ -159,20 +166,18 @@ func (s *Server) handleLogin(ctx context.Context, c *app.RequestContext) {
 		// Only genuine credential failures count toward lockout; internal
 		// errors (DB/JWT) must not lock a user out.
 		if errors.Is(err, domain.ErrInvalidCredential) {
-			s.limiter.recordFailure(key)
+			s.recordLoginFailure(req.Username, ip)
 		}
 		s.writeServiceError(c, err)
 		return
 	}
-	s.limiter.recordSuccess(key)
+	if s.guard != nil {
+		s.guard.Lockout.RecordSuccess(key)
+		s.guard.LoginThrottle.Clear(key)
+	}
 	s.setAuthCookies(c, access, refresh)
 	groups, _ := s.groups.GroupsForUser(ctx, u.ID)
 	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
-}
-
-// loginLimitKey builds the rate-limiter key for a password login attempt.
-func loginLimitKey(username, clientIP string) string {
-	return fmt.Sprintf("login|%s|%s", strings.ToLower(username), clientIP)
 }
 
 // handleRefresh rotates a refresh token (from the refresh cookie first, then
@@ -295,19 +300,21 @@ func (s *Server) handleChangePassword(ctx context.Context, c *app.RequestContext
 		writeError(c, consts.StatusBadRequest, "current_password and new_password are required")
 		return
 	}
-	key := fmt.Sprintf("chpw|%s|%s", id.UserID, c.ClientIP())
-	if !s.limiter.allow(key) {
+	key := lockout.PasswordChangeLimitKey(id.UserID, s.clientIP(c))
+	if s.guard != nil && !s.guard.Lockout.Allow(key) {
 		writeError(c, consts.StatusTooManyRequests, "too many failed attempts, try again later")
 		return
 	}
 	if err := s.users.ChangePassword(ctx, id.UserID, req.CurrentPassword, req.NewPassword); err != nil {
-		if errors.Is(err, domain.ErrInvalidCredential) {
-			s.limiter.recordFailure(key)
+		if errors.Is(err, domain.ErrInvalidCredential) && s.guard != nil {
+			s.guard.Lockout.RecordFailure(key)
 		}
 		s.writeServiceError(c, err)
 		return
 	}
-	s.limiter.recordSuccess(key)
+	if s.guard != nil {
+		s.guard.Lockout.RecordSuccess(key)
+	}
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
@@ -338,7 +345,7 @@ func (s *Server) startOAuthLogin(c *app.RequestContext) {
 	// completed by the browser that initiated the login (login-CSRF, CWE-352).
 	// The cookie is written only after the state and authorize URL are ready so
 	// a failed start does not leave a half-initialized flow behind.
-	nonce, err := newOAuthNonce()
+	nonce, err := goauthoauth.GenerateNonce()
 	if err != nil {
 		s.failOAuth(c, "oauth", "nonce", err)
 		return
@@ -353,7 +360,8 @@ func (s *Server) startOAuthLogin(c *app.RequestContext) {
 		s.failOAuth(c, "oauth", "discovery", nil)
 		return
 	}
-	c.SetCookie(oauthStateCookie, nonce, oauthStateCookieMaxAge, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
+	stateSpec := httpcookie.IssueOAuthStateSpec(s.oauthCookieConfig(), requestIsTLS(c), nonce, oauthStateCookieMaxAge)
+	s.writeCookieSpec(c, &stateSpec)
 	c.Redirect(consts.StatusFound, []byte(loginURL))
 }
 
@@ -441,30 +449,49 @@ func oauthCallbackErrorCode(err error) string {
 
 // clearOAuthStateCookie removes the login nonce cookie (best-effort).
 func (s *Server) clearOAuthStateCookie(c *app.RequestContext) {
-	c.SetCookie(oauthStateCookie, "", -1, oauthStateCookiePath, "", protocol.CookieSameSiteLaxMode, s.oauthCookieSecure || requestIsTLS(c), true)
+	clearSpec := httpcookie.ClearOAuthStateSpec(s.oauthCookieConfig(), requestIsTLS(c))
+	s.writeCookieSpec(c, &clearSpec)
 }
 
-// authCookiePath is the Path attribute shared by both session cookies.
-const authCookiePath = "/"
+// cookieConfig builds the go-auth cookie configuration from the supervisor's
+// cookie settings.
+func (s *Server) cookieConfig() httpcookie.Config {
+	cfg := httpcookie.DefaultConfig()
+	cfg.AccessName = s.cookieCfg.AccessName
+	cfg.RefreshName = s.cookieCfg.RefreshName
+	cfg.Secure = s.cookieCfg.Secure
+	return cfg
+}
+
+// oauthCookieConfig is the cookie configuration for the OAuth state cookie,
+// whose Secure flag is controlled by auth.oauth.cookie_secure.
+func (s *Server) oauthCookieConfig() httpcookie.Config {
+	cfg := s.cookieConfig()
+	cfg.Secure = s.oauthCookieSecure
+	return cfg
+}
+
+// writeCookieSpec writes a go-auth cookie spec to the Hertz response.
+func (s *Server) writeCookieSpec(c *app.RequestContext, spec *httpcookie.Spec) {
+	c.SetCookie(spec.Name, spec.Value, spec.MaxAge, spec.Path, spec.Domain, protocol.CookieSameSite(spec.SameSite), spec.Secure, spec.HttpOnly)
+}
 
 // setAuthCookies sets httpOnly access+refresh cookies. Secure = cfg.secure ||
 // requestIsTLS. Max-Age is derived from the JWT TTLs.
 func (s *Server) setAuthCookies(c *app.RequestContext, access, refresh string) {
-	s.setAuthCookie(c, s.cookieCfg.AccessName, access, int(s.jwt.AccessTTL().Seconds()))
-	s.setAuthCookie(c, s.cookieCfg.RefreshName, refresh, int(s.jwt.RefreshTTL().Seconds()))
+	accessSpec, refreshSpec := httpcookie.IssuePairSpecs(
+		s.cookieConfig(), requestIsTLS(c), access, refresh,
+		int(s.jwt.AccessTTL().Seconds()), int(s.jwt.RefreshTTL().Seconds()),
+	)
+	s.writeCookieSpec(c, &accessSpec)
+	s.writeCookieSpec(c, &refreshSpec)
 }
 
 // clearAuthCookies expires both session cookies (Max-Age=-1).
 func (s *Server) clearAuthCookies(c *app.RequestContext) {
-	s.setAuthCookie(c, s.cookieCfg.AccessName, "", -1)
-	s.setAuthCookie(c, s.cookieCfg.RefreshName, "", -1)
-}
-
-// setAuthCookie writes one httpOnly, SameSite=Lax session cookie at Path "/".
-// Secure is forced by config or auto-detected from the request scheme.
-func (s *Server) setAuthCookie(c *app.RequestContext, name, value string, maxAge int) {
-	secure := s.cookieCfg.Secure || requestIsTLS(c)
-	c.SetCookie(name, value, maxAge, authCookiePath, "", protocol.CookieSameSiteLaxMode, secure, true)
+	accessSpec, refreshSpec := httpcookie.ClearPairSpecs(s.cookieConfig(), requestIsTLS(c))
+	s.writeCookieSpec(c, &accessSpec)
+	s.writeCookieSpec(c, &refreshSpec)
 }
 
 // safeRedirectPath validates a post-login SPA redirect target. Only internal
@@ -475,9 +502,13 @@ func (s *Server) setAuthCookie(c *app.RequestContext, name, value string, maxAge
 // be redirected back into the auth flow.
 func safeRedirectPath(redirect string) string {
 	const fallback = "/pipelines"
-	if redirect == "" || hasUnsafeChars(redirect) {
+	// Base sanitization via go-auth (rejects empty, non-"/", "//", "/\",
+	// backslash, CR/LF, and control characters).
+	if httpcookie.SafeRedirectPath(redirect, fallback) == fallback {
 		return fallback
 	}
+	// net/url parsing additionally normalizes encoded forms of "//" and
+	// backslashes before the checks (CWE-601).
 	u, err := url.Parse(redirect)
 	if err != nil {
 		return fallback
@@ -524,16 +555,6 @@ func redirectOAuthErrorCode(c *app.RequestContext, code string) {
 		code = "oauth"
 	}
 	c.Redirect(consts.StatusFound, []byte(fmt.Sprintf("%s?error=%s", oauthErrorRedirectBase, code)))
-}
-
-// newOAuthNonce returns a cryptographically random 16-byte nonce, base64url
-// encoded, for binding the OAuth state to a cookie.
-func newOAuthNonce() (string, error) {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		return "", fmt.Errorf("read oauth nonce: %w", err)
-	}
-	return base64.RawURLEncoding.EncodeToString(b), nil
 }
 
 // requestIsTLS reports whether the request arrived over TLS. hertz does not

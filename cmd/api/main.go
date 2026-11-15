@@ -18,6 +18,9 @@ import (
 	"syscall"
 	"time"
 
+	goauthjwt "github.com/disaster37/go-auth/jwt"
+	raftk8s "github.com/disaster37/go-raft/k8s"
+	"github.com/disaster37/go-secguard"
 	"github.com/minio/minio-go/v7"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
@@ -25,8 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/rest"
-	"k8s.io/client-go/tools/clientcmd"
 
 	"github.com/disaster/dagger-kubernetes/config"
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -99,7 +100,7 @@ func run(c *cli.Context) error {
 	// The k8s clientset is needed early: it selects the TLS provider
 	// (Secret-backed minting CA) and is reused for raft TLS auto-mode and the
 	// fleet provider below.
-	clientset, err := newK8sClientset()
+	clientset, err := raftk8s.NewClientset()
 	if err != nil {
 		logger.WithError(err).Warn("k8s clientset unavailable; raft TLS auto-mode, minting CA sharing, and fleet provider will fall back")
 	}
@@ -376,6 +377,12 @@ func run(c *cli.Context) error {
 		cliSvc = service.NewCLIService(versionResolver, cliUpstream, cliCache, cfg.Server.PublicURL, cfg.CLI.ReleaseListTTL, logger, metrics)
 	}
 
+	// --- Security guardrails (go-secguard) ---
+	securityGuard, err := secguard.New(config.ToSecguardConfig(&cfg.Auth.Security))
+	if err != nil {
+		return fmt.Errorf("init security guard: %w", err)
+	}
+
 	server := handler.NewServer(&handler.ServerConfig{
 		ControlAddr:      cfg.Server.ControlAddr,
 		DataAddr:         cfg.Server.DataAddr,
@@ -426,6 +433,7 @@ func run(c *cli.Context) error {
 		EngineMetrics:        engineMetricsSvc,
 		FleetMetrics:         fleetMetricsSvc,
 		LeaderInfo:           raftStore,
+		Security:             securityGuard,
 	})
 
 	if err := server.Start(ctx, serverTLS); err != nil {
@@ -460,6 +468,7 @@ func run(c *cli.Context) error {
 				if len(expired) > 0 {
 					metrics.ActiveLeases.Sub(float64(len(expired)))
 				}
+				securityGuard.SweepAll()
 			}
 		}
 	}()
@@ -618,20 +627,21 @@ func raftNodeCommonName(cfg *domain.Config, resolver repository.PeerResolver, ho
 	return hostname
 }
 
-// minJWTSecretLen is the minimum accepted HS256 signing key length. HS256
-// security is bounded by the key's entropy; NIST SP 800-131A requires at
-// least 112 bits for HMAC, and RFC 7518 mandates a key at least as long as
-// the hash output (256 bits) for HS256 (CWE-326).
-const minJWTSecretLen = 32
+// minJWTSecretLen is the minimum accepted HS256 signing key length, sourced
+// from the shared go-auth library. HS256 security is bounded by the key's
+// entropy; RFC 7518 mandates a key at least as long as the hash output (256
+// bits) for HS256 (CWE-326).
+const minJWTSecretLen = goauthjwt.MinSecretLength
 
 // loadOrCreateJWTSecret returns the configured JWT secret, or generates and
 // persists a 32-byte random secret in the DB meta table on first boot.
-// Configured secrets shorter than 32 bytes are rejected: a weak key makes
-// HS256 tokens forgeable offline, which would bypass authentication entirely.
+// Configured secrets shorter than the go-auth minimum are rejected: a weak key
+// makes HS256 tokens forgeable offline, which would bypass authentication
+// entirely.
 func loadOrCreateJWTSecret(ctx context.Context, ms *repository.MetaStore, configured string, logger *logrus.Logger) ([]byte, error) {
 	if configured != "" {
-		if len(configured) < minJWTSecretLen {
-			return nil, fmt.Errorf("auth.jwt.secret too short (%d bytes): HS256 requires at least %d bytes", len(configured), minJWTSecretLen)
+		if err := goauthjwt.ValidateSecret(configured); err != nil {
+			return nil, fmt.Errorf("auth.jwt.secret: %w", err)
 		}
 		return []byte(configured), nil
 	}
@@ -1281,25 +1291,6 @@ func validateEnvName(name, source string) error {
 		return fmt.Errorf("fleet.%s contains an empty env var name", source)
 	}
 	return nil
-}
-
-func newK8sClientset() (kubernetes.Interface, error) {
-	restCfg, err := rest.InClusterConfig()
-	if err != nil {
-		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-		configOverrides := &clientcmd.ConfigOverrides{}
-		kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-		restCfg, err = kubeConfig.ClientConfig()
-		if err != nil {
-			return nil, fmt.Errorf("cannot load in-cluster or kubeconfig: %w", err)
-		}
-	}
-
-	clientset, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, fmt.Errorf("create clientset: %w", err)
-	}
-	return clientset, nil
 }
 
 // parseTolerations parses tolerations in the key[:value[:effect]] format.

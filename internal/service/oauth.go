@@ -6,10 +6,36 @@ import (
 	"fmt"
 	"sort"
 
+	authcrypto "github.com/disaster37/go-auth/crypto"
+	goauthoauth "github.com/disaster37/go-auth/oauth"
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
+
+// credentialSealer builds an AES-256-GCM sealer for the OAuth credential
+// encryption key, or nil when no key is configured (credential persistence
+// disabled).
+func credentialSealer(encKey []byte) authcrypto.Sealer {
+	if len(encKey) == 0 {
+		return nil
+	}
+	s, err := authcrypto.NewAESGCMSealer(encKey, nil)
+	if err != nil {
+		return nil
+	}
+	return s
+}
+
+// sealOAuthCredential encrypts an OAuth credential at rest.
+func sealOAuthCredential(encKey []byte, c *goauthoauth.Credential) (string, error) {
+	return goauthoauth.SealCredential(credentialSealer(encKey), c)
+}
+
+// openOAuthCredential decrypts a stored OAuth credential.
+func openOAuthCredential(encKey []byte, ct string) (*goauthoauth.Credential, error) {
+	return goauthoauth.OpenCredential(credentialSealer(encKey), ct)
+}
 
 // OAuthProvider is the single active OAuth provider. Implementations:
 // GitHubOAuthService (provider: github) and OIDCOAuthService (provider: oidc).
@@ -207,7 +233,7 @@ func completeOAuthLogin(
 	upstreamGroups []string,
 	mappedGroups []string,
 	mappedGroupMaxRunnerSessions int,
-	credential *oauthCredential,
+	credential *goauthoauth.Credential,
 ) (access, refresh string, u *domain.User, err error) {
 	u, _, err = users.EnsureOAuthUser(ctx, provider, oauthID, username)
 	if err != nil {
@@ -236,7 +262,7 @@ func completeOAuthLogin(
 		}).Info("oauth: admin role changed via admin_groups")
 	}
 
-	ct, err := encryptOAuthCredential(encKey, credential)
+	ct, err := sealOAuthCredential(encKey, credential)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("encrypt oauth credential: %w", err)
 	}

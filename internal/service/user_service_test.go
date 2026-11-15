@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 
+	gopassword "github.com/disaster37/go-auth/password"
+
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
@@ -73,7 +75,7 @@ func TestUserServiceValidation(t *testing.T) {
 		{"bad username short", "a", "password123", domain.RoleUser},
 		{"bad username chars", "ab cd", "password123", domain.RoleUser},
 		{"short password", "alice", "short", domain.RoleUser},
-		{"long password", "alice", strings.Repeat("x", maxPasswordLen+1), domain.RoleUser},
+		{"long password", "alice", strings.Repeat("x", gopassword.MaxPasswordLength+1), domain.RoleUser},
 		{"bad role", "alice", "password123", "superadmin"},
 	}
 	for _, tc := range cases {

@@ -4,33 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"regexp"
+	"strings"
 
+	goauthdomain "github.com/disaster37/go-auth/domain"
+	gopassword "github.com/disaster37/go-auth/password"
 	"github.com/sirupsen/logrus"
-	"golang.org/x/crypto/bcrypt"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
-
-var (
-	usernameRe = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{1,63}$`)
-
-	minPasswordLen = 8
-	// maxPasswordLen is bcrypt's input limit: only the first 72 bytes are
-	// hashed, so longer passwords would be silently truncated.
-	maxPasswordLen = 72
-)
-
-// dummyPasswordHash is a valid bcrypt hash compared against when a login
-// attempt targets an unknown user (or a user without a password), so the
-// response timing does not reveal whether the username exists (CWE-208).
-var dummyPasswordHash = func() []byte {
-	h, err := bcrypt.GenerateFromPassword([]byte("timing-equalization-dummy"), bcrypt.DefaultCost)
-	if err != nil {
-		panic(fmt.Sprintf("generate dummy hash: %v", err))
-	}
-	return h
-}()
 
 // UserService implements user CRUD and password logic.
 type UserService struct {
@@ -98,16 +79,16 @@ func (s *UserService) Authenticate(ctx context.Context, username, password strin
 			// credential failure (which would hide outages and lock users out).
 			return nil, fmt.Errorf("load user for authentication: %w", err)
 		}
-		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+		gopassword.EqualizeTiming(password)
 		return nil, domain.ErrInvalidCredential
 	}
 	if u.PasswordHash == "" || u.AccessBlocked() {
 		// A blocked (disabled/deleted/IdP-revoked) account is indistinguishable
 		// from an unknown one: generic credential failure, same bcrypt timing.
-		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash, []byte(password))
+		gopassword.EqualizeTiming(password)
 		return nil, domain.ErrInvalidCredential
 	}
-	if bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(password)) != nil {
+	if !gopassword.Verify(u.PasswordHash, password) {
 		return nil, domain.ErrInvalidCredential
 	}
 	return u, nil
@@ -233,7 +214,7 @@ func (s *UserService) ChangePassword(ctx context.Context, id, current, newPasswo
 	if err != nil {
 		return err
 	}
-	if u.PasswordHash == "" || bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(current)) != nil {
+	if u.PasswordHash == "" || !gopassword.Verify(u.PasswordHash, current) {
 		return domain.ErrInvalidCredential
 	}
 	u.TokenVersion++
@@ -340,30 +321,35 @@ func (s *UserService) Update(ctx context.Context, u *domain.User) error {
 	return s.users.Update(ctx, u)
 }
 
+// validateUsername delegates to go-auth's username validator, translating the
+// go-auth validation sentinel to the supervisor's domain sentinel while
+// preserving the message.
 func validateUsername(username string) error {
-	if !usernameRe.MatchString(username) {
-		return fmt.Errorf("username must match ^[a-zA-Z0-9][a-zA-Z0-9._-]{1,63}$: %w", domain.ErrValidation)
-	}
-	return nil
+	return mapValidation(gopassword.ValidateUsername(username))
 }
 
+// validatePassword delegates to go-auth's password validator.
 func validatePassword(password string) error {
-	if len(password) < minPasswordLen {
-		return fmt.Errorf("password must be at least %d characters: %w", minPasswordLen, domain.ErrValidation)
-	}
-	if len(password) > maxPasswordLen {
-		return fmt.Errorf("password must be at most %d characters (bcrypt limit): %w", maxPasswordLen, domain.ErrValidation)
-	}
-	return nil
+	return mapValidation(gopassword.ValidatePassword(password))
 }
 
 // hashPassword returns the bcrypt hash of password.
 func hashPassword(password string) (string, error) {
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		return "", fmt.Errorf("hash password: %w", err)
+	return gopassword.Hash(password)
+}
+
+// mapValidation rewrites a go-auth validation error so errors.Is matches the
+// supervisor's domain.ErrValidation, keeping the human-readable prefix.
+func mapValidation(err error) error {
+	if err == nil {
+		return nil
 	}
-	return string(hash), nil
+	if errors.Is(err, goauthdomain.ErrValidation) {
+		msg := strings.TrimSuffix(err.Error(), goauthdomain.ErrValidation.Error())
+		msg = strings.TrimSuffix(msg, ": ")
+		return fmt.Errorf("%s: %w", msg, domain.ErrValidation)
+	}
+	return err
 }
 
 func isNotFound(err error) bool {

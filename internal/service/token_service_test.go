@@ -2,10 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"encoding/base64"
 	"errors"
 	"testing"
 	"time"
+
+	authcrypto "github.com/disaster37/go-auth/crypto"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -222,57 +226,59 @@ func TestRevealNoKey(t *testing.T) {
 	}
 }
 
-func TestEncryptDecryptRoundTrip(t *testing.T) {
-	key := testEncKey()
-	ct, err := encryptToken(key, "dct_secret_value")
+func TestAESGCMSealerRoundTrip(t *testing.T) {
+	sealer, err := authcrypto.NewAESGCMSealer(testEncKey(), nil)
 	if err != nil {
-		t.Fatalf("encryptToken: %v", err)
+		t.Fatalf("NewAESGCMSealer: %v", err)
 	}
-	pt, err := decryptToken(key, ct)
+	ct, err := sealer.SealString("dct_secret_value")
 	if err != nil {
-		t.Fatalf("decryptToken: %v", err)
+		t.Fatalf("SealString: %v", err)
+	}
+	pt, err := sealer.OpenString(ct)
+	if err != nil {
+		t.Fatalf("OpenString: %v", err)
 	}
 	if pt != "dct_secret_value" {
-		t.Fatalf("decryptToken = %q", pt)
+		t.Fatalf("OpenString = %q", pt)
 	}
 
 	// Wrong key must fail.
-	if _, err := decryptToken([]byte("11111111111111111111111111111111"), ct); err == nil {
-		t.Fatal("decrypt with wrong key: expected error")
+	other, _ := authcrypto.NewAESGCMSealer([]byte("11111111111111111111111111111111"), nil)
+	if _, err := other.OpenString(ct); err == nil {
+		t.Fatal("open with wrong key: expected error")
 	}
 }
 
-func TestEncryptTokenDisabled(t *testing.T) {
-	if ct, err := encryptToken(nil, "dct_x"); err != nil || ct != "" {
-		t.Fatalf("encryptToken(nil) = (%q, %v), want empty/nil", ct, err)
-	}
-	if ct, err := encryptToken([]byte{}, "dct_x"); err != nil || ct != "" {
-		t.Fatalf("encryptToken(empty) = (%q, %v), want empty/nil", ct, err)
-	}
-}
-
-func TestDecryptTokenInvalid(t *testing.T) {
+// TestAESGCMSealerOpensLegacyCiphertext proves the sealer transparently opens
+// the pre-upgrade base64(nonce||ciphertext||tag) format.
+func TestAESGCMSealerOpensLegacyCiphertext(t *testing.T) {
 	key := testEncKey()
-
-	if _, err := decryptToken(key, "!!!not-base64!!!"); err == nil {
-		t.Fatal("decryptToken bad base64: expected error")
+	block, err := aes.NewCipher(key)
+	if err != nil {
+		t.Fatalf("NewCipher: %v", err)
 	}
-	if _, err := decryptToken(key, base64.StdEncoding.EncodeToString([]byte("short"))); err == nil {
-		t.Fatal("decryptToken short ciphertext: expected error")
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		t.Fatalf("NewGCM: %v", err)
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	sealed := gcm.Seal(nonce, nonce, []byte("dct_legacy"), nil)
+	legacy := base64.StdEncoding.EncodeToString(sealed)
+
+	sealer, _ := authcrypto.NewAESGCMSealer(key, nil)
+	pt, err := sealer.OpenString(legacy)
+	if err != nil {
+		t.Fatalf("OpenString legacy: %v", err)
+	}
+	if pt != "dct_legacy" {
+		t.Fatalf("legacy = %q", pt)
 	}
 }
 
-func TestEncryptDecryptInvalidKey(t *testing.T) {
-	short := []byte("too-short")
-	if _, err := encryptToken(short, "dct_x"); err == nil {
-		t.Fatal("encryptToken with short key: expected error")
-	}
-	ct, err := encryptToken(testEncKey(), "dct_x")
-	if err != nil {
-		t.Fatalf("encryptToken: %v", err)
-	}
-	if _, err := decryptToken(short, ct); err == nil {
-		t.Fatal("decryptToken with short key: expected error")
+func TestAESGCMSealerInvalidKey(t *testing.T) {
+	if _, err := authcrypto.NewAESGCMSealer([]byte("too-short"), nil); err == nil {
+		t.Fatal("short key: expected error")
 	}
 }
 

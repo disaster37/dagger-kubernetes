@@ -1,20 +1,20 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
-	"net"
-	"strconv"
+	"io"
+	"net/textproto"
 	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
-	hertzclient "github.com/cloudwego/hertz/pkg/app/client"
-	"github.com/cloudwego/hertz/pkg/network/standard"
-	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
-	"github.com/hertz-contrib/reverseproxy"
+	"github.com/disaster37/go-raft/httpext"
+	rafttransport "github.com/disaster37/go-raft/transport"
 )
 
 // leaderForwardedHeader marks a request that has already been forwarded to the
@@ -27,6 +27,23 @@ const leaderForwardedHeader = "X-Dagger-Kubernetes-Leader-Forwarded"
 type leaderInfo interface {
 	IsLeader() bool
 	LeaderAddress() string
+}
+
+// serverLeaderInfo adapts the server's leaderInfo to httpext.LeaderInfo,
+// reading the current leader dynamically on every call.
+type serverLeaderInfo struct {
+	s *Server
+}
+
+func (l *serverLeaderInfo) IsLeader() bool {
+	return l.s.leaderInfo != nil && l.s.leaderInfo.IsLeader()
+}
+
+func (l *serverLeaderInfo) LeaderAddress() string {
+	if l.s.leaderInfo == nil {
+		return ""
+	}
+	return l.s.leaderInfo.LeaderAddress()
 }
 
 // isReadOnlyMethod reports whether a method is served locally by followers
@@ -71,101 +88,121 @@ func leaderPinnedRoute(method, path string) bool {
 	return false
 }
 
+// effectiveForwardTLSProvider returns the dynamic mTLS provider for the
+// follower->leader forward hop. When none was injected it builds a static
+// provider trusting the minting CA pool (the internal listener always serves a
+// minting-CA leaf in every provider mode).
+func (s *Server) effectiveForwardTLSProvider() *rafttransport.DynamicTLSProvider {
+	if s.forwardTLSProvider != nil {
+		return s.forwardTLSProvider
+	}
+	pool := s.mintingCA.CertPool()
+	return rafttransport.NewDynamicTLSProvider(tls.Certificate{}, pool, pool, false)
+}
+
+// getOrBuildForwarder returns the cached httpext.Forwarder for the current
+// internal control port, rebuilding it when the port changes. It returns
+// (nil, false) when no leader info is injected or the internal port is unknown.
+func (s *Server) getOrBuildForwarder() (*httpext.Forwarder, bool) {
+	if s.leaderInfo == nil || s.internalControlPort <= 0 {
+		return nil, false
+	}
+	s.forwarderMu.Lock()
+	defer s.forwarderMu.Unlock()
+	if s.forwarder != nil && s.forwarderPort == s.internalControlPort {
+		return s.forwarder, true
+	}
+	s.forwarder = httpext.NewForwarder(httpext.LeaderForwardConfig{
+		LeaderInfo:            &serverLeaderInfo{s: s},
+		TargetPort:            s.internalControlPort,
+		Scheme:                "https",
+		HeaderName:            leaderForwardedHeader,
+		TLSProvider:           s.effectiveForwardTLSProvider(),
+		PinnedRouteFn:         leaderPinnedRoute,
+		DialTimeout:           2 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Minute,
+	})
+	s.forwarderPort = s.internalControlPort
+	return s.forwarder, true
+}
+
 // leaderForward is the global middleware that forwards leader-pinned requests
-// to the current Raft leader. It is a no-op on the leader, when no leader info
-// is injected, for follower-safe routes, and when the request already carries
-// the loop-prevention header; otherwise it rewrites and proxies the request to
-// the leader's control plane.
+// to the current Raft leader via go-raft's httpext.Forwarder. It is a no-op on
+// the leader, when no leader info is injected, for follower-safe routes, and
+// when the request already carries the loop-prevention header; otherwise it
+// streams the request to the leader's internal control plane and streams the
+// response back (preserving incremental SSE and 64 MiB OTLP bodies).
 func (s *Server) leaderForward() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		marker := string(c.Request.Header.Peek(leaderForwardedHeader))
 		if s.leaderInfo == nil ||
 			s.leaderInfo.IsLeader() ||
 			!leaderPinnedRoute(string(c.Method()), string(c.Path())) ||
-			c.Request.Header.Get(leaderForwardedHeader) != "" {
+			marker != "" {
+			c.Request.Header.Del(leaderForwardedHeader)
 			c.Next(ctx)
 			return
 		}
-		if _, _, ok := s.controlForwardTarget(s.leaderInfo.LeaderAddress()); !ok {
+
+		fwd, ok := s.getOrBuildForwarder()
+		if !ok {
 			s.leaderForwardFailure(c, consts.StatusServiceUnavailable, "no raft leader available")
 			c.Abort()
 			return
 		}
-		if s.leaderProxy == nil {
-			s.leaderForwardFailure(c, consts.StatusServiceUnavailable, "no raft leader available")
+
+		hdr := make(map[string][]string)
+		c.Request.Header.VisitAll(func(k, v []byte) {
+			name := textproto.CanonicalMIMEHeaderKey(string(k))
+			if httpext.IsHopByHopHeader(name) {
+				return
+			}
+			hdr[name] = append(hdr[name], string(v))
+		})
+		hdr[forwardedClientIPHeader] = []string{s.clientIP(c)}
+
+		var bodyReader io.Reader
+		if c.Request.IsBodyStream() {
+			bodyReader = c.Request.BodyStream()
+		} else if raw := c.Request.Body(); len(raw) > 0 {
+			bodyReader = bytes.NewReader(raw)
+		}
+
+		resp, err := fwd.Forward(ctx, &httpext.ForwardRequest{
+			Method:     string(c.Method()),
+			RequestURI: string(c.Request.URI().RequestURI()),
+			Header:     hdr,
+			Body:       bodyReader,
+		})
+		if err != nil {
+			if errors.Is(err, httpext.ErrNoLeader) {
+				s.leaderForwardFailure(c, consts.StatusServiceUnavailable, "no raft leader available")
+			} else {
+				s.logger.WithError(err).Error("leader forward failed")
+				s.leaderForwardFailure(c, consts.StatusBadGateway, "leader unreachable")
+			}
 			c.Abort()
 			return
 		}
-		c.Request.Header.Set(leaderForwardedHeader, "1")
-		s.leaderProxy.ServeHTTP(ctx, c)
+
+		for k, values := range resp.Header {
+			if httpext.IsHopByHopHeader(k) {
+				continue
+			}
+			for _, v := range values {
+				c.Response.Header.Add(k, v)
+			}
+		}
+		c.SetStatusCode(resp.StatusCode)
+		if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+			c.Response.ImmediateHeaderFlush = true
+		}
+		// Hand the upstream body to Hertz. Do NOT defer resp.Body.Close():
+		// Hertz's writeBodyStream flushes every chunk incrementally and closes
+		// resp.Body when streaming finishes.
+		c.SetBodyStream(resp.Body, -1)
 		c.Abort()
 	}
-}
-
-// controlForwardTarget derives the scheme + host:port of the leader's internal
-// control listener from the leader's Raft address and this server's derived
-// internal control port. The leader's Raft address carries the pod FQDN; the
-// port comes from internalControlPort (control_addr port + 2, all pods in a
-// fleet derive the same value). The scheme is always https: the internal
-// listener always carries a minting-CA-signed leaf (ADR-041).
-func (s *Server) controlForwardTarget(leaderAddress string) (scheme, hostPort string, ok bool) {
-	host, _, err := net.SplitHostPort(leaderAddress)
-	if err != nil || host == "" {
-		return "", "", false
-	}
-	if s.internalControlPort <= 0 {
-		return "", "", false
-	}
-	return "https", net.JoinHostPort(host, strconv.Itoa(s.internalControlPort)), true
-}
-
-// leaderForwardTLSConfig builds the client TLS config for the internal forward
-// hop. Verification is full — certificate verification is never disabled:
-// RootCAs is unconditionally the shared minting-CA pool (the internal listener
-// always serves a minting-CA leaf in every provider mode), and ServerName is
-// left empty so Go's tls.Client derives it from the dialed leader FQDN.
-// Minimum version TLS 1.2.
-func (s *Server) leaderForwardTLSConfig() *tls.Config {
-	return &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: s.mintingCA.CertPool()}
-}
-
-// buildLeaderForward constructs the reverse proxy used by leaderForward. One
-// proxy handles both buffered JSON writes and the streaming SSE route:
-// WithResponseBodyStream lets the backend body stream so Hertz flushes it
-// incrementally. The standard dialer is required because netpoll does not do
-// client TLS. The director rewrites the request to the current leader's
-// control plane; the error handler maps a transport/verification failure to
-// 502 "leader unreachable".
-func (s *Server) buildLeaderForward() error {
-	p, err := reverseproxy.NewSingleHostReverseProxy("https://leader.invalid",
-		hertzclient.WithResponseBodyStream(true),
-		hertzclient.WithDialTimeout(2*time.Second),
-		hertzclient.WithDialer(standard.NewDialer()),
-		hertzclient.WithTLSConfig(s.leaderForwardTLSConfig()),
-	)
-	if err != nil {
-		return err
-	}
-	p.SetDirector(func(req *protocol.Request) {
-		scheme, hostPort, ok := s.controlForwardTarget(s.leaderInfo.LeaderAddress())
-		if !ok {
-			// The leader vanished between the middleware check and the
-			// director: dial an unroutable target so the error handler
-			// returns 502 instead of forwarding to the wrong host.
-			req.URI().SetScheme("http")
-			req.URI().SetHost("leader.invalid")
-			req.Header.SetHostBytes([]byte("leader.invalid"))
-			return
-		}
-		req.URI().SetScheme(scheme)
-		req.URI().SetHost(hostPort)
-		req.Header.SetHostBytes([]byte(hostPort))
-	})
-	p.SetErrorHandler(func(c *app.RequestContext, err error) {
-		s.logger.WithError(err).Error("leader forward failed")
-		s.leaderForwardFailure(c, consts.StatusBadGateway, "leader unreachable")
-	})
-	s.leaderProxy = p
-	return nil
 }
 
 // leaderForwardFailure returns the fixed OAuth error screen for browser OAuth

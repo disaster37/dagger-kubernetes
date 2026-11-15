@@ -6,6 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disaster37/go-secguard"
+	sgconfig "github.com/disaster37/go-secguard/config"
+
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
@@ -42,8 +45,26 @@ func newTestStore(t *testing.T) *repository.RaftStore {
 }
 
 // newTestEnv builds a Server wired to a temp in-memory Raft store + stub fleet,
-// with auth always enabled.
+// with auth always enabled and a default security guard.
 func newTestEnv(t *testing.T) *testEnv {
+	t.Helper()
+	guard, err := secguard.New(sgconfig.DefaultConfig())
+	if err != nil {
+		t.Fatalf("secguard.New: %v", err)
+	}
+	return newTestEnvWithGuard(t, guard)
+}
+
+// newTestEnvWithGuard builds a Server with an explicit security guard (used by
+// tests that need a controllable clock).
+func newTestEnvWithGuard(t *testing.T, guard *secguard.Guard) *testEnv {
+	t.Helper()
+	return newTestEnvFull(t, guard, nil)
+}
+
+// newTestEnvFull builds a Server with an explicit security guard and CORS
+// allowlist.
+func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *testEnv {
 	t.Helper()
 	logger := observ.NewTestLogger()
 
@@ -134,12 +155,14 @@ func newTestEnv(t *testing.T) *testEnv {
 		HistoryStatsProvider: &stubHistoryStatsProvider{
 			stats: &domain.HistoryStats{TraceCount: 0, GC: domain.HistoryGCRules{}},
 		},
-		HistoryPurger:  &stubHistoryPurger{result: &domain.HistoryPurgeResult{}},
-		StatusProvider: &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
-		Connect:        connectSvc,
-		LiveHub:        liveHub,
-		Lifecycle:      pipelineLifecycle,
-		LeaderInfo:     store,
+		HistoryPurger:      &stubHistoryPurger{result: &domain.HistoryPurgeResult{}},
+		StatusProvider:     &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
+		Connect:            connectSvc,
+		LiveHub:            liveHub,
+		Lifecycle:          pipelineLifecycle,
+		LeaderInfo:         store,
+		Security:           guard,
+		CORSAllowedOrigins: corsOrigins,
 	})
 
 	return &testEnv{
