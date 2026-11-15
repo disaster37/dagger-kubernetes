@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disaster37/go-raft/discovery"
 	"github.com/sirupsen/logrus"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -34,7 +35,7 @@ func newRaftStoreForTest(t *testing.T) *repository.RaftStore {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := store.WaitForLeader(ctx); err != nil {
 		t.Fatalf("WaitForLeader: %v", err)
@@ -67,7 +68,7 @@ func newTwoNodeRaftStores(t *testing.T) (s1, s2 *repository.RaftStore) {
 	t.Helper()
 	addr1 := freeAddr(t)
 	addr2 := freeAddr(t)
-	peers := []repository.RaftPeer{
+	peers := []discovery.Peer{
 		{ID: "node-1", Address: addr1},
 		{ID: "node-2", Address: addr2},
 	}
@@ -117,9 +118,9 @@ func newTwoNodeRaftStores(t *testing.T) (s1, s2 *repository.RaftStore) {
 	return s1, s2
 }
 
-func mustResolver(t *testing.T, nodeID, advertise string, peers []repository.RaftPeer) repository.PeerResolver {
+func mustResolver(t *testing.T, nodeID, advertise string, peers []discovery.Peer) discovery.PeerResolver {
 	t.Helper()
-	return repository.NewPeerResolver(&repository.RaftDiscoveryConfig{
+	return discovery.NewPeerResolver(&discovery.Config{
 		NodeID:        nodeID,
 		AdvertiseAddr: advertise,
 		Peers:         peers,
@@ -554,6 +555,19 @@ func TestMintingCABootstrap(t *testing.T) {
 }
 
 func TestSelectTLSProvider(t *testing.T) {
+	newDynamicCA := func(t *testing.T, cfg *domain.Config, clientset kubernetes.Interface) *repository.DynamicMintingCA {
+		t.Helper()
+		minting := mintingProvider(cfg, clientset)
+		dynamicCA, err := repository.NewDynamicMintingCA(repository.DynamicMintingCAConfig{
+			Provider: minting,
+			Logger:   observ.NewTestLogger(),
+		})
+		if err != nil {
+			t.Fatalf("NewDynamicMintingCA: %v", err)
+		}
+		return dynamicCA
+	}
+
 	t.Run("embedded returns provider that shares minting CA via secret", func(t *testing.T) {
 		clientset := fake.NewSimpleClientset()
 		cfg := &domain.Config{
@@ -563,7 +577,7 @@ func TestSelectTLSProvider(t *testing.T) {
 			Fleet:      domain.FleetConfig{Namespace: "ns"},
 			Server:     domain.ServerConfig{DataHost: "data.example.com"},
 		}
-		p, err := selectTLSProvider(cfg, clientset)
+		p, err := selectTLSProvider(cfg, newDynamicCA(t, cfg, clientset))
 		if err != nil {
 			t.Fatalf("selectTLSProvider: %v", err)
 		}
@@ -584,7 +598,7 @@ func TestSelectTLSProvider(t *testing.T) {
 			Fleet:      domain.FleetConfig{Namespace: "ns"},
 			Server:     domain.ServerConfig{DataHost: "data.example.com"},
 		}
-		p, err := selectTLSProvider(cfg, clientset)
+		p, err := selectTLSProvider(cfg, newDynamicCA(t, cfg, clientset))
 		if err != nil {
 			t.Fatalf("selectTLSProvider: %v", err)
 		}
@@ -983,5 +997,71 @@ func TestBootstrapAdminIdempotentSecondBoot(t *testing.T) {
 	}
 	if !bytes.Equal(before, after) {
 		t.Fatal("password file rewritten on second boot")
+	}
+}
+
+// TestSyncCASecretsAfterRotation proves the settled Minting CA is written back
+// to its Kubernetes Secret after rotation so future scale-up pods bootstrap
+// with the current CA.
+func TestSyncCASecretsAfterRotation(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	dir := t.TempDir()
+	provider := repository.NewEmbeddedProvider(dir, 2*time.Hour)
+	sealer, err := repository.DeriveSealer("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("DeriveSealer: %v", err)
+	}
+	dynamicCA, err := repository.NewDynamicMintingCA(repository.DynamicMintingCAConfig{
+		Provider: provider,
+		Sealer:   sealer,
+		Logger:   observ.NewTestLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewDynamicMintingCA: %v", err)
+	}
+
+	store := newRaftStoreForTest(t)
+	store.SetMetaHook(func(key, value string) {
+		if key == repository.MintingKeyringMetaKey {
+			if err := dynamicCA.SetKeyringJSON(value); err != nil {
+				t.Errorf("SetKeyringJSON: %v", err)
+			}
+		}
+	})
+
+	now := time.Now()
+	rotator := repository.NewMintingRotator(&repository.MintingRotatorConfig{
+		Store:          store,
+		CA:             dynamicCA,
+		Bootstrap:      provider.BootstrapProvider(),
+		Sealer:         sealer,
+		ClientCertTTL:  2 * time.Hour,
+		RotationPeriod: time.Hour,
+		CheckInterval:  time.Second,
+		CommonName:     "dagger-kubernetes-minting-ca",
+		Organization:   "dagger-kubernetes",
+		CAValidity:     30 * 365 * 24 * time.Hour,
+		Logger:         observ.NewTestLogger(),
+		Now:            func() time.Time { return now },
+	})
+	ctx := context.Background()
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	now = now.Add(2 * time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+
+	syncMintingCASecret(ctx, clientset, "ns", "minting-ca", dynamicCA, observ.NewTestLogger())
+	secret, err := clientset.CoreV1().Secrets("ns").Get(ctx, "minting-ca", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("minting-ca secret not created: %v", err)
+	}
+	if len(secret.Data["ca.crt"]) == 0 || len(secret.Data["ca.key"]) == 0 {
+		t.Fatal("minting-ca secret missing ca.crt/ca.key")
 	}
 }

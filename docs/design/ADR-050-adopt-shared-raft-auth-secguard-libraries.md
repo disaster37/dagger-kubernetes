@@ -81,9 +81,11 @@ The Go toolchain is bumped to **1.27.0** (all three libraries require it) and
 - **Negative:** a new external dependency surface; the toolchain floor rises to
   Go 1.27; behavioral parity must be proven by the existing test suite plus new
   guardrail tests.
-- **Migration:** the config, security-guardrail, and auth layers are migrated
-  in this changeset. The Raft store, Minting CA rotation, and dynamic
-  per-handshake TLS migration is tracked as follow-up work; until it lands the
-  local Raft/PKI implementations remain in place and the shared libraries are
-  used for the pieces already migrated (`k8s.NewClientset`,
-  `jwt.ValidateSecret`, `pki.MintingCA`, `httpext.Forwarder`).
+- **Migration:** the config, security-guardrail, auth, Raft store, Minting CA
+  rotation, and dynamic per-handshake TLS layers are all migrated in this
+  changeset. `internal/repository/raft_store.go` now wraps `go-raft`'s `Node`
+  (storage, transport, discovery, autopilot, keyring rotation, join loop);
+  `minting_rotator.go` provides the phased dual-trust Minting CA rotation and
+  the `cert-manager`/`external` `FileWatcher` hot-reload; the local
+  `raft_discovery.go`, `raft_streamlayer.go`, `raft_tls.go`,
+  `raft_autopilot.go`, and `observ/raft_metrics.go` are deleted.

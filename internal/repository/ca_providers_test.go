@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/disaster37/go-raft/pki"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -185,9 +186,13 @@ func TestEmbeddedProviderSecretNonBootstrapPoll(t *testing.T) {
 }
 
 func TestEmbeddedProviderSecretAlreadyExistsFallback(t *testing.T) {
-	knownCert, knownKey, err := newMintingCAWithGoca()
+	knownCA, err := NewMintingCA(0)
 	if err != nil {
-		t.Fatalf("newMintingCAWithGoca: %v", err)
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+	knownCert, knownKey, err := knownCA.EncodePEM()
+	if err != nil {
+		t.Fatalf("EncodePEM: %v", err)
 	}
 	clientset := fake.NewSimpleClientset(&corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: "minting-ca", Namespace: "ns"},
@@ -629,6 +634,200 @@ func TestInternalServerCertReissuesOnSANGrowth(t *testing.T) {
 		KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
 	}); err != nil {
 		t.Fatalf("re-issued leaf not trusted for %s: %v", ownFQDN, err)
+	}
+}
+
+// verifyClientCert reports whether sc verifies against pool at time now.
+func verifyClientCert(t *testing.T, sc *domain.SerializableCertificate, pool *x509.CertPool, now time.Time) bool {
+	t.Helper()
+	cert, err := x509.ParseCertificate(sc.CertificateChain[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	_, err = cert.Verify(x509.VerifyOptions{
+		Roots:       pool,
+		CurrentTime: now,
+		KeyUsages:   []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	})
+	return err == nil
+}
+
+// TestDynamicMintingCAPhasedRotationPreservesInFlightClientCert proves the
+// phased dual-trust rotation keeps an in-flight engine client cert trusted
+// during the overlap window and retires it only after the old CA is pruned.
+func TestDynamicMintingCAPhasedRotationPreservesInFlightClientCert(t *testing.T) {
+	dir := t.TempDir()
+	provider := NewEmbeddedProvider(dir, 24*time.Hour)
+	sealer, err := DeriveSealer("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("DeriveSealer: %v", err)
+	}
+	dynamicCA, err := NewDynamicMintingCA(DynamicMintingCAConfig{Provider: provider, Sealer: sealer, Logger: testLogger()})
+	if err != nil {
+		t.Fatalf("NewDynamicMintingCA: %v", err)
+	}
+
+	// C0 minted under M0.
+	c0, err := dynamicCA.MintClientCert("engine-0")
+	if err != nil {
+		t.Fatalf("MintClientCert C0: %v", err)
+	}
+
+	store := newTestRaftStore(t)
+	store.SetMetaHook(func(key, value string) {
+		if key == MintingKeyringMetaKey {
+			if err := dynamicCA.SetKeyringJSON(value); err != nil {
+				t.Errorf("SetKeyringJSON: %v", err)
+			}
+		}
+	})
+
+	now := time.Now()
+	rotator := NewMintingRotator(&MintingRotatorConfig{
+		Store:          store,
+		CA:             dynamicCA,
+		Bootstrap:      provider.BootstrapProvider(),
+		Sealer:         sealer,
+		ClientCertTTL:  24 * time.Hour,
+		RotationPeriod: time.Hour,
+		CheckInterval:  time.Second,
+		CommonName:     "dagger-kubernetes-minting-ca",
+		Organization:   "dagger-kubernetes",
+		CAValidity:     30 * 365 * 24 * time.Hour,
+		Logger:         testLogger(),
+		Now:            func() time.Time { return now },
+	})
+	ctx := context.Background()
+
+	// Seed (Term 1).
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Stage (Term 2).
+	now = now.Add(2 * time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	// Activate (Term 3, active M1, overlap [M0, M1]).
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+
+	// C1 minted under M1 during the overlap.
+	c1, err := dynamicCA.MintClientCert("engine-1")
+	if err != nil {
+		t.Fatalf("MintClientCert C1: %v", err)
+	}
+
+	// Client certs are minted with the real clock (goca), so verify against
+	// the real clock; the fake clock only drives the rotation decisions.
+	realNow := time.Now()
+	pool := dynamicCA.CertPool()
+	if !verifyClientCert(t, c0, pool, realNow) {
+		t.Fatal("C0 (M0) must verify during the dual-trust overlap")
+	}
+	if !verifyClientCert(t, c1, pool, realNow) {
+		t.Fatal("C1 (M1) must verify during the dual-trust overlap")
+	}
+
+	// Prune (Term 4) after max(2*clientCertTTL, 1h).
+	now = now.Add(2*24*time.Hour + time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	pool = dynamicCA.CertPool()
+	if verifyClientCert(t, c0, pool, realNow) {
+		t.Fatal("C0 (M0) must not verify after pruning M0")
+	}
+	c2, err := dynamicCA.MintClientCert("engine-2")
+	if err != nil {
+		t.Fatalf("MintClientCert C2: %v", err)
+	}
+	if !verifyClientCert(t, c2, pool, realNow) {
+		t.Fatal("a fresh cert under M1 must verify after pruning M0")
+	}
+}
+
+// TestDataplaneFileWatcherHotReload proves the cert-manager/external data-plane
+// server cert hot-reloads renewed files and rejects corrupt PEMs while keeping
+// the previous certificate active.
+func TestDataplaneFileWatcherHotReload(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := pki.NewMintingCA("test-ca", "org", 10*365*24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+	caCertPEM, _, err := ca.EncodePEM()
+	if err != nil {
+		t.Fatalf("EncodePEM: %v", err)
+	}
+	caPath := filepath.Join(dir, "ca.crt")
+	certPath := filepath.Join(dir, "server.crt")
+	keyPath := filepath.Join(dir, "server.key")
+	if err := os.WriteFile(caPath, caCertPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	writeLeaf := func() *x509.Certificate {
+		certPEM, keyPEM, err := ca.IssuePeerCertificate("server", "org", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
+		if err != nil {
+			t.Fatalf("IssuePeerCertificate: %v", err)
+		}
+		if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+			t.Fatalf("write cert: %v", err)
+		}
+		if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+			t.Fatalf("write key: %v", err)
+		}
+		parsed, err := pki.ParsePEMCert(certPEM)
+		if err != nil {
+			t.Fatalf("ParsePEMCert: %v", err)
+		}
+		return parsed
+	}
+	writeLeaf()
+
+	w, err := NewDataplaneFileWatcher(certPath, keyPath, caPath, 50*time.Millisecond, testLogger())
+	if err != nil {
+		t.Fatalf("NewDataplaneFileWatcher: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go w.Start(ctx)
+	provider := w.Provider()
+
+	renewed := writeLeaf()
+	deadline := time.Now().Add(10 * time.Second)
+	reloaded := false
+	for time.Now().Before(deadline) {
+		cur, err := provider.GetCertificate(nil)
+		if err == nil && len(cur.Certificate) > 0 {
+			parsed, perr := x509.ParseCertificate(cur.Certificate[0])
+			if perr == nil && parsed.SerialNumber.Cmp(renewed.SerialNumber) == 0 {
+				reloaded = true
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !reloaded {
+		t.Fatal("file watcher did not hot-reload the renewed certificate")
+	}
+
+	// A corrupt PEM must be rejected, keeping the previous certificate active.
+	if err := os.WriteFile(certPath, []byte("not a pem"), 0o600); err != nil {
+		t.Fatalf("write corrupt cert: %v", err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	cur, err := provider.GetCertificate(nil)
+	if err != nil || len(cur.Certificate) == 0 {
+		t.Fatalf("provider lost its certificate after a corrupt reload: %v", err)
+	}
+	parsed, err := x509.ParseCertificate(cur.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	if parsed.SerialNumber.Cmp(renewed.SerialNumber) != 0 {
+		t.Fatal("corrupt PEM replaced the active certificate")
 	}
 }
 

@@ -3,8 +3,6 @@ package repository
 import (
 	"context"
 	"crypto/rand"
-	"crypto/tls"
-	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,8 +12,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hashicorp/go-hclog"
-	"github.com/hashicorp/raft"
+	raftconfig "github.com/disaster37/go-raft/config"
+	"github.com/disaster37/go-raft/discovery"
+	"github.com/disaster37/go-raft/pki"
+	"github.com/disaster37/go-raft/testutil"
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -85,127 +85,141 @@ func mustCommand(t *testing.T, kind commandKind, payload any) *command {
 	return cmd
 }
 
-// raftClusterNode is one node in a test raft cluster.
-type raftClusterNode struct {
-	store *RaftStore
-	r     *raft.Raft
-	trans raft.Transport
-	layer *tlsStreamLayer
-	addr  raft.ServerAddress
+// testBootstrapProvider returns a fixed shared CA material for TLS test
+// clusters (no Kubernetes clientset required).
+type testBootstrapProvider struct {
+	mat *pki.BootstrapMaterial
 }
 
-// raftTestConfig returns a fast election-timing raft config for test clusters.
-// Timings are intentionally relaxed enough to stay deterministic under
-// -race and CI container CPU contention (200ms timeouts flaked on loaded
-// runners: leaders stepped down before heartbeats could commit; the later
-// failover flake "no leader elected" was the same problem one level up —
-// a 250ms leader lease and 500ms election timeouts can still flap under
-// contention, and each stalled round waits the full transport timeout on the
-// dead node).
-func raftTestConfig(id string) *raft.Config {
-	config := raft.DefaultConfig()
-	config.LocalID = raft.ServerID(id)
-	config.TrailingLogs = 256
-	config.SnapshotInterval = 10 * time.Minute
-	config.SnapshotThreshold = 1000
-	config.LogOutput = io.Discard
-	config.LogLevel = "WARN"
-	config.HeartbeatTimeout = time.Second
-	config.ElectionTimeout = time.Second
-	config.LeaderLeaseTimeout = 500 * time.Millisecond
-	config.CommitTimeout = 100 * time.Millisecond
-	return config
+func (p *testBootstrapProvider) EnsureBootstrapMaterial(context.Context) (*pki.BootstrapMaterial, error) {
+	return p.mat, nil
 }
 
-// waitForClusterLeader blocks until one of the nodes becomes leader.
-func waitForClusterLeader(t *testing.T, nodes []raftClusterNode) *RaftStore {
+// newTestBootstrapProvider builds a shared CA material for TLS test clusters.
+func newTestBootstrapProvider(t *testing.T) *testBootstrapProvider {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		for i := range nodes {
-			if nodes[i].r.State() == raft.Leader {
-				return nodes[i].store
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
+	ca, err := pki.NewMintingCA("test-raft-ca", "dagger-kubernetes-raft", 10*365*24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
 	}
-	t.Fatal("no leader elected")
-	return nil
+	certPEM, keyPEM, err := ca.EncodePEM()
+	if err != nil {
+		t.Fatalf("EncodePEM: %v", err)
+	}
+	return &testBootstrapProvider{mat: &pki.BootstrapMaterial{CACertPEM: certPEM, CAKeyPEM: keyPEM}}
 }
 
-// newThreeNodeRaftCluster builds a 3-node in-memory (no TLS) raft cluster and
-// waits for a leader to be elected. Used for stale-read + not-leader-on-follower
-// + leadership-transfer tests.
-func newThreeNodeRaftCluster(t *testing.T) []*RaftStore {
+// newRaftCluster builds an n-node loopback Raft cluster via NewRaftStore with
+// static peer discovery. When tlsEnabled is true every node shares a local CA
+// and uses mTLS.
+func newRaftCluster(t *testing.T, n int, tlsEnabled bool) []*RaftStore {
 	t.Helper()
-	return newInmemRaftCluster(t, 3)
+	return newRaftClusterOpts(t, n, tlsEnabled, false)
 }
 
-// newInmemRaftCluster builds an n-node fully-connected in-memory raft cluster.
-func newInmemRaftCluster(t *testing.T, n int) []*RaftStore {
+// newRaftClusterWithRotation builds a TLS cluster with in-band keyring
+// rotation enabled (fast period) and an at-rest sealer.
+func newRaftClusterWithRotation(t *testing.T, n int) []*RaftStore {
 	t.Helper()
-	nodes := make([]raftClusterNode, n)
-	for i := 0; i < n; i++ {
-		id := fmt.Sprintf("node-%d", i)
-		fsm := NewFSM()
-		logs := raft.NewInmemStore()
-		stable := raft.NewInmemStore()
-		snaps := raft.NewInmemSnapshotStore()
-		addr, trans := raft.NewInmemTransport(raft.NewInmemAddr())
-		r, err := raft.NewRaft(raftTestConfig(id), fsm, logs, stable, snaps, trans)
+	return newRaftClusterOpts(t, n, true, true)
+}
+
+func newRaftClusterOpts(t *testing.T, n int, tlsEnabled, rotation bool) []*RaftStore {
+	t.Helper()
+	addrs := make([]string, n)
+	listeners := make([]net.Listener, n)
+	for i := range addrs {
+		listeners[i] = testutil.FreeListener(t)
+		addrs[i] = listeners[i].Addr().String()
+	}
+	peers := make([]discovery.Peer, n)
+	for i := range peers {
+		peers[i] = discovery.Peer{ID: fmt.Sprintf("node-%d", i), Address: addrs[i]}
+	}
+	var bootstrap pki.BootstrapProvider
+	if tlsEnabled {
+		bootstrap = newTestBootstrapProvider(t)
+	}
+	stores := make([]*RaftStore, n)
+	for i := range stores {
+		nodeID := fmt.Sprintf("node-%d", i)
+		cfg := &RaftStoreConfig{
+			Dir:                    t.TempDir(),
+			NodeID:                 nodeID,
+			BindAddr:               addrs[i],
+			AdvertiseAddr:          addrs[i],
+			Peers:                  peers,
+			Replicas:               n,
+			Resolver:               discovery.NewPeerResolver(&discovery.Config{NodeID: nodeID, AdvertiseAddr: addrs[i], Peers: peers, Replicas: n}),
+			StorageBackend:         raftconfig.StorageBackendInmem,
+			CustomListener:         listeners[i],
+			JoinInterval:           100 * time.Millisecond,
+			JoinReconcileTimeout:   2 * time.Second,
+			PerformanceMultiplier:  0.2,
+			AutopilotEnabled:       true,
+			CleanupDeadServers:     true,
+			MinQuorum:              1,
+			TLSEnabled:             tlsEnabled,
+			TLSDir:                 t.TempDir(),
+			TLSOrganization:        "dagger-kubernetes-raft",
+			CASecret:               "test-ca",
+			ClientAuth:             true,
+			BootstrapProvider:      bootstrap,
+			AllowInsecureMultiNode: true,
+		}
+		if rotation {
+			// Rotation applies Raft writes; use more forgiving election
+			// timings so the leader stays stable under -race load.
+			cfg.PerformanceMultiplier = 2.0
+			cfg.KeyringRotationEnabled = true
+			cfg.RotationPeriod = 300 * time.Millisecond
+			cfg.RotationCheckInterval = 50 * time.Millisecond
+			cfg.SafetyMargin = 7 * 24 * time.Hour
+			cfg.EncryptionKey = "0123456789abcdef0123456789abcdef"
+		}
+		store, err := NewRaftStore(cfg, testLogger())
 		if err != nil {
-			t.Fatalf("NewRaft %s: %v", id, err)
+			t.Fatalf("NewRaftStore node-%d: %v", i, err)
 		}
-		nodes[i] = raftClusterNode{
-			store: &RaftStore{raft: r, fsm: fsm, timeout: 5 * time.Second},
-			r:     r,
-			trans: trans,
-			addr:  addr,
-		}
+		stores[i] = store
 	}
-	for i := range nodes {
-		for j := range nodes {
-			if i != j {
-				nodes[i].trans.(*raft.InmemTransport).Connect(nodes[j].addr, nodes[j].trans)
-			}
-		}
-	}
-	bootstrapCluster(t, nodes)
 	t.Cleanup(func() {
-		for i := range nodes {
-			_ = nodes[i].r.Shutdown().Error()
-			_ = nodes[i].trans.(*raft.InmemTransport).Close()
+		for _, s := range stores {
+			_ = s.Close()
 		}
 	})
-	return clusterStores(nodes)
+	waitCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	for i, s := range stores {
+		if err := s.WaitForLeader(waitCtx); err != nil {
+			t.Fatalf("node-%d WaitForLeader: %v", i, err)
+		}
+	}
+	for i, s := range stores {
+		if err := s.WaitForCleanState(waitCtx); err != nil {
+			t.Fatalf("node-%d WaitForCleanState: %v", i, err)
+		}
+	}
+	return stores
 }
 
-// newThreeNodeTLSRaftCluster builds a 3-node cluster over loopback TCP with
-// real goca CA + per-node leaf certs + mTLS. Asserts a leader is elected and
-// that the initial configuration has replicated to every node (see
-// waitForClusterSettled).
+// newThreeNodeRaftCluster builds a 3-node in-memory (no TLS) raft cluster.
+func newThreeNodeRaftCluster(t *testing.T) []*RaftStore {
+	t.Helper()
+	return newRaftCluster(t, 3, false)
+}
+
+// newThreeNodeTLSRaftCluster builds a 3-node cluster over loopback TCP with a
+// shared CA + per-node leaf certs + mTLS.
 func newThreeNodeTLSRaftCluster(t *testing.T) []*RaftStore {
 	t.Helper()
-	nodes := buildTLSClusterNodes(t, 3)
-	bootstrapCluster(t, nodes)
-	waitForClusterLeader(t, nodes)
-	stores := clusterStores(nodes)
+	stores := newRaftCluster(t, 3, true)
 	waitForClusterSettled(t, stores, 3, 30*time.Second)
 	return stores
 }
 
 // waitForClusterSettled blocks until every node's latest configuration
-// contains the full voter set (len(cfg.Servers) == n). This proves the
-// bootstrap configuration entry has been committed and replicated.
-//
-// It exists because raft followers with an empty configuration refuse to
-// start elections by design (split-brain protection: runFollower aborts with
-// "no known peers, aborting election" when the config index is 0). A test
-// that kills the leader before the configuration replicated leaves a cluster
-// that can never elect a new leader — the exact "no leader elected" CI flake
-// in TestThreeNodeTLSClusterLeaderFailover, where the kill landed in the
-// window between the first election and the commit of the no-op barrier
-// entry (widened by leader-lease step-down flaps under -race contention).
+// contains the full voter set (len(cfg.Servers) == n).
 func waitForClusterSettled(t *testing.T, stores []*RaftStore, n int, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -226,125 +240,13 @@ func waitForClusterSettled(t *testing.T, stores []*RaftStore, n int, timeout tim
 	t.Fatal("cluster configuration never replicated to all nodes")
 }
 
-// buildTLSClusterNodes builds n mTLS raft nodes over loopback TCP sharing a
-// goca CA. The nodes are NOT bootstrapped (callers choose the configuration).
-func buildTLSClusterNodes(t *testing.T, n int) []raftClusterNode {
-	t.Helper()
-
-	caCertPEM, caKeyPEM, err := createRaftCAWithGoca("test-raft-ca", "dagger-kubernetes-raft")
-	if err != nil {
-		t.Fatalf("createRaftCAWithGoca: %v", err)
-	}
-	ca, err := NewMintingCAFromPEM(caCertPEM, caKeyPEM, time.Hour)
-	if err != nil {
-		t.Fatalf("NewMintingCAFromPEM: %v", err)
-	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(caCertPEM) {
-		t.Fatal("append CA cert")
-	}
-
-	nodes := make([]raftClusterNode, n)
-	for i := 0; i < n; i++ {
-		cn := fmt.Sprintf("node-%d", i)
-		leafCert, leafKey, err := ca.IssuePeerCertificate(cn, "dagger-kubernetes-raft", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
-		if err != nil {
-			t.Fatalf("IssuePeerCertificate: %v", err)
-		}
-		leaf, err := tls.X509KeyPair(leafCert, leafKey)
-		if err != nil {
-			t.Fatalf("X509KeyPair: %v", err)
-		}
-		tlsCfg := &tls.Config{
-			Certificates: []tls.Certificate{leaf},
-			RootCAs:      pool,
-			ClientCAs:    pool,
-			ClientAuth:   tls.RequireAndVerifyClientCert,
-			MinVersion:   tls.VersionTLS12,
-		}
-		layer, err := newTLSStreamLayer("127.0.0.1:0", nil, tlsCfg)
-		if err != nil {
-			t.Fatalf("newTLSStreamLayer: %v", err)
-		}
-		adv := layer.Addr()
-		trans := raft.NewNetworkTransportWithConfig(&raft.NetworkTransportConfig{
-			Stream:  layer,
-			Logger:  hclog.NewNullLogger(),
-			MaxPool: 10,
-			Timeout: time.Second,
-		})
-		nodes[i] = raftClusterNode{layer: layer, trans: trans, addr: raft.ServerAddress(adv.String())}
-	}
-	for i := 0; i < n; i++ {
-		id := fmt.Sprintf("node-%d", i)
-		fsm := NewFSM()
-		logs := raft.NewInmemStore()
-		stable := raft.NewInmemStore()
-		snaps := raft.NewInmemSnapshotStore()
-		r, err := raft.NewRaft(raftTestConfig(id), fsm, logs, stable, snaps, nodes[i].trans)
-		if err != nil {
-			t.Fatalf("NewRaft %s: %v", id, err)
-		}
-		nodes[i].store = &RaftStore{raft: r, fsm: fsm, timeout: 5 * time.Second, transport: nodes[i].trans}
-		nodes[i].r = r
-	}
-	t.Cleanup(func() {
-		for i := range nodes {
-			_ = nodes[i].r.Shutdown().Error()
-			_ = closeRaftTransport(nodes[i].trans)
-		}
-	})
-	return nodes
-}
-
-// bootstrapSingle seeds node-0 with itself as the only voter.
-func bootstrapSingle(t *testing.T, nodes []raftClusterNode) {
-	t.Helper()
-	servers := []raft.Server{{
-		Suffrage: raft.Voter,
-		ID:       raft.ServerID("node-0"),
-		Address:  nodes[0].addr,
-	}}
-	if err := nodes[0].r.BootstrapCluster(raft.Configuration{Servers: servers}).Error(); err != nil {
-		t.Fatalf("BootstrapCluster: %v", err)
-	}
-}
-
-// bootstrapCluster seeds node-0 with the full voter configuration.
-func bootstrapCluster(t *testing.T, nodes []raftClusterNode) {
-	t.Helper()
-	servers := make([]raft.Server, len(nodes))
-	for i := range nodes {
-		servers[i] = raft.Server{
-			Suffrage: raft.Voter,
-			ID:       raft.ServerID(fmt.Sprintf("node-%d", i)),
-			Address:  nodes[i].addr,
-		}
-	}
-	if err := nodes[0].r.BootstrapCluster(raft.Configuration{Servers: servers}).Error(); err != nil {
-		t.Fatalf("BootstrapCluster: %v", err)
-	}
-}
-
-// clusterStores extracts the RaftStore handles from the cluster nodes.
-func clusterStores(nodes []raftClusterNode) []*RaftStore {
-	stores := make([]*RaftStore, len(nodes))
-	for i := range nodes {
-		stores[i] = nodes[i].store
-	}
-	return stores
-}
-
 // findLeader returns the current leader store, failing if none is elected.
 func findLeader(t *testing.T, stores []*RaftStore) *RaftStore {
 	t.Helper()
 	return findLeaderTimeout(t, stores, 30*time.Second)
 }
 
-// findLeaderTimeout is findLeader with a caller-chosen deadline. The failover
-// test uses a longer one: after the leader dies, election rounds stall on the
-// dead node for the transport timeout, and under -race/CI contention the
-// default 30s has proven too tight.
+// findLeaderTimeout is findLeader with a caller-chosen deadline.
 func findLeaderTimeout(t *testing.T, stores []*RaftStore, timeout time.Duration) *RaftStore {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -355,9 +257,6 @@ func findLeaderTimeout(t *testing.T, stores []*RaftStore, timeout time.Duration)
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
-	}
-	for i, s := range stores {
-		t.Logf("node %d stats: %v", i, s.raft.Stats())
 	}
 	stack := make([]byte, 1<<20)
 	n := runtime.Stack(stack, true)
@@ -429,18 +328,10 @@ func TestThreeNodeTLSClusterLeaderFailover(t *testing.T) {
 	stores := newThreeNodeTLSRaftCluster(t)
 	leader := findLeader(t, stores)
 
-	// Kill the leader (raft + transport): a new one must be elected and
-	// writes must resume. newThreeNodeTLSRaftCluster already waited for the
-	// configuration to replicate to every node — without it the survivors
-	// would hold an empty configuration and refuse to start elections
-	// (raft's split-brain protection), which was the actual CI flake.
-	// Closing the transport too makes dials to the dead node fail fast
-	// (connection refused) instead of stalling every election round for the
-	// transport timeout.
-	if err := leader.raft.Shutdown().Error(); err != nil {
-		t.Fatalf("shutdown leader: %v", err)
+	// Kill the leader: a new one must be elected and writes must resume.
+	if err := leader.Close(); err != nil {
+		t.Fatalf("close leader: %v", err)
 	}
-	_ = closeRaftTransport(leader.transport)
 
 	newLeader := findLeaderTimeout(t, stores, 60*time.Second)
 	if newLeader == leader {
@@ -453,34 +344,9 @@ func TestThreeNodeTLSClusterLeaderFailover(t *testing.T) {
 }
 
 func TestThreeNodeTLSClusterAddVoterJoin(t *testing.T) {
-	nodes := buildTLSClusterNodes(t, 3)
-	bootstrapSingle(t, nodes)
+	stores := newThreeNodeTLSRaftCluster(t)
+	leader := findLeader(t, stores)
 
-	// Wait for node-0 to become the single-node leader.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) && !nodes[0].store.IsLeader() {
-		time.Sleep(10 * time.Millisecond)
-	}
-	if !nodes[0].store.IsLeader() {
-		t.Fatal("node-0 did not become leader")
-	}
-
-	leader := nodes[0].store
-	for i := 1; i < 3; i++ {
-		if err := leader.AddVoter(fmt.Sprintf("node-%d", i), string(nodes[i].addr), 5*time.Second); err != nil {
-			t.Fatalf("AddVoter node-%d: %v", i, err)
-		}
-	}
-
-	// The cluster reaches a 3-node configuration.
-	deadline = time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		cfg, err := leader.GetConfiguration()
-		if err == nil && len(cfg.Servers) == 3 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 	cfg, err := leader.GetConfiguration()
 	if err != nil {
 		t.Fatalf("GetConfiguration: %v", err)
@@ -494,7 +360,10 @@ func TestThreeNodeTLSClusterAddVoterJoin(t *testing.T) {
 	if err := leader.apply(cmd); err != nil {
 		t.Fatalf("apply after join: %v", err)
 	}
-	for i := 1; i < 3; i++ {
-		waitForMetaValue(t, nodes[i].store, "joined", "yes")
+	for _, s := range stores {
+		if s == leader {
+			continue
+		}
+		waitForMetaValue(t, s, "joined", "yes")
 	}
 }

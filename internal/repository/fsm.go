@@ -352,11 +352,21 @@ func newState() *fsmState {
 // state; all writes are deterministic applications of a command.
 type FSM struct {
 	state *fsmState
+	// onMeta, when set, is invoked for every replicated meta key/value on both
+	// Apply (kindSetMeta) and Restore. It lets the Minting CA rotator observe
+	// meta["minting_tls_keyring"] on every pod in real time.
+	onMeta func(key, value string)
 }
 
 // NewFSM returns an empty FSM.
 func NewFSM() *FSM {
 	return &FSM{state: newState()}
+}
+
+// SetMetaHook installs the meta-change callback. It must be called before the
+// FSM starts applying (i.e. before NewRaftStore returns).
+func (f *FSM) SetMetaHook(hook func(key, value string)) {
+	f.onMeta = hook
 }
 
 var _ raft.FSM = (*FSM)(nil)
@@ -384,6 +394,9 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if cmd.Kind == kindSetMeta {
+		return nil, f.applySetMetaLocked(cmd)
+	}
 	if result, err, handled := s.applyEntityCommand(cmd); handled {
 		return result, err
 	}
@@ -394,6 +407,18 @@ func (f *FSM) applyCommand(cmd *command) (interface{}, error) {
 		return nil, err
 	}
 	return nil, fmt.Errorf("unknown raft command kind %d", cmd.Kind)
+}
+
+// applySetMetaLocked applies a kindSetMeta command and invokes the meta hook.
+// Callers must hold the state write lock.
+func (f *FSM) applySetMetaLocked(cmd *command) error {
+	return applyPayload(cmd, "set meta", func(p cmdSetMeta) error {
+		f.state.meta[p.Key] = p.Value
+		if f.onMeta != nil {
+			f.onMeta(p.Key, p.Value)
+		}
+		return nil
+	})
 }
 
 // applyEntityCommand handles user/group/project/token commands. Handled
@@ -485,11 +510,6 @@ func (s *fsmState) applyTraceCacheCommand(cmd *command) (interface{}, error, boo
 			return nil, err, true
 		}
 		return s.markTraceFailed(p), nil, true
-	case kindSetMeta:
-		return nil, applyPayload(cmd, "set meta", func(p cmdSetMeta) error {
-			s.meta[p.Key] = p.Value
-			return nil
-		}), true
 	case kindUpsertManifestRoute, kindDeleteManifestRoute, kindUpsertBlobRoute,
 		kindRecordUpload, kindDeleteUpload, kindReapUploads:
 		// Reserved registry-cache routing kinds. Decode-only no-op: the

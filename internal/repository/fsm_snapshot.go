@@ -145,6 +145,14 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	// synchronizing on the pointer itself, so reassigning it here would race
 	// with concurrent reads (snapshot installs can happen on a live node).
 	f.state.adopt(s)
+
+	// Notify the meta hook for every restored meta key so the Minting CA
+	// rotator observes the replicated keyring after a snapshot install.
+	if f.onMeta != nil {
+		for k, v := range payload.Meta {
+			f.onMeta(k, v)
+		}
+	}
 	return nil
 }
 

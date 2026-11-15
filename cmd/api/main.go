@@ -1,10 +1,10 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/tls"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -19,14 +19,18 @@ import (
 	"time"
 
 	goauthjwt "github.com/disaster37/go-auth/jwt"
+	"github.com/disaster37/go-raft/discovery"
 	raftk8s "github.com/disaster37/go-raft/k8s"
+	rafttransport "github.com/disaster37/go-raft/transport"
 	"github.com/disaster37/go-secguard"
 	"github.com/minio/minio-go/v7"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/disaster/dagger-kubernetes/config"
@@ -105,7 +109,22 @@ func run(c *cli.Context) error {
 		logger.WithError(err).Warn("k8s clientset unavailable; raft TLS auto-mode, minting CA sharing, and fleet provider will fall back")
 	}
 
-	tlsProvider, err := selectTLSProvider(cfg, clientset)
+	// --- Minting CA + dynamic server-cert provider ---
+	minting := mintingProvider(cfg, clientset)
+	sealer, err := repository.DeriveSealer(cfg.Auth.Token.EncryptionKey)
+	if err != nil {
+		return fmt.Errorf("derive at-rest sealer: %w", err)
+	}
+	dynamicCA, err := repository.NewDynamicMintingCA(repository.DynamicMintingCAConfig{
+		Provider: minting,
+		Sealer:   sealer,
+		Logger:   logger,
+	})
+	if err != nil {
+		return fmt.Errorf("create dynamic minting CA: %w", err)
+	}
+
+	tlsProvider, err := selectTLSProvider(cfg, dynamicCA)
 	if err != nil {
 		return fmt.Errorf("create TLS provider: %w", err)
 	}
@@ -149,10 +168,21 @@ func run(c *cli.Context) error {
 	const raftInitMaxRetries = 3
 	const raftInitRetryDelay = 5 * time.Second
 
+	// The FSM meta hook installs the replicated Minting CA keyring on every
+	// pod as it is applied/restored.
+	metaHook := func(key, value string) {
+		if key != repository.MintingKeyringMetaKey {
+			return
+		}
+		if err := dynamicCA.SetKeyringJSON(value); err != nil {
+			logger.WithError(err).Warn("install minting CA keyring failed")
+		}
+	}
+
 	var raftStore *repository.RaftStore
 	var jwtSecret, tokenEncKey []byte
 	for attempt := 0; attempt < raftInitMaxRetries; attempt++ {
-		raftStore, jwtSecret, tokenEncKey, err = initRaftStore(ctx, cfg, clientset, sessions, logger)
+		raftStore, jwtSecret, tokenEncKey, err = initRaftStore(ctx, cfg, clientset, sessions, metaHook, logger)
 		if err == nil {
 			break
 		}
@@ -168,6 +198,28 @@ func run(c *cli.Context) error {
 		}
 	}
 	defer func() { _ = raftStore.Close() }()
+
+	// --- Minting CA phased rotation (leader-only) ---
+	if cfg.CA.KeyringRotationEnabled {
+		rotator := repository.NewMintingRotator(&repository.MintingRotatorConfig{
+			Store:          raftStore,
+			CA:             dynamicCA,
+			Bootstrap:      minting.BootstrapProvider(),
+			Sealer:         sealer,
+			ClientCertTTL:  cfg.CA.ClientCertTTL,
+			RotationPeriod: cfg.CA.RotationPeriod,
+			CheckInterval:  cfg.CA.RotationCheckInterval,
+			CommonName:     "dagger-kubernetes-minting-ca",
+			Organization:   "dagger-kubernetes",
+			CAValidity:     cfg.CA.CAValidity,
+			Logger:         logger,
+		})
+		go rotator.Start(ctx)
+	}
+
+	// --- Sync settled CAs back to the Kubernetes Secrets (leader-only) ---
+	go syncCASecretLoop(ctx, cfg, clientset, raftStore, dynamicCA, logger)
+
 	jwtSvc := service.NewJWTService(jwtSecret, cfg.Auth.JWT.AccessTTL, cfg.Auth.JWT.RefreshTTL)
 
 	userRepo := repository.NewUserRepo(raftStore)
@@ -383,17 +435,43 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("init security guard: %w", err)
 	}
 
+	// --- Dynamic per-handshake TLS providers (ADR-050) ---
+	var dataTLSProvider, controlTLSProvider *rafttransport.DynamicTLSProvider
+	if cfg.Supervisor.Dataplane.TLS.Provider == "embedded" {
+		dataTLSProvider = dynamicCA.EmbeddedServerTLSProvider()
+		controlTLSProvider = dynamicCA.EmbeddedServerTLSProvider()
+	} else {
+		caFile := filepath.Join(cfg.Supervisor.Dataplane.TLS.CAPath, "ca.crt")
+		watcher, werr := repository.NewDataplaneFileWatcher(
+			cfg.Supervisor.Dataplane.TLS.CertPath,
+			cfg.Supervisor.Dataplane.TLS.KeyPath,
+			caFile,
+			cfg.Supervisor.Dataplane.TLS.ReloadPollInterval,
+			logger,
+		)
+		if werr != nil {
+			return fmt.Errorf("start dataplane file watcher: %w", werr)
+		}
+		go watcher.Start(ctx)
+		dataTLSProvider = watcher.Provider()
+		controlTLSProvider = watcher.Provider()
+	}
+
 	server := handler.NewServer(&handler.ServerConfig{
-		ControlAddr:      cfg.Server.ControlAddr,
-		DataAddr:         cfg.Server.DataAddr,
-		DataHost:         cfg.Server.DataHost,
-		CollectorURL:     cfg.Telemetry.CollectorURL,
-		VictoriaURL:      cfg.Telemetry.VictoriaURL,
-		CertPath:         controlTLSCertPath,
-		KeyPath:          controlTLSKeyPath,
-		PipelineURL:      cfg.Server.PublicURL,
-		OTelMaxBodyBytes: cfg.OTel.IngestMaxBodySize,
-		InternalTLSCert:  &internalTLS,
+		ControlAddr:         cfg.Server.ControlAddr,
+		DataAddr:            cfg.Server.DataAddr,
+		DataHost:            cfg.Server.DataHost,
+		CollectorURL:        cfg.Telemetry.CollectorURL,
+		VictoriaURL:         cfg.Telemetry.VictoriaURL,
+		CertPath:            controlTLSCertPath,
+		KeyPath:             controlTLSKeyPath,
+		PipelineURL:         cfg.Server.PublicURL,
+		OTelMaxBodyBytes:    cfg.OTel.IngestMaxBodySize,
+		InternalTLSCert:     &internalTLS,
+		ControlTLSProvider:  controlTLSProvider,
+		DataTLSProvider:     dataTLSProvider,
+		InternalTLSProvider: dynamicCA.InternalTLSProvider(),
+		ForwardTLSProvider:  dynamicCA.ForwardTLSProvider(),
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -512,18 +590,18 @@ func run(c *cli.Context) error {
 // leadership/membership goroutines, and resolves the JWT secret +
 // token-encryption key (the leader provisions, followers wait for replication —
 // ADR-016 D5/D6). The caller owns closing the returned store.
-func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, sessions domain.SessionStateSink, logger *logrus.Logger) (store *repository.RaftStore, jwtSecret, tokenEncKey []byte, err error) {
+func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, sessions domain.SessionStateSink, metaHook func(key, value string), logger *logrus.Logger) (store *repository.RaftStore, jwtSecret, tokenEncKey []byte, err error) {
 	if err := validateRaftConfig(cfg, clientset); err != nil {
 		return nil, nil, nil, fmt.Errorf("validate raft config: %w", err)
 	}
 
 	hostname, _ := os.Hostname()
-	discovery := raftDiscoveryConfig(cfg)
+	discoveryCfg := raftDiscoveryConfig(cfg)
 
-	resolver := repository.NewPeerResolver(&discovery)
+	resolver := discovery.NewPeerResolver(&discoveryCfg)
 
 	// Derive the advertise address (pod FQDN for StatefulSet pods).
-	advertise, err := repository.DeriveAdvertiseAddr(&discovery, hostname)
+	advertise, err := discovery.DeriveAdvertiseAddr(&discoveryCfg, hostname)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("derive raft advertise addr: %w", err)
 	}
@@ -539,13 +617,13 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		logger.Warn(`multi-node is configured with the embedded TLS provider but the minting CA cannot be shared across pods (no K8s clientset or ca.minting_ca_secret is empty), and supervisor.dataplane.tls.ca_path is stored under the per-pod database directory. Each pod will mint a DISTINCT engine-client CA, so engine mTLS client certs issued by one pod will be REJECTED by other pods' data-plane listeners (CWE-295). To fix: run with a K8s clientset and ca.minting_ca_secret set (the embedded provider then shares the CA via that Secret), mount a shared ReadWriteMany volume at supervisor.dataplane.tls.ca_path, or switch supervisor.dataplane.tls.provider to cert-manager/external with a shared CA.`)
 	}
 
-	var raftTLS *tls.Config
-	if cfg.Raft.TLS.Enabled {
-		dnsNames, ipAddrs := repository.PodSANs(&discovery, hostname)
-		raftTLS, err = buildRaftTLSConfig(cfg, isMultiNode, clientset, dnsNames, ipAddrs, raftNodeCommonName(cfg, resolver, hostname), hostname, logger)
-		if err != nil {
-			return nil, nil, nil, fmt.Errorf("build raft TLS: %w", err)
-		}
+	namespace := cfg.Raft.Namespace
+	if namespace == "" {
+		namespace = cfg.Fleet.Namespace
+	}
+	tlsDir := cfg.Raft.TLS.Dir
+	if tlsDir == "" {
+		tlsDir = filepath.Join(cfg.Database.Dir, "tls")
 	}
 
 	raftStore, err := repository.NewRaftStore(&repository.RaftStoreConfig{
@@ -553,18 +631,46 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		NodeID:                   cfg.Raft.NodeID,
 		BindAddr:                 cfg.Raft.BindAddr,
 		AdvertiseAddr:            advertise,
+		Peers:                    toRaftPeers(cfg.Raft.Peers),
 		Resolver:                 resolver,
+		Replicas:                 cfg.Raft.Replicas,
+		StatefulSetName:          cfg.Raft.StatefulSetName,
+		HeadlessService:          cfg.Raft.HeadlessService,
+		Namespace:                namespace,
+		ClusterDomain:            cfg.Raft.ClusterDomain,
+		RaftPort:                 raftPortFromBindAddr(cfg.Raft.BindAddr),
 		ApplyTimeout:             cfg.Raft.ApplyTimeout,
+		LeaderWaitTimeout:        cfg.Raft.LeaderWaitTimeout,
 		SnapshotThreshold:        cfg.Raft.SnapshotThreshold,
 		SnapshotInterval:         cfg.Raft.SnapshotInterval,
 		TrailingLogs:             cfg.Raft.TrailingLogs,
-		TLS:                      raftTLS,
 		PerformanceMultiplier:    cfg.Raft.PerformanceMultiplier,
 		RaftLogCacheSize:         cfg.Raft.RaftLogCacheSize,
-		NoSnapshotRestoreOnStart: cfg.Raft.NoSnapshotRestoreOnStart,
-		SessionSink:              sessions,
-		RecoveryMode:             cfg.Raft.RecoveryMode,
 		TransportMaxPool:         cfg.Raft.TransportMaxPool,
+		NoSnapshotRestoreOnStart: cfg.Raft.NoSnapshotRestoreOnStart,
+		RecoveryMode:             cfg.Raft.RecoveryMode,
+		SessionSink:              sessions,
+		TLSEnabled:               cfg.Raft.TLS.Enabled,
+		TLSDir:                   tlsDir,
+		TLSValidity:              cfg.Raft.TLS.Validity,
+		TLSOrganization:          cfg.Raft.TLS.Organization,
+		CACertPath:               cfg.Raft.TLS.CACertPath,
+		CertPath:                 cfg.Raft.TLS.CertPath,
+		KeyPath:                  cfg.Raft.TLS.KeyPath,
+		CASecret:                 cfg.Raft.TLS.CASecret,
+		CABootstrap:              raftCABootstrap(cfg, hostname),
+		ClientAuth:               cfg.Raft.TLS.ClientAuth,
+		SecretPollTimeout:        cfg.Raft.LeaderWaitTimeout,
+		KeyringRotationEnabled:   cfg.Raft.TLS.KeyringRotationEnabled,
+		RotationPeriod:           cfg.Raft.TLS.RotationPeriod,
+		RotationCheckInterval:    cfg.Raft.TLS.RotationCheckInterval,
+		SafetyMargin:             cfg.Raft.TLS.SafetyMargin,
+		EncryptionKey:            cfg.Auth.Token.EncryptionKey,
+		AutopilotEnabled:         cfg.Raft.Autopilot.Enabled,
+		CleanupDeadServers:       cfg.Raft.Autopilot.CleanupDeadServers,
+		MinQuorum:                cfg.Raft.Autopilot.MinQuorum,
+		Clientset:                clientset,
+		MetaHook:                 metaHook,
 	}, logger)
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("open database: %w", err)
@@ -579,8 +685,6 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 		_ = raftStore.Close()
 		return nil, nil, nil, fmt.Errorf("wait for raft leader: %w", err)
 	}
-
-	go joinLoop(ctx, raftStore, resolver, logger)
 
 	// Startup barrier: the FSM must be caught up (Leader/Follower,
 	// commit_index == applied_index, fsm_pending == 0) before reading secrets
@@ -612,19 +716,6 @@ func initRaftStore(ctx context.Context, cfg *domain.Config, clientset kubernetes
 	// resolution.
 
 	return raftStore, jwtSecret, tokenEncKey, nil
-}
-
-// raftNodeCommonName returns the leaf-certificate common name for this node:
-// the configured node_id, else the resolver's self ID (the StatefulSet pod
-// name), else the hostname.
-func raftNodeCommonName(cfg *domain.Config, resolver repository.PeerResolver, hostname string) string {
-	if cfg.Raft.NodeID != "" {
-		return cfg.Raft.NodeID
-	}
-	if self, err := resolver.Self(); err == nil && self.ID != "" {
-		return self.ID
-	}
-	return hostname
 }
 
 // minJWTSecretLen is the minimum accepted HS256 signing key length, sourced
@@ -928,11 +1019,11 @@ func runMigrateTokens(c *cli.Context) error {
 	return nil
 }
 
-// toRaftPeers converts domain.RaftPeer config entries into repository peers.
-func toRaftPeers(peers []domain.RaftPeer) []repository.RaftPeer {
-	out := make([]repository.RaftPeer, 0, len(peers))
+// toRaftPeers converts domain.RaftPeer config entries into discovery peers.
+func toRaftPeers(peers []domain.RaftPeer) []discovery.Peer {
+	out := make([]discovery.Peer, 0, len(peers))
 	for _, p := range peers {
-		out = append(out, repository.RaftPeer{ID: p.ID, Address: p.Address})
+		out = append(out, discovery.Peer{ID: p.ID, Address: p.Address})
 	}
 	return out
 }
@@ -947,41 +1038,6 @@ func validateMigrateTokensSingleNode(cfg *domain.Config) error {
 		return fmt.Errorf("migrate-tokens must run against a single-node cluster (raft.replicas=1 and raft.peers empty); for multi-node, run it via the running leader's API or scale the cluster to 1 first")
 	}
 	return nil
-}
-
-// joinLoop (leader only) periodically reconciles the running raft
-// configuration with the resolver's voter list: AddVoter for missing voters
-// and RemoveServer for removed voters (scale-up/scale-down, ADR-016 D7).
-func joinLoop(ctx context.Context, store *repository.RaftStore, resolver repository.PeerResolver, logger *logrus.Logger) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if !store.IsLeader() {
-				continue
-			}
-			desired, err := resolver.Resolve()
-			if err != nil {
-				logger.WithError(err).Warn("joinLoop: resolve peers failed")
-				continue
-			}
-			added, updated, removed, err := store.ReconcileMembership(desired, 10*time.Second)
-			if err != nil {
-				logger.WithError(err).Warn("joinLoop: reconcile membership failed")
-				continue
-			}
-			if len(added) > 0 || len(updated) > 0 || len(removed) > 0 {
-				logger.WithFields(logrus.Fields{
-					"added":   added,
-					"updated": updated,
-					"removed": removed,
-				}).Info("joinLoop: raft membership reconciled")
-			}
-		}
-	}
 }
 
 // waitForMetaSecret polls metaStore.Get(key) every 500ms until a value is
@@ -1030,21 +1086,15 @@ func resolveTokenEncryptionKey(ctx context.Context, store *repository.RaftStore,
 	return deriveAESKey(raw), nil
 }
 
-// raftDiscoveryConfig maps the domain raft config to the repository discovery
+// raftDiscoveryConfig maps the domain raft config to the go-raft discovery
 // config. The raft port is derived from bind_addr (default 8081) so callers
 // can reference it directly.
-func raftDiscoveryConfig(cfg *domain.Config) repository.RaftDiscoveryConfig {
+func raftDiscoveryConfig(cfg *domain.Config) discovery.Config {
 	namespace := cfg.Raft.Namespace
 	if namespace == "" {
 		namespace = cfg.Fleet.Namespace
 	}
-	port := 8081
-	if _, portStr, err := net.SplitHostPort(cfg.Raft.BindAddr); err == nil {
-		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
-			port = p
-		}
-	}
-	return repository.RaftDiscoveryConfig{
+	return discovery.Config{
 		NodeID:          cfg.Raft.NodeID,
 		AdvertiseAddr:   cfg.Raft.AdvertiseAddr,
 		BindAddr:        cfg.Raft.BindAddr,
@@ -1054,8 +1104,18 @@ func raftDiscoveryConfig(cfg *domain.Config) repository.RaftDiscoveryConfig {
 		HeadlessService: cfg.Raft.HeadlessService,
 		Namespace:       namespace,
 		ClusterDomain:   cfg.Raft.ClusterDomain,
-		RaftPort:        port,
+		RaftPort:        raftPortFromBindAddr(cfg.Raft.BindAddr),
 	}
+}
+
+// raftPortFromBindAddr returns the port from bind_addr, defaulting to 8081.
+func raftPortFromBindAddr(bindAddr string) int {
+	if _, portStr, err := net.SplitHostPort(bindAddr); err == nil {
+		if p, err := strconv.Atoi(portStr); err == nil && p > 0 {
+			return p
+		}
+	}
+	return 8081
 }
 
 // validateRaftConfig fails fast on config that would break multi-node raft or
@@ -1084,40 +1144,6 @@ func validateRaftConfig(cfg *domain.Config, clientset kubernetes.Interface) erro
 	return nil
 }
 
-// buildRaftTLSConfig builds the raft transport tls.Config from config,
-// issuing/reusing this node's leaf certificate (ADR-016 D1/D2/D3).
-func buildRaftTLSConfig(cfg *domain.Config, isMultiNode bool, clientset kubernetes.Interface, dnsNames []string, ipAddrs []net.IP, commonName, hostname string, logger *logrus.Logger) (*tls.Config, error) {
-	dir := cfg.Raft.TLS.Dir
-	if dir == "" {
-		dir = filepath.Join(cfg.Database.Dir, "tls")
-	}
-	namespace := cfg.Raft.Namespace
-	if namespace == "" {
-		namespace = cfg.Fleet.Namespace
-	}
-	// The internal CA bootstrap node is ordinal 0 of the StatefulSet. It is
-	// auto-detected from the pod hostname (<sts>-0); raft.tls.ca_bootstrap
-	// forces it explicitly (ADR-016 §1.2).
-	caBootstrap := raftCABootstrap(cfg, hostname)
-	_, tlsCfg, err := repository.LoadOrBuildRaftTLS(&repository.RaftTLSConfig{
-		Enabled:           true,
-		Dir:               dir,
-		Validity:          cfg.Raft.TLS.Validity,
-		Organization:      cfg.Raft.TLS.Organization,
-		CACertPath:        cfg.Raft.TLS.CACertPath,
-		CertPath:          cfg.Raft.TLS.CertPath,
-		KeyPath:           cfg.Raft.TLS.KeyPath,
-		CASecret:          cfg.Raft.TLS.CASecret,
-		CABootstrap:       caBootstrap,
-		ClientAuth:        cfg.Raft.TLS.ClientAuth,
-		SecretPollTimeout: cfg.Raft.LeaderWaitTimeout,
-	}, isMultiNode, clientset, namespace, dnsNames, ipAddrs, commonName, logger)
-	if err != nil {
-		return nil, err
-	}
-	return tlsCfg, nil
-}
-
 // raftCABootstrap reports whether this node should generate + share the
 // internal raft CA: raft.tls.ca_bootstrap forces it, else ordinal 0 of the
 // StatefulSet (pod hostname "<sts>-0") is auto-detected (ADR-016 §1.2).
@@ -1133,19 +1159,113 @@ func raftCABootstrap(cfg *domain.Config, hostname string) bool {
 	return strings.HasSuffix(hostname, "-0")
 }
 
-func selectTLSProvider(cfg *domain.Config, clientset kubernetes.Interface) (domain.CAProvider, error) {
+// syncCASecretLoop (leader-only) writes every settled active CA back to its
+// Kubernetes Secret so future scale-up or empty-PVC pods bootstrap with the
+// current CA rather than a retired one. It syncs both the Raft CA
+// (<release>-raft-ca) and the Minting CA (<release>-minting-ca).
+func syncCASecretLoop(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, raftStore *repository.RaftStore, dynamicCA *repository.DynamicMintingCA, logger *logrus.Logger) {
+	if clientset == nil {
+		return
+	}
+	namespace := cfg.Raft.Namespace
+	if namespace == "" {
+		namespace = cfg.Fleet.Namespace
+	}
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if !raftStore.IsLeader() {
+				continue
+			}
+			syncRaftCASecret(ctx, clientset, namespace, cfg.Raft.TLS.CASecret, raftStore, logger)
+			syncMintingCASecret(ctx, clientset, namespace, cfg.CA.MintingCASecret, dynamicCA, logger)
+		}
+	}
+}
+
+// syncRaftCASecret writes the settled Raft CA (Term >= 3, single key) to the
+// Raft CA Secret.
+func syncRaftCASecret(ctx context.Context, clientset kubernetes.Interface, namespace, secretName string, raftStore *repository.RaftStore, logger *logrus.Logger) {
+	if secretName == "" {
+		return
+	}
+	km := raftStore.KeyringManager()
+	if km == nil {
+		return
+	}
+	kr := km.CurrentKeyring()
+	if kr == nil || kr.Term < 3 || len(kr.Keys) != 1 {
+		return
+	}
+	keyID, _, certPEM, keyPEM, err := raftStore.ActiveCAPEM()
+	if err != nil {
+		logger.WithError(err).Warn("sync raft CA secret: read active CA failed")
+		return
+	}
+	updateCASecret(ctx, clientset, namespace, secretName, certPEM, keyPEM, keyID, logger)
+}
+
+// syncMintingCASecret writes the settled Minting CA (Term >= 3) to the Minting
+// CA Secret.
+func syncMintingCASecret(ctx context.Context, clientset kubernetes.Interface, namespace, secretName string, dynamicCA *repository.DynamicMintingCA, logger *logrus.Logger) {
+	if secretName == "" || dynamicCA == nil {
+		return
+	}
+	keyID, term, certPEM, keyPEM, ok := dynamicCA.ActiveCAPEM()
+	if !ok || term < 3 {
+		return
+	}
+	updateCASecret(ctx, clientset, namespace, secretName, certPEM, keyPEM, keyID, logger)
+}
+
+// updateCASecret creates or updates a CA Secret with the given cert/key when
+// they differ from the stored values.
+func updateCASecret(ctx context.Context, clientset kubernetes.Interface, namespace, secretName string, certPEM, keyPEM []byte, keyID string, logger *logrus.Logger) {
+	secrets := clientset.CoreV1().Secrets(namespace)
+	secret, err := secrets.Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			logger.WithError(err).WithField("secret", secretName).Warn("sync CA secret: get failed")
+			return
+		}
+		secret = &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: namespace}}
+	}
+	if secret.Data == nil {
+		secret.Data = map[string][]byte{}
+	}
+	if bytes.Equal(secret.Data["ca.crt"], certPEM) && bytes.Equal(secret.Data["ca.key"], keyPEM) {
+		return
+	}
+	secret.Data["ca.crt"] = certPEM
+	secret.Data["ca.key"] = keyPEM
+	if secret.ResourceVersion == "" {
+		if _, err := secrets.Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
+			logger.WithError(err).WithField("secret", secretName).Warn("sync CA secret: create failed")
+			return
+		}
+	} else if _, err := secrets.Update(ctx, secret, metav1.UpdateOptions{}); err != nil {
+		logger.WithError(err).WithField("secret", secretName).Warn("sync CA secret: update failed")
+		return
+	}
+	logger.WithFields(logrus.Fields{"secret": secretName, "key_id": keyID}).Info("synced settled CA to Kubernetes Secret")
+}
+
+func selectTLSProvider(cfg *domain.Config, dynamicCA *repository.DynamicMintingCA) (domain.CAProvider, error) {
 	// The minting CA is always auto-bootstrapped and shared across pods via
 	// ca.minting_ca_secret when a K8s clientset is available (multi-node),
 	// regardless of the server-TLS provider below. The provider only decides
 	// where the data/control-plane server certificate comes from.
-	minting := mintingProvider(cfg, clientset)
 	switch cfg.Supervisor.Dataplane.TLS.Provider {
 	case "embedded":
-		return minting, nil
+		return dynamicCA, nil
 	case "cert-manager":
-		return repository.NewCertManagerProvider(cfg.Supervisor.Dataplane.TLS.CertPath, cfg.Supervisor.Dataplane.TLS.KeyPath, minting), nil
+		return repository.NewCertManagerProvider(cfg.Supervisor.Dataplane.TLS.CertPath, cfg.Supervisor.Dataplane.TLS.KeyPath, dynamicCA), nil
 	case "external":
-		return repository.NewExternalProvider(cfg.Supervisor.Dataplane.TLS.CertPath, cfg.Supervisor.Dataplane.TLS.KeyPath, minting), nil
+		return repository.NewExternalProvider(cfg.Supervisor.Dataplane.TLS.CertPath, cfg.Supervisor.Dataplane.TLS.KeyPath, dynamicCA), nil
 	default:
 		return nil, fmt.Errorf("unknown TLS provider: %s", cfg.Supervisor.Dataplane.TLS.Provider)
 	}
@@ -1159,11 +1279,11 @@ func selectTLSProvider(cfg *domain.Config, clientset kubernetes.Interface) (doma
 // auto-bootstrapped for every server-TLS provider.
 func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *repository.EmbeddedProvider {
 	hostname, _ := os.Hostname()
-	discovery := raftDiscoveryConfig(cfg)
+	discoveryCfg := raftDiscoveryConfig(cfg)
 	// The server cert must carry this pod's own exact FQDN SANs so any
 	// follower can verify the leader's control-plane cert on the internal
 	// forward hop (ADR-041). The engine-facing data host stays in the list.
-	extraSANs := repository.ServerCertFQDNSANs(&discovery, hostname)
+	extraSANs := discovery.ServerCertFQDNSANs(&discoveryCfg, hostname)
 	extraSANs = append(extraSANs, cfg.Server.DataHost)
 	if clientset != nil && cfg.CA.MintingCASecret != "" {
 		namespace := cfg.Raft.Namespace

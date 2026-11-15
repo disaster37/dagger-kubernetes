@@ -93,6 +93,9 @@ func leaderPinnedRoute(method, path string) bool {
 // provider trusting the minting CA pool (the internal listener always serves a
 // minting-CA leaf in every provider mode).
 func (s *Server) effectiveForwardTLSProvider() *rafttransport.DynamicTLSProvider {
+	if s.cfg.ForwardTLSProvider != nil {
+		return s.cfg.ForwardTLSProvider
+	}
 	if s.forwardTLSProvider != nil {
 		return s.forwardTLSProvider
 	}

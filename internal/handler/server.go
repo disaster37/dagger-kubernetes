@@ -210,6 +210,14 @@ type ServerConfig struct {
 	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
 	// (64 MiB). The control-API maxControlBody cap is unaffected.
 	OTelMaxBodyBytes int64
+
+	// Dynamic per-handshake TLS providers (ADR-050). When set they take
+	// precedence over the static CertPath/KeyPath/InternalTLSCert so renewed
+	// certificates are picked up without a restart.
+	ControlTLSProvider  *rafttransport.DynamicTLSProvider
+	DataTLSProvider     *rafttransport.DynamicTLSProvider
+	InternalTLSProvider *rafttransport.DynamicTLSProvider
+	ForwardTLSProvider  *rafttransport.DynamicTLSProvider
 }
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
@@ -371,6 +379,9 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 		ClientCAs:    s.mintingCA.CertPool(),
 		MinVersion:   tls.VersionTLS12,
 	}
+	if s.cfg.DataTLSProvider != nil {
+		tlsConfig.GetCertificate = s.cfg.DataTLSProvider.GetCertificate
+	}
 
 	tlsLn := s.cfg.DataListener
 	if tlsLn == nil {
@@ -430,6 +441,14 @@ func (s *Server) serveTLSConn(raw net.Conn, base *tls.Config) {
 	cfg := base.Clone()
 	cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		info.serverName = hello.ServerName
+		if s.cfg.DataTLSProvider != nil {
+			return &tls.Config{
+				GetCertificate: s.cfg.DataTLSProvider.GetCertificate,
+				ClientCAs:      s.mintingCA.CertPool(),
+				ClientAuth:     tls.RequireAndVerifyClientCert,
+				MinVersion:     tls.VersionTLS12,
+			}, nil
+		}
 		return nil, nil
 	}
 
@@ -587,7 +606,9 @@ func (s *Server) configure() (*server.Hertz, error) {
 		// capped per-handler.
 		server.WithStreamBody(true),
 	)
-	if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
+	if s.cfg.ControlTLSProvider != nil {
+		opts = append(opts, server.WithTLS(s.cfg.ControlTLSProvider.ServerTLSConfig()))
+	} else if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
 		cert, err := tls.LoadX509KeyPair(s.cfg.CertPath, s.cfg.KeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load control plane TLS cert: %w", err)
