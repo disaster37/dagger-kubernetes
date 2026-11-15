@@ -1676,59 +1676,6 @@ func TestCollectSettingsSkipsShadowedKeys(t *testing.T) {
 	}
 }
 
-func TestStringToDurationHookFunc(t *testing.T) {
-	hook := stringToDurationHookFunc()
-	durType := reflect.TypeOf(time.Duration(0))
-	strType := reflect.TypeOf("")
-
-	out, err := hook(durType, durType, 5*time.Second)
-	if err != nil || out != 5*time.Second {
-		t.Fatalf("non-string passthrough = (%v, %v), want (5s, nil)", out, err)
-	}
-	out, err = hook(strType, strType, "keep")
-	if err != nil || out != "keep" {
-		t.Fatalf("non-duration target passthrough = (%v, %v), want (keep, nil)", out, err)
-	}
-	out, err = hook(strType, durType, "7d")
-	if err != nil || out != 168*time.Hour {
-		t.Fatalf("7d = (%v, %v), want (168h, nil)", out, err)
-	}
-	out, err = hook(strType, durType, "nope")
-	if err == nil || out != nil {
-		t.Fatalf("invalid duration = (%v, %v), want error", out, err)
-	}
-}
-
-func TestStringToWeakSliceHookFunc(t *testing.T) {
-	hook := stringToWeakSliceHookFunc(",")
-	strType := reflect.TypeOf("")
-	sliceType := reflect.TypeOf([]string{})
-	intType := reflect.TypeOf(0)
-
-	out, err := hook(strType, sliceType, "a,b")
-	if err != nil {
-		t.Fatalf("split = %v", err)
-	}
-	if got := out.([]string); len(got) != 2 || got[0] != "a" || got[1] != "b" {
-		t.Fatalf("split = %v, want [a b]", got)
-	}
-	out, err = hook(strType, sliceType, "")
-	if err != nil {
-		t.Fatalf("empty split = %v", err)
-	}
-	if got := out.([]string); len(got) != 0 {
-		t.Fatalf("empty split = %v, want empty slice", got)
-	}
-	out, err = hook(strType, strType, "x")
-	if err != nil || out != "x" {
-		t.Fatalf("non-slice target passthrough = (%v, %v), want (x, nil)", out, err)
-	}
-	out, err = hook(intType, sliceType, 5)
-	if err != nil || out != 5 {
-		t.Fatalf("non-string passthrough = (%v, %v), want (5, nil)", out, err)
-	}
-}
-
 func TestDecodeSettingsRejectsNonPointer(t *testing.T) {
 	err := decodeSettings(nil, struct{}{})
 	if err == nil || !strings.Contains(err.Error(), "pointer") {

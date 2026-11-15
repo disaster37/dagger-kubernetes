@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	goauthoauth "github.com/disaster37/go-auth/oauth"
 	jose "github.com/go-jose/go-jose/v4"
 	"golang.org/x/oauth2"
 
@@ -831,7 +832,7 @@ func newOIDCServiceStub(t *testing.T, cfg *domain.OAuthConfig) (*OIDCOAuthServic
 
 // seedOIDCUser creates a local user with a stored (optionally encrypted)
 // OAuth credential and returns it.
-func seedOIDCUser(t *testing.T, svc *OIDCOAuthService, cred *oauthCredential) *domain.User {
+func seedOIDCUser(t *testing.T, svc *OIDCOAuthService, cred *goauthoauth.Credential) *domain.User {
 	t.Helper()
 	ctx := context.Background()
 	u, err := svc.users.Create(ctx, "alice", "password123", domain.RoleUser)
@@ -841,7 +842,7 @@ func seedOIDCUser(t *testing.T, svc *OIDCOAuthService, cred *oauthCredential) *d
 	u.OAuthProvider = "oidc"
 	u.OAuthID = "alice-sub"
 	if cred != nil {
-		ct, err := encryptOAuthCredential(svc.encKey, cred)
+		ct, err := sealOAuthCredential(svc.encKey, cred)
 		if err != nil {
 			t.Fatalf("encrypt credential: %v", err)
 		}
@@ -858,13 +859,13 @@ func seedOIDCUser(t *testing.T, svc *OIDCOAuthService, cred *oauthCredential) *d
 // domain.ErrSessionRevoked, which would deactivate the user and delete their
 // API token.
 func TestOIDCRevalidateCredentialUnusable(t *testing.T) {
-	expiredCred := &oauthCredential{
+	expiredCred := &goauthoauth.Credential{
 		Provider:     "oidc",
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
 		ExpiresAt:    time.Now().Add(-time.Hour),
 	}
-	validCred := &oauthCredential{
+	validCred := &goauthoauth.Credential{
 		Provider:     "oidc",
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
@@ -872,7 +873,7 @@ func TestOIDCRevalidateCredentialUnusable(t *testing.T) {
 	}
 	tests := []struct {
 		name   string
-		cred   *oauthCredential
+		cred   *goauthoauth.Credential
 		mutate func(t *testing.T, issuer *fakeOIDCIssuer, u *domain.User)
 	}{
 		{
@@ -938,7 +939,7 @@ func TestOIDCRevalidateGroupsFailingAllowlistStillForbidden(t *testing.T) {
 	issuer := newFakeOIDCIssuer(t)
 	issuer.userinfo = map[string]any{"groups": []any{"outsiders"}}
 	svc := newOIDCServiceForKey(t, oidcCfg(issuer.srv.URL, nil))
-	u := seedOIDCUser(t, svc, &oauthCredential{
+	u := seedOIDCUser(t, svc, &goauthoauth.Credential{
 		Provider:    "oidc",
 		AccessToken: "old-access",
 		ExpiresAt:   time.Now().Add(time.Hour),
@@ -961,7 +962,7 @@ func TestOIDCRevalidateRefreshRotatesAndPersistsCredential(t *testing.T) {
 	issuer.accessToken = "rotated-access"
 	issuer.refreshToken = "rotated-refresh"
 	svc := newOIDCServiceForKey(t, oidcCfg(issuer.srv.URL, nil))
-	u := seedOIDCUser(t, svc, &oauthCredential{
+	u := seedOIDCUser(t, svc, &goauthoauth.Credential{
 		Provider:     "oidc",
 		AccessToken:  "old-access",
 		RefreshToken: "old-refresh",
@@ -986,7 +987,7 @@ func TestOIDCRevalidateRefreshRotatesAndPersistsCredential(t *testing.T) {
 	if got.OAuthTokenCiphertext == oldCiphertext {
 		t.Fatal("rotated credential was not persisted to the store")
 	}
-	decoded, err := decryptOAuthCredential(svc.encKey, got.OAuthTokenCiphertext)
+	decoded, err := openOAuthCredential(svc.encKey, got.OAuthTokenCiphertext)
 	if err != nil {
 		t.Fatalf("decrypt persisted credential: %v", err)
 	}
@@ -1006,7 +1007,7 @@ func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
 		issuer.userinfo = map[string]any{"groups": []any{"devs"}}
 		svc, _ := newOIDCServiceStub(t, oidcCfg(issuer.srv.URL, nil))
 		svc.isLeader = func() bool { return false }
-		u := seedOIDCUser(t, svc, &oauthCredential{
+		u := seedOIDCUser(t, svc, &goauthoauth.Credential{
 			Provider:     "oidc",
 			AccessToken:  "old-access",
 			RefreshToken: "old-refresh",
@@ -1029,7 +1030,7 @@ func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
 		issuer.refreshToken = "rotated-refresh"
 		svc, _ := newOIDCServiceStub(t, oidcCfg(issuer.srv.URL, nil))
 		svc.isLeader = func() bool { return true }
-		u := seedOIDCUser(t, svc, &oauthCredential{
+		u := seedOIDCUser(t, svc, &goauthoauth.Credential{
 			Provider:     "oidc",
 			AccessToken:  "old-access",
 			RefreshToken: "old-refresh",
@@ -1050,7 +1051,7 @@ func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get user: %v", err)
 		}
-		decoded, err := decryptOAuthCredential(svc.encKey, got.OAuthTokenCiphertext)
+		decoded, err := openOAuthCredential(svc.encKey, got.OAuthTokenCiphertext)
 		if err != nil {
 			t.Fatalf("decrypt persisted credential: %v", err)
 		}
@@ -1066,7 +1067,7 @@ func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
 		issuer.refreshToken = "rotated-refresh"
 		svc, urepo := newOIDCServiceStub(t, oidcCfg(issuer.srv.URL, nil))
 		svc.isLeader = func() bool { return true }
-		u := seedOIDCUser(t, svc, &oauthCredential{
+		u := seedOIDCUser(t, svc, &goauthoauth.Credential{
 			Provider:     "oidc",
 			AccessToken:  "old-access",
 			RefreshToken: "old-refresh",
@@ -1075,7 +1076,7 @@ func TestOIDCRevalidateLeaderOnlyRefresh(t *testing.T) {
 		// The Raft apply now reports ErrNotLeader (leadership lost mid-check).
 		urepo.commitErr = domain.ErrNotLeader
 
-		cred, err := decryptOAuthCredential(svc.encKey, u.OAuthTokenCiphertext)
+		cred, err := openOAuthCredential(svc.encKey, u.OAuthTokenCiphertext)
 		if err != nil {
 			t.Fatalf("decrypt credential: %v", err)
 		}

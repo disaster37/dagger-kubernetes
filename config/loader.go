@@ -6,13 +6,12 @@ import (
 	"io/fs"
 	"net/url"
 	"os"
-	"reflect"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-viper/mapstructure/v2"
+	raftconfig "github.com/disaster37/go-raft/config"
+	sgconfig "github.com/disaster37/go-secguard/config"
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
 
@@ -32,6 +31,8 @@ type validation struct {
 // determines the returned error string.
 var supervisorValidations = []validation{
 	{wrap: "validate auth config", fn: validateAuthConfig},
+	{wrap: "validate security config", fn: validateSecurityConfig},
+	{wrap: "validate ca config", fn: validateCAConfig},
 	{wrap: "validate oauth revalidation config", fn: validateOAuthRevalidation},
 	{wrap: "validate group mappings", fn: validateGroupMappings},
 	{wrap: "validate project mappings", fn: validateProjectMappings},
@@ -123,6 +124,28 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("auth.cookie.secure", false)
 	v.SetDefault("auth.cors.allowed_origins", []string{})
 
+	// go-secguard guardrails (lockout, auth rate limit, IP bans, trusted
+	// proxies). Defaults mirror go-secguard/config.DefaultConfig().
+	v.SetDefault("auth.security.lockout.enabled", true)
+	v.SetDefault("auth.security.lockout.max_failed_attempts", 5)
+	v.SetDefault("auth.security.lockout.base_lockout", 30*time.Second)
+	v.SetDefault("auth.security.lockout.max_lockout", 15*time.Minute)
+	v.SetDefault("auth.security.lockout.entry_ttl", 30*time.Minute)
+	v.SetDefault("auth.security.lockout.max_entries", 4096)
+	v.SetDefault("auth.security.rate_limit.enabled", true)
+	v.SetDefault("auth.security.rate_limit.max_requests", 60)
+	v.SetDefault("auth.security.rate_limit.window", time.Minute)
+	v.SetDefault("auth.security.rate_limit.login_throttle_attempts", 10)
+	v.SetDefault("auth.security.rate_limit.login_throttle_window", 5*time.Minute)
+	v.SetDefault("auth.security.rate_limit.max_entries", 4096)
+	v.SetDefault("auth.security.ban.enabled", true)
+	v.SetDefault("auth.security.ban.max_unique_failures", 10)
+	v.SetDefault("auth.security.ban.ban_duration", 15*time.Minute)
+	v.SetDefault("auth.security.ban.window", 5*time.Minute)
+	v.SetDefault("auth.security.ban.max_entries", 4096)
+	v.SetDefault("auth.security.proxy.behind_reverse_proxy", false)
+	v.SetDefault("auth.security.proxy.trusted_proxy_cidrs", []string{})
+
 	v.SetDefault("database.dir", "/var/lib/dagger-kubernetes")
 
 	v.SetDefault("raft.node_id", "")
@@ -153,6 +176,10 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("raft.tls.ca_secret", "")
 	v.SetDefault("raft.tls.ca_bootstrap", false)
 	v.SetDefault("raft.tls.client_auth", true)
+	v.SetDefault("raft.tls.keyring_rotation_enabled", true)
+	v.SetDefault("raft.tls.rotation_check_interval", 30*time.Second)
+	v.SetDefault("raft.tls.reload_poll_interval", 5*time.Second)
+	v.SetDefault("raft.tls.safety_margin", 168*time.Hour) // 7d
 
 	v.SetDefault("raft.performance_multiplier", 5.0)
 	v.SetDefault("raft.raft_log_cache_size", 512)
@@ -245,6 +272,12 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
+	v.SetDefault("ca.keyring_rotation_enabled", true)
+	v.SetDefault("ca.rotation_period", 24*time.Hour)
+	v.SetDefault("ca.rotation_check_interval", 30*time.Second)
+	v.SetDefault("ca.validity", 8760*time.Hour)      // 1y
+	v.SetDefault("ca.ca_validity", 262800*time.Hour) // 30y
+	v.SetDefault("ca.safety_margin", 168*time.Hour)  // 7d
 
 	v.SetDefault("lease_ttl", 2*time.Minute)
 
@@ -252,6 +285,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("supervisor.dataplane.tls.ca_path", "/var/lib/dagger-kubernetes/ca")
 	v.SetDefault("supervisor.dataplane.tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")
 	v.SetDefault("supervisor.dataplane.tls.key_path", "/etc/dagger-kubernetes/tls/tls.key")
+	v.SetDefault("supervisor.dataplane.tls.reload_poll_interval", 5*time.Second)
 
 	v.SetDefault("version.floor", "v0.19.0")
 	v.SetDefault("version.allowlist", []string{})
@@ -337,20 +371,10 @@ func unmarshalConfig(v *viper.Viper, cfg *domain.Config, configFile string) erro
 
 // decodeSettings decodes the nested settings map into result using the same
 // weak-typing semantics Viper uses. See unmarshalConfig for why this replaces
-// viper.Unmarshal.
+// viper.Unmarshal. It delegates to the shared go-raft config decoder so the
+// weak-slice and extended-duration hooks stay identical across projects.
 func decodeSettings(settings map[string]any, result any) error {
-	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
-		WeaklyTypedInput: true,
-		DecodeHook: mapstructure.ComposeDecodeHookFunc(
-			stringToDurationHookFunc(),
-			stringToWeakSliceHookFunc(","),
-		),
-		Result: result,
-	})
-	if err != nil {
-		return err
-	}
-	return decoder.Decode(settings)
+	return raftconfig.DecodeSettings(settings, result)
 }
 
 // readRawConfig reads the YAML config file into a case-preserving map.
@@ -494,96 +518,11 @@ func exactKeyPrefix(src any, key string) string {
 	return ""
 }
 
-// extendedDurationSegmentRE matches one `<number><unit>` segment where the
-// unit extends time.ParseDuration's set with "d" (day) and "w" (week).
-var extendedDurationSegmentRE = regexp.MustCompile(`([+-]?(\d*\.)?\d+)(ns|us|µs|ms|s|m|h|d|w)`)
-
 // parseExtendedDuration parses a duration like time.ParseDuration but
 // additionally accepts day ("d") and week ("w") units, so values such as
-// "7d", "1w" or "1.5d12h" work. If the input also fails the extended grammar,
-// the error from time.ParseDuration is returned unchanged.
+// "7d", "1w" or "1.5d12h" work. It delegates to the shared go-raft parser.
 func parseExtendedDuration(s string) (time.Duration, error) {
-	if d, err := time.ParseDuration(s); err == nil {
-		return d, nil
-	}
-
-	matches := extendedDurationSegmentRE.FindAllStringSubmatchIndex(s, -1)
-	if len(matches) == 0 {
-		_, err := time.ParseDuration(s)
-		return 0, err
-	}
-	covered := 0
-	for _, m := range matches {
-		if m[0] != covered {
-			_, err := time.ParseDuration(s)
-			return 0, err
-		}
-		covered = m[1]
-	}
-	if covered != len(s) {
-		_, err := time.ParseDuration(s)
-		return 0, err
-	}
-
-	var total time.Duration
-	for _, m := range matches {
-		num, unit := s[m[2]:m[3]], s[m[6]:m[7]]
-		switch unit {
-		case "d", "w":
-			f, err := strconv.ParseFloat(num, 64)
-			if err != nil {
-				return 0, fmt.Errorf("time: invalid duration %q", s)
-			}
-			unitDur := 24 * time.Hour
-			if unit == "w" {
-				unitDur = 7 * 24 * time.Hour
-			}
-			total += time.Duration(f * float64(unitDur))
-		default:
-			d, err := time.ParseDuration(num + unit)
-			if err != nil {
-				return 0, err
-			}
-			total += d
-		}
-	}
-	return total, nil
-}
-
-// stringToDurationHookFunc is a mapstructure decode hook converting strings
-// to time.Duration with parseExtendedDuration (time.ParseDuration semantics
-// plus "d"/"w" units). It replaces viper's built-in hook, which errors with
-// "time: unknown unit" on "7d"-style values.
-func stringToDurationHookFunc() mapstructure.DecodeHookFuncType {
-	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
-		if f.Kind() != reflect.String {
-			return data, nil
-		}
-		if t != reflect.TypeOf(time.Duration(0)) {
-			return data, nil
-		}
-		d, err := parseExtendedDuration(data.(string))
-		if err != nil {
-			return nil, err
-		}
-		return d, nil
-	}
-}
-
-// stringToWeakSliceHookFunc is the same weak string->slice hook Viper composes
-// into its default decoder: a plain string value (e.g. an env override) is
-// split on sep so it can feed slice-typed config fields.
-func stringToWeakSliceHookFunc(sep string) mapstructure.DecodeHookFuncType {
-	return func(f reflect.Type, t reflect.Type, data any) (any, error) {
-		if f.Kind() != reflect.String || t.Kind() != reflect.Slice {
-			return data, nil
-		}
-		raw := data.(string)
-		if raw == "" {
-			return []string{}, nil
-		}
-		return strings.Split(raw, sep), nil
-	}
+	return raftconfig.ParseExtendedDuration(s)
 }
 
 // validateServerConfig ensures server.public_url is an absolute http(s) URL
@@ -628,6 +567,61 @@ func validateAuthConfig(cfg *domain.Config) error {
 		return fmt.Errorf("auth.internal.enabled: false requires auth.oauth.enabled: true with a fully configured provider")
 	}
 
+	return nil
+}
+
+// ToSecguardConfig converts the domain security configuration into the
+// go-secguard config shape consumed by secguard.New.
+func ToSecguardConfig(s *domain.SecurityConfig) sgconfig.Config {
+	return sgconfig.Config{
+		Lockout: sgconfig.LockoutConfig{
+			Enabled:           s.Lockout.Enabled,
+			MaxFailedAttempts: s.Lockout.MaxFailedAttempts,
+			BaseLockout:       s.Lockout.BaseLockout,
+			MaxLockout:        s.Lockout.MaxLockout,
+			EntryTTL:          s.Lockout.EntryTTL,
+			MaxEntries:        s.Lockout.MaxEntries,
+		},
+		RateLimit: sgconfig.RateLimitConfig{
+			Enabled:               s.RateLimit.Enabled,
+			MaxRequests:           s.RateLimit.MaxRequests,
+			Window:                s.RateLimit.Window,
+			LoginThrottleAttempts: s.RateLimit.LoginThrottleAttempts,
+			LoginThrottleWindow:   s.RateLimit.LoginThrottleWindow,
+			MaxEntries:            s.RateLimit.MaxEntries,
+		},
+		Ban: sgconfig.BanConfig{
+			Enabled:           s.Ban.Enabled,
+			MaxUniqueFailures: s.Ban.MaxUniqueFailures,
+			BanDuration:       s.Ban.BanDuration,
+			Window:            s.Ban.Window,
+			MaxEntries:        s.Ban.MaxEntries,
+		},
+		Proxy: sgconfig.ProxyConfig{
+			BehindReverseProxy: s.Proxy.BehindReverseProxy,
+			TrustedProxyCIDRs:  s.Proxy.TrustedProxyCIDRs,
+		},
+	}
+}
+
+// validateSecurityConfig validates the go-secguard guardrail configuration
+// (durations, thresholds, and trusted-proxy CIDRs).
+func validateSecurityConfig(cfg *domain.Config) error {
+	sg := ToSecguardConfig(&cfg.Auth.Security)
+	return sg.Validate()
+}
+
+// validateCAConfig enforces the Minting CA rotation invariant: when keyring
+// rotation is enabled, the rotation period must be at least twice the engine
+// client-cert TTL so an in-flight Dagger CLI holding a client cert minted under
+// the old CA is never rejected during the dual-trust overlap window.
+func validateCAConfig(cfg *domain.Config) error {
+	if !cfg.CA.KeyringRotationEnabled {
+		return nil
+	}
+	if cfg.CA.RotationPeriod < 2*cfg.CA.ClientCertTTL {
+		return fmt.Errorf("ca.rotation_period (%s) must be >= 2 * ca.client_cert_ttl (%s) when ca.keyring_rotation_enabled is true", cfg.CA.RotationPeriod, 2*cfg.CA.ClientCertTTL)
+	}
 	return nil
 }
 

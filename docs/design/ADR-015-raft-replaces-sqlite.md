@@ -1,5 +1,10 @@
 # ADR-015: Raft replaces SQLite
 
+> **Revision (2026-11-15, ADR-050):** the Raft node lifecycle, storage wiring,
+> discovery, transport, and autopilot are being migrated onto the shared
+> `github.com/disaster37/go-raft` library. The relational FSM and the unified
+> config loader are retained.
+
 - **Status:** Accepted
 - **Date:** 2026-08-17
 - **Supersedes:** ADR-010 (persistence engine; the multi-user RBAC model is unchanged)

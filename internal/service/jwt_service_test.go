@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	goauthjwt "github.com/disaster37/go-auth/jwt"
 	"github.com/golang-jwt/jwt/v5"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -87,7 +88,7 @@ func TestJWTAlgNoneAttack(t *testing.T) {
 	// A token signed with "none" must be rejected (WithValidMethods enforces HS256).
 	claims := &Claims{
 		UserID: "u1",
-		Type:   typAccess,
+		Type:   goauthjwt.TypeAccess,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
 		},
@@ -111,7 +112,7 @@ func TestJWTOAuthState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseOAuthState: %v", err)
 	}
-	if claims.Type != typOAuthState {
+	if claims.Type != goauthjwt.TypeOAuthState {
 		t.Fatalf("type = %q", claims.Type)
 	}
 	if claims.Username != "/pipelines" {
@@ -196,7 +197,7 @@ func TestJWTIssueIncludesTokenVersion(t *testing.T) {
 		"uid":      "u1",
 		"username": "alice",
 		"role":     "user",
-		"typ":      typAccess,
+		"typ":      goauthjwt.TypeAccess,
 		"exp":      time.Now().Add(time.Hour).Unix(),
 	})
 	tok, err := legacy.SignedString([]byte("test-secret-32-bytes-long-enough!!"))

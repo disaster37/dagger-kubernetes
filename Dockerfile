@@ -16,7 +16,7 @@ ENV NUXT_PUBLIC_APP_VERSION=$APP_VERSION
 RUN npm run build
 
 # ---------- Go builder ----------
-FROM golang:1.26-alpine AS go-builder
+FROM golang:1.27-alpine AS go-builder
 RUN apk add --no-cache git ca-certificates
 WORKDIR /app
 COPY go.mod go.sum ./

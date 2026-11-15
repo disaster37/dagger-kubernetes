@@ -1,6 +1,11 @@
 # ADR-016: Multi-node Raft with TLS (goca-issued internal PKI) + StatefulSet discovery
 
-- **Status:** Accepted (revised by ADR-029)
+> **Revision (2026-11-15, ADR-050):** R5 ("CA rotation out of scope") is
+> superseded. In-band phased CA/leaf auto-renewal is provided by `go-raft`'s
+> keyring (`PhasedRotator` + `DynamicTLSProvider`), and manual PEM mode
+> hot-reloads via `transport.FileWatcher`.
+
+- **Status:** Accepted (revised by ADR-029, ADR-050)
 - **Date:** 2026-08-17
 - **Builds on:** ADR-015 (Raft replaces SQLite)
 - **Related:** ADR-005 (embedded minting CA, goca), ADR-009 (clean architecture layering), ADR-015 (Raft replaces SQLite)

@@ -1,19 +1,21 @@
 package repository
 
 import (
-	"bytes"
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/disaster37/go-raft/discovery"
+	"github.com/disaster37/go-raft/keyring"
+	"github.com/disaster37/go-raft/pki"
 	"github.com/hashicorp/raft"
-	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
@@ -28,10 +30,6 @@ func TestRaftStoreSingleNodeLeader(t *testing.T) {
 	if err := store.WaitForLeader(ctx); err != nil {
 		t.Fatalf("WaitForLeader: %v", err)
 	}
-	// A leader that just won the election transiently has its no-op barrier
-	// entry committed but not yet applied (commit_index != applied_index,
-	// fsm_pending > 0); a single-instant IsCleanState check flaked under
-	// -race. Wait for the state to settle instead.
 	if err := store.WaitForCleanState(ctx); err != nil {
 		t.Fatalf("single node leader should be in clean state: %v", err)
 	}
@@ -65,7 +63,7 @@ func TestRaftStoreWaitForCleanStateShutdown(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := store.WaitForCleanState(ctx); err == nil {
 		t.Fatal("WaitForCleanState after shutdown should error")
@@ -87,15 +85,13 @@ func TestRaftStoreApplySuccess(t *testing.T) {
 }
 
 func TestRaftStoreApplyNotLeader(t *testing.T) {
-	a, b := newTwoNodeRaftCluster(t)
-	var leader, follower *RaftStore
-	switch {
-	case a.IsLeader():
-		leader, follower = a, b
-	case b.IsLeader():
-		leader, follower = b, a
-	default:
-		t.Fatal("no leader elected in two-node cluster")
+	stores := newRaftCluster(t, 2, false)
+	leader := findLeader(t, stores)
+	var follower *RaftStore
+	for _, s := range stores {
+		if s != leader {
+			follower = s
+		}
 	}
 
 	cmd, _ := newCommand(kindSetMeta, cmdSetMeta{Key: "k", Value: "v"})
@@ -199,10 +195,9 @@ func TestRaftStoreLeaderAddress(t *testing.T) {
 }
 
 func TestRaftStoreLeaderAddressNoLeader(t *testing.T) {
-	// A store whose raft instance has been shut down has no known leader.
 	store := newTestRaftStore(t)
-	if err := store.raft.Shutdown().Error(); err != nil {
-		t.Fatalf("shutdown: %v", err)
+	if err := store.Close(); err != nil {
+		t.Fatalf("close: %v", err)
 	}
 	if addr := store.LeaderAddress(); addr != "" {
 		t.Fatalf("LeaderAddress after shutdown = %q, want empty", addr)
@@ -230,98 +225,6 @@ func TestRaftStoreNewRaftStoreSingleNode(t *testing.T) {
 	}
 	if v, _ := store.fsmRead().readMeta("k"); v != "v" {
 		t.Fatalf("readMeta = %q", v)
-	}
-}
-
-// TestRaftStoreOnlyBootstrapNodeSeedsConfig verifies that only the bootstrap
-// node (first peer in the resolved voter list) calls raft.BootstrapCluster,
-// and that it seeds the cluster with ONLY itself as the initial voter. Other
-// nodes start with no config and join via the leader's AddVoter (joinLoop).
-// This prevents the deadlock where the bootstrap node includes all peers in
-// the initial configuration, requiring a majority (2 of 3) to elect a leader
-// while the non-bootstrap peers have no config and may not be ready to vote
-// (CWE-693, ADR-016).
-func TestRaftStoreOnlyBootstrapNodeSeedsConfig(t *testing.T) {
-	addr1 := freeTCPAddr(t)
-	addr2 := freeTCPAddr(t)
-	peers := []RaftPeer{
-		{ID: "node-1", Address: addr1},
-		{ID: "node-2", Address: addr2},
-	}
-
-	// Node-1 is the first peer → bootstraps with only itself.
-	s1, err := NewRaftStore(&RaftStoreConfig{
-		Dir:           filepath.Join(t.TempDir(), "node-1"),
-		NodeID:        "node-1",
-		BindAddr:      addr1,
-		AdvertiseAddr: addr1,
-		Resolver:      &staticPeerResolver{cfg: RaftDiscoveryConfig{NodeID: "node-1", Peers: peers}},
-	}, testLogger())
-	if err != nil {
-		t.Fatalf("NewRaftStore node-1: %v", err)
-	}
-	defer func() { _ = s1.Close() }()
-
-	// Node-2 is NOT the first peer → must NOT bootstrap. Its configuration
-	// must be empty until the leader (node-1) adds it via AddVoter.
-	s2, err := NewRaftStore(&RaftStoreConfig{
-		Dir:           filepath.Join(t.TempDir(), "node-2"),
-		NodeID:        "node-2",
-		BindAddr:      addr2,
-		AdvertiseAddr: addr2,
-		Resolver:      &staticPeerResolver{cfg: RaftDiscoveryConfig{NodeID: "node-2", Peers: peers}},
-	}, testLogger())
-	if err != nil {
-		t.Fatalf("NewRaftStore node-2: %v", err)
-	}
-	defer func() { _ = s2.Close() }()
-
-	// Node-2 must not have seeded a local configuration (no split-brain).
-	cfg2, err := s2.GetConfiguration()
-	if err != nil {
-		t.Fatalf("GetConfiguration node-2: %v", err)
-	}
-	if len(cfg2.Servers) != 0 {
-		t.Fatalf("non-bootstrap node-2 seeded a local config (split-brain risk): %v", cfg2.Servers)
-	}
-
-	// Node-1 must have bootstrapped with only itself (single-node quorum).
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := s1.WaitForLeader(ctx); err != nil {
-		t.Fatalf("WaitForLeader node-1: %v", err)
-	}
-	cfg1, err := s1.GetConfiguration()
-	if err != nil {
-		t.Fatalf("GetConfiguration node-1: %v", err)
-	}
-	if len(cfg1.Servers) != 1 {
-		t.Fatalf("bootstrap node-1 config has %d servers, want 1 (single-node bootstrap)", len(cfg1.Servers))
-	}
-	if string(cfg1.Servers[0].ID) != "node-1" {
-		t.Fatalf("bootstrap node-1 config server = %s, want node-1", cfg1.Servers[0].ID)
-	}
-
-	// Node-2 joins via AddVoter (simulating the joinLoop). Once added, the
-	// leader replicates the configuration and node-2 discovers the leader
-	// through heartbeats.
-	if err := s1.AddVoter("node-2", addr2, 5*time.Second); err != nil {
-		t.Fatalf("AddVoter node-2: %v", err)
-	}
-
-	ctx2, cancel2 := context.WithTimeout(context.Background(), 15*time.Second)
-	defer cancel2()
-	if err := s2.WaitForLeader(ctx2); err != nil {
-		t.Fatalf("WaitForLeader node-2 after AddVoter: %v", err)
-	}
-
-	// Verify the cluster now has both voters.
-	cfgFinal, err := s1.GetConfiguration()
-	if err != nil {
-		t.Fatalf("GetConfiguration final: %v", err)
-	}
-	if len(cfgFinal.Servers) != 2 {
-		t.Fatalf("final config has %d servers, want 2", len(cfgFinal.Servers))
 	}
 }
 
@@ -356,16 +259,14 @@ func TestNewRaftStoreBadBindAddr(t *testing.T) {
 }
 
 func TestNewRaftStoreTLS(t *testing.T) {
-	dir := t.TempDir()
-	_, tlsCfg, err := LoadOrBuildRaftTLS(testRaftTLSCfg(filepath.Join(dir, "tls")), false, nil, "", nil, nil, "node-0", testLogger())
-	if err != nil {
-		t.Fatalf("build raft TLS config: %v", err)
-	}
-
 	store, err := NewRaftStore(&RaftStoreConfig{
-		Dir:      filepath.Join(dir, "data"),
-		BindAddr: freeTCPAddr(t),
-		TLS:      tlsCfg,
+		Dir:               filepath.Join(t.TempDir(), "data"),
+		BindAddr:          freeTCPAddr(t),
+		TLSEnabled:        true,
+		TLSDir:            t.TempDir(),
+		TLSOrganization:   "dagger-kubernetes-raft",
+		ClientAuth:        true,
+		BootstrapProvider: newTestBootstrapProvider(t),
 	}, testLogger())
 	if err != nil {
 		t.Fatalf("NewRaftStore: %v", err)
@@ -387,18 +288,15 @@ func TestNewRaftStoreTLS(t *testing.T) {
 }
 
 func TestWaitForLeaderAnyVsSelf(t *testing.T) {
-	a, b := newTwoNodeRaftCluster(t)
-	var leader, follower *RaftStore
-	switch {
-	case a.IsLeader():
-		leader, follower = a, b
-	case b.IsLeader():
-		leader, follower = b, a
-	default:
-		t.Fatal("no leader elected in two-node cluster")
+	stores := newRaftCluster(t, 2, false)
+	leader := findLeader(t, stores)
+	var follower *RaftStore
+	for _, s := range stores {
+		if s != leader {
+			follower = s
+		}
 	}
 
-	// WaitForLeader (any leader) returns on BOTH nodes.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := leader.WaitForLeader(ctx); err != nil {
@@ -408,7 +306,6 @@ func TestWaitForLeaderAnyVsSelf(t *testing.T) {
 		t.Fatalf("follower WaitForLeader: %v", err)
 	}
 
-	// WaitForSelfLeadership returns on the leader, times out on the follower.
 	if err := leader.WaitForSelfLeadership(ctx); err != nil {
 		t.Fatalf("leader WaitForSelfLeadership: %v", err)
 	}
@@ -419,37 +316,9 @@ func TestWaitForLeaderAnyVsSelf(t *testing.T) {
 	}
 }
 
-// TestWaitForLeaderBeforeElection exercises the startup wait path: a follower
-// that starts waiting before any leader is elected must still observe the
-// leader once it appears (raft.LeaderCh only fires on self leadership changes,
-// so the wait must poll — ADR-016 D6).
-func TestWaitForLeaderBeforeElection(t *testing.T) {
-	a, b := newTwoNodeRaftClusterOpt(t, false)
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := a.WaitForLeader(ctx); err != nil {
-		t.Fatalf("node-a WaitForLeader: %v", err)
-	}
-	if err := b.WaitForLeader(ctx); err != nil {
-		t.Fatalf("node-b WaitForLeader: %v", err)
-	}
-	if !a.IsLeader() && !b.IsLeader() {
-		t.Fatal("expected a leader to be elected")
-	}
-}
-
 func TestRaftStoreAddVoterAndConfiguration(t *testing.T) {
-	a, b := newTwoNodeRaftCluster(t)
-	var leader *RaftStore
-	switch {
-	case a.IsLeader():
-		leader = a
-	case b.IsLeader():
-		leader = b
-	default:
-		t.Fatal("no leader elected")
-	}
+	stores := newRaftCluster(t, 2, false)
+	leader := findLeader(t, stores)
 
 	cfg, err := leader.GetConfiguration()
 	if err != nil {
@@ -460,22 +329,14 @@ func TestRaftStoreAddVoterAndConfiguration(t *testing.T) {
 	}
 
 	// Re-adding an existing voter is idempotent.
-	if err := leader.AddVoter("node-1", string(cfg.Servers[0].Address), 5*time.Second); err != nil {
+	if err := leader.AddVoter("node-0", string(cfg.Servers[0].Address), 5*time.Second); err != nil {
 		t.Fatalf("AddVoter (idempotent): %v", err)
 	}
 }
 
 func TestReconcileMembershipAddVoter(t *testing.T) {
-	a, b := newTwoNodeRaftCluster(t)
-	var leader *RaftStore
-	switch {
-	case a.IsLeader():
-		leader = a
-	case b.IsLeader():
-		leader = b
-	default:
-		t.Fatal("no leader elected")
-	}
+	stores := newRaftCluster(t, 2, false)
+	leader := findLeader(t, stores)
 	cfg, err := leader.GetConfiguration()
 	if err != nil {
 		t.Fatalf("GetConfiguration: %v", err)
@@ -487,17 +348,17 @@ func TestReconcileMembershipAddVoter(t *testing.T) {
 
 	// A third (not running) voter is added: AddVoter only records the config
 	// entry and the 2 running nodes still satisfy the old quorum.
-	desired := []RaftPeer{
+	desired := []discovery.Peer{
+		{ID: "node-0", Address: addrByID["node-0"]},
 		{ID: "node-1", Address: addrByID["node-1"]},
-		{ID: "node-2", Address: addrByID["node-2"]},
-		{ID: "node-3", Address: "127.0.0.1:19999"},
+		{ID: "node-2", Address: "127.0.0.1:19999"},
 	}
 	added, updated, removed, err := leader.ReconcileMembership(desired, 5*time.Second)
 	if err != nil {
 		t.Fatalf("ReconcileMembership: %v", err)
 	}
-	if len(added) != 1 || added[0] != "node-3" {
-		t.Fatalf("added = %v, want [node-3]", added)
+	if len(added) != 1 || added[0] != "node-2" {
+		t.Fatalf("added = %v, want [node-2]", added)
 	}
 	if len(updated) != 0 {
 		t.Fatalf("updated = %v, want empty", updated)
@@ -508,24 +369,13 @@ func TestReconcileMembershipAddVoter(t *testing.T) {
 }
 
 func TestReconcileMembershipRemoveServer(t *testing.T) {
-	a, b := newTwoNodeRaftCluster(t)
-	var leader *RaftStore
-	switch {
-	case a.IsLeader():
-		leader = a
-	case b.IsLeader():
-		leader = b
-	default:
-		t.Fatal("no leader elected")
-	}
+	stores := newRaftCluster(t, 2, false)
+	leader := findLeader(t, stores)
 	cfg, err := leader.GetConfiguration()
 	if err != nil {
 		t.Fatalf("GetConfiguration: %v", err)
 	}
-	selfID := "node-2"
-	if leader == a {
-		selfID = "node-1"
-	}
+	selfID := leader.NodeID()
 	selfAddr := ""
 	for _, s := range cfg.Servers {
 		if string(s.ID) == selfID {
@@ -538,7 +388,7 @@ func TestReconcileMembershipRemoveServer(t *testing.T) {
 
 	// Shrink to a single voter (self); both running nodes satisfy the old
 	// 2-node quorum so the removal commits.
-	desired := []RaftPeer{{ID: selfID, Address: selfAddr}}
+	desired := []discovery.Peer{{ID: selfID, Address: selfAddr}}
 	added, updated, removed, err := leader.ReconcileMembership(desired, 5*time.Second)
 	if err != nil {
 		t.Fatalf("ReconcileMembership: %v", err)
@@ -554,31 +404,6 @@ func TestReconcileMembershipRemoveServer(t *testing.T) {
 	}
 }
 
-func TestNodeIDGeneratedAndReused(t *testing.T) {
-	dir := t.TempDir()
-	id1, err := loadOrGenerateNodeID(dir)
-	if err != nil {
-		t.Fatalf("loadOrGenerateNodeID: %v", err)
-	}
-	if id1 == "" {
-		t.Fatal("empty node id")
-	}
-	id2, err := loadOrGenerateNodeID(dir)
-	if err != nil {
-		t.Fatalf("reload: %v", err)
-	}
-	if id1 != id2 {
-		t.Fatalf("node id not stable: %q vs %q", id1, id2)
-	}
-	info, err := os.Stat(filepath.Join(dir, "node-id"))
-	if err != nil {
-		t.Fatalf("stat node-id: %v", err)
-	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("node-id perm = %o, want 600", info.Mode().Perm())
-	}
-}
-
 func freeTCPAddr(t *testing.T) string {
 	t.Helper()
 	l, err := net.Listen("tcp", "127.0.0.1:0")
@@ -590,193 +415,200 @@ func freeTCPAddr(t *testing.T) string {
 	return addr
 }
 
-// newTwoNodeRaftCluster builds two connected in-memory raft nodes and waits
-// for one to win the election.
-func newTwoNodeRaftCluster(t *testing.T) (a, b *RaftStore) {
-	t.Helper()
-	return newTwoNodeRaftClusterOpt(t, true)
-}
+// TestRaftStoreAutoRenewsTLSKeyringAndLeaf proves the in-band keyring rotation
+// advances to Term >= 3, seals the active private key at rest, and keeps
+// replication running.
+func TestRaftStoreAutoRenewsTLSKeyringAndLeaf(t *testing.T) {
+	stores := newRaftClusterWithRotation(t, 3)
 
-// newTwoNodeRaftClusterOpt builds two connected in-memory raft nodes. When
-// waitForLeader is false it returns immediately after bootstrap (before any
-// leader is elected), exercising the startup wait paths.
-func newTwoNodeRaftClusterOpt(t *testing.T, waitForLeader bool) (a, b *RaftStore) {
-	t.Helper()
-
-	node := func(id string) (*RaftStore, *raft.Raft, *raft.InmemTransport, raft.ServerAddress) {
-		fsm := NewFSM()
-		config := raft.DefaultConfig()
-		config.LocalID = raft.ServerID(id)
-		config.TrailingLogs = 256
-		config.SnapshotInterval = 10 * time.Minute
-		config.SnapshotThreshold = 1000
-		config.LogOutput = io.Discard
-		config.LogLevel = "WARN"
-		config.HeartbeatTimeout = 200 * time.Millisecond
-		config.ElectionTimeout = 200 * time.Millisecond
-		config.LeaderLeaseTimeout = 100 * time.Millisecond
-		config.CommitTimeout = 10 * time.Millisecond
-
-		logs := raft.NewInmemStore()
-		stable := raft.NewInmemStore()
-		snaps := raft.NewInmemSnapshotStore()
-		addr, trans := raft.NewInmemTransport(raft.NewInmemAddr())
-		r, err := raft.NewRaft(config, fsm, logs, stable, snaps, trans)
-		if err != nil {
-			t.Fatalf("NewRaft %s: %v", id, err)
-		}
-		return &RaftStore{raft: r, fsm: fsm, timeout: 5 * time.Second}, r, trans, addr
-	}
-
-	store1, r1, t1, a1 := node("node-1")
-	store2, r2, t2, a2 := node("node-2")
-	t1.Connect(a2, t2)
-	t2.Connect(a1, t1)
-
-	configuration := raft.Configuration{Servers: []raft.Server{
-		{Suffrage: raft.Voter, ID: raft.ServerID("node-1"), Address: a1},
-		{Suffrage: raft.Voter, ID: raft.ServerID("node-2"), Address: a2},
-	}}
-	if err := r1.BootstrapCluster(configuration).Error(); err != nil {
-		t.Fatalf("BootstrapCluster: %v", err)
-	}
-
-	if waitForLeader {
-		deadline := time.Now().Add(10 * time.Second)
-		for time.Now().Before(deadline) {
-			if r1.State() == raft.Leader || r2.State() == raft.Leader {
+	deadline := time.Now().Add(90 * time.Second)
+	var kr *keyring.TLSKeyring
+	var leader *RaftStore
+	for time.Now().Before(deadline) {
+		for _, s := range stores {
+			km := s.KeyringManager()
+			if km == nil {
+				continue
+			}
+			if cur := km.CurrentKeyring(); cur != nil && cur.Term >= 3 {
+				kr = cur
+				leader = s
 				break
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
+		if kr != nil {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if kr == nil || kr.Term < 3 {
+		t.Fatalf("keyring term = %v, want >= 3", kr)
+	}
+	active := kr.GetActive()
+	if active == nil {
+		t.Fatal("keyring has no active key")
+	}
+	if !strings.HasPrefix(active.KeyPEM, "{") {
+		t.Fatalf("active keyring private key is not sealed: %q", active.KeyPEM)
 	}
 
-	t.Cleanup(func() {
-		_ = r1.Shutdown().Error()
-		_ = r2.Shutdown().Error()
-		_ = t1.Close()
-		_ = t2.Close()
-	})
-	return store1, store2
-}
-
-// messageFormatter emits only the entry message, one per line, so tests can
-// assert on the exact set of flushed log lines.
-type messageFormatter struct{}
-
-func (messageFormatter) Format(e *logrus.Entry) ([]byte, error) {
-	return []byte(e.Message + "\n"), nil
-}
-
-func TestLogrusWriterLineBuffering(t *testing.T) {
-	var buf bytes.Buffer
-	logger := logrus.New()
-	logger.SetOutput(&buf)
-	logger.SetFormatter(messageFormatter{})
-
-	w := &logrusWriter{logger: logger}
-
-	// A line split across Write calls must not be logged until '\n' arrives.
-	if _, err := w.Write([]byte("hello ")); err != nil {
-		t.Fatalf("Write: %v", err)
+	// Replication continues after rotation. Re-find the leader and retry: a
+	// rotation apply under -race load can coincide with a transient
+	// leadership change.
+	cmd, _ := newCommand(kindSetMeta, cmdSetMeta{Key: "rot", Value: "ok"})
+	var applyErr error
+	for attempt := 0; attempt < 20; attempt++ {
+		leader = findLeader(t, stores)
+		if applyErr = leader.apply(cmd); applyErr == nil {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	if _, err := w.Write([]byte("world")); err != nil {
-		t.Fatalf("Write: %v", err)
+	if applyErr != nil {
+		t.Fatalf("apply after rotation: %v", applyErr)
 	}
-	if got := buf.String(); got != "" {
-		t.Fatalf("partial line must be buffered, got %q", got)
-	}
-
-	if _, err := w.Write([]byte("\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if got, want := buf.String(), "hello world\n"; got != want {
-		t.Fatalf("flushed line = %q, want %q", got, want)
-	}
-	buf.Reset()
-
-	// Multiple complete lines in a single Write are flushed separately.
-	if _, err := w.Write([]byte("line1\nline2\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if got, want := buf.String(), "line1\nline2\n"; got != want {
-		t.Fatalf("multi-line flush = %q, want %q", got, want)
-	}
-	buf.Reset()
-
-	// CRLF is stripped, surrounding whitespace trimmed, empty lines skipped.
-	if _, err := w.Write([]byte("  spaced  \r\n\n")); err != nil {
-		t.Fatalf("Write: %v", err)
-	}
-	if got, want := buf.String(), "spaced\n"; got != want {
-		t.Fatalf("CRLF/empty-line handling = %q, want %q", got, want)
+	for _, s := range stores {
+		if s == leader {
+			continue
+		}
+		waitForMetaValue(t, s, "rot", "ok")
 	}
 }
 
-func TestResolveAdvertiseAddrSuccess(t *testing.T) {
-	addr, err := resolveAdvertiseAddr("127.0.0.1:8081", time.Second, io.Discard)
+// TestRaftStoreManualTLSFileWatcherHotReload proves manual PEM mode hot-reloads
+// renewed cert/key files via transport.FileWatcher.
+func TestRaftStoreManualTLSFileWatcherHotReload(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := pki.NewMintingCA("test-ca", "org", 10*365*24*time.Hour)
 	if err != nil {
-		t.Fatalf("resolveAdvertiseAddr: %v", err)
+		t.Fatalf("NewMintingCA: %v", err)
 	}
-	if addr == nil || !addr.IP.Equal(net.ParseIP("127.0.0.1")) {
-		t.Fatalf("addr = %v, want 127.0.0.1", addr)
+	caCertPEM, _, err := ca.EncodePEM()
+	if err != nil {
+		t.Fatalf("EncodePEM: %v", err)
 	}
+	caPath := filepath.Join(dir, "ca.crt")
+	certPath := filepath.Join(dir, "node.crt")
+	keyPath := filepath.Join(dir, "node.key")
+	if err := os.WriteFile(caPath, caCertPEM, 0o600); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	writeLeaf := func() *x509.Certificate {
+		certPEM, keyPEM, err := ca.IssuePeerCertificate("node-0", "org", []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
+		if err != nil {
+			t.Fatalf("IssuePeerCertificate: %v", err)
+		}
+		if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
+			t.Fatalf("write cert: %v", err)
+		}
+		if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
+			t.Fatalf("write key: %v", err)
+		}
+		parsed, err := pki.ParsePEMCert(certPEM)
+		if err != nil {
+			t.Fatalf("ParsePEMCert: %v", err)
+		}
+		return parsed
+	}
+	initial := writeLeaf()
+
+	store, err := NewRaftStore(&RaftStoreConfig{
+		Dir:                filepath.Join(dir, "data"),
+		BindAddr:           freeTCPAddr(t),
+		TLSEnabled:         true,
+		CACertPath:         caPath,
+		CertPath:           certPath,
+		KeyPath:            keyPath,
+		ReloadPollInterval: 50 * time.Millisecond,
+		ClientAuth:         true,
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("NewRaftStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	provider := store.TLSProvider()
+	if provider == nil {
+		t.Fatal("no TLS provider")
+	}
+	renewed := writeLeaf()
+	if renewed.SerialNumber.Cmp(initial.SerialNumber) == 0 {
+		t.Fatal("test precondition: renewed cert has the same serial")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		cur, err := provider.GetCertificate(nil)
+		if err == nil && len(cur.Certificate) > 0 {
+			parsed, perr := x509.ParseCertificate(cur.Certificate[0])
+			if perr == nil && parsed.SerialNumber.Cmp(renewed.SerialNumber) == 0 {
+				return
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("file watcher did not hot-reload the renewed certificate")
 }
 
-func TestResolveAdvertiseAddrRetriesThenFails(t *testing.T) {
-	// A fresh cluster's DNS may not resolve the pod FQDN yet. The pod must
-	// retry within the budget instead of exiting (each exit restarts the
-	// whole raft bootstrap sequence), then fail with the last resolve error.
-	start := time.Now()
-	if _, err := resolveAdvertiseAddr("pod-0.headless.ns.svc.cluster.local:8081", 500*time.Millisecond, io.Discard); err != nil {
-		t.Logf("resolution failed after retry budget as expected: %v", err)
-	} else {
-		t.Log("advertise host unexpectedly resolvable in this environment; retry loop not exercised")
+// TestRaftStoreStartupReissuesExpiringNodeCert proves a persisted node cert
+// within the safety margin is re-issued at startup.
+func TestRaftStoreStartupReissuesExpiringNodeCert(t *testing.T) {
+	dir := t.TempDir()
+	tlsDir := filepath.Join(dir, "tls")
+	if err := os.MkdirAll(tlsDir, 0o700); err != nil {
+		t.Fatalf("mkdir tls: %v", err)
 	}
-	if elapsed := time.Since(start); elapsed > 5*time.Second {
-		t.Fatalf("retry budget not enforced: waited %v for a 500ms budget", elapsed)
+	ca, err := pki.NewMintingCA("test-ca", "org", 10*365*24*time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
 	}
-}
-
-func TestClearStaleRaftState(t *testing.T) {
-	seed := func(t *testing.T) string {
-		t.Helper()
-		dir := t.TempDir()
-		files := []string{"raft.db", "node-id", "peers.json"}
-		for _, name := range files {
-			if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
-				t.Fatalf("seed %s: %v", name, err)
-			}
-		}
-		if err := os.Mkdir(filepath.Join(dir, "snapshots"), 0o700); err != nil {
-			t.Fatalf("seed snapshots: %v", err)
-		}
-		return dir
+	caCertPEM, caKeyPEM, err := ca.EncodePEM()
+	if err != nil {
+		t.Fatalf("EncodePEM: %v", err)
+	}
+	hostname, _ := os.Hostname()
+	// A node cert that covers the required SANs but expires within the 7d
+	// safety margin.
+	certPEM, keyPEM, err := ca.IssuePeerCertificate("node-0", "org", []string{hostname, "localhost"}, []net.IP{net.ParseIP("127.0.0.1")}, time.Hour)
+	if err != nil {
+		t.Fatalf("IssuePeerCertificate: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tlsDir, "node.crt"), certPEM, 0o600); err != nil {
+		t.Fatalf("write node.crt: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(tlsDir, "node.key"), keyPEM, 0o600); err != nil {
+		t.Fatalf("write node.key: %v", err)
+	}
+	oldCert, err := pki.ParsePEMCert(certPEM)
+	if err != nil {
+		t.Fatalf("ParsePEMCert: %v", err)
 	}
 
-	t.Run("recovery mode off is a no-op", func(t *testing.T) {
-		dir := seed(t)
-		clearStaleRaftState(&RaftStoreConfig{Dir: dir}, dir, testLogger())
-		for _, name := range []string{"raft.db", "node-id", "peers.json"} {
-			if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
-				t.Fatalf("non-recovery run removed %s: %v", name, err)
-			}
-		}
-		if _, err := os.Stat(filepath.Join(dir, "snapshots")); err != nil {
-			t.Fatalf("non-recovery run removed snapshots dir: %v", err)
-		}
-	})
+	store, err := NewRaftStore(&RaftStoreConfig{
+		Dir:               dir,
+		NodeID:            "node-0",
+		BindAddr:          freeTCPAddr(t),
+		TLSEnabled:        true,
+		TLSDir:            tlsDir,
+		TLSValidity:       8760 * time.Hour,
+		SafetyMargin:      7 * 24 * time.Hour,
+		ClientAuth:        true,
+		BootstrapProvider: &testBootstrapProvider{mat: &pki.BootstrapMaterial{CACertPEM: caCertPEM, CAKeyPEM: caKeyPEM}},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("NewRaftStore: %v", err)
+	}
+	defer func() { _ = store.Close() }()
 
-	t.Run("recovery mode on clears state", func(t *testing.T) {
-		dir := seed(t)
-		clearStaleRaftState(&RaftStoreConfig{Dir: dir, RecoveryMode: true}, dir, testLogger())
-		for _, name := range []string{"raft.db", "node-id", "peers.json"} {
-			if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
-				t.Fatalf("recovery run left %s behind (stat err=%v)", name, err)
-			}
-		}
-		if _, err := os.Stat(filepath.Join(dir, "snapshots")); !os.IsNotExist(err) {
-			t.Fatalf("recovery run left snapshots dir behind (stat err=%v)", err)
-		}
-	})
+	newCertPEM, err := os.ReadFile(filepath.Join(tlsDir, "node.crt"))
+	if err != nil {
+		t.Fatalf("read node.crt: %v", err)
+	}
+	newCert, err := pki.ParsePEMCert(newCertPEM)
+	if err != nil {
+		t.Fatalf("ParsePEMCert: %v", err)
+	}
+	if newCert.SerialNumber.Cmp(oldCert.SerialNumber) == 0 {
+		t.Fatal("expiring node cert was not re-issued at startup")
+	}
 }

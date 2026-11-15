@@ -36,7 +36,7 @@ func internalControlPortFromControlAddr(controlAddr string) (int, error) {
 // log-only (mirroring startRelayListener): the public control plane is never
 // brought down by a problem with the internal listener.
 func (s *Server) startInternalControlListener() {
-	if s.cfg.InternalTLSCert == nil {
+	if s.cfg.InternalTLSCert == nil && s.cfg.InternalTLSProvider == nil {
 		s.logger.Error("internal control listener disabled: no internal TLS certificate")
 		return
 	}
@@ -50,9 +50,14 @@ func (s *Server) startInternalControlListener() {
 	host, _, _ := net.SplitHostPort(s.cfg.ControlAddr)
 	addr := net.JoinHostPort(host, strconv.Itoa(port))
 
-	tlsCfg := &tls.Config{
-		Certificates: []tls.Certificate{*s.cfg.InternalTLSCert},
-		MinVersion:   tls.VersionTLS12,
+	var tlsCfg *tls.Config
+	if s.cfg.InternalTLSProvider != nil {
+		tlsCfg = s.cfg.InternalTLSProvider.ServerTLSConfig()
+	} else {
+		tlsCfg = &tls.Config{
+			Certificates: []tls.Certificate{*s.cfg.InternalTLSCert},
+			MinVersion:   tls.VersionTLS12,
+		}
 	}
 
 	var ln net.Listener

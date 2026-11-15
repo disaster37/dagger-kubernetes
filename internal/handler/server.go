@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -23,6 +24,9 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/cloudwego/hertz/pkg/protocol"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	"github.com/disaster37/go-raft/httpext"
+	rafttransport "github.com/disaster37/go-raft/transport"
+	"github.com/disaster37/go-secguard"
 	"github.com/hertz-contrib/reverseproxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
@@ -168,6 +172,14 @@ type Deps struct {
 	// LeaderInfo is the Raft store view used by the leader-forward middleware
 	// and the data-plane relay. nil disables both (single-node / tests).
 	LeaderInfo leaderInfo
+	// Security is the go-secguard guard enforcing lockout, rate limiting, IP
+	// bans, and CSRF origin checks. nil disables the guard (tests / single-node
+	// dev).
+	Security *secguard.Guard
+	// ForwardTLSProvider is the dynamic mTLS provider used for the
+	// follower->leader forward hop. nil builds a static provider from the
+	// minting CA pool.
+	ForwardTLSProvider *rafttransport.DynamicTLSProvider
 }
 
 // ServerConfig holds the non-injected server configuration (addresses + URLs).
@@ -198,6 +210,14 @@ type ServerConfig struct {
 	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
 	// (64 MiB). The control-API maxControlBody cap is unaffected.
 	OTelMaxBodyBytes int64
+
+	// Dynamic per-handshake TLS providers (ADR-050). When set they take
+	// precedence over the static CertPath/KeyPath/InternalTLSCert so renewed
+	// certificates are picked up without a restart.
+	ControlTLSProvider  *rafttransport.DynamicTLSProvider
+	DataTLSProvider     *rafttransport.DynamicTLSProvider
+	InternalTLSProvider *rafttransport.DynamicTLSProvider
+	ForwardTLSProvider  *rafttransport.DynamicTLSProvider
 }
 
 // Server is the control-plane HTTP server + mTLS data-plane listener.
@@ -223,7 +243,10 @@ type Server struct {
 	relayInPort         int
 	dataConnSem         chan struct{}
 	leaderInfo          leaderInfo
-	leaderProxy         *reverseproxy.ReverseProxy
+	forwardTLSProvider  *rafttransport.DynamicTLSProvider
+	forwarder           *httpext.Forwarder
+	forwarderPort       int
+	forwarderMu         sync.Mutex
 
 	// Auth + RBAC collaborators.
 	auth                *service.AuthService
@@ -241,7 +264,7 @@ type Server struct {
 	jwt                 *service.JWTService
 	oauth               service.OAuthProvider
 	oauthProvider       string
-	limiter             *attemptLimiter
+	guard               *secguard.Guard
 
 	otelProxy     *reverseproxy.ReverseProxy
 	victoriaProxy *reverseproxy.ReverseProxy
@@ -262,20 +285,21 @@ type Server struct {
 // NewServer constructs a Server from a config and a Deps bundle.
 func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 	return &Server{
-		cfg:             cfg,
-		logger:          deps.Logger,
-		metrics:         deps.Metrics,
-		mintingCA:       deps.MintingCA,
-		fleetManager:    deps.FleetManager,
-		sessions:        deps.Sessions,
-		sessionRegistry: deps.SessionRegistry,
-		versionResolver: deps.VersionResolver,
-		liveHub:         resolveLiveHub(deps.LiveHub),
-		lifecycle:       deps.Lifecycle,
-		traces:          deps.Traces,
-		logs:            deps.Logs,
-		dataConnSem:     make(chan struct{}, maxDataConnections),
-		leaderInfo:      deps.LeaderInfo,
+		cfg:                cfg,
+		logger:             deps.Logger,
+		metrics:            deps.Metrics,
+		mintingCA:          deps.MintingCA,
+		fleetManager:       deps.FleetManager,
+		sessions:           deps.Sessions,
+		sessionRegistry:    deps.SessionRegistry,
+		versionResolver:    deps.VersionResolver,
+		liveHub:            resolveLiveHub(deps.LiveHub),
+		lifecycle:          deps.Lifecycle,
+		traces:             deps.Traces,
+		logs:               deps.Logs,
+		dataConnSem:        make(chan struct{}, maxDataConnections),
+		leaderInfo:         deps.LeaderInfo,
+		forwardTLSProvider: deps.ForwardTLSProvider,
 
 		auth:                deps.Auth,
 		internalAuthEnabled: deps.InternalAuthEnabled,
@@ -292,7 +316,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		jwt:                 deps.JWT,
 		oauth:               deps.OAuth,
 		oauthProvider:       deps.OAuthProvider,
-		limiter:             newAttemptLimiter(),
+		guard:               deps.Security,
 
 		engineCachePurger: deps.EngineCachePurger,
 		historyStats:      deps.HistoryStatsProvider,
@@ -355,6 +379,9 @@ func (s *Server) Start(ctx context.Context, tlsCert tls.Certificate) error {
 		ClientCAs:    s.mintingCA.CertPool(),
 		MinVersion:   tls.VersionTLS12,
 	}
+	if s.cfg.DataTLSProvider != nil {
+		tlsConfig.GetCertificate = s.cfg.DataTLSProvider.GetCertificate
+	}
 
 	tlsLn := s.cfg.DataListener
 	if tlsLn == nil {
@@ -414,6 +441,14 @@ func (s *Server) serveTLSConn(raw net.Conn, base *tls.Config) {
 	cfg := base.Clone()
 	cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		info.serverName = hello.ServerName
+		if s.cfg.DataTLSProvider != nil {
+			return &tls.Config{
+				GetCertificate: s.cfg.DataTLSProvider.GetCertificate,
+				ClientCAs:      s.mintingCA.CertPool(),
+				ClientAuth:     tls.RequireAndVerifyClientCert,
+				MinVersion:     tls.VersionTLS12,
+			}, nil
+		}
 		return nil, nil
 	}
 
@@ -571,7 +606,9 @@ func (s *Server) configure() (*server.Hertz, error) {
 		// capped per-handler.
 		server.WithStreamBody(true),
 	)
-	if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
+	if s.cfg.ControlTLSProvider != nil {
+		opts = append(opts, server.WithTLS(s.cfg.ControlTLSProvider.ServerTLSConfig()))
+	} else if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
 		cert, err := tls.LoadX509KeyPair(s.cfg.CertPath, s.cfg.KeyPath)
 		if err != nil {
 			return nil, fmt.Errorf("load control plane TLS cert: %w", err)
@@ -582,10 +619,6 @@ func (s *Server) configure() (*server.Hertz, error) {
 		}))
 	}
 	h := server.Default(opts...)
-
-	if err := s.buildLeaderForward(); err != nil {
-		return nil, fmt.Errorf("build leader forward proxy: %w", err)
-	}
 
 	s.registerRoutes(h)
 
@@ -600,6 +633,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.Use(s.requestLog())
 	h.Use(s.securityHeaders())
 	h.Use(s.corsMiddleware())
+	h.Use(s.secguardMiddleware())
 	h.Use(s.leaderForward())
 
 	// Data-plane + telemetry endpoints.
@@ -668,6 +702,10 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.POST("/api/v1/projects", s.adminOnly(s.handleProjectCreate))
 	h.PUT("/api/v1/projects/:id", s.adminOnly(s.handleProjectUpdate))
 	h.DELETE("/api/v1/projects/:id", s.adminOnly(s.handleProjectDelete))
+
+	// Admin security ban management (go-secguard).
+	h.GET("/api/v1/security/bans", s.adminOnly(s.handleSecurityBansList))
+	h.DELETE("/api/v1/security/bans/:ip", s.adminOnly(s.handleSecurityBanDelete))
 
 	// Traces (scoped + authorized).
 	h.GET("/api/v1/traces", s.handleTracesList)
@@ -1224,10 +1262,9 @@ func (s *Server) requestLog() app.HandlerFunc {
 // cannot leak via a Referer header (CWE-200).
 func (s *Server) securityHeaders() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		c.Response.Header.Set("X-Content-Type-Options", "nosniff")
-		c.Response.Header.Set("X-Frame-Options", "DENY")
-		c.Response.Header.Set("Content-Security-Policy", "frame-ancestors 'none'")
-		c.Response.Header.Set("Referrer-Policy", "no-referrer")
+		for name, value := range securityHeadersFor(string(c.Path()), requestIsTLS(c)) {
+			c.Response.Header.Set(name, value)
+		}
 		c.Next(ctx)
 	}
 }

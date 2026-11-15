@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	goauth "github.com/disaster37/go-auth"
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -22,8 +23,9 @@ const maxEntryAge = 24 * time.Hour
 
 // errOAuthNoCredential is returned by a provider's Revalidate when the user has
 // no stored OAuth credential (pre-upgrade). The revalidator treats this as an
-// allow (no deactivation), bounded by session_max_age.
-var errOAuthNoCredential = errors.New("no stored oauth credential")
+// allow (no deactivation), bounded by session_max_age. It aliases the shared
+// go-auth sentinel.
+var errOAuthNoCredential = goauth.ErrOAuthNoCredential
 
 // OAuthRevalidatorConfig holds the tuning parameters for IdP group-membership
 // revalidation (ADR-027).

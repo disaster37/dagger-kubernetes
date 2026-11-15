@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
@@ -65,7 +67,7 @@ func ImportTokensFile(ctx context.Context, path string, users *UserService, toke
 		}
 
 		// Create the user with a random (never-disclosed) password.
-		randomPW := newPlaintextToken()
+		randomPW := randomPassword()
 		u, err := users.Create(ctx, username, randomPW, domain.RoleUser)
 		if err != nil {
 			logger.WithError(err).WithField("username", username).Warn("legacy import: create user failed")
@@ -91,4 +93,14 @@ func ImportTokensFile(ctx context.Context, path string, users *UserService, toke
 		"skipped":  result.Skipped,
 	}).Info("legacy token import complete")
 	return result, nil
+}
+
+// randomPassword returns a 48-hex-character random password for imported
+// legacy users (never disclosed; the account authenticates via its API token).
+func randomPassword() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("generate random password: %v", err))
+	}
+	return hex.EncodeToString(b)
 }

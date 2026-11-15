@@ -3,387 +3,156 @@ package repository
 import (
 	"context"
 	"crypto/tls"
-	"crypto/x509"
-	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	raftk8s "github.com/disaster37/go-raft/k8s"
+	"github.com/disaster37/go-raft/pki"
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// mintingCACommonName / mintingCAOrganization identify the auto-bootstrapped
+// minting CA (shared across pods via ca.minting_ca_secret).
+const (
+	mintingCACommonName   = "dagger-kubernetes-minting-ca"
+	mintingCAOrganization = "dagger-kubernetes"
+	mintingCACertValidity = 10 * 365 * 24 * time.Hour
+	serverCertValidity    = 5 * 365 * 24 * time.Hour
+)
+
+// EmbeddedProvider serves the data-plane server certificate from a leaf minted
+// by the auto-bootstrapped minting CA. The CA bootstrap (Kubernetes Secret or
+// local files) and the leaf reuse/expiry checks are delegated to go-raft's
+// k8s/pki packages.
 type EmbeddedProvider struct {
 	caPath        string
 	clientCertTTL time.Duration
 	extraSANs     []string
-
-	// K8s Secret-backed minting CA sharing (multi-node). A nil clientset or
-	// empty secretName falls back to the local-file behavior.
-	secretName        string
-	namespace         string
-	clientset         kubernetes.Interface
-	caBootstrap       bool
-	secretPollTimeout time.Duration
+	bootstrap     pki.BootstrapProvider
+	safetyMargin  time.Duration
 }
 
 var _ domain.CAProvider = (*EmbeddedProvider)(nil)
 
+// NewEmbeddedProvider returns a local-file minting-CA provider (single-node
+// dev/test or a shared RWX volume).
 func NewEmbeddedProvider(caPath string, clientCertTTL time.Duration, extraSANs ...string) *EmbeddedProvider {
 	return &EmbeddedProvider{
 		caPath:        caPath,
 		clientCertTTL: clientCertTTL,
 		extraSANs:     extraSANs,
+		bootstrap:     pki.NewLocalBootstrapProvider(caPath, mintingCACommonName, mintingCAOrganization, mintingCACertValidity),
+		safetyMargin:  pki.DefaultSafetyMargin,
 	}
 }
 
 // NewEmbeddedProviderWithSecret returns an EmbeddedProvider that shares the
-// minting CA across pods via a Kubernetes Secret (ca.minting_ca_secret),
-// mirroring the raft CA Secret pattern in raft_tls.go. The CA private key is
-// stored in the Secret because any pod may mint engine client certs — the
-// Secret must be RBAC-restricted to the supervisor ServiceAccount. A local
-// copy of ca.crt/ca.key is still cached under caPath (0600, dir 0700).
+// minting CA across pods via a Kubernetes Secret (ca.minting_ca_secret). A nil
+// clientset or empty secret name falls back to local files.
 func NewEmbeddedProviderWithSecret(caPath string, clientCertTTL time.Duration, secretName, namespace string, clientset kubernetes.Interface, caBootstrap bool, secretPollTimeout time.Duration, extraSANs ...string) *EmbeddedProvider {
-	return &EmbeddedProvider{
-		caPath:            caPath,
-		clientCertTTL:     clientCertTTL,
-		extraSANs:         extraSANs,
-		secretName:        secretName,
-		namespace:         namespace,
-		clientset:         clientset,
-		caBootstrap:       caBootstrap,
-		secretPollTimeout: secretPollTimeout,
+	p := &EmbeddedProvider{
+		caPath:        caPath,
+		clientCertTTL: clientCertTTL,
+		extraSANs:     extraSANs,
+		safetyMargin:  pki.DefaultSafetyMargin,
 	}
+	if clientset == nil || secretName == "" {
+		p.bootstrap = pki.NewLocalBootstrapProvider(caPath, mintingCACommonName, mintingCAOrganization, mintingCACertValidity)
+		return p
+	}
+	p.bootstrap = raftk8s.NewSecretBootstrapProvider(raftk8s.SecretBootstrapConfig{
+		Clientset:    clientset,
+		Namespace:    namespace,
+		SecretName:   secretName,
+		CABootstrap:  caBootstrap,
+		CACommonName: mintingCACommonName,
+		Organization: mintingCAOrganization,
+		CAValidity:   mintingCACertValidity,
+		PollTimeout:  secretPollTimeout,
+		CacheDir:     caPath,
+	})
+	return p
 }
 
+// MintingCA returns the persistent minting CA, creating it on first use.
 func (p *EmbeddedProvider) MintingCA() (domain.MintingCA, error) {
 	return p.loadOrCreateCA()
 }
 
+// BootstrapProvider returns the underlying CA bootstrap provider (used by the
+// MintingRotator to seed the replicated keyring).
+func (p *EmbeddedProvider) BootstrapProvider() pki.BootstrapProvider {
+	return p.bootstrap
+}
+
+// ServerTLSCert returns the data-plane server certificate, re-issuing it in
+// place when the cached pair no longer covers the required SAN set or is near
+// expiry.
 func (p *EmbeddedProvider) ServerTLSCert() (tls.Certificate, error) {
 	ca, err := p.loadOrCreateCA()
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("minting CA: %w", err)
 	}
-
-	serverCertPath := filepath.Join(p.caPath, "server.crt")
-	serverKeyPath := filepath.Join(p.caPath, "server.key")
-
-	if fileExists(serverCertPath) && fileExists(serverKeyPath) {
-		cert, err := loadTLSKeyPair(serverCertPath, serverKeyPath)
-		if err == nil && len(cert.Certificate) > 0 {
-			leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
-			requiredDNS, requiredIPs := p.requiredServerSANs()
-			if parseErr == nil && coversRequiredServerSANs(leaf, requiredDNS, requiredIPs) {
-				return cert, nil
-			}
-		}
-		// The cached server certificate does not cover the current SAN set
-		// (e.g. it predates the own-FQDN SANs added for the leader-forward
-		// hop) or could not be parsed: re-issue it in place under the same
-		// minting CA, mirroring the raft leaf re-issue behavior (ADR-029).
-	}
-
-	return p.issueServerCert(ca, serverCertPath, serverKeyPath)
+	sans, ipSANs := p.requiredServerSANs()
+	return p.issueOrReuseServerCert(ca, "server.crt", "server.key", "supervisor-server", sans, ipSANs)
 }
 
 // InternalServerTLSCert returns the leaf served by the internal-only control
 // listener (ADR-041). It is minted by the shared minting CA in every provider
-// mode and carries this pod's own exact FQDN SANs (no wildcard), so any
-// follower can verify the leader's internal listener with the minting-CA pool.
-// Mirrors ServerTLSCert: the cached pair is reused while it covers the
-// current SAN set and re-issued in place otherwise.
+// mode and carries this pod's own exact FQDN SANs (no wildcard).
 func (p *EmbeddedProvider) InternalServerTLSCert() (tls.Certificate, error) {
 	ca, err := p.loadOrCreateCA()
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("minting CA: %w", err)
 	}
-
-	internalCertPath := filepath.Join(p.caPath, "server-internal.crt")
-	internalKeyPath := filepath.Join(p.caPath, "server-internal.key")
-
-	if fileExists(internalCertPath) && fileExists(internalKeyPath) {
-		cert, err := loadTLSKeyPair(internalCertPath, internalKeyPath)
-		if err == nil && len(cert.Certificate) > 0 {
-			leaf, parseErr := x509.ParseCertificate(cert.Certificate[0])
-			if parseErr == nil && coversRequiredServerSANs(leaf, p.internalServerSANs(), nil) {
-				return cert, nil
-			}
-		}
-		// The cached internal leaf does not cover the current FQDN SAN set
-		// (e.g. cluster_domain/headless_service changed) or could not be
-		// parsed: re-issue it in place under the same minting CA.
-	}
-
-	return p.issueInternalServerCert(ca, internalCertPath, internalKeyPath)
+	return p.issueOrReuseServerCert(ca, "server-internal.crt", "server-internal.key", "supervisor-internal", p.internalServerSANs(), nil)
 }
 
 // internalServerSANs returns the exact SAN set the internal-listener leaf must
 // cover: this pod's own FQDN SANs plus the engine-facing data host, already
-// computed by mintingProvider into extraSANs. No wildcard and no all-pod
-// enumeration — the only host a follower dials is the leader's own FQDN.
+// computed by mintingProvider into extraSANs.
 func (p *EmbeddedProvider) internalServerSANs() []string {
 	return dedupeStrings(p.extraSANs)
 }
 
-// issueInternalServerCert mints and persists the internal-listener leaf under
-// the minting CA (0600 files, mirroring issueServerCert).
-func (p *EmbeddedProvider) issueInternalServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
-	certPEM, keyPEM, err := ca.IssueServerCertificate(
-		"supervisor-internal", "dagger-kubernetes",
-		p.internalServerSANs(),
-		5*365*24*time.Hour)
-	if err != nil {
-		return tls.Certificate{}, fmt.Errorf("issue internal server cert: %w", err)
-	}
-	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		return tls.Certificate{}, fmt.Errorf("write internal server cert: %w", err)
-	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		return tls.Certificate{}, fmt.Errorf("write internal server key: %w", err)
-	}
-	return tls.X509KeyPair(certPEM, keyPEM)
-}
-
 // requiredServerSANs returns the exact DNS + IP SAN set the embedded server
-// certificate must cover: the fixed base names, the injected extraSANs (the
-// engine-facing data host and this pod's own FQDN SANs), this pod's hostname,
-// and the loopback IP.
+// certificate must cover.
 func (p *EmbeddedProvider) requiredServerSANs() (dns []string, ips []net.IP) {
 	sans := []string{"localhost", "supervisor", "supervisor-control", "supervisor-control.dagger-kubernetes.svc"}
 	sans = append(sans, p.extraSANs...)
-	// Direct pod access (CWE-295): cover this pod's hostname and loopback so
-	// the data-plane cert verifies when dialed directly by pod name/IP. The
-	// engine-facing data host is already included via extraSANs.
 	if hostname, err := os.Hostname(); err == nil && hostname != "" {
 		sans = append(sans, hostname)
 	}
 	return dedupeStrings(sans), []net.IP{net.ParseIP("127.0.0.1")}
 }
 
-// coversRequiredServerSANs reports whether cert carries every required DNS
-// name and IP SAN. Matching is exact (set containment) — no wildcard
-// expansion, so a wildcard certificate does not satisfy an exact-name
-// requirement.
-func coversRequiredServerSANs(cert *x509.Certificate, dns []string, ips []net.IP) bool {
-	if cert == nil {
-		return false
-	}
-	haveDNS := make(map[string]bool, len(cert.DNSNames))
-	for _, name := range cert.DNSNames {
-		haveDNS[name] = true
-	}
-	for _, name := range dns {
-		if !haveDNS[name] {
-			return false
-		}
-	}
-	haveIP := make(map[string]bool, len(cert.IPAddresses))
-	for _, ip := range cert.IPAddresses {
-		haveIP[ip.String()] = true
-	}
-	for _, ip := range ips {
-		if ip == nil || !haveIP[ip.String()] {
-			return false
-		}
-	}
-	return true
-}
-
-// loadOrCreateCA returns the persistent minting CA, creating it on first use.
-// When a Secret source is configured (clientset + secretName), the CA is
-// shared across pods via that Secret; otherwise it persists locally under
-// caPath exactly as before.
+// loadOrCreateCA returns the persistent minting CA via the configured
+// bootstrap provider (Kubernetes Secret or local files).
 func (p *EmbeddedProvider) loadOrCreateCA() (*MintingCA, error) {
-	if err := os.MkdirAll(p.caPath, 0o700); err != nil {
-		return nil, fmt.Errorf("create CA path: %w", err)
-	}
-	// Tighten an existing directory (e.g. a mounted PVC) so the cached CA key
-	// is not readable by other users (CWE-732). Best-effort: when the pod runs
-	// non-root and the directory is owned by another UID (e.g. created by an
-	// earlier root-run deployment), chmod fails with EPERM. That is tolerable —
-	// the CA key is still written 0600 below — so proceed rather than crash.
-	// #nosec G302 -- caPath is a directory; 0700 is more restrictive than the 0750 directory threshold.
-	if err := os.Chmod(p.caPath, 0o700); err != nil && !os.IsPermission(err) {
-		return nil, fmt.Errorf("chmod CA path: %w", err)
-	}
-
-	if p.clientset != nil && p.secretName != "" {
-		return p.loadOrCreateCAFromSecret()
-	}
-
-	caCertPath := filepath.Join(p.caPath, "ca.crt")
-	caKeyPath := filepath.Join(p.caPath, "ca.key")
-
-	if fileExists(caCertPath) && fileExists(caKeyPath) {
-		return p.loadCA(caCertPath, caKeyPath)
-	}
-
-	return p.createCA(caCertPath, caKeyPath)
-}
-
-// loadOrCreateCAFromSecret shares the minting CA via a K8s Secret. The
-// bootstrap node (ordinal 0 / caBootstrap) generates + writes it; other nodes
-// poll until it appears. This mirrors ensureRaftCAFromSecret in raft_tls.go.
-//
-// A Secret that exists but has empty ca.crt/ca.key (e.g. pre-created by an
-// older Helm chart revision with empty values) is treated as "not yet
-// provisioned": the bootstrap node generates a CA and Updates the Secret
-// rather than crashing on a PEM-decode error (CWE-754 / fail-closed).
-func (p *EmbeddedProvider) loadOrCreateCAFromSecret() (*MintingCA, error) {
-	if ca, err := p.readMintingCASecret(); err == nil {
-		return ca, nil
-	} else if !apierrors.IsNotFound(err) && !errors.Is(err, errEmptyMintingCASecret) {
-		return nil, fmt.Errorf("read minting CA secret %s: %w", p.secretName, err)
-	}
-
-	if p.caBootstrap {
-		certPEM, keyPEM, err := newMintingCAWithGoca()
-		if err != nil {
-			return nil, err
-		}
-		secret := &corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: p.secretName, Namespace: p.namespace},
-			Data: map[string][]byte{
-				"ca.crt": certPEM,
-				"ca.key": keyPEM,
-			},
-		}
-		if _, err := p.clientset.CoreV1().Secrets(p.namespace).Create(context.Background(), secret, metav1.CreateOptions{}); err != nil {
-			if !apierrors.IsAlreadyExists(err) {
-				return nil, fmt.Errorf("create minting CA secret %s: %w", p.secretName, err)
-			}
-			// The Secret already exists. If it holds a valid CA (e.g. the
-			// bootstrap pod restarted after a successful first boot), reuse it
-			// so every pod keeps trusting the same minting CA across restarts.
-			// If it is empty/invalid (e.g. pre-created by an older Helm chart),
-			// overwrite it with the freshly generated CA.
-			if ca, readErr := p.readMintingCASecret(); readErr == nil {
-				return ca, nil
-			} else if !errors.Is(readErr, errEmptyMintingCASecret) {
-				return nil, fmt.Errorf("read existing minting CA secret %s: %w", p.secretName, readErr)
-			}
-			if _, err := p.clientset.CoreV1().Secrets(p.namespace).Update(context.Background(), secret, metav1.UpdateOptions{}); err != nil {
-				return nil, fmt.Errorf("update empty minting CA secret %s: %w", p.secretName, err)
-			}
-		}
-		if err := p.writeLocalCA(certPEM, keyPEM); err != nil {
-			return nil, err
-		}
-		return NewMintingCAFromPEM(certPEM, keyPEM, p.clientCertTTL)
-	}
-
-	// Non-bootstrap node: poll the Secret until the bootstrap pod writes it.
-	timeout := p.secretPollTimeout
-	if timeout == 0 {
-		timeout = 30 * time.Second
-	}
-	deadline := time.Now().Add(timeout)
-	for {
-		if ca, err := p.readMintingCASecret(); err == nil {
-			return ca, nil
-		} else if !apierrors.IsNotFound(err) && !errors.Is(err, errEmptyMintingCASecret) {
-			return nil, fmt.Errorf("read minting CA secret %s: %w", p.secretName, err)
-		} else if time.Now().After(deadline) {
-			return nil, fmt.Errorf("minting CA secret %s did not appear within %s: %w", p.secretName, timeout, err)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
-}
-
-// errEmptyMintingCASecret is returned by readMintingCASecret when the Secret
-// exists but its ca.crt/ca.key values are empty (e.g. pre-created by an older
-// Helm chart revision). The caller treats it like NotFound so the bootstrap
-// node generates a CA and Updates the Secret instead of crashing.
-var errEmptyMintingCASecret = errors.New("minting CA secret exists but ca.crt/ca.key are empty")
-
-// readMintingCASecret fetches the CA cert+key from the shared K8s Secret,
-// validates both keys, caches them locally, and returns the loaded MintingCA.
-func (p *EmbeddedProvider) readMintingCASecret() (*MintingCA, error) {
-	secret, err := p.clientset.CoreV1().Secrets(p.namespace).Get(context.Background(), p.secretName, metav1.GetOptions{})
+	mat, err := p.bootstrap.EnsureBootstrapMaterial(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	certPEM, okCert := secret.Data["ca.crt"]
-	keyPEM, okKey := secret.Data["ca.key"]
-	if !okCert || !okKey {
-		return nil, fmt.Errorf("minting CA secret %s is missing ca.crt/ca.key keys", p.secretName)
-	}
-	if len(certPEM) == 0 || len(keyPEM) == 0 {
-		return nil, errEmptyMintingCASecret
-	}
-	if err := p.writeLocalCA(certPEM, keyPEM); err != nil {
-		return nil, err
-	}
-	return NewMintingCAFromPEM(certPEM, keyPEM, p.clientCertTTL)
+	return NewMintingCAFromPEM(mat.CACertPEM, mat.CAKeyPEM, p.clientCertTTL)
 }
 
-// writeLocalCA persists the CA cert+key under caPath (0600) as a local cache.
-func (p *EmbeddedProvider) writeLocalCA(certPEM, keyPEM []byte) error {
-	if err := os.WriteFile(filepath.Join(p.caPath, "ca.crt"), certPEM, 0o600); err != nil {
-		return fmt.Errorf("write CA cert: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(p.caPath, "ca.key"), keyPEM, 0o600); err != nil {
-		return fmt.Errorf("write CA key: %w", err)
-	}
-	return nil
-}
+// issueOrReuseServerCert reuses the cached leaf when it is still valid, signed
+// by the current CA, has the expected CN, and covers the required SANs;
+// otherwise it re-issues and persists the pair (0600).
+func (p *EmbeddedProvider) issueOrReuseServerCert(ca *MintingCA, certFile, keyFile, commonName string, dnsNames []string, ipAddrs []net.IP) (tls.Certificate, error) {
+	certPath := filepath.Join(p.caPath, certFile)
+	keyPath := filepath.Join(p.caPath, keyFile)
 
-// newMintingCAWithGoca builds a new self-signed minting CA via goca and
-// returns its PEM encoding.
-func newMintingCAWithGoca() (certPEM, keyPEM []byte, err error) {
-	ca, err := NewMintingCA(0)
-	if err != nil {
-		return nil, nil, fmt.Errorf("create minting CA: %w", err)
-	}
-	return ca.EncodePEM()
-}
-
-func (p *EmbeddedProvider) createCA(certPath, keyPath string) (*MintingCA, error) {
-	certPEM, keyPEM, err := newMintingCAWithGoca()
-	if err != nil {
-		return nil, err
+	if certPEM, keyPEM, ok := p.reuseServerCert(ca, certPath, keyPath, commonName, dnsNames, ipAddrs); ok {
+		return tls.X509KeyPair(certPEM, keyPEM)
 	}
 
-	if err := os.WriteFile(certPath, certPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write CA cert: %w", err)
-	}
-	if err := os.WriteFile(keyPath, keyPEM, 0o600); err != nil {
-		return nil, fmt.Errorf("write CA key: %w", err)
-	}
-
-	return p.loadCA(certPath, keyPath)
-}
-
-func (p *EmbeddedProvider) loadCA(certPath, keyPath string) (*MintingCA, error) {
-	certPEM, err := os.ReadFile(certPath) //nolint:gosec // paths from config
-	if err != nil {
-		return nil, fmt.Errorf("read CA cert: %w", err)
-	}
-	keyPEM, err := os.ReadFile(keyPath) //nolint:gosec // paths from config
-	if err != nil {
-		return nil, fmt.Errorf("read CA key: %w", err)
-	}
-
-	return NewMintingCAFromPEM(certPEM, keyPEM, p.clientCertTTL)
-}
-
-func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath string) (tls.Certificate, error) {
-	sans, ipSANs := p.requiredServerSANs()
-	// IssuePeerCertificate supports IP SANs (IssueServerCertificate does not),
-	// so 127.0.0.1 is carried as an IP SAN. It also sets ExtKeyUsageServerAuth,
-	// so the cert remains a valid server cert.
-	certPEM, keyPEM, err := ca.IssuePeerCertificate(
-		"supervisor-server", "dagger-kubernetes",
-		sans,
-		ipSANs,
-		5*365*24*time.Hour)
+	certPEM, keyPEM, err := ca.IssuePeerCertificate(commonName, mintingCAOrganization, dnsNames, ipAddrs, serverCertValidity)
 	if err != nil {
 		return tls.Certificate{}, fmt.Errorf("issue server cert: %w", err)
 	}
@@ -396,17 +165,35 @@ func (p *EmbeddedProvider) issueServerCert(ca *MintingCA, certPath, keyPath stri
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
+// reuseServerCert reports whether the cached pair may be reused, returning its
+// PEM bytes when so.
+func (p *EmbeddedProvider) reuseServerCert(ca *MintingCA, certPath, keyPath, commonName string, dnsNames []string, ipAddrs []net.IP) (certPEM, keyPEM []byte, ok bool) {
+	certPEM, err := os.ReadFile(certPath) //nolint:gosec // fixed file under the configured CA dir
+	if err != nil {
+		return nil, nil, false
+	}
+	keyPEM, err = os.ReadFile(keyPath) //nolint:gosec // fixed file under the configured CA dir
+	if err != nil {
+		return nil, nil, false
+	}
+	cert, err := pki.ParsePEMCert(certPEM)
+	if err != nil {
+		return nil, nil, false
+	}
+	if !pki.ReusableNodeCert(cert, ca.ca, commonName, dnsNames, ipAddrs, p.safetyMargin, time.Now()) {
+		return nil, nil, false
+	}
+	return certPEM, keyPEM, true
+}
+
 // fileCAProvider serves the server TLS certificate from PEM files managed
-// outside of dagger-kubernetes (cert-manager or external tooling). The minting CA
-// is always auto-bootstrapped by the embedded provider (K8s Secret or local
-// files), independent of where the server certificate comes from — the
-// minting CA signs short-lived engine client certs and is an internal CA that
-// never needs a public/cert-manager issuer.
+// outside of dagger-kubernetes (cert-manager or external tooling). The minting
+// CA is always auto-bootstrapped by the embedded provider.
 type fileCAProvider struct {
 	label    string
 	certPath string
 	keyPath  string
-	minting  *EmbeddedProvider
+	minting  domain.CAProvider
 }
 
 var _ domain.CAProvider = (*fileCAProvider)(nil)
@@ -420,23 +207,20 @@ func (p *fileCAProvider) ServerTLSCert() (tls.Certificate, error) {
 }
 
 // InternalServerTLSCert delegates to the embedded minting provider so the
-// internal listener always serves a minting-CA leaf, even when the public
-// server certificate comes from cert-manager or an external source.
+// internal listener always serves a minting-CA leaf.
 func (p *fileCAProvider) InternalServerTLSCert() (tls.Certificate, error) {
 	return p.minting.InternalServerTLSCert()
 }
 
-// NewCertManagerProvider returns a CA provider backed by cert-manager
-// mounted PEM files for the server certificate. The minting CA is
-// auto-bootstrapped via the supplied embedded provider.
-func NewCertManagerProvider(certPath, keyPath string, minting *EmbeddedProvider) domain.CAProvider {
+// NewCertManagerProvider returns a CA provider backed by cert-manager mounted
+// PEM files for the server certificate.
+func NewCertManagerProvider(certPath, keyPath string, minting domain.CAProvider) domain.CAProvider {
 	return &fileCAProvider{label: "cert-manager", certPath: certPath, keyPath: keyPath, minting: minting}
 }
 
 // NewExternalProvider returns a CA provider backed by externally managed PEM
-// files for the server certificate. The minting CA is auto-bootstrapped via
-// the supplied embedded provider.
-func NewExternalProvider(certPath, keyPath string, minting *EmbeddedProvider) domain.CAProvider {
+// files for the server certificate.
+func NewExternalProvider(certPath, keyPath string, minting domain.CAProvider) domain.CAProvider {
 	return &fileCAProvider{label: "external", certPath: certPath, keyPath: keyPath, minting: minting}
 }
 
@@ -452,11 +236,6 @@ func loadTLSKeyPair(certPath, keyPath string) (tls.Certificate, error) {
 		return tls.Certificate{}, fmt.Errorf("read server key: %w", err)
 	}
 	return tls.X509KeyPair(certPEM, keyPEM)
-}
-
-func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return !os.IsNotExist(err)
 }
 
 // dedupeStrings returns in with duplicates removed, preserving order.

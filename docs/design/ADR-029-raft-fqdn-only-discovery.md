@@ -1,5 +1,8 @@
 # ADR-029: Raft FQDN-only discovery + NodeLocal DNSCache bypass
 
+> **Revision (2026-11-15, ADR-050):** peer discovery is delegated to
+> `go-raft/discovery` (FQDN-only, same semantics).
+
 - **Status:** Accepted
 - **Date:** 2026-09-03
 - **Builds on:** ADR-016 (multi-node Raft with TLS + StatefulSet discovery)

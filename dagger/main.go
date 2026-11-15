@@ -27,10 +27,10 @@ const (
 	jenkinsLibsDir = "ci-integrations/jenkins"
 
 	// Pinned tool images and versions. Keep in sync with DAGGER.md.
-	golangImage         = "golang:1.26"
+	golangImage         = "golang:1.27"
 	nodeImage           = "node:22-alpine"
 	helmImage           = "alpine/helm:3.14.0"
-	golangciLintVersion = "v2.12.2"
+	golangciLintVersion = "v2.14.0"
 )
 
 // binaries lists the Go binaries produced by Build.

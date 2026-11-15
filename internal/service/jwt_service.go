@@ -4,135 +4,79 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	goauthdomain "github.com/disaster37/go-auth/domain"
+	goauthjwt "github.com/disaster37/go-auth/jwt"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// Claims is the JWT body issued by the supervisor.
-type Claims struct {
-	UserID   string   `json:"uid"`
-	Username string   `json:"username"`
-	Role     string   `json:"role"`
-	GroupIDs []string `json:"groups"`
-	Type     string   `json:"typ"` // "access" | "refresh" | "oauth_state"
-	Nonce    string   `json:"nonce,omitempty"`
-	// TokenVersion mirrors domain.User.TokenVersion at issue time (ADR-045);
-	// resolution compares it against the freshly loaded user, so a logout or
-	// password change invalidates every token minted before the bump. Tokens
-	// minted before the upgrade lack the claim and decode to 0.
-	TokenVersion int `json:"token_version"`
-	jwt.RegisteredClaims
-}
+// Claims is the JWT body issued by the supervisor. It is the go-auth wire
+// format (HS256, TokenVersion, optional AuthEpoch).
+type Claims = goauthjwt.Claims
 
-const (
-	typAccess     = "access"
-	typRefresh    = "refresh"
-	typOAuthState = "oauth_state"
-	oauthStateTTL = 10 * time.Minute
-)
-
-// JWTService issues and parses HS256 JWTs.
+// JWTService issues and parses HS256 JWTs via go-auth. UseHKDF is false so the
+// raw configured secret signs tokens, preserving active cluster sessions across
+// the upgrade.
 type JWTService struct {
-	secret     []byte
-	accessTTL  time.Duration
-	refreshTTL time.Duration
-	clock      func() time.Time
+	svc *goauthjwt.Service
 }
 
-// NewJWTService returns a JWTService.
+// NewJWTService returns a JWTService. A secret shorter than the go-auth minimum
+// is a startup invariant violation (validated by jwt.ValidateSecret in
+// cmd/api); it panics rather than silently issuing weak tokens.
 func NewJWTService(secret []byte, accessTTL, refreshTTL time.Duration) *JWTService {
-	return &JWTService{
-		secret:     secret,
-		accessTTL:  accessTTL,
-		refreshTTL: refreshTTL,
-		clock:      func() time.Time { return time.Now().UTC() },
+	svc, err := goauthjwt.NewService(goauthjwt.Config{
+		Secret:     secret,
+		UseHKDF:    false,
+		AccessTTL:  accessTTL,
+		RefreshTTL: refreshTTL,
+	})
+	if err != nil {
+		panic(fmt.Sprintf("new jwt service: %v", err))
 	}
+	return &JWTService{svc: svc}
 }
 
 // AccessTTL returns the configured access-token TTL.
-func (s *JWTService) AccessTTL() time.Duration { return s.accessTTL }
+func (s *JWTService) AccessTTL() time.Duration { return s.svc.AccessTTL() }
 
 // RefreshTTL returns the configured refresh-token TTL.
-func (s *JWTService) RefreshTTL() time.Duration { return s.refreshTTL }
+func (s *JWTService) RefreshTTL() time.Duration { return s.svc.RefreshTTL() }
 
 // IssuePair returns signed access + refresh tokens for the user.
 func (s *JWTService) IssuePair(u *domain.User, groupIDs []string) (access, refresh string, err error) {
-	access, err = s.issue(u, groupIDs, typAccess, s.accessTTL)
-	if err != nil {
-		return "", "", fmt.Errorf("issue access: %w", err)
-	}
-	refresh, err = s.issue(u, groupIDs, typRefresh, s.refreshTTL)
-	if err != nil {
-		return "", "", fmt.Errorf("issue refresh: %w", err)
-	}
-	return access, refresh, nil
+	return s.svc.IssuePair(toGoAuthUser(u), groupIDs, 0)
 }
 
 // ParseAccess validates the signature, expiry, and typ=="access".
 func (s *JWTService) ParseAccess(token string) (*Claims, error) {
-	return s.parse(token, typAccess, "parse access token")
+	return s.svc.ParseAccess(token)
 }
 
 // ParseRefresh validates the signature, expiry, and typ=="refresh".
 func (s *JWTService) ParseRefresh(token string) (*Claims, error) {
-	return s.parse(token, typRefresh, "parse refresh token")
+	return s.svc.ParseRefresh(token)
 }
 
 // ParseOAuthState validates an OAuth state token.
 func (s *JWTService) ParseOAuthState(token string) (*Claims, error) {
-	return s.parse(token, typOAuthState, "parse oauth state")
+	return s.svc.ParseOAuthState(token)
 }
 
 // IssueOAuthState issues a short-lived state token for the OAuth flow. The
 // redirect path is carried in the Username claim and the login-CSRF nonce in
 // the Nonce claim; the callback must present the matching nonce cookie.
 func (s *JWTService) IssueOAuthState(redirectPath, nonce string) (string, error) {
-	claims := s.claims(typOAuthState, oauthStateTTL)
-	claims.Username = redirectPath
-	claims.Nonce = nonce
-	tok, err := s.sign(claims)
-	if err != nil {
-		return "", fmt.Errorf("sign oauth state: %w", err)
-	}
-	return tok, nil
+	return s.svc.IssueOAuthState(redirectPath, nonce, "", "")
 }
 
-func (s *JWTService) issue(u *domain.User, groupIDs []string, typ string, ttl time.Duration) (string, error) {
-	claims := s.claims(typ, ttl)
-	claims.UserID = u.ID
-	claims.Username = u.Username
-	claims.Role = string(u.Role)
-	claims.GroupIDs = groupIDs
-	claims.TokenVersion = u.TokenVersion
-	return s.sign(claims)
-}
-
-// claims builds the base claims with iat/exp around the service clock.
-func (s *JWTService) claims(typ string, ttl time.Duration) *Claims {
-	now := s.clock()
-	return &Claims{
-		Type: typ,
-		RegisteredClaims: jwt.RegisteredClaims{
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
-		},
+// toGoAuthUser adapts the supervisor's domain.User to the go-auth user shape
+// used for JWT issuance.
+func toGoAuthUser(u *domain.User) *goauthdomain.User {
+	return &goauthdomain.User{
+		ID:           u.ID,
+		Username:     u.Username,
+		Role:         goauthdomain.Role(u.Role),
+		TokenVersion: u.TokenVersion,
 	}
-}
-
-func (s *JWTService) sign(claims *Claims) (string, error) {
-	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(s.secret)
-}
-
-func (s *JWTService) parse(token, wantTyp, label string) (*Claims, error) {
-	claims := &Claims{}
-	if _, err := jwt.ParseWithClaims(token, claims, func(*jwt.Token) (interface{}, error) {
-		return s.secret, nil
-	}, jwt.WithValidMethods([]string{"HS256"})); err != nil {
-		return nil, fmt.Errorf("%s: %w", label, err)
-	}
-	if claims.Type != wantTyp {
-		return nil, fmt.Errorf("%s: unexpected token type %q, want %q", label, claims.Type, wantTyp)
-	}
-	return claims, nil
 }
