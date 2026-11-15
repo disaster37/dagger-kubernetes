@@ -129,11 +129,6 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("create TLS provider: %w", err)
 	}
 
-	serverMintingCA, err := tlsProvider.MintingCA()
-	if err != nil {
-		return fmt.Errorf("get minting CA: %w", err)
-	}
-
 	serverTLS, err := tlsProvider.ServerTLSCert()
 	if err != nil {
 		return fmt.Errorf("get server TLS cert: %w", err)
@@ -475,7 +470,7 @@ func run(c *cli.Context) error {
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
-		MintingCA:            serverMintingCA,
+		MintingCA:            dynamicCA,
 		FleetManager:         fleetManager,
 		Sessions:             sessions,
 		SessionRegistry:      repository.NewSessionRepo(raftStore),

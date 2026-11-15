@@ -15,6 +15,8 @@ import (
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 	"github.com/disaster37/go-raft/httpext"
 	rafttransport "github.com/disaster37/go-raft/transport"
+
+	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 // leaderForwardedHeader marks a request that has already been forwarded to the
@@ -125,6 +127,10 @@ func (s *Server) getOrBuildForwarder() (*httpext.Forwarder, bool) {
 		DialTimeout:           2 * time.Second,
 		ResponseHeaderTimeout: 2 * time.Minute,
 	})
+	// A reverse proxy must pass redirects through unchanged: following them
+	// would drop the Set-Cookie headers on the OAuth callback's 302 and hand
+	// the browser the redirect target's body instead of the redirect.
+	repository.DisableForwarderRedirects(s.forwarder)
 	s.forwarderPort = s.internalControlPort
 	return s.forwarder, true
 }

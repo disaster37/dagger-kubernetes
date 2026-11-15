@@ -748,6 +748,87 @@ func TestDynamicMintingCAPhasedRotationPreservesInFlightClientCert(t *testing.T)
 	}
 }
 
+// TestMintingRotatorStageIdempotent proves a crash between the two stage
+// writes (Term=2 with AppliedIndex=0) does not strand the rotation: the next
+// tick records the applied index and keeps exactly two keys.
+func TestMintingRotatorStageIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	provider := NewEmbeddedProvider(dir, 24*time.Hour)
+	sealer, err := DeriveSealer("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("DeriveSealer: %v", err)
+	}
+	dynamicCA, err := NewDynamicMintingCA(DynamicMintingCAConfig{Provider: provider, Sealer: sealer, Logger: testLogger()})
+	if err != nil {
+		t.Fatalf("NewDynamicMintingCA: %v", err)
+	}
+	store := newTestRaftStore(t)
+	store.SetMetaHook(func(key, value string) {
+		if key == MintingKeyringMetaKey {
+			if err := dynamicCA.SetKeyringJSON(value); err != nil {
+				t.Errorf("SetKeyringJSON: %v", err)
+			}
+		}
+	})
+
+	now := time.Now()
+	rotator := NewMintingRotator(&MintingRotatorConfig{
+		Store:          store,
+		CA:             dynamicCA,
+		Bootstrap:      provider.BootstrapProvider(),
+		Sealer:         sealer,
+		ClientCertTTL:  24 * time.Hour,
+		RotationPeriod: time.Hour,
+		CheckInterval:  time.Second,
+		CommonName:     "dagger-kubernetes-minting-ca",
+		Organization:   "dagger-kubernetes",
+		CAValidity:     30 * 365 * 24 * time.Hour,
+		Logger:         testLogger(),
+		Now:            func() time.Time { return now },
+	})
+	ctx := context.Background()
+
+	// Seed (Term 1).
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	// Stage (Term 2) with the clock advanced past the rotation period.
+	now = now.Add(2 * time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+
+	// Simulate a crash between the two stage writes: reset the keyring's
+	// AppliedIndex to 0 (as if the second write never landed).
+	kr, err := rotator.readKeyring()
+	if err != nil {
+		t.Fatalf("readKeyring: %v", err)
+	}
+	if kr == nil || len(kr.Keys) != 2 {
+		t.Fatalf("expected a staged 2-key keyring, got %+v", kr)
+	}
+	kr.AppliedIndex = 0
+	if err := rotator.writeKeyring(ctx, kr); err != nil {
+		t.Fatalf("writeKeyring (simulate crash): %v", err)
+	}
+
+	// Re-run the rotation: activate must record the applied index (recovering
+	// the crashed stage write) without appending a third key.
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("re-run rotation: %v", err)
+	}
+	kr, err = rotator.readKeyring()
+	if err != nil {
+		t.Fatalf("readKeyring after re-run: %v", err)
+	}
+	if len(kr.Keys) != 2 {
+		t.Fatalf("re-run appended a duplicate key: got %d keys, want 2", len(kr.Keys))
+	}
+	if kr.AppliedIndex == 0 {
+		t.Fatal("re-run must record the applied index")
+	}
+}
+
 // TestDataplaneFileWatcherHotReload proves the cert-manager/external data-plane
 // server cert hot-reloads renewed files and rejects corrupt PEMs while keeping
 // the previous certificate active.

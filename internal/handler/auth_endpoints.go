@@ -151,7 +151,7 @@ func (s *Server) handleLogin(ctx context.Context, c *app.RequestContext) {
 	ip := s.clientIP(c)
 	key := lockout.LoginLimitKey(req.Username, ip)
 	if s.guard != nil {
-		if !s.guard.Lockout.Allow(key) {
+		if s.guard.Config.Lockout.Enabled && !s.guard.Lockout.Allow(key) {
 			writeError(c, consts.StatusTooManyRequests, "too many failed login attempts, try again later")
 			return
 		}
@@ -172,7 +172,9 @@ func (s *Server) handleLogin(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	if s.guard != nil {
-		s.guard.Lockout.RecordSuccess(key)
+		if s.guard.Config.Lockout.Enabled {
+			s.guard.Lockout.RecordSuccess(key)
+		}
 		s.guard.LoginThrottle.Clear(key)
 	}
 	s.setAuthCookies(c, access, refresh)
@@ -301,18 +303,18 @@ func (s *Server) handleChangePassword(ctx context.Context, c *app.RequestContext
 		return
 	}
 	key := lockout.PasswordChangeLimitKey(id.UserID, s.clientIP(c))
-	if s.guard != nil && !s.guard.Lockout.Allow(key) {
+	if s.guard != nil && s.guard.Config.Lockout.Enabled && !s.guard.Lockout.Allow(key) {
 		writeError(c, consts.StatusTooManyRequests, "too many failed attempts, try again later")
 		return
 	}
 	if err := s.users.ChangePassword(ctx, id.UserID, req.CurrentPassword, req.NewPassword); err != nil {
-		if errors.Is(err, domain.ErrInvalidCredential) && s.guard != nil {
+		if errors.Is(err, domain.ErrInvalidCredential) && s.guard != nil && s.guard.Config.Lockout.Enabled {
 			s.guard.Lockout.RecordFailure(key)
 		}
 		s.writeServiceError(c, err)
 		return
 	}
-	if s.guard != nil {
+	if s.guard != nil && s.guard.Config.Lockout.Enabled {
 		s.guard.Lockout.RecordSuccess(key)
 	}
 	c.SetStatusCode(consts.StatusNoContent)

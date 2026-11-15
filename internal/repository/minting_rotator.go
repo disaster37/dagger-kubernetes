@@ -420,8 +420,19 @@ func (r *MintingRotator) stage(ctx context.Context, kr *keyring.TLSKeyring) erro
 
 // activate promotes M1 as the signer while keeping M0 trusted (Term=3).
 func (r *MintingRotator) activate(ctx context.Context, kr *keyring.TLSKeyring) error {
-	if len(kr.Keys) != 2 || kr.AppliedIndex == 0 {
+	if len(kr.Keys) != 2 {
 		return nil
+	}
+	if kr.AppliedIndex == 0 {
+		// Crash recovery: the stage's second write (recording the applied
+		// index) never landed, leaving Term=2 with AppliedIndex=0. Record the
+		// applied index now so activation can proceed on the next tick.
+		next := kr.Clone()
+		next.AppliedIndex = r.cfg.Store.AppliedIndex()
+		if next.AppliedIndex == 0 {
+			next.AppliedIndex = 1
+		}
+		return r.writeKeyring(ctx, next)
 	}
 	if r.cfg.Store.MinFollowerAppliedIndex() < kr.AppliedIndex {
 		return nil

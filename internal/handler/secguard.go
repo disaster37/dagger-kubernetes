@@ -124,7 +124,7 @@ func (s *Server) secguardMiddleware() app.HandlerFunc {
 		// The admin ban-management endpoints stay reachable from a banned IP
 		// so an operator can always inspect and lift bans (operational
 		// recovery); every other API route is subject to the ban check.
-		if !strings.HasPrefix(path, "/api/v1/security/bans") && s.guard.BanTracker.IsBanned(ip) {
+		if s.guard.Config.Ban.Enabled && !strings.HasPrefix(path, "/api/v1/security/bans") && s.guard.BanTracker.IsBanned(ip) {
 			s.metrics.SecurityRejectionsTotal.WithLabelValues("ip_banned").Inc()
 			writeError(c, consts.StatusForbidden, "IP address is temporarily banned due to suspicious activity")
 			c.Abort()
@@ -150,8 +150,13 @@ func (s *Server) recordLoginFailure(username, ip string) {
 	if s.guard == nil {
 		return
 	}
-	key := lockout.LoginLimitKey(username, ip)
-	s.guard.Lockout.RecordFailure(key)
+	if s.guard.Config.Lockout.Enabled {
+		key := lockout.LoginLimitKey(username, ip)
+		s.guard.Lockout.RecordFailure(key)
+	}
+	if !s.guard.Config.Ban.Enabled {
+		return
+	}
 	banned := s.guard.BanTracker.RecordAndBan(
 		ip,
 		bantracker.FingerprintLogin(username),
@@ -167,7 +172,7 @@ func (s *Server) recordLoginFailure(username, ip string) {
 // recordTokenFailure records an invalid bearer/API token against the ban
 // tracker (bearer-token brute force).
 func (s *Server) recordTokenFailure(ip, bearer string) {
-	if s.guard == nil || bearer == "" {
+	if s.guard == nil || bearer == "" || !s.guard.Config.Ban.Enabled {
 		return
 	}
 	banned := s.guard.BanTracker.RecordAndBan(

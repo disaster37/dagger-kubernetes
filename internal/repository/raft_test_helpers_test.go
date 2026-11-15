@@ -169,10 +169,14 @@ func newRaftClusterOpts(t *testing.T, n int, tlsEnabled, rotation bool) []*RaftS
 		}
 		if rotation {
 			// Rotation applies Raft writes; use more forgiving election
-			// timings so the leader stays stable under -race load.
+			// timings so the leader stays stable under -race load. The rotation
+			// period is deliberately well above the check interval: a 300ms period
+			// generates a fresh RSA CA key every few hundred milliseconds, which
+			// starves the FSM apply loop under -race -covermode=atomic and makes
+			// TestRaftStoreAutoRenewsTLSKeyringAndLeaf flaky.
 			cfg.PerformanceMultiplier = 2.0
 			cfg.KeyringRotationEnabled = true
-			cfg.RotationPeriod = 300 * time.Millisecond
+			cfg.RotationPeriod = 2 * time.Second
 			cfg.RotationCheckInterval = 50 * time.Millisecond
 			cfg.SafetyMargin = 7 * 24 * time.Hour
 			cfg.EncryptionKey = "0123456789abcdef0123456789abcdef"

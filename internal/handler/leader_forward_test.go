@@ -662,3 +662,61 @@ func TestLeaderForwardStreamsSSE(t *testing.T) {
 		t.Fatal("timed out reading the second SSE event")
 	}
 }
+
+// TestLeaderForwardPassesRedirectThrough proves the forward hop passes a 302
+// redirect (and its Set-Cookie headers) through unchanged instead of following
+// it. Following the redirect would drop the OAuth callback's session cookies
+// and hand the browser the SPA body instead of the redirect itself.
+func TestLeaderForwardPassesRedirectThrough(t *testing.T) {
+	ca, err := repository.NewMintingCA(time.Hour)
+	if err != nil {
+		t.Fatalf("NewMintingCA: %v", err)
+	}
+	certPEM, keyPEM, err := ca.IssuePeerCertificate(
+		"supervisor-internal", "dagger-kubernetes",
+		[]string{"localhost"},
+		[]net.IP{net.ParseIP("127.0.0.1")},
+		time.Hour,
+	)
+	if err != nil {
+		t.Fatalf("IssuePeerCertificate: %v", err)
+	}
+	leaf, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	backend := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Set-Cookie", "dagger_kubernetes_access=jwt; Path=/; HttpOnly")
+		w.Header().Set("Location", "/auth/callback?redirect=%2Fpipelines")
+		w.WriteHeader(http.StatusFound)
+	}))
+	backend.TLS = &tls.Config{Certificates: []tls.Certificate{leaf}}
+	backend.StartTLS()
+	t.Cleanup(backend.Close)
+	backendHostPort := strings.TrimPrefix(backend.URL, "https://")
+	_, backendPort, err := net.SplitHostPort(backendHostPort)
+	if err != nil {
+		t.Fatalf("split backend: %v", err)
+	}
+
+	env := newTestEnv(t)
+	s := env.server
+	s.leaderInfo = &fakeLeaderInfo{leader: false, addr: backendHostPort}
+	s.mintingCA = ca
+	s.internalControlPort, err = strconv.Atoi(backendPort)
+	if err != nil {
+		t.Fatalf("parse backend port: %v", err)
+	}
+
+	e := newLeaderForwardEngine(s)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/auth/oauth/github/callback?code=abc&state=xyz", nil)
+	if got := resp.Result().StatusCode(); got != http.StatusFound {
+		t.Fatalf("status = %d, want 302 (redirect must be passed through, not followed)", got)
+	}
+	if got := resp.Result().Header.Get("Set-Cookie"); !strings.Contains(got, "dagger_kubernetes_access") {
+		t.Fatalf("Set-Cookie = %q, want the session cookie to be preserved", got)
+	}
+	if got := string(resp.Result().Header.Peek("Location")); got != "/auth/callback?redirect=%2Fpipelines" {
+		t.Fatalf("Location = %q, want the redirect target", got)
+	}
+}
