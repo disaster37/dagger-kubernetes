@@ -151,12 +151,17 @@ func (s *ChecksService) dispatchCheckJob(ctx context.Context, src *domain.ForgeS
 	if err := s.runner.CancelSuperseded(ctx, record.ProjectID, record.Ref); err != nil {
 		s.logger.WithError(err).Warn("cancel superseded check runs failed")
 	}
+	runToken, runTokenHash := newRunToken()
+	record.RunTokenHash = runTokenHash
+	if err := s.checkRuns.Upsert(ctx, record); err != nil {
+		return fmt.Errorf("persist check run token: %w", err)
+	}
 	spec := &domain.CheckRunSpec{
 		ID: record.ID, OrgID: record.OrgID, ProjectID: record.ProjectID, SourceID: record.SourceID,
 		Provider: record.Provider, Repo: record.Repo, SHA: record.SHA, Ref: record.Ref,
 		DefaultBranch: record.DefaultBranch, TargetBranch: record.TargetBranch, Tag: record.Tag,
 		PRNumber: record.PRNumber, IsFork: record.IsFork, IsRelease: record.IsRelease,
-		Event: record.Event, Token: token, CloneToken: cloneToken, Secrets: secrets,
+		Event: record.Event, Token: token, RunToken: runToken, CloneToken: cloneToken, Secrets: secrets,
 	}
 	return s.runner.Run(ctx, spec)
 }

@@ -111,6 +111,16 @@ func TestChecksServiceNonForkWebhookDispatches(t *testing.T) {
 	if runner.runs[0].Token == "" {
 		t.Fatal("check job must receive an org token")
 	}
+	if runner.runs[0].RunToken == "" {
+		t.Fatal("check job must receive a per-run token")
+	}
+	record, err := svc.Get(context.Background(), runner.runs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyRunToken(record.RunTokenHash, runner.runs[0].RunToken) {
+		t.Fatal("stored hash must match the dispatched run token")
+	}
 	if len(provider.statuses) == 0 || provider.statuses[0].State != domain.CheckPending {
 		t.Fatalf("forge statuses = %+v", provider.statuses)
 	}
@@ -143,6 +153,30 @@ func TestChecksServiceForkHoldsUntilApproval(t *testing.T) {
 	}
 	if len(runner.runs) != 1 {
 		t.Fatalf("runner runs = %d", len(runner.runs))
+	}
+	firstToken := runner.runs[0].RunToken
+	record, err := svc.Get(context.Background(), records[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyRunToken(record.RunTokenHash, firstToken) {
+		t.Fatal("approval dispatch hash must match the run token")
+	}
+	if _, err := svc.Rerun(context.Background(), records[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.runs) != 2 {
+		t.Fatalf("runner runs after rerun = %d", len(runner.runs))
+	}
+	if runner.runs[1].RunToken == "" || runner.runs[1].RunToken == firstToken {
+		t.Fatal("rerun must mint a fresh per-run token")
+	}
+	record, err = svc.Get(context.Background(), records[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyRunToken(record.RunTokenHash, runner.runs[1].RunToken) {
+		t.Fatal("rerun hash must match the new token")
 	}
 }
 

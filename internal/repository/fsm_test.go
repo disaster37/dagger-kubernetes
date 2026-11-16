@@ -1181,15 +1181,15 @@ func TestFSMCloudParityCommandsAndSnapshot(t *testing.T) {
 	if err := applyCmd(t, f, kindUpsertEnvironment, cmdEnvironment{Environment: *env}); err != nil {
 		t.Fatalf("upsert environment: %v", err)
 	}
-	rec := &domain.CheckRunRecord{ID: "check-1", OrgID: "acme", ProjectID: "p1", Status: "running", CreatedAt: now, UpdatedAt: now}
-	if err := applyCmd(t, f, kindUpsertCheckRun, cmdCheckRun{Record: *rec}); err != nil {
+	rec := &domain.CheckRunRecord{ID: "check-1", OrgID: "acme", ProjectID: "p1", Status: "running", RunTokenHash: "check-hash", CreatedAt: now, UpdatedAt: now}
+	if err := applyCmd(t, f, kindUpsertCheckRun, cmdCheckRunFrom(rec)); err != nil {
 		t.Fatalf("upsert check run: %v", err)
 	}
 	def := &domain.WorkflowDef{ID: "acme/p1/release", OrgID: "acme", ProjectID: "p1", Workflow: domain.Workflow{Name: "release"}}
 	if err := applyCmd(t, f, kindSyncProjectWorkflowDefs, cmdSyncProjectWorkflowDefs{OrgID: "acme", ProjectID: "p1", Defs: []*domain.WorkflowDef{def}}); err != nil {
 		t.Fatalf("sync defs: %v", err)
 	}
-	run := &domain.WorkflowRun{OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "pending"}}, ContextFiles: map[string][]byte{"VERSION": []byte("1.0.0")}}
+	run := &domain.WorkflowRun{OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "pending"}}, ContextFiles: map[string][]byte{"VERSION": []byte("1.0.0")}, RunTokenHash: "workflow-hash"}
 	resp, err := f.applyCommand(mustCommand(t, kindCreateWorkflowRun, cmdWorkflowRunFrom(run)))
 	if err != nil {
 		t.Fatalf("create run: %v", err)
@@ -1223,13 +1223,13 @@ func TestFSMCloudParityCommandsAndSnapshot(t *testing.T) {
 	if got, err := restored.readEnvironment("acme", "prod"); err != nil || !got.PreventSelfApproval {
 		t.Fatalf("restored env = %+v err=%v", got, err)
 	}
-	if got, err := restored.readCheckRun("check-1"); err != nil || got.Status != "running" {
+	if got, err := restored.readCheckRun("check-1"); err != nil || got.Status != "running" || got.RunTokenHash != "check-hash" {
 		t.Fatalf("restored check = %+v err=%v", got, err)
 	}
 	if got, err := restored.readWorkflowDef("acme", "p1", "release"); err != nil || got.Workflow.Name != "release" {
 		t.Fatalf("restored def = %+v err=%v", got, err)
 	}
-	if got, err := restored.readWorkflowRun("p1-release-1"); err != nil || string(got.ContextFiles["VERSION"]) != "1.0.0" {
+	if got, err := restored.readWorkflowRun("p1-release-1"); err != nil || string(got.ContextFiles["VERSION"]) != "1.0.0" || got.RunTokenHash != "workflow-hash" {
 		t.Fatalf("restored run = %+v err=%v", got, err)
 	}
 	resp3, err := restored.applyCommand(mustCommand(t, kindCreateWorkflowRun, cmdWorkflowRunFrom(&domain.WorkflowRun{OrgID: "acme", ProjectID: "p1", Workflow: "release"})))

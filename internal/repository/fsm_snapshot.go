@@ -37,6 +37,7 @@ type fsmSnapshotPayload struct {
 	ForgeSources     []*cmdForgeSource        `json:"forge_sources"`
 	Environments     []*domain.Environment    `json:"environments"`
 	CheckRuns        []*domain.CheckRunRecord `json:"check_runs"`
+	CheckRunTokens   map[string]string        `json:"check_run_token_hashes,omitempty"`
 	WorkflowDefs     []*domain.WorkflowDef    `json:"workflow_defs"`
 	WorkflowRuns     []*cmdWorkflowRun        `json:"workflow_runs"`
 	WorkflowCounters map[string]int64         `json:"workflow_counters"`
@@ -120,6 +121,7 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 		ForgeSources:     make([]*cmdForgeSource, 0, len(f.state.forgeSources)),
 		Environments:     copyEnvironments(f.state.environments),
 		CheckRuns:        copyCheckRuns(f.state.checkRuns),
+		CheckRunTokens:   make(map[string]string, len(f.state.checkRuns)),
 		WorkflowDefs:     copyWorkflowDefs(f.state.workflowDefs),
 		WorkflowRuns:     make([]*cmdWorkflowRun, 0, len(f.state.workflowRuns)),
 		WorkflowCounters: make(map[string]int64, len(f.state.workflowCounters)),
@@ -139,6 +141,11 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	}
 	for _, src := range f.state.forgeSources {
 		payload.ForgeSources = append(payload.ForgeSources, cmdForgeSourceFrom(src))
+	}
+	for id, rec := range f.state.checkRuns {
+		if rec.RunTokenHash != "" {
+			payload.CheckRunTokens[id] = rec.RunTokenHash
+		}
 	}
 	for _, run := range f.state.workflowRuns {
 		payload.WorkflowRuns = append(payload.WorkflowRuns, cmdWorkflowRunFrom(run))
@@ -228,6 +235,7 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 		if rec == nil {
 			continue
 		}
+		rec.RunTokenHash = payload.CheckRunTokens[rec.ID]
 		_ = s.upsertCheckRun(rec)
 	}
 	for _, def := range payload.WorkflowDefs {

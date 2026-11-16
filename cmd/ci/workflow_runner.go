@@ -34,6 +34,7 @@ func workflowRunnerFlags() []cli.Flag {
 		&cli.StringSliceFlag{Name: "uses-artifact", Usage: "artifact key to download before running (repeatable)"},
 		&cli.StringFlag{Name: "server", EnvVars: []string{"DAGGER_KUBERNETES_SERVER"}, Usage: "supervisor URL"},
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN", "DAGGER_CLOUD_TOKEN"}, Usage: "supervisor token"},
+		&cli.StringFlag{Name: "run-token", EnvVars: []string{"DAGGER_RUN_TOKEN"}, Usage: "per-run callback token"},
 		&cli.StringFlag{Name: "workdir", Usage: "checkout directory (default: temp dir)"},
 		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "overall workflow job timeout"},
 	}
@@ -63,6 +64,7 @@ func runWorkflowRunner(c *cli.Context) error {
 	}
 	server := c.String("server")
 	token := c.String("token")
+	runToken := c.String("run-token")
 	for _, key := range c.StringSlice("uses-artifact") {
 		if err := downloadArtifact(ctx, server, token, key, workdir); err != nil {
 			return err
@@ -109,7 +111,7 @@ func runWorkflowRunner(c *cli.Context) error {
 	if runErr != nil {
 		report["error"] = runErr.Error()
 	}
-	if err := postJSON(ctx, server, token, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/%s/complete", c.String("run-id"), c.String("job")), report); err != nil {
+	if err := postJSON(ctx, server, token, runToken, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/%s/complete", c.String("run-id"), c.String("job")), report); err != nil {
 		return fmt.Errorf("report workflow job completion: %w", err)
 	}
 	return runErr

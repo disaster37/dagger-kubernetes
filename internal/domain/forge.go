@@ -124,6 +124,7 @@ type CheckRunRecord struct {
 	WorkflowFiles  map[string]string `json:"workflow_files,omitempty"` // raw .dagger/workflows/*.yaml captured in load phase
 	ContextFiles   map[string][]byte `json:"context_files,omitempty"`  // <=1MiB structured files referenced by file()/next_semver()
 	Error          string            `json:"error,omitempty"`
+	RunTokenHash   string            `json:"-"` // SHA-256 of the per-run callback token; never exposed via API
 	CreatedAt      time.Time         `json:"created_at"`
 	UpdatedAt      time.Time         `json:"updated_at"`
 }
@@ -165,6 +166,7 @@ type CheckRunSpec struct {
 	TraceID       string
 	Environment   string
 	Token         string
+	RunToken      string
 	CloneToken    string
 	Event         string
 	Secrets       map[string]string

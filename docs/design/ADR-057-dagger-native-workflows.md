@@ -41,3 +41,7 @@ hatch.
   and zero K8s pods held while waiting.
 - `robfig/cron/v3` schedules and `on: artifact` listeners are evaluated on the
   leader; `after_checks` workflows start only after checks succeed.
+- Workflow Job completion callbacks require a per-run `X-Dagger-Run-Token`
+  header in addition to the org bearer token. Only the token's SHA-256 hash is
+  replicated on `WorkflowRun`; the plaintext is injected as
+  `DAGGER_RUN_TOKEN` into the Job's ephemeral Secret.

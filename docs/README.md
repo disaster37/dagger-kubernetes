@@ -968,10 +968,13 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
 - **Cloud Checks.** Configure a forge under
   `/api/v1/orgs/<org>/integrations`, then webhooks at
   `/v1/webhooks/<provider>/<sourceID>` dispatch `batch/v1` check Jobs. The
-  runner receives `DAGGER_CLOUD_TOKEN`/`DAGGER_KUBERNETES_TOKEN` from an
-  ephemeral `check-env-*` Secret (never argv). Fork PRs hold in
-  `waiting_approval` and never receive secrets; an org member may approve a
-  secretless run, while only `org_admin`/global `admin` may opt into
+  runner receives `DAGGER_CLOUD_TOKEN`/`DAGGER_KUBERNETES_TOKEN` and a
+  per-run `DAGGER_RUN_TOKEN` from an ephemeral `check-env-*` Secret (never
+  argv). The `/load` and `/complete` callbacks require the per-run
+  `X-Dagger-Run-Token` header in addition to the org bearer token; only its
+  SHA-256 hash is replicated and it is never returned by the API. Fork PRs
+  hold in `waiting_approval` and never receive secrets; an org member may
+  approve a secretless run, while only `org_admin`/global `admin` may opt into
   `include_secrets`. Crashed/timed-out Jobs are reconciled to `failed` and
   reported back to the forge.
 - **Workflows.** `.dagger/workflows/*.y{a,}ml` supports `call:` jobs,
@@ -979,8 +982,9 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   inputs, `robfig/cron` schedules, `on: artifact` listeners, artifacts, and
   protected environments with human approval. `Approve` enforces
   `org_admin`/approver-group RBAC, `prevent_self_approval`, and
-  `approval_timeout`, then resumes the DAG. Arbitrary host-shell `run:` steps
-  are intentionally unsupported.
+  `approval_timeout`, then resumes the DAG. Workflow job completion callbacks
+  use the same per-run `X-Dagger-Run-Token` credential as checks. Arbitrary
+  host-shell `run:` steps are intentionally unsupported.
 - **Environment secrets.** Secrets are scoped `org`, `project`, or
   `environment` (`<orgID>/<envName>`). Resolution precedence is
   `org/env > project > org`; environment secrets are only injected into a job

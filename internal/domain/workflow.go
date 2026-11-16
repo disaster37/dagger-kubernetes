@@ -130,6 +130,7 @@ type WorkflowRun struct {
 	ContextFiles    map[string][]byte         `json:"-"`
 	TriggeredBy     string                    `json:"triggered_by,omitempty"`
 	IsFork          bool                      `json:"is_fork,omitempty"`
+	RunTokenHash    string                    `json:"-"` // SHA-256 of the per-run callback token; never exposed via API
 	CreatedAt       time.Time                 `json:"created_at"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
 }
@@ -184,6 +185,7 @@ type WorkflowCallSpec struct {
 	SHA           string
 	Ref           string
 	Token         string
+	RunToken      string
 	CloneToken    string
 	Flags         []string
 	Artifacts     []WorkflowArtifact

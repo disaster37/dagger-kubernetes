@@ -56,6 +56,7 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 	stringData := map[string]string{
 		"DAGGER_CLOUD_TOKEN":      spec.Token,
 		"DAGGER_KUBERNETES_TOKEN": spec.Token,
+		"DAGGER_RUN_TOKEN":        spec.RunToken,
 		"GIT_CLONE_TOKEN":         spec.CloneToken,
 	}
 	for k, v := range spec.Secrets {

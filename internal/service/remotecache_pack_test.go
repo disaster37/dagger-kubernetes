@@ -37,7 +37,19 @@ func TestEncodeDecodePack(t *testing.T) {
 	if headerLen <= 0 || decoded.ID.Digest != manifest.ID.Digest {
 		t.Fatalf("decoded = %+v headerLen=%d", decoded, headerLen)
 	}
+	if decoded.Total != manifest.Total {
+		t.Fatalf("decoded total = %d, encoded total = %d", decoded.Total, manifest.Total)
+	}
+	if decoded.Total != int64(len(pack)) {
+		t.Fatalf("decoded total = %d, pack = %d", decoded.Total, len(pack))
+	}
+	if len(decoded.Members) != len(manifest.Members) {
+		t.Fatalf("decoded members = %d, encoded members = %d", len(decoded.Members), len(manifest.Members))
+	}
 	for i, m := range decoded.Members {
+		if m.Offset != manifest.Members[i].Offset || m.Size != manifest.Members[i].Size {
+			t.Fatalf("member %d = %+v, want %+v", i, m, manifest.Members[i])
+		}
 		got := pack[m.Offset : m.Offset+m.Size]
 		if !bytes.Equal(got, members[i].Data) {
 			t.Fatalf("member %d = %q, want %q", i, got, members[i].Data)

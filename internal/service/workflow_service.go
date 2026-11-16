@@ -58,9 +58,10 @@ type WorkflowService struct {
 	cfg       WorkflowServiceConfig
 	logger    *logrus.Logger
 
-	mu       sync.Mutex
-	runs     map[string]*domain.WorkflowRun
-	lastCron map[string]string
+	mu        sync.Mutex
+	runs      map[string]*domain.WorkflowRun
+	runTokens map[string]string
+	lastCron  map[string]string
 }
 
 // NewWorkflowService returns a WorkflowService.
@@ -82,7 +83,8 @@ func NewWorkflowService(
 		repo: repo, envs: envs, orgs: orgs, projects: projects, sources: sources,
 		parser: parser, evaluator: evaluator, artifacts: artifacts, runner: runner,
 		secrets: secrets, cfg: cfg, logger: logger,
-		runs: make(map[string]*domain.WorkflowRun), lastCron: make(map[string]string),
+		runs: make(map[string]*domain.WorkflowRun), runTokens: make(map[string]string),
+		lastCron: make(map[string]string),
 	}
 }
 
@@ -99,6 +101,7 @@ func (s *WorkflowService) Start(ctx context.Context, in StartWorkflowInput) (*do
 	}
 	now := time.Now().UTC()
 	git := buildGitContext(in)
+	runToken, runTokenHash := newRunToken()
 	run := &domain.WorkflowRun{
 		Workflow:        in.Workflow.Name,
 		OrgID:           in.OrgID,
@@ -114,6 +117,7 @@ func (s *WorkflowService) Start(ctx context.Context, in StartWorkflowInput) (*do
 		ContextFiles:    in.ContextFiles,
 		TriggeredBy:     in.TriggeredBy,
 		IsFork:          in.IsFork,
+		RunTokenHash:    runTokenHash,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -133,6 +137,9 @@ func (s *WorkflowService) Start(ctx context.Context, in StartWorkflowInput) (*do
 		s.runs[run.ID] = run
 		s.mu.Unlock()
 	}
+	s.mu.Lock()
+	s.runTokens[run.ID] = runToken
+	s.mu.Unlock()
 	if err := s.advanceDAG(ctx, run, ""); err != nil {
 		return run, err
 	}
@@ -300,11 +307,16 @@ func (s *WorkflowService) executeJob(ctx context.Context, run *domain.WorkflowRu
 			}
 		}
 	}
+	runToken, err := s.ensureRunToken(ctx, run)
+	if err != nil {
+		s.setJobStatus(run, name, "failed", err.Error())
+		return
+	}
 	spec := &domain.WorkflowCallSpec{
 		RunID: run.ID, OrgID: run.OrgID, ProjectID: run.ProjectID, JobName: name,
 		Call: call, Environment: job.Environment, Timeout: job.Timeout,
 		Secrets: resolvedSecrets, Repo: run.Git.Repo, SHA: run.Git.SHA, Ref: run.Git.Ref,
-		Token: token, CloneToken: cloneToken, Artifacts: job.Artifacts, UsesArtifacts: job.UsesArtifacts,
+		Token: token, RunToken: runToken, CloneToken: cloneToken, Artifacts: job.Artifacts, UsesArtifacts: job.UsesArtifacts,
 	}
 	captured, err := s.runner.RunCall(ctx, spec)
 	if err != nil {
@@ -728,6 +740,28 @@ func (s *WorkflowService) persist(ctx context.Context, run *domain.WorkflowRun) 
 	s.runs[run.ID] = run
 	s.mu.Unlock()
 	return nil
+}
+
+// ensureRunToken returns the plaintext callback token for run, generating and
+// persisting a new hash when the in-memory token is unavailable (e.g. after a
+// leader restart). Only the hash is replicated; the plaintext lives in memory
+// for the lifetime of the process.
+func (s *WorkflowService) ensureRunToken(ctx context.Context, run *domain.WorkflowRun) (string, error) {
+	s.mu.Lock()
+	token := s.runTokens[run.ID]
+	s.mu.Unlock()
+	if token != "" {
+		return token, nil
+	}
+	token, hash := newRunToken()
+	run.RunTokenHash = hash
+	if err := s.persist(ctx, run); err != nil {
+		return "", fmt.Errorf("persist workflow run token: %w", err)
+	}
+	s.mu.Lock()
+	s.runTokens[run.ID] = token
+	s.mu.Unlock()
+	return token, nil
 }
 
 // ListDefs lists the indexed workflow catalog.

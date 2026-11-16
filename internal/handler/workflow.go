@@ -272,6 +272,10 @@ func (s *Server) handleWorkflowJobComplete(ctx context.Context, c *app.RequestCo
 		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
+	if !runTokenAllowed(c, run.RunTokenHash) {
+		writeError(c, consts.StatusForbidden, "invalid run token")
+		return
+	}
 	var req completeWorkflowJobRequest
 	if !decodeBody(c, &req) {
 		return

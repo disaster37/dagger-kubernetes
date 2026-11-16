@@ -297,8 +297,11 @@ type (
 		Name  string `json:"name"`
 	}
 
+	// cmdCheckRun is the snapshot-safe check-run payload. It preserves
+	// RunTokenHash, which domain.CheckRunRecord hides with json:"-".
 	cmdCheckRun struct {
-		Record domain.CheckRunRecord `json:"record"`
+		Record       domain.CheckRunRecord `json:"record"`
+		RunTokenHash string                `json:"run_token_hash,omitempty"`
 	}
 
 	cmdDeleteCheckRun struct {
@@ -312,16 +315,40 @@ type (
 	}
 
 	// cmdWorkflowRun is the snapshot-safe workflow-run payload. It preserves
-	// ContextFiles, which domain.WorkflowRun hides with json:"-".
+	// ContextFiles and RunTokenHash, which domain.WorkflowRun hides with
+	// json:"-".
 	cmdWorkflowRun struct {
 		Run          domain.WorkflowRun `json:"run"`
 		ContextFiles map[string][]byte  `json:"context_files,omitempty"`
+		RunTokenHash string             `json:"run_token_hash,omitempty"`
 	}
 
 	cmdDeleteWorkflowRun struct {
 		ID string `json:"id"`
 	}
 )
+
+// cmdCheckRunFrom converts a domain.CheckRunRecord into its snapshot-safe
+// command form.
+func cmdCheckRunFrom(rec *domain.CheckRunRecord) *cmdCheckRun {
+	if rec == nil {
+		return nil
+	}
+	cp := *rec
+	cp.RunTokenHash = ""
+	return &cmdCheckRun{Record: cp, RunTokenHash: rec.RunTokenHash}
+}
+
+// toDomain converts a command check-run payload back into a
+// domain.CheckRunRecord.
+func (c *cmdCheckRun) toDomain() *domain.CheckRunRecord {
+	if c == nil {
+		return nil
+	}
+	cp := c.Record
+	cp.RunTokenHash = c.RunTokenHash
+	return &cp
+}
 
 // cmdWorkflowRunFrom converts a domain.WorkflowRun into its snapshot-safe
 // command form.
@@ -331,7 +358,8 @@ func cmdWorkflowRunFrom(run *domain.WorkflowRun) *cmdWorkflowRun {
 	}
 	cp := *run
 	cp.ContextFiles = nil
-	return &cmdWorkflowRun{Run: cp, ContextFiles: run.ContextFiles}
+	cp.RunTokenHash = ""
+	return &cmdWorkflowRun{Run: cp, ContextFiles: run.ContextFiles, RunTokenHash: run.RunTokenHash}
 }
 
 // toDomain converts a command workflow-run payload back into a
@@ -342,6 +370,7 @@ func (c *cmdWorkflowRun) toDomain() *domain.WorkflowRun {
 	}
 	cp := c.Run
 	cp.ContextFiles = c.ContextFiles
+	cp.RunTokenHash = c.RunTokenHash
 	return &cp
 }
 
@@ -761,7 +790,7 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		}), true
 	case kindUpsertCheckRun:
 		return nil, applyPayload(cmd, "check run", func(p cmdCheckRun) error {
-			return s.upsertCheckRun(&p.Record)
+			return s.upsertCheckRun(p.toDomain())
 		}), true
 	case kindDeleteCheckRun:
 		return nil, applyPayload(cmd, "delete check run", func(p cmdDeleteCheckRun) error {

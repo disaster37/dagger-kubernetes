@@ -160,6 +160,7 @@ func DecodePackHeader(r io.Reader) (domain.PackManifest, int64, error) {
 		return domain.PackManifest{}, 0, fmt.Errorf("read pack header terminator: %w", err)
 	}
 	headerLen += int64(len(blank))
+	manifest.Total = headerLen
 	for i := range manifest.Members {
 		manifest.Members[i].Offset += headerLen
 		manifest.Total += manifest.Members[i].Size

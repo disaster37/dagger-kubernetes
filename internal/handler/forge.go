@@ -340,10 +340,22 @@ func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext)
 	writeJSON(c, updated)
 }
 
+// runTokenHeader carries the per-run callback credential.
+const runTokenHeader = "X-Dagger-Run-Token" //nolint:gosec // header name, not a credential value
+
+// runTokenAllowed verifies the per-run callback token against the stored hash.
+func runTokenAllowed(c *app.RequestContext, hash string) bool {
+	return service.VerifyRunToken(hash, string(c.Request.Header.Peek(runTokenHeader)))
+}
+
 // handleCheckRunLoad records the check-runner load phase.
 func (s *Server) handleCheckRunLoad(ctx context.Context, c *app.RequestContext) {
 	record, ok := s.loadCheckRunForCaller(ctx, c)
 	if !ok {
+		return
+	}
+	if !runTokenAllowed(c, record.RunTokenHash) {
+		writeError(c, consts.StatusForbidden, "invalid run token")
 		return
 	}
 	var in service.LoadReportInput
@@ -362,6 +374,10 @@ func (s *Server) handleCheckRunLoad(ctx context.Context, c *app.RequestContext) 
 func (s *Server) handleCheckRunComplete(ctx context.Context, c *app.RequestContext) {
 	record, ok := s.loadCheckRunForCaller(ctx, c)
 	if !ok {
+		return
+	}
+	if !runTokenAllowed(c, record.RunTokenHash) {
+		writeError(c, consts.StatusForbidden, "invalid run token")
 		return
 	}
 	var in service.CompleteReportInput

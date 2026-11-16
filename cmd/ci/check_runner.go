@@ -36,6 +36,7 @@ func checkRunnerFlags() []cli.Flag {
 		&cli.IntFlag{Name: "pr", Usage: "pull/merge request number"},
 		&cli.StringFlag{Name: "server", EnvVars: []string{"DAGGER_KUBERNETES_SERVER"}, Usage: "supervisor URL"},
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN", "DAGGER_CLOUD_TOKEN"}, Usage: "supervisor token"},
+		&cli.StringFlag{Name: "run-token", EnvVars: []string{"DAGGER_RUN_TOKEN"}, Usage: "per-run callback token"},
 		&cli.StringFlag{Name: "workdir", Usage: "checkout directory (default: temp dir)"},
 		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "overall check-run timeout"},
 	}
@@ -86,6 +87,7 @@ func runCheckRunner(c *cli.Context) error {
 
 	server := c.String("server")
 	token := c.String("token")
+	runToken := c.String("run-token")
 	runID := c.String("run-id")
 
 	env := append(os.Environ(),
@@ -110,7 +112,7 @@ func runCheckRunner(c *cli.Context) error {
 		checks = nil
 	}
 	if runID != "" {
-		if err := postJSON(ctx, server, token, fmt.Sprintf("/api/v1/checks/runs/%s/load", runID), loadReport{
+		if err := postJSON(ctx, server, token, runToken, fmt.Sprintf("/api/v1/checks/runs/%s/load", runID), loadReport{
 			Checks: checks, WorkflowFiles: workflowFiles, ContextFiles: contextFiles,
 		}); err != nil {
 			return fmt.Errorf("report load phase: %w", err)
@@ -132,7 +134,7 @@ func runCheckRunner(c *cli.Context) error {
 		if runErr != nil {
 			report.Error = runErr.Error()
 		}
-		if err := postJSON(ctx, server, token, fmt.Sprintf("/api/v1/checks/runs/%s/complete", runID), report); err != nil {
+		if err := postJSON(ctx, server, token, runToken, fmt.Sprintf("/api/v1/checks/runs/%s/complete", runID), report); err != nil {
 			return fmt.Errorf("report completion: %w", err)
 		}
 	}
@@ -317,7 +319,7 @@ func listChecks(ctx context.Context, dir string, env []string) ([]string, error)
 }
 
 // postJSON posts payload to the supervisor and requires a 2xx response.
-func postJSON(ctx context.Context, server, token, path string, payload any) error {
+func postJSON(ctx context.Context, server, token, runToken, path string, payload any) error {
 	body, err := json.Marshal(payload)
 	if err != nil {
 		return fmt.Errorf("marshal report: %w", err)
@@ -328,6 +330,9 @@ func postJSON(ctx context.Context, server, token, path string, payload any) erro
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+	if runToken != "" {
+		req.Header.Set("X-Dagger-Run-Token", runToken)
+	}
 	resp, err := cliHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("post report: %w", err)

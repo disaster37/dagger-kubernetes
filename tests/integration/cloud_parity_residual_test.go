@@ -158,6 +158,34 @@ func (p *parityServer) do(t *testing.T, method, path string, body any) (resp *ht
 	return resp, data
 }
 
+func (p *parityServer) doWithRunToken(t *testing.T, path string, body any, runToken string) (resp *http.Response, data []byte) {
+	t.Helper()
+	var reader io.Reader
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reader = bytes.NewReader(data)
+	}
+	req, err := http.NewRequest(http.MethodPost, p.base+path, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", p.admin))
+	req.Header.Set("X-Dagger-Run-Token", runToken)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	return resp, data
+}
+
 func TestGraphQLSecurityLimits(t *testing.T) {
 	srv := newParityServer(t, domain.GraphQLConfig{MaxDepth: 3, MaxSelections: 5, MaxQueryBytes: 80, MaxParallelism: 10}, nil, nil, nil, nil)
 	resp, body := srv.do(t, http.MethodPost, "/query", map[string]any{"query": `{ __schema { types { name } } }`}) //nolint:bodyclose // srv.do closes the body
@@ -353,6 +381,18 @@ func (r *recordingCheckRunner) count() int {
 	defer r.mu.Unlock()
 	return len(r.runs)
 }
+
+func (r *recordingCheckRunner) tokenFor(runID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, spec := range r.runs {
+		if spec.ID == runID {
+			return spec.RunToken
+		}
+	}
+	return ""
+}
+
 func (r *recordingCheckRunner) CancelSuperseded(context.Context, string, string) error { return nil }
 func (r *recordingCheckRunner) JobStatus(context.Context, string) (domain.JobState, error) {
 	return domain.JobStateActive, nil
@@ -374,6 +414,17 @@ func (r *recordingWorkflowRunner) snapshot() []*domain.WorkflowCallSpec {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]*domain.WorkflowCallSpec(nil), r.specs...)
+}
+
+func (r *recordingWorkflowRunner) tokenFor(runID string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, spec := range r.specs {
+		if spec.RunID == runID {
+			return spec.RunToken
+		}
+	}
+	return ""
 }
 
 func signGitHub(secret string, body []byte) string {
@@ -509,14 +560,18 @@ jobs:
       workflow: deploy
       wait: false
 `
-	if _, body := srv.do(t, http.MethodPost, fmt.Sprintf("/api/v1/checks/runs/%s/load", runID), map[string]any{ //nolint:bodyclose // srv.do closes the body
+	checkToken := checkRunner.tokenFor(runID)
+	if checkToken == "" {
+		t.Fatal("push check run did not receive a per-run token")
+	}
+	if _, body := srv.doWithRunToken(t, fmt.Sprintf("/api/v1/checks/runs/%s/load", runID), map[string]any{ //nolint:bodyclose // srv.doWithRunToken closes the body
 		"checks": []string{"test"}, "workflow_files": map[string]string{"release.yaml": workflowYAML},
-	}); !bytes.Contains(body, []byte(`"checks"`)) {
+	}, checkToken); !bytes.Contains(body, []byte(`"checks"`)) {
 		t.Fatalf("load = %s", body)
 	}
-	if _, body := srv.do(t, http.MethodPost, fmt.Sprintf("/api/v1/checks/runs/%s/complete", runID), map[string]any{ //nolint:bodyclose // srv.do closes the body
+	if _, body := srv.doWithRunToken(t, fmt.Sprintf("/api/v1/checks/runs/%s/complete", runID), map[string]any{ //nolint:bodyclose // srv.doWithRunToken closes the body
 		"checks": []map[string]any{{"name": "test", "state": "success", "trace_id": "trace-1"}},
-	}); !bytes.Contains(body, []byte(`"status":"success"`)) {
+	}, checkToken); !bytes.Contains(body, []byte(`"status":"success"`)) {
 		t.Fatalf("complete = %s", body)
 	}
 
@@ -531,9 +586,13 @@ jobs:
 	if run.Jobs["build"].Status != "running" {
 		t.Fatalf("build status = %+v", run.Jobs["build"])
 	}
-	if _, body := srv.do(t, http.MethodPost, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/build/complete", run.ID), map[string]any{ //nolint:bodyclose // srv.do closes the body
+	workflowToken := flowRunner.tokenFor(run.ID)
+	if workflowToken == "" {
+		t.Fatal("workflow run did not receive a per-run token")
+	}
+	if _, body := srv.doWithRunToken(t, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/build/complete", run.ID), map[string]any{ //nolint:bodyclose // srv.doWithRunToken closes the body
 		"outputs": map[string]string{"tag": "v1.2.3"},
-	}); !bytes.Contains(body, []byte(`"waiting_approval"`)) {
+	}, workflowToken); !bytes.Contains(body, []byte(`"waiting_approval"`)) {
 		t.Fatalf("build complete = %s", body)
 	}
 	_, body = srv.do(t, http.MethodGet, fmt.Sprintf("/api/v1/workflows/runs/%s", run.ID), nil) //nolint:bodyclose // srv.do closes the body
@@ -583,9 +642,9 @@ jobs:
 		t.Fatalf("deploy did not receive the environment secret: %+v", flowRunner.snapshot())
 	}
 	// Complete deploy-prod so the run finishes.
-	if _, body := srv.do(t, http.MethodPost, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/deploy-prod/complete", run.ID), map[string]any{ //nolint:bodyclose // srv.do closes the body
+	if _, body := srv.doWithRunToken(t, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/deploy-prod/complete", run.ID), map[string]any{ //nolint:bodyclose // srv.doWithRunToken closes the body
 		"outputs": map[string]string{},
-	}); !bytes.Contains(body, []byte(`"success"`)) {
+	}, workflowToken); !bytes.Contains(body, []byte(`"success"`)) {
 		t.Fatalf("deploy complete = %s", body)
 	}
 }

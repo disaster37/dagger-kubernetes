@@ -21,7 +21,7 @@ func (r *CheckRunRepo) Upsert(ctx context.Context, rec *domain.CheckRunRecord) e
 		rec.CreatedAt = time.Now().UTC()
 	}
 	rec.UpdatedAt = time.Now().UTC()
-	return r.store.applyCtx(ctx, kindUpsertCheckRun, cmdCheckRun{Record: *rec})
+	return r.store.applyCtx(ctx, kindUpsertCheckRun, cmdCheckRunFrom(rec))
 }
 
 func (r *CheckRunRepo) Get(ctx context.Context, id string) (*domain.CheckRunRecord, error) {

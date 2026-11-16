@@ -28,10 +28,14 @@ func (f *fakeArtifactStore) List(context.Context, string, string, string) ([]str
 }
 func (f *fakeArtifactStore) DeleteRun(context.Context, string, string, string) error { return nil }
 
-type fakeWorkflowRunner struct{ calls int }
+type fakeWorkflowRunner struct {
+	calls int
+	specs []*domain.WorkflowCallSpec
+}
 
-func (f *fakeWorkflowRunner) RunCall(context.Context, *domain.WorkflowCallSpec) (map[string]string, error) {
+func (f *fakeWorkflowRunner) RunCall(_ context.Context, spec *domain.WorkflowCallSpec) (map[string]string, error) {
 	f.calls++
+	f.specs = append(f.specs, spec)
 	return map[string]string{"out": "ok"}, nil
 }
 
@@ -155,6 +159,12 @@ func TestWorkflowServiceStart(t *testing.T) {
 	}
 	if runner.calls != 1 {
 		t.Fatalf("calls = %d", runner.calls)
+	}
+	if run.RunTokenHash == "" || runner.specs[0].RunToken == "" {
+		t.Fatal("workflow run must carry a per-run token")
+	}
+	if !VerifyRunToken(run.RunTokenHash, runner.specs[0].RunToken) {
+		t.Fatal("stored hash must match the dispatched run token")
 	}
 	completed, err := svc.CompleteJob(context.Background(), run.ID, "build", map[string]string{"out": "ok"}, nil, "")
 	if err != nil {
