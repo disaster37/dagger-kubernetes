@@ -113,6 +113,7 @@ func (s *WorkflowService) Start(ctx context.Context, in StartWorkflowInput) (*do
 		TriggerArtifact: in.TriggerArtifact,
 		ContextFiles:    in.ContextFiles,
 		TriggeredBy:     in.TriggeredBy,
+		IsFork:          in.IsFork,
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
@@ -256,12 +257,18 @@ func (s *WorkflowService) executeJob(ctx context.Context, run *domain.WorkflowRu
 	}
 	env := buildExprEnv(run)
 	resolvedSecrets := map[string]string{}
-	if s.secrets != nil && len(job.Secrets) > 0 {
-		var err error
-		resolvedSecrets, err = s.secrets.ResolveJobSecrets(ctx, run.OrgID, run.ProjectID, approvedEnv, job.Secrets)
-		if err != nil {
-			s.setJobStatus(run, name, "failed", err.Error())
+	if len(job.Secrets) > 0 {
+		if run.IsFork {
+			s.setJobStatus(run, name, "failed", "secrets are not available to fork PR runs")
 			return
+		}
+		if s.secrets != nil {
+			var err error
+			resolvedSecrets, err = s.secrets.ResolveJobSecrets(ctx, run.OrgID, run.ProjectID, approvedEnv, job.Secrets)
+			if err != nil {
+				s.setJobStatus(run, name, "failed", err.Error())
+				return
+			}
 		}
 	}
 	call, err := InterpolateString(job.Call, env, s.evaluator, evalRoot)

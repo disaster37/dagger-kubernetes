@@ -304,3 +304,26 @@ func TestWorkflowServiceOnArtifactPublished(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkflowServiceForkRunNeverReceivesSecrets(t *testing.T) {
+	wf := &domain.Workflow{
+		Name: "release",
+		Jobs: map[string]domain.WorkflowJob{
+			"deploy": {Call: "deploy", Secrets: []string{"PROD_KEY"}},
+		},
+	}
+	runner := &fakeWorkflowRunner{}
+	svc, _ := newWorkflowServiceForTest(t, wf, runner, &fakeEnvRepo{envs: map[string]*domain.Environment{}})
+	run, err := svc.Start(context.Background(), StartWorkflowInput{
+		Workflow: wf, OrgID: "acme", ProjectID: "p1", SHA: "sha", Ref: "refs/pull/1/head", IsFork: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Jobs["deploy"].Status != "failed" {
+		t.Fatalf("fork job = %+v", run.Jobs["deploy"])
+	}
+	if runner.calls != 0 {
+		t.Fatalf("fork job must not execute: calls=%d", runner.calls)
+	}
+}

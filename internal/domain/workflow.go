@@ -129,6 +129,7 @@ type WorkflowRun struct {
 	TriggerArtifact *WorkflowArtifactRef      `json:"trigger_artifact,omitempty"`
 	ContextFiles    map[string][]byte         `json:"-"`
 	TriggeredBy     string                    `json:"triggered_by,omitempty"`
+	IsFork          bool                      `json:"is_fork,omitempty"`
 	CreatedAt       time.Time                 `json:"created_at"`
 	UpdatedAt       time.Time                 `json:"updated_at"`
 }

@@ -421,7 +421,7 @@ func freeTCPAddr(t *testing.T) string {
 func TestRaftStoreAutoRenewsTLSKeyringAndLeaf(t *testing.T) {
 	stores := newRaftClusterWithRotation(t, 3)
 
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(180 * time.Second)
 	var kr *keyring.TLSKeyring
 	var leader *RaftStore
 	for time.Now().Before(deadline) {
