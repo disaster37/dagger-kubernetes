@@ -163,6 +163,7 @@ type Deps struct {
 	Checks               *service.ChecksService
 	Forge                *service.ForgeService
 	Secrets              *service.SecretService
+	Environments         *service.EnvironmentService
 	Workflows            *service.WorkflowService
 	Artifacts            domain.ArtifactStore
 	WSLeaderDialer       repository.WSLeaderDialer
@@ -299,6 +300,7 @@ type Server struct {
 	checks              *service.ChecksService
 	forges              *service.ForgeService
 	secrets             *service.SecretService
+	environments        *service.EnvironmentService
 	workflows           *service.WorkflowService
 	artifacts           domain.ArtifactStore
 	wsDialer            repository.WSLeaderDialer
@@ -372,6 +374,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		checks:              deps.Checks,
 		forges:              deps.Forge,
 		secrets:             deps.Secrets,
+		environments:        deps.Environments,
 		workflows:           deps.Workflows,
 		artifacts:           deps.Artifacts,
 		wsDialer:            deps.WSLeaderDialer,
@@ -792,13 +795,31 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/orgs/:org/secrets", s.handleOrgSecretsList)
 	h.PUT("/api/v1/orgs/:org/secrets", s.handleOrgSecretPut)
 	h.DELETE("/api/v1/orgs/:org/secrets/:name", s.handleOrgSecretDelete)
+	h.GET("/api/v1/orgs/:org/environments", s.handleEnvironmentsList)
+	h.PUT("/api/v1/orgs/:org/environments/:env", s.handleEnvironmentPut)
+	h.DELETE("/api/v1/orgs/:org/environments/:env", s.handleEnvironmentDelete)
+	h.GET("/api/v1/orgs/:org/environments/:env/secrets", s.handleEnvSecretsList)
+	h.PUT("/api/v1/orgs/:org/environments/:env/secrets", s.handleEnvSecretPut)
+	h.DELETE("/api/v1/orgs/:org/environments/:env/secrets/:name", s.handleEnvSecretDelete)
 	h.GET("/api/v1/projects/:id/secrets", s.handleProjectSecretsList)
 	h.PUT("/api/v1/projects/:id/secrets", s.handleProjectSecretPut)
 	h.DELETE("/api/v1/projects/:id/secrets/:name", s.handleProjectSecretDelete)
 	h.POST("/v1/webhooks/:provider/:sourceID", s.handleForgeWebhook)
+	h.GET("/api/v1/orgs/:org/checks", s.handleOrgChecksList)
+	h.GET("/api/v1/checks/runs/:id", s.handleCheckRunGet)
+	h.POST("/api/v1/checks/runs/:id/approve", s.handleCheckRunApprove)
+	h.POST("/api/v1/checks/runs/:id/rerun", s.handleCheckRunRerun)
+	h.POST("/api/v1/checks/runs/:id/load", s.handleCheckRunLoad)
+	h.POST("/api/v1/checks/runs/:id/complete", s.handleCheckRunComplete)
+	h.GET("/api/v1/orgs/:org/workflows", s.handleOrgWorkflowsList)
+	h.POST("/api/v1/orgs/:org/workflows/dispatch", s.handleWorkflowDispatch)
+	h.GET("/api/v1/orgs/:org/workflows/runs", s.handleOrgWorkflowRunsList)
 	h.GET("/api/v1/workflows/runs/:runID", s.handleWorkflowRunGet)
 	h.POST("/api/v1/workflows/runs/:runID/approve/:job", s.handleWorkflowApprove)
+	h.POST("/api/v1/workflows/runs/:runID/reject/:job", s.handleWorkflowReject)
+	h.POST("/api/v1/workflows/runs/:runID/jobs/:job/complete", s.handleWorkflowJobComplete)
 	h.GET("/api/v1/artifacts", s.handleArtifactsList)
+	h.POST("/api/v1/artifacts", s.handleArtifactUpload)
 	h.GET("/api/v1/artifacts/download", s.handleArtifactDownload)
 
 	// Admin project CRUD.
@@ -1159,6 +1180,9 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 				s.otlpStream.Ingest(ctx, traceID, signal, body)
 			}
 		}
+		if s.remoteCache != nil && len(batch.CacheEvents) > 0 {
+			s.remoteCache.IngestCacheEvents(ctx, s.remoteCacheNamespace(c, id), batch.CacheEvents)
+		}
 
 		if signal == "traces" {
 			for i := range batch.Summaries {
@@ -1502,7 +1526,7 @@ func formatTime(t time.Time) string {
 // retrieve the resolved identity with identityOf(c).
 func (s *Server) adminOnly(h app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if _, ok := s.requireAdmin(ctx, c); !ok {
+		if !s.requireAdmin(ctx, c) {
 			return
 		}
 		h(ctx, c)

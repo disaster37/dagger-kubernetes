@@ -83,16 +83,16 @@ func (s *Server) requireAuthWithQueryFallback(ctx context.Context, c *app.Reques
 
 // requireAdmin resolves the identity and enforces the admin role. Writes 401
 // when unauthenticated, 403 when authenticated but not admin.
-func (s *Server) requireAdmin(ctx context.Context, c *app.RequestContext) (*domain.Identity, bool) {
+func (s *Server) requireAdmin(ctx context.Context, c *app.RequestContext) bool {
 	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
-		return nil, false
+		return false
 	}
 	if !id.IsAdmin() {
 		writeError(c, consts.StatusForbidden, "forbidden")
-		return nil, false
+		return false
 	}
-	return id, true
+	return true
 }
 
 // identityOf returns the identity stored on the context by resolveIdentity.

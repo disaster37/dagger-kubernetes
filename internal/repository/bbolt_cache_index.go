@@ -3,6 +3,7 @@ package repository
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,6 +17,11 @@ type CacheIndexEntry struct {
 	Digest     string    `json:"digest"`
 	Root       string    `json:"root,omitempty"`
 	BundleKey  string    `json:"bundle_key"`
+	BlobKey    string    `json:"blob_key,omitempty"`
+	PackDigest string    `json:"pack_digest,omitempty"`
+	PackKey    string    `json:"pack_key,omitempty"`
+	PackOffset int64     `json:"pack_offset,omitempty"`
+	Aliases    []string  `json:"aliases,omitempty"`
 	Size       int64     `json:"size"`
 	CreatedAt  time.Time `json:"created_at"`
 	LastAccess time.Time `json:"last_access"`
@@ -159,6 +165,65 @@ func (i *BboltCacheIndex) Stats(namespace string) (count int, bytes int64, err e
 	return count, bytes, err
 }
 
+// ExportSnapshot writes a consistent copy of the database to w.
+func (i *BboltCacheIndex) ExportSnapshot(w io.Writer) error {
+	return i.db.View(func(tx *bolt.Tx) error {
+		_, err := tx.WriteTo(w)
+		return err
+	})
+}
+
+// ImportSnapshot merges a serialized bbolt snapshot into the live index.
+func (i *BboltCacheIndex) ImportSnapshot(_ string, data []byte) error {
+	tmp, err := os.CreateTemp("", "remotecache-snapshot-*.db")
+	if err != nil {
+		return fmt.Errorf("create cache index snapshot temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write cache index snapshot: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close cache index snapshot: %w", err)
+	}
+	src, err := bolt.Open(tmpPath, 0o600, &bolt.Options{ReadOnly: true, Timeout: 5 * time.Second})
+	if err != nil {
+		return fmt.Errorf("open cache index snapshot: %w", err)
+	}
+	defer func() { _ = src.Close() }()
+	return src.View(func(stx *bolt.Tx) error {
+		return i.db.Update(func(dtx *bolt.Tx) error {
+			return stx.ForEach(func(name []byte, sb *bolt.Bucket) error {
+				db, err := dtx.CreateBucketIfNotExists(name)
+				if err != nil {
+					return err
+				}
+				return sb.ForEach(func(k, v []byte) error {
+					return db.Put(k, v)
+				})
+			})
+		})
+	})
+}
+
+// Namespaces returns every namespace bucket in the index.
+func (i *BboltCacheIndex) Namespaces() ([]string, error) {
+	var out []string
+	err := i.db.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, _ *bolt.Bucket) error {
+			out = append(out, string(name))
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // GC evicts entries older than ttl or beyond maxBytes (oldest first). It
 // returns the evicted entries so callers can delete their S3 objects.
 func (i *BboltCacheIndex) GC(namespace string, ttl time.Duration, maxBytes int64, now time.Time) ([]CacheIndexEntry, error) {
@@ -182,20 +247,21 @@ func (i *BboltCacheIndex) GC(namespace string, ttl time.Duration, maxBytes int64
 	sort.Slice(entries, func(a, b int) bool { return entries[a].LastAccess.Before(entries[b].LastAccess) })
 	var evicted []CacheIndexEntry
 	var total int64
-	for _, e := range entries {
-		total += e.Size
+	for i := range entries {
+		total += entries[i].Size
 	}
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
 		expired := ttl > 0 && now.Sub(e.LastAccess) > ttl
 		over := maxBytes > 0 && total > maxBytes
 		if !expired && !over {
 			continue
 		}
-		evicted = append(evicted, e)
+		evicted = append(evicted, *e)
 		total -= e.Size
 	}
-	for _, e := range evicted {
-		if err := i.Delete(namespace, e.Digest); err != nil {
+	for idx := range evicted {
+		if err := i.Delete(namespace, evicted[idx].Digest); err != nil {
 			return evicted, err
 		}
 	}

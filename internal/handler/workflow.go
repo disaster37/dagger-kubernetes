@@ -10,18 +10,102 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// handleWorkflowRunGet returns a workflow run by id.
-func (s *Server) handleWorkflowRunGet(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+// handleOrgWorkflowsList lists the indexed workflow catalog.
+func (s *Server) handleOrgWorkflowsList(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.workflows == nil {
+		writeJSON(c, []*domain.WorkflowDef{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	defs, err := s.workflows.ListDefs(ctx, c.Param("org"), c.Query("project"))
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, defs)
+}
+
+type dispatchWorkflowRequest struct {
+	ProjectID string         `json:"project_id"`
+	Workflow  string         `json:"workflow"`
+	Ref       string         `json:"ref"`
+	Inputs    map[string]any `json:"inputs"`
+}
+
+// handleWorkflowDispatch manually triggers a workflow_dispatch run.
+func (s *Server) handleWorkflowDispatch(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.workflows == nil {
 		writeError(c, consts.StatusNotFound, "workflows disabled")
 		return
 	}
-	run, ok := s.workflows.Get(c.Param("runID"))
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	var req dispatchWorkflowRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	run, err := s.workflows.Dispatch(ctx, c.Param("org"), req.ProjectID, req.Workflow, req.Ref, req.Inputs, id)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.JSON(consts.StatusCreated, run)
+}
+
+// handleOrgWorkflowRunsList lists workflow runs for an org.
+func (s *Server) handleOrgWorkflowRunsList(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
-		writeError(c, consts.StatusNotFound, "workflow run not found")
+		return
+	}
+	if s.workflows == nil {
+		writeJSON(c, []*domain.WorkflowRun{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	runs, err := s.workflows.ListRuns(ctx, &domain.WorkflowRunFilter{
+		OrgID: c.Param("org"), ProjectID: c.Query("project"), Status: c.Query("status"), Limit: queryLimit(c),
+	})
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, runs)
+}
+
+// handleWorkflowRunGet returns a workflow run by id, scoped to its org.
+func (s *Server) handleWorkflowRunGet(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.workflows == nil {
+		writeError(c, consts.StatusNotFound, "workflows disabled")
+		return
+	}
+	run, err := s.workflows.GetRun(ctx, c.Param("runID"))
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	if !s.orgAllowed(ctx, id, run.OrgID) {
+		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	writeJSON(c, run)
@@ -29,7 +113,7 @@ func (s *Server) handleWorkflowRunGet(ctx context.Context, c *app.RequestContext
 
 // handleWorkflowApprove approves a waiting workflow job.
 func (s *Server) handleWorkflowApprove(ctx context.Context, c *app.RequestContext) {
-	id, ok := s.requireAdmin(ctx, c)
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return
 	}
@@ -37,11 +121,38 @@ func (s *Server) handleWorkflowApprove(ctx context.Context, c *app.RequestContex
 		writeError(c, consts.StatusNotFound, "workflows disabled")
 		return
 	}
-	if err := s.workflows.Approve(ctx, c.Param("runID"), c.Param("job"), id.UserID); err != nil {
+	run, err := s.workflows.Approve(ctx, c.Param("runID"), c.Param("job"), id)
+	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	c.SetStatusCode(consts.StatusNoContent)
+	writeJSON(c, run)
+}
+
+type rejectWorkflowRequest struct {
+	Reason string `json:"reason"`
+}
+
+// handleWorkflowReject rejects a waiting workflow job.
+func (s *Server) handleWorkflowReject(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.workflows == nil {
+		writeError(c, consts.StatusNotFound, "workflows disabled")
+		return
+	}
+	var req rejectWorkflowRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	run, err := s.workflows.Reject(ctx, c.Param("runID"), c.Param("job"), id, req.Reason)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, run)
 }
 
 // handleArtifactsList lists artifacts for a run, scoped to the caller's org.
@@ -134,4 +245,75 @@ func (s *Server) artifactKeyAllowed(ctx context.Context, id *domain.Identity, ke
 		return false
 	}
 	return s.orgAllowed(ctx, id, parts[1])
+}
+
+type completeWorkflowJobRequest struct {
+	Outputs   map[string]string `json:"outputs"`
+	Artifacts []string          `json:"artifacts"`
+	Error     string            `json:"error"`
+}
+
+// handleWorkflowJobComplete records a runner-reported job completion.
+func (s *Server) handleWorkflowJobComplete(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.workflows == nil {
+		writeError(c, consts.StatusNotFound, "workflows disabled")
+		return
+	}
+	run, err := s.workflows.GetRun(ctx, c.Param("runID"))
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	if !s.orgAllowed(ctx, id, run.OrgID) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	var req completeWorkflowJobRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	updated, err := s.workflows.CompleteJob(ctx, run.ID, c.Param("job"), req.Outputs, req.Artifacts, req.Error)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, updated)
+}
+
+type artifactUploadRequest struct {
+	Org       string `json:"org"`
+	ProjectID string `json:"project_id"`
+	RunID     string `json:"run_id"`
+	Name      string `json:"name"`
+	Data      []byte `json:"data"`
+}
+
+// handleArtifactUpload stores a workflow artifact (org member/admin).
+func (s *Server) handleArtifactUpload(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.artifacts == nil {
+		writeError(c, consts.StatusServiceUnavailable, "artifacts disabled")
+		return
+	}
+	var req artifactUploadRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	if !s.orgAllowed(ctx, id, req.Org) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	key, err := s.artifacts.Put(ctx, req.Org, req.ProjectID, req.RunID, req.Name, req.Data)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.JSON(consts.StatusCreated, map[string]string{"key": key})
 }

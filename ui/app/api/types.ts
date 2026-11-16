@@ -403,3 +403,154 @@ export interface ImageCachePruneAllResult {
   mirrors: ImageCachePruneAllMirror[]
   message?: string
 }
+
+// --- Cloud parity (orgs, environments, checks, workflows, artifacts, cache) ---
+export interface Org {
+  id: string
+  name: string
+  display_name: string
+  features: string[]
+  created_at: string
+}
+
+export interface OrgMember {
+  org_id: string
+  user_id: string
+  role: 'org_admin' | 'member'
+}
+
+export interface OrgTokenMeta extends TokenMeta {
+  exists?: boolean
+}
+
+export interface SecretMeta {
+  id: string
+  scope: 'org' | 'project' | 'environment'
+  scope_id: string
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ProtectedEnvironment {
+  id: string
+  org_id: string
+  name: string
+  approver_group_ids: string[]
+  prevent_self_approval: boolean
+  approval_timeout: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ForgeSource {
+  id: string
+  org_id: string
+  project_id?: string
+  provider: 'github' | 'gitlab' | 'gitea'
+  base_url: string
+  repo: string
+  app_id?: string
+  installation_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CheckItem {
+  name: string
+  state: 'pending' | 'success' | 'failure' | 'error'
+  trace_id?: string
+  summary?: string
+  updated_at: string
+}
+
+export interface CheckRunRecord {
+  id: string
+  org_id: string
+  project_id: string
+  source_id: string
+  provider: string
+  repo: string
+  event: string
+  sha: string
+  ref: string
+  default_branch?: string
+  target_branch?: string
+  tag?: string
+  pr_number?: number
+  is_fork: boolean
+  is_release: boolean
+  status: 'waiting_approval' | 'running' | 'success' | 'failed' | 'canceled'
+  include_secrets: boolean
+  approved_by?: string
+  approved_at?: string
+  checks?: CheckItem[]
+  error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkflowInput {
+  type: 'string' | 'boolean' | 'number' | 'choice' | 'artifact'
+  description?: string
+  required?: boolean
+  default?: unknown
+  options?: string[]
+}
+
+export interface WorkflowDef {
+  id: string
+  org_id: string
+  project_id: string
+  repo: string
+  default_ref: string
+  default_sha: string
+  workflow: {
+    name: string
+    on: Record<string, unknown>
+    after_checks: boolean
+    jobs: Record<string, unknown>
+    inputs?: Record<string, WorkflowInput>
+  }
+  updated_at: string
+}
+
+export interface WorkflowJobRun {
+  name: string
+  status: string
+  trace_id?: string
+  outputs?: Record<string, string>
+  artifacts?: string[]
+  environment?: string
+  waiting_since?: string
+  approval_deadline?: string
+  approved_by?: string
+  approved_at?: string
+  rejected_by?: string
+  triggered_run_id?: string
+  error?: string
+}
+
+export interface WorkflowRun {
+  id: string
+  workflow: string
+  org_id: string
+  project_id: string
+  sha: string
+  ref: string
+  status: string
+  number: number
+  jobs: Record<string, WorkflowJobRun>
+  git: Record<string, unknown>
+  inputs?: Record<string, unknown>
+  triggered_by?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RemoteCacheStats {
+  enabled: boolean
+  namespace?: string
+  entries?: number
+  bytes?: number
+}

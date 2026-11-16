@@ -66,6 +66,12 @@ func main() {
 				Flags:  checkRunnerFlags(),
 				Action: runCheckRunner,
 			},
+			{
+				Name:   "workflow-runner",
+				Usage:  "run one Dagger-native workflow job (used by leader-created Jobs)",
+				Flags:  workflowRunnerFlags(),
+				Action: runWorkflowRunner,
+			},
 		},
 	}
 	if err := app.Run(os.Args); err != nil {

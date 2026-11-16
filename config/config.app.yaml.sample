@@ -272,7 +272,9 @@ cache:
     index_path: "/var/cache/dagger-kubernetes/remotecache.db"
     ttl: "720h"
     max_bytes: 107374182400               # 100 GiB
-    workers: 16
+    workers: 16                           # bounded concurrent export/upload work.
+    pack_max_member_bytes: 4194304        # 4 MiB: largest blob packed into a dagger-pack.
+    gc_interval: "5m"                     # background GC + S3 index checkpoint cadence.
   s3:                                # shared S3 client for the CLI cache (cli.s3_bucket).
     bucket: ""                       # default CLI-cache bucket. Empty + cli.enabled = config load error.
     region: "us-east-1"              # S3 region (required by AWS S3; ignored by MinIO).
@@ -338,6 +340,7 @@ fleet:
   engine_termination_grace_seconds: 120               # termination grace period for engine pods.
   engine_pull_policy: "IfNotPresent"                   # engine image pull policy.
   engine_privileged: false                        # run engine container as privileged (set to true only if a BuildKit feature requires it).
+  isolation: "per_org"                            # "per_org" (default) or "shared" engine/cache namespaces.
   engine_node_selector: {}                            # node selector for engine pods (map).
   engine_tolerations: []                              # tolerations in "key:value:effect" format.
   engine_extra_args: []                               # additional CLI args passed to dagger engine.
@@ -457,6 +460,7 @@ cli:
     download_base: "https://github.com/dagger/dagger/releases/download"   # tarball + checksums.txt base (mirror-able).
     github_token: ""                  # optional; set via DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN (raises rate limit).
   ci_wrapper_path: "/usr/local/bin/dagger-kubernetes-ci"  # path to the pre-built CI wrapper binary served at /api/v1/cli/ci-wrapper/latest.
+  include_prereleases: false          # include vX.Y.Z-beta.* in "latest" resolution.
 
 # --- Project → group attribution ---------------------------------------------
 # Config-driven mapping of a project name (CI repo slug, e.g.
@@ -509,6 +513,16 @@ workflows:
   job_image: "ghcr.io/dagger/dagger:latest"
   default_timeout: "30m"
   max_parallel: 8
+
+# --- Cloud GraphQL hardening (ADR-053) --------------------------------------
+# POST /query is bounded to prevent introspection and expensive queries from
+# exhausting the leader. Introspection is disabled by default.
+graphql:
+  introspection_enabled: false
+  max_depth: 15
+  max_selections: 250
+  max_query_bytes: 65536
+  max_parallelism: 10
 
 # --- Forge integrations (ADR-056) -------------------------------------------
 forge:

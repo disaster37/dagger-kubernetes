@@ -23,6 +23,13 @@ func NewGiteaForge(apiURL string) *GiteaForge {
 
 func (g *GiteaForge) Kind() domain.ForgeKind { return domain.ForgeGitea }
 
+func (g *GiteaForge) apiBase(source *domain.ForgeSource) string {
+	if source != nil && source.BaseURL != "" {
+		return strings.TrimSuffix(source.BaseURL, "/")
+	}
+	return g.apiURL
+}
+
 func (g *GiteaForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, token, callbackURL, secret string) (string, error) {
 	body, err := jsonBody(map[string]any{
 		"type":   "gitea",
@@ -33,7 +40,7 @@ func (g *GiteaForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSo
 	if err != nil {
 		return "", err
 	}
-	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiURL, source.Repo), "Authorization", "token "+token, body, "application/json")
+	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), source.Repo), "Authorization", fmt.Sprintf("token %s", token), body, "application/json")
 	if err != nil {
 		return "", err
 	}
@@ -45,7 +52,7 @@ func (g *GiteaForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSo
 }
 
 func (g *GiteaForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiURL, source.Repo, webhookID), "Authorization", "token "+token, nil, "")
+	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiBase(source), source.Repo, webhookID), "Authorization", fmt.Sprintf("token %s", token), nil, "")
 	return err
 }
 
@@ -63,7 +70,7 @@ func (g *GiteaForge) SetCommitStatus(ctx context.Context, source *domain.ForgeSo
 	if err != nil {
 		return err
 	}
-	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/statuses/%s", g.apiURL, source.Repo, run.HeadSHA), "Authorization", "token "+token, body, "application/json")
+	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/statuses/%s", g.apiBase(source), source.Repo, run.HeadSHA), "Authorization", fmt.Sprintf("token %s", token), body, "application/json")
 	return err
 }
 

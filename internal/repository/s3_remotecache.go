@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strings"
 	"time"
@@ -56,6 +57,19 @@ func (s *S3RemoteCacheStore) blobKey(namespace, digest string) string {
 	return fmt.Sprintf("%s/%s/blobs/%s", s.prefix, namespace, digest)
 }
 
+func (s *S3RemoteCacheStore) packKey(namespace, packDigest string) string {
+	return fmt.Sprintf("%s/%s/packs/%s.pack", s.prefix, namespace, packDigest)
+}
+
+// PackKey returns the S3 key for a pack object.
+func (s *S3RemoteCacheStore) PackKey(namespace, packDigest string) string {
+	return s.packKey(namespace, packDigest)
+}
+
+func (s *S3RemoteCacheStore) checkpointKey() string {
+	return fmt.Sprintf("%s/index/checkpoint.json", s.prefix)
+}
+
 // PutBundle stores a ValueBundle JSON document.
 func (s *S3RemoteCacheStore) PutBundle(ctx context.Context, namespace, digest string, bundle []byte) (string, error) {
 	key := s.bundleKey(namespace, digest)
@@ -96,6 +110,71 @@ func (s *S3RemoteCacheStore) PresignGet(ctx context.Context, namespace, digest s
 		return "", fmt.Errorf("presign remote cache get: %w", err)
 	}
 	return u.String(), nil
+}
+
+// PresignPackPut returns a presigned PUT URL for a pack object.
+func (s *S3RemoteCacheStore) PresignPackPut(ctx context.Context, namespace, packDigest string) (string, error) {
+	u, err := s.signer.PresignedPutObject(ctx, s.bucket, s.packKey(namespace, packDigest), s.presignTTL)
+	if err != nil {
+		return "", fmt.Errorf("presign remote cache pack put: %w", err)
+	}
+	return u.String(), nil
+}
+
+// PutPack stores a pack object directly.
+func (s *S3RemoteCacheStore) PutPack(ctx context.Context, namespace, packDigest string, data []byte) (string, error) {
+	key := s.packKey(namespace, packDigest)
+	_, err := s.client.PutObject(ctx, s.bucket, key, bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/octet-stream"})
+	if err != nil {
+		return "", fmt.Errorf("put remote cache pack: %w", err)
+	}
+	return key, nil
+}
+
+// PresignGetRange generates a presigned GET URL cryptographically bound to
+// HTTP Range: bytes=<offset>-<offset+length-1> so S3/MinIO serves 206.
+func (s *S3RemoteCacheStore) PresignGetRange(ctx context.Context, packKey string, offset, length int64) (urlStr, rangeHeader string, err error) {
+	if offset < 0 || length <= 0 {
+		return "", "", fmt.Errorf("invalid pack byte range")
+	}
+	rangeHeader = fmt.Sprintf("bytes=%d-%d", offset, offset+length-1)
+	u, err := s.signer.PresignHeader(ctx, http.MethodGet, s.bucket, packKey, s.presignTTL, url.Values{}, http.Header{"Range": []string{rangeHeader}})
+	if err != nil {
+		return "", "", fmt.Errorf("presign remote cache range get: %w", err)
+	}
+	return u.String(), rangeHeader, nil
+}
+
+// PresignBundleGet returns a presigned GET URL for a bundle object.
+func (s *S3RemoteCacheStore) PresignBundleGet(ctx context.Context, namespace, digest string) (string, error) {
+	u, err := s.signer.PresignedGetObject(ctx, s.bucket, s.bundleKey(namespace, digest), s.presignTTL, url.Values{})
+	if err != nil {
+		return "", fmt.Errorf("presign remote cache bundle get: %w", err)
+	}
+	return u.String(), nil
+}
+
+// PutIndexCheckpoint stores the serialized bbolt index snapshot.
+func (s *S3RemoteCacheStore) PutIndexCheckpoint(ctx context.Context, data []byte) error {
+	_, err := s.client.PutObject(ctx, s.bucket, s.checkpointKey(), bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/json"})
+	if err != nil {
+		return fmt.Errorf("put remote cache index checkpoint: %w", err)
+	}
+	return nil
+}
+
+// GetIndexCheckpoint reads the serialized bbolt index snapshot.
+func (s *S3RemoteCacheStore) GetIndexCheckpoint(ctx context.Context) ([]byte, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, s.checkpointKey(), minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get remote cache index checkpoint: %w", err)
+	}
+	defer func() { _ = obj.Close() }()
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, fmt.Errorf("read remote cache index checkpoint: %w", err)
+	}
+	return data, nil
 }
 
 // DeleteBundle removes a bundle object.

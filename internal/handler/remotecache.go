@@ -43,7 +43,7 @@ func (s *Server) handleRemoteCacheStats(ctx context.Context, c *app.RequestConte
 
 // handleRemoteCachePurge purges a namespace (admin only).
 func (s *Server) handleRemoteCachePurge(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.remoteCache == nil {

@@ -26,17 +26,22 @@ type orgMembershipEdge struct {
 
 // fsmSnapshotPayload is the JSON document persisted into a Raft snapshot.
 type fsmSnapshotPayload struct {
-	Users        []*cmdUser          `json:"users"`
-	Groups       []*domain.Group     `json:"groups"`
-	Memberships  []membershipEdge    `json:"memberships"`
-	Tokens       []*cmdToken         `json:"tokens"`
-	Projects     []*domain.Project   `json:"projects"`
-	Orgs         []*domain.Org       `json:"orgs"`
-	OrgMembers   []orgMembershipEdge `json:"org_members"`
-	Secrets      []*cmdSecret        `json:"secrets"`
-	ForgeSources []*cmdForgeSource   `json:"forge_sources"`
-	Traces       []*domain.TraceMeta `json:"traces"`
-	Meta         map[string]string   `json:"meta"`
+	Users            []*cmdUser               `json:"users"`
+	Groups           []*domain.Group          `json:"groups"`
+	Memberships      []membershipEdge         `json:"memberships"`
+	Tokens           []*cmdToken              `json:"tokens"`
+	Projects         []*domain.Project        `json:"projects"`
+	Orgs             []*domain.Org            `json:"orgs"`
+	OrgMembers       []orgMembershipEdge      `json:"org_members"`
+	Secrets          []*cmdSecret             `json:"secrets"`
+	ForgeSources     []*cmdForgeSource        `json:"forge_sources"`
+	Environments     []*domain.Environment    `json:"environments"`
+	CheckRuns        []*domain.CheckRunRecord `json:"check_runs"`
+	WorkflowDefs     []*domain.WorkflowDef    `json:"workflow_defs"`
+	WorkflowRuns     []*cmdWorkflowRun        `json:"workflow_runs"`
+	WorkflowCounters map[string]int64         `json:"workflow_counters"`
+	Traces           []*domain.TraceMeta      `json:"traces"`
+	Meta             map[string]string        `json:"meta"`
 }
 
 // fsmSnapshot is a point-in-time snapshot of the FSM state.
@@ -73,21 +78,52 @@ func copySlice[T any](m map[string]*T) []*T {
 	return out
 }
 
+func copyEnvironments(m map[string]*domain.Environment) []*domain.Environment {
+	out := make([]*domain.Environment, 0, len(m))
+	for _, env := range m {
+		cp := *env
+		cp.ApproverGroupIDs = append([]string(nil), env.ApproverGroupIDs...)
+		out = append(out, &cp)
+	}
+	return out
+}
+
+func copyCheckRuns(m map[string]*domain.CheckRunRecord) []*domain.CheckRunRecord {
+	out := make([]*domain.CheckRunRecord, 0, len(m))
+	for _, rec := range m {
+		out = append(out, copyCheckRun(rec))
+	}
+	return out
+}
+
+func copyWorkflowDefs(m map[string]*domain.WorkflowDef) []*domain.WorkflowDef {
+	out := make([]*domain.WorkflowDef, 0, len(m))
+	for _, def := range m {
+		out = append(out, copyWorkflowDef(def))
+	}
+	return out
+}
+
 // Snapshot deep-copies the state under the read lock and returns a snapshot.
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.state.mu.RLock()
 	defer f.state.mu.RUnlock()
 
 	payload := fsmSnapshotPayload{
-		Meta:         make(map[string]string, len(f.state.meta)),
-		Users:        make([]*cmdUser, 0, len(f.state.users)),
-		Tokens:       make([]*cmdToken, 0, len(f.state.tokens)),
-		Groups:       copySlice(f.state.groups),
-		Projects:     copySlice(f.state.projects),
-		Orgs:         copySlice(f.state.orgs),
-		Secrets:      make([]*cmdSecret, 0, len(f.state.secrets)),
-		ForgeSources: make([]*cmdForgeSource, 0, len(f.state.forgeSources)),
-		Traces:       copySlice(f.state.traces),
+		Meta:             make(map[string]string, len(f.state.meta)),
+		Users:            make([]*cmdUser, 0, len(f.state.users)),
+		Tokens:           make([]*cmdToken, 0, len(f.state.tokens)),
+		Groups:           copySlice(f.state.groups),
+		Projects:         copySlice(f.state.projects),
+		Orgs:             copySlice(f.state.orgs),
+		Secrets:          make([]*cmdSecret, 0, len(f.state.secrets)),
+		ForgeSources:     make([]*cmdForgeSource, 0, len(f.state.forgeSources)),
+		Environments:     copyEnvironments(f.state.environments),
+		CheckRuns:        copyCheckRuns(f.state.checkRuns),
+		WorkflowDefs:     copyWorkflowDefs(f.state.workflowDefs),
+		WorkflowRuns:     make([]*cmdWorkflowRun, 0, len(f.state.workflowRuns)),
+		WorkflowCounters: make(map[string]int64, len(f.state.workflowCounters)),
+		Traces:           copySlice(f.state.traces),
 	}
 	for k, v := range f.state.meta {
 		payload.Meta[k] = v
@@ -103,6 +139,12 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	}
 	for _, src := range f.state.forgeSources {
 		payload.ForgeSources = append(payload.ForgeSources, cmdForgeSourceFrom(src))
+	}
+	for _, run := range f.state.workflowRuns {
+		payload.WorkflowRuns = append(payload.WorkflowRuns, cmdWorkflowRunFrom(run))
+	}
+	for k, v := range f.state.workflowCounters {
+		payload.WorkflowCounters[k] = v
 	}
 	for gid, set := range f.state.memberships {
 		for uid := range set {
@@ -176,6 +218,37 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 			s.forgeSources[d.ID] = d
 		}
 	}
+	for _, env := range payload.Environments {
+		if env == nil {
+			continue
+		}
+		_ = s.upsertEnvironment(env)
+	}
+	for _, rec := range payload.CheckRuns {
+		if rec == nil {
+			continue
+		}
+		_ = s.upsertCheckRun(rec)
+	}
+	for _, def := range payload.WorkflowDefs {
+		if def == nil {
+			continue
+		}
+		cp := *def
+		cp.ContextFiles = copyBytesMap(def.ContextFiles)
+		s.workflowDefs[workflowDefKey(def.OrgID, def.ProjectID, def.Workflow.Name)] = &cp
+	}
+	for _, run := range payload.WorkflowRuns {
+		if run == nil {
+			continue
+		}
+		if d := run.toDomain(); d != nil {
+			s.workflowRuns[d.ID] = d
+		}
+	}
+	for k, v := range payload.WorkflowCounters {
+		s.workflowCounters[k] = v
+	}
 	for _, m := range payload.Traces {
 		if m == nil {
 			continue
@@ -241,6 +314,11 @@ func (s *fsmState) adopt(other *fsmState) {
 	s.orgMembersByUser = other.orgMembersByUser
 	s.secrets = other.secrets
 	s.forgeSources = other.forgeSources
+	s.environments = other.environments
+	s.checkRuns = other.checkRuns
+	s.workflowDefs = other.workflowDefs
+	s.workflowRuns = other.workflowRuns
+	s.workflowCounters = other.workflowCounters
 	s.traces = other.traces
 	s.meta = other.meta
 }

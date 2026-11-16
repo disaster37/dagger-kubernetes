@@ -48,6 +48,7 @@ var supervisorValidations = []validation{
 	{wrap: "validate remote cache config", fn: validateRemoteCacheConfig},
 	{wrap: "validate checks config", fn: validateChecksConfig},
 	{wrap: "validate workflows config", fn: validateWorkflowsConfig},
+	{wrap: "validate graphql config", fn: validateGraphQLConfig},
 }
 
 // ciWrapperValidations is the client-relevant subset. The wrapper consumes only
@@ -239,10 +240,18 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("cache.remote.ttl", 720*time.Hour)
 	v.SetDefault("cache.remote.max_bytes", int64(100<<30))
 	v.SetDefault("cache.remote.workers", 16)
+	v.SetDefault("cache.remote.pack_max_member_bytes", int64(4<<20))
+	v.SetDefault("cache.remote.gc_interval", 5*time.Minute)
 
 	// Local image mirrors (Zot) the supervisor lists/prunes over their OCI
 	// Distribution v2 API. Admin-visible/read-only; the Helm chart renders the
 	// block from what it deploys.
+	v.SetDefault("graphql.introspection_enabled", false)
+	v.SetDefault("graphql.max_depth", 15)
+	v.SetDefault("graphql.max_selections", 250)
+	v.SetDefault("graphql.max_query_bytes", 65536)
+	v.SetDefault("graphql.max_parallelism", 10)
+
 	v.SetDefault("image_cache.mirrors", []domain.ImageCacheMirror{})
 	v.SetDefault("image_cache.tls_ca_path", "")
 
@@ -918,6 +927,12 @@ func validateRemoteCacheConfig(cfg *domain.Config) error {
 	if r.IndexPath == "" {
 		return fmt.Errorf("cache.remote.index_path must not be empty when cache.remote.enabled is true")
 	}
+	if r.PackMaxMemberBytes < 0 {
+		return fmt.Errorf("cache.remote.pack_max_member_bytes must be >= 0")
+	}
+	if r.GCInterval <= 0 {
+		return fmt.Errorf("cache.remote.gc_interval must be > 0 when cache.remote.enabled is true")
+	}
 	return nil
 }
 
@@ -945,6 +960,24 @@ func validateWorkflowsConfig(cfg *domain.Config) error {
 	}
 	if cfg.Workflows.MaxParallel < 0 {
 		return fmt.Errorf("workflows.max_parallel must be >= 0")
+	}
+	return nil
+}
+
+// validateGraphQLConfig guards the Cloud GraphQL complexity bounds.
+func validateGraphQLConfig(cfg *domain.Config) error {
+	g := cfg.GraphQL
+	if g.MaxDepth <= 0 {
+		return fmt.Errorf("graphql.max_depth must be > 0")
+	}
+	if g.MaxSelections <= 0 {
+		return fmt.Errorf("graphql.max_selections must be > 0")
+	}
+	if g.MaxQueryBytes <= 0 {
+		return fmt.Errorf("graphql.max_query_bytes must be > 0")
+	}
+	if g.MaxParallelism <= 0 {
+		return fmt.Errorf("graphql.max_parallelism must be > 0")
 	}
 	return nil
 }

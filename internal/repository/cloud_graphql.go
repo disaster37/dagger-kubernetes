@@ -2,8 +2,10 @@ package repository
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/graph-gophers/graphql-go"
@@ -55,6 +57,16 @@ type Org {
   cliNotice: String
   lastUserTrace: Trace
   traces(filter: String, sort: String, first: Int, after: String): TraceConnection!
+  checks(first: Int): [CheckRun!]!
+}
+
+type CheckRun {
+  id: ID!
+  name: String!
+  state: String!
+  traceID: String
+  summary: String
+  updatedAt: String!
 }
 
 type Subscription {
@@ -90,9 +102,18 @@ type CloudGraphQL struct {
 }
 
 // NewCloudGraphQL builds the schema over the supplied repositories.
-func NewCloudGraphQL(users domain.UserRepository, orgs domain.OrgRepository, traces domain.TraceMetaRepository) *CloudGraphQL {
-	root := &graphqlRoot{users: users, orgs: orgs, traces: traces}
-	return &CloudGraphQL{schema: graphql.MustParseSchema(cloudGraphQLSchema, root)}
+func NewCloudGraphQL(users domain.UserRepository, orgs domain.OrgRepository, traces domain.TraceMetaRepository, checks domain.CheckRunRepository, cfg domain.GraphQLConfig) *CloudGraphQL {
+	root := &graphqlRoot{users: users, orgs: orgs, traces: traces, checks: checks}
+	opts := []graphql.SchemaOpt{
+		graphql.MaxDepth(cfg.MaxDepth),
+		graphql.MaxSelections(cfg.MaxSelections),
+		graphql.MaxQueryLength(cfg.MaxQueryBytes),
+		graphql.MaxParallelism(cfg.MaxParallelism),
+	}
+	if !cfg.IntrospectionEnabled {
+		opts = append(opts, graphql.RestrictIntrospection(func(context.Context) bool { return false }))
+	}
+	return &CloudGraphQL{schema: graphql.MustParseSchema(cloudGraphQLSchema, root, opts...)}
 }
 
 // Exec executes a GraphQL query and returns the JSON response body.
@@ -109,6 +130,7 @@ type graphqlRoot struct {
 	users  domain.UserRepository
 	orgs   domain.OrgRepository
 	traces domain.TraceMetaRepository
+	checks domain.CheckRunRepository
 }
 
 func (r *graphqlRoot) User(ctx context.Context) (*graphqlUser, error) {
@@ -230,15 +252,65 @@ func (o *graphqlOrg) Traces(ctx context.Context, args struct {
 	if args.First != nil && *args.First > 0 {
 		limit = int(*args.First)
 	}
-	rows, err := o.root.traces.List(ctx, &domain.TraceFilter{OrgID: o.org.ID, Limit: limit})
+	if limit > domain.MaxTraceLimit {
+		limit = domain.MaxTraceLimit
+	}
+	offset := 0
+	if args.After != nil && *args.After != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(*args.After)
+		if err != nil {
+			return nil, fmt.Errorf("invalid cursor")
+		}
+		n, err := strconv.Atoi(string(raw))
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("invalid cursor")
+		}
+		offset = n
+	}
+	rows, err := o.root.traces.List(ctx, &domain.TraceFilter{OrgID: o.org.ID, Limit: offset + limit + 1})
 	if err != nil {
 		return nil, err
 	}
-	nodes := make([]*graphqlTrace, 0, len(rows))
-	for i := range rows {
-		nodes = append(nodes, &graphqlTrace{meta: &rows[i].TraceMeta})
+	if offset > len(rows) {
+		offset = len(rows)
 	}
-	return &graphqlTraceConnection{nodes: nodes}, nil
+	end := offset + limit
+	if end > len(rows) {
+		end = len(rows)
+	}
+	page := rows[offset:end]
+	nodes := make([]*graphqlTrace, 0, len(page))
+	for i := range page {
+		nodes = append(nodes, &graphqlTrace{meta: &page[i].TraceMeta})
+	}
+	hasNext := len(rows) > end
+	var endCursor *string
+	if hasNext {
+		cursor := base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(end)))
+		endCursor = &cursor
+	}
+	return &graphqlTraceConnection{nodes: nodes, hasNext: hasNext, endCursor: endCursor}, nil
+}
+
+func (o *graphqlOrg) Checks(ctx context.Context, args struct{ First *int32 }) ([]*graphqlCheckRun, error) {
+	if o.root.checks == nil {
+		return nil, nil
+	}
+	limit := domain.DefaultTraceLimit
+	if args.First != nil && *args.First > 0 {
+		limit = int(*args.First)
+	}
+	records, err := o.root.checks.List(ctx, &domain.CheckRunFilter{OrgID: o.org.ID, Limit: limit})
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*graphqlCheckRun, 0, len(records))
+	for _, rec := range records {
+		for _, item := range rec.Checks {
+			out = append(out, &graphqlCheckRun{recordID: rec.ID, item: item})
+		}
+	}
+	return out, nil
 }
 
 type graphqlSubscription struct{}
@@ -265,13 +337,44 @@ func (t *graphqlTrace) StartedAt() string { return t.meta.StartedAt.UTC().Format
 func (t *graphqlTrace) UpdatedAt() string { return t.meta.UpdatedAt.UTC().Format(time.RFC3339) }
 
 type graphqlTraceConnection struct {
-	nodes []*graphqlTrace
+	nodes     []*graphqlTrace
+	hasNext   bool
+	endCursor *string
 }
 
-func (c *graphqlTraceConnection) Nodes() []*graphqlTrace     { return c.nodes }
-func (c *graphqlTraceConnection) PageInfo() *graphqlPageInfo { return &graphqlPageInfo{} }
+func (c *graphqlTraceConnection) Nodes() []*graphqlTrace { return c.nodes }
+func (c *graphqlTraceConnection) PageInfo() *graphqlPageInfo {
+	return &graphqlPageInfo{hasNext: c.hasNext, endCursor: c.endCursor}
+}
 
-type graphqlPageInfo struct{}
+type graphqlPageInfo struct {
+	hasNext   bool
+	endCursor *string
+}
 
-func (p *graphqlPageInfo) HasNextPage() bool  { return false }
-func (p *graphqlPageInfo) EndCursor() *string { return nil }
+func (p *graphqlPageInfo) HasNextPage() bool  { return p.hasNext }
+func (p *graphqlPageInfo) EndCursor() *string { return p.endCursor }
+
+type graphqlCheckRun struct {
+	recordID string
+	item     domain.CheckItem
+}
+
+func (c *graphqlCheckRun) ID() graphql.ID {
+	return graphql.ID(fmt.Sprintf("%s/%s", c.recordID, c.item.Name))
+}
+func (c *graphqlCheckRun) Name() string  { return c.item.Name }
+func (c *graphqlCheckRun) State() string { return string(c.item.State) }
+func (c *graphqlCheckRun) TraceID() *string {
+	if c.item.TraceID == "" {
+		return nil
+	}
+	return &c.item.TraceID
+}
+func (c *graphqlCheckRun) Summary() *string {
+	if c.item.Summary == "" {
+		return nil
+	}
+	return &c.item.Summary
+}
+func (c *graphqlCheckRun) UpdatedAt() string { return c.item.UpdatedAt.UTC().Format(time.RFC3339) }

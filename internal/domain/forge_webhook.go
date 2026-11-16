@@ -30,17 +30,20 @@ func parseGitStyleWebhook(provider ForgeKind, event string, body []byte) (*Webho
 		Ref        string `json:"ref"`
 		After      string `json:"after"`
 		Repository struct {
-			FullName string `json:"full_name"`
+			FullName      string `json:"full_name"`
+			DefaultBranch string `json:"default_branch"`
 		} `json:"repository"`
 		PullRequest struct {
 			Number int `json:"number"`
 			Head   struct {
 				SHA  string `json:"sha"`
+				Ref  string `json:"ref"`
 				Repo struct {
 					ID int64 `json:"id"`
 				} `json:"repo"`
 			} `json:"head"`
 			Base struct {
+				Ref  string `json:"ref"`
 				Repo struct {
 					ID int64 `json:"id"`
 				} `json:"repo"`
@@ -53,7 +56,7 @@ func parseGitStyleWebhook(provider ForgeKind, event string, body []byte) (*Webho
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("decode %s webhook: %w", provider, err)
 	}
-	ev := &WebhookEvent{Provider: provider, Event: event, Repo: payload.Repository.FullName, SHA: payload.After, Ref: payload.Ref}
+	ev := &WebhookEvent{Provider: provider, Event: event, Repo: payload.Repository.FullName, SHA: payload.After, Ref: payload.Ref, DefaultBranch: payload.Repository.DefaultBranch}
 	switch event {
 	case "push":
 		if strings.HasPrefix(payload.Ref, "refs/tags/") {
@@ -63,6 +66,7 @@ func parseGitStyleWebhook(provider ForgeKind, event string, body []byte) (*Webho
 	case "pull_request":
 		ev.PRNumber = payload.PullRequest.Number
 		ev.SHA = payload.PullRequest.Head.SHA
+		ev.TargetBranch = payload.PullRequest.Base.Ref
 		ev.SourceRepoID = fmt.Sprintf("%d", payload.PullRequest.Head.Repo.ID)
 		ev.TargetRepoID = fmt.Sprintf("%d", payload.PullRequest.Base.Repo.ID)
 		ev.IsFork = ev.SourceRepoID != ev.TargetRepoID
@@ -81,10 +85,13 @@ func parseGitLabWebhook(event string, body []byte) (*WebhookEvent, error) {
 		CheckoutSHA string `json:"checkout_sha"`
 		Project     struct {
 			PathWithNamespace string `json:"path_with_namespace"`
+			DefaultBranch     string `json:"default_branch"`
 		} `json:"project"`
 		ObjectAttributes struct {
-			IID    int `json:"iid"`
-			Source struct {
+			IID          int    `json:"iid"`
+			TargetBranch string `json:"target_branch"`
+			SourceBranch string `json:"source_branch"`
+			Source       struct {
 				ID int64 `json:"id"`
 			} `json:"source"`
 			Target struct {
@@ -98,7 +105,7 @@ func parseGitLabWebhook(event string, body []byte) (*WebhookEvent, error) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, fmt.Errorf("decode gitlab webhook: %w", err)
 	}
-	ev := &WebhookEvent{Provider: ForgeGitLab, Event: event, Repo: payload.Project.PathWithNamespace, SHA: payload.After, Ref: payload.Ref}
+	ev := &WebhookEvent{Provider: ForgeGitLab, Event: event, Repo: payload.Project.PathWithNamespace, SHA: payload.After, Ref: payload.Ref, DefaultBranch: payload.Project.DefaultBranch}
 	if ev.SHA == "" {
 		ev.SHA = payload.CheckoutSHA
 	}
@@ -107,6 +114,7 @@ func parseGitLabWebhook(event string, body []byte) (*WebhookEvent, error) {
 		ev.Event = "pull_request"
 		ev.PRNumber = payload.ObjectAttributes.IID
 		ev.SHA = payload.ObjectAttributes.LastCommit.ID
+		ev.TargetBranch = payload.ObjectAttributes.TargetBranch
 		ev.SourceRepoID = fmt.Sprintf("%d", payload.ObjectAttributes.Source.ID)
 		ev.TargetRepoID = fmt.Sprintf("%d", payload.ObjectAttributes.Target.ID)
 		ev.IsFork = ev.SourceRepoID != ev.TargetRepoID

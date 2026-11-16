@@ -26,6 +26,7 @@ type Config struct {
 	Checks      ChecksConfig      `mapstructure:"checks"`
 	Workflows   WorkflowConfig    `mapstructure:"workflows"`
 	Forge       ForgeConfig       `mapstructure:"forge"`
+	GraphQL     GraphQLConfig     `mapstructure:"graphql"`
 }
 
 // SupervisorConfig groups the supervisor's own subcomponent configuration.
@@ -388,6 +389,10 @@ type RemoteCacheConfig struct {
 	MaxBytes int64 `mapstructure:"max_bytes"`
 	// Workers bounds concurrent bundle export/upload work (default 16).
 	Workers int `mapstructure:"workers"`
+	// PackMaxMemberBytes is the largest blob packed into a dagger-pack (default 4 MiB).
+	PackMaxMemberBytes int64 `mapstructure:"pack_max_member_bytes"`
+	// GCInterval is the background GC/checkpoint cadence (default 5m).
+	GCInterval time.Duration `mapstructure:"gc_interval"`
 }
 
 // S3Config is the shared S3 client configuration consumed by the CLI cache
@@ -645,4 +650,13 @@ type ForgeConfig struct {
 	GiteaAPIURL  string `mapstructure:"gitea_api_url"`
 	// WebhookSecret is the fallback HMAC secret when a source has none.
 	WebhookSecret string `mapstructure:"webhook_secret"`
+}
+
+// GraphQLConfig bounds Cloud GraphQL query complexity and introspection.
+type GraphQLConfig struct {
+	IntrospectionEnabled bool `mapstructure:"introspection_enabled"`
+	MaxDepth             int  `mapstructure:"max_depth"`
+	MaxSelections        int  `mapstructure:"max_selections"`
+	MaxQueryBytes        int  `mapstructure:"max_query_bytes"`
+	MaxParallelism       int  `mapstructure:"max_parallelism"`
 }

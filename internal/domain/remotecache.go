@@ -126,13 +126,16 @@ type Exported struct {
 
 // Upload requests presigned PUT URLs for blobs.
 type Upload struct {
-	SessionID string   `json:"session_id"`
-	Digests   []string `json:"digests"`
+	SessionID string           `json:"session_id"`
+	Digests   []string         `json:"digests"`
+	Blobs     []BlobDescriptor `json:"blobs,omitempty"`
+	Packs     []PackManifest   `json:"packs,omitempty"`
 }
 
 // Uploaded returns presigned PUT URLs.
 type Uploaded struct {
-	URLs map[string]string `json:"urls"`
+	URLs  map[string]string `json:"urls"`
+	Packs []UploadPack      `json:"packs,omitempty"`
 }
 
 // Merge requests presigned GET URLs for cached blobs.
@@ -143,7 +146,9 @@ type Merge struct {
 
 // Merged returns presigned GET URLs.
 type Merged struct {
-	URLs map[string]string `json:"urls"`
+	URLs       map[string]string       `json:"urls"`
+	Locations  map[string]BlobLocation `json:"locations,omitempty"`
+	BundleURLs map[string]string       `json:"bundle_urls,omitempty"`
 }
 
 // Offer offers a bundle to the engine.
@@ -166,7 +171,9 @@ type Renew struct {
 
 // Renewed returns fresh presigned GET URLs.
 type Renewed struct {
-	URLs map[string]string `json:"urls"`
+	URLs       map[string]string       `json:"urls"`
+	Locations  map[string]BlobLocation `json:"locations,omitempty"`
+	BundleURLs map[string]string       `json:"bundle_urls,omitempty"`
 }
 
 // Lookup asks whether digests are cached.
@@ -191,10 +198,53 @@ type ValueBundle struct {
 	Digest           string   `json:"digest"`
 	ShareChainLayers bool     `json:"share_chain_layers"`
 	Layers           []string `json:"layers,omitempty"`
+	RecipeDigest     string   `json:"recipe_digest,omitempty"`
+	ExtraDigests     []string `json:"extra_digests,omitempty"`
+	SelfDigest       string   `json:"self_digest,omitempty"`
+	InputDigests     []string `json:"input_digests,omitempty"`
 }
 
 // DaggerPackVersion is the dagger-pack wire version.
 const DaggerPackVersion = "dagger-pack v1"
+
+// DefaultPackMaxMemberBytes is the threshold for packing small blobs.
+const DefaultPackMaxMemberBytes = 4 << 20 // 4 MiB
+
+// PackMember is one member slice inside a dagger-pack object.
+type PackMember struct {
+	Digest string `json:"digest"`
+	Offset int64  `json:"offset"` // byte offset from start of pack object
+	Size   int64  `json:"size"`
+}
+
+// PackManifest describes the members of one dagger-pack object.
+type PackManifest struct {
+	ID      PackID       `json:"id"`
+	Members []PackMember `json:"members"`
+	Total   int64        `json:"total"`
+}
+
+// BlobDescriptor is one blob requested for upload.
+type BlobDescriptor struct {
+	Digest string `json:"digest"`
+	Size   int64  `json:"size"`
+}
+
+// UploadPack is a presigned pack upload target.
+type UploadPack struct {
+	PackID  PackID       `json:"pack_id"`
+	URL     string       `json:"url"`
+	Members []PackMember `json:"members"`
+}
+
+// BlobLocation is a presigned GET location for one blob (packed or standalone).
+type BlobLocation struct {
+	URL        string            `json:"url"`
+	PackDigest string            `json:"pack_digest,omitempty"`
+	Offset     int64             `json:"offset,omitempty"`
+	Size       int64             `json:"size,omitempty"`
+	Headers    map[string]string `json:"headers,omitempty"` // {"Range": "bytes=start-end"} for 206 Partial Content
+}
 
 // Pack limits.
 const (

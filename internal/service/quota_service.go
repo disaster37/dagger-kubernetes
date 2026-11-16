@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"strings"
 
 	"github.com/sirupsen/logrus"
 
@@ -28,6 +29,14 @@ func NewQuotaService(sessions domain.SessionStore, groups domain.GroupRepository
 func (q *QuotaService) CheckEngineAccess(ctx context.Context, id *domain.Identity) error {
 	if id.IsAdmin() {
 		return nil
+	}
+
+	// Org-scoped dag_<org>_ tokens (POST /v1/oidc, check-runner,
+	// workflow-runner, --scale-out engines) are not user memberships. Admit
+	// them against the org's groups, or bounded by fleet capacity when the org
+	// has no groups yet.
+	if id.OrgID != "" && strings.HasPrefix(id.UserID, "org:") {
+		return q.checkOrgAccess(ctx, id)
 	}
 
 	gs, err := q.groups.GroupsForUser(ctx, id.UserID)
@@ -59,6 +68,36 @@ func (q *QuotaService) CheckEngineAccess(ctx context.Context, id *domain.Identit
 		"groups":  groupIDs(available),
 		"usage":   usage,
 	}).Warn("quota exhausted")
+	return domain.ErrQuotaExhausted
+}
+
+// checkOrgAccess admits an org-scoped token when the org has an available
+// group with remaining capacity, or when the org has no groups yet.
+func (q *QuotaService) checkOrgAccess(ctx context.Context, id *domain.Identity) error {
+	all, err := q.groups.List(ctx)
+	if err != nil {
+		return err
+	}
+	var orgGroups []*domain.Group
+	for _, g := range all {
+		if g.OrgID == id.OrgID {
+			orgGroups = append(orgGroups, g)
+		}
+	}
+	if len(orgGroups) == 0 {
+		return nil
+	}
+	usage := q.usageSnapshot(ctx)
+	for _, g := range orgGroups {
+		if g.AgentAvailable && (g.MaxRunnerSessions == 0 || usage[g.ID] < g.MaxRunnerSessions) {
+			return nil
+		}
+	}
+	q.logger.WithFields(logrus.Fields{
+		"org_id": id.OrgID,
+		"groups": groupIDs(orgGroups),
+		"usage":  usage,
+	}).Warn("org quota exhausted")
 	return domain.ErrQuotaExhausted
 }
 

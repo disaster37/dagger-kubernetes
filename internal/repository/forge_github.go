@@ -27,6 +27,13 @@ func NewGitHubForge(apiURL string) *GitHubForge {
 
 func (g *GitHubForge) Kind() domain.ForgeKind { return domain.ForgeGitHub }
 
+func (g *GitHubForge) apiBase(source *domain.ForgeSource) string {
+	if source != nil && source.BaseURL != "" {
+		return strings.TrimSuffix(source.BaseURL, "/")
+	}
+	return g.apiURL
+}
+
 func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, token, callbackURL, secret string) (string, error) {
 	body, err := jsonBody(map[string]any{
 		"name":   "web",
@@ -37,7 +44,7 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	if err != nil {
 		return "", err
 	}
-	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiURL, source.Repo), "Authorization", "Bearer "+token, body, "application/json")
+	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), source.Repo), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
 	if err != nil {
 		return "", err
 	}
@@ -49,7 +56,7 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 }
 
 func (g *GitHubForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiURL, source.Repo, webhookID), "Authorization", "Bearer "+token, nil, "")
+	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiBase(source), source.Repo, webhookID), "Authorization", fmt.Sprintf("Bearer %s", token), nil, "")
 	return err
 }
 
@@ -67,7 +74,7 @@ func (g *GitHubForge) SetCommitStatus(ctx context.Context, source *domain.ForgeS
 	if err != nil {
 		return err
 	}
-	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/statuses/%s", g.apiURL, source.Repo, run.HeadSHA), "Authorization", "Bearer "+token, body, "application/json")
+	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/statuses/%s", g.apiBase(source), source.Repo, run.HeadSHA), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
 	return err
 }
 
@@ -83,7 +90,7 @@ func (g *GitHubForge) CreateCheckRun(ctx context.Context, source *domain.ForgeSo
 	if err != nil {
 		return err
 	}
-	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/check-runs", g.apiURL, source.Repo), "Authorization", "Bearer "+token, body, "application/json")
+	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/check-runs", g.apiBase(source), source.Repo), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
 	return err
 }
 

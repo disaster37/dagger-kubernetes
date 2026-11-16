@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/minio/minio-go/v7"
 	"github.com/sirupsen/logrus"
@@ -42,18 +44,29 @@ func (a *S3OTLPArchive) Append(ctx context.Context, traceID, signal string, seq 
 	return nil
 }
 
-func (a *S3OTLPArchive) Chunks(ctx context.Context, traceID, signal string) ([][]byte, error) {
+func (a *S3OTLPArchive) ChunksAfter(ctx context.Context, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
 	prefix := fmt.Sprintf("%s/%s/%s/", a.prefix, traceID, signal)
+	opts := minio.ListObjectsOptions{Prefix: prefix, Recursive: true}
+	if fromSeq > 0 {
+		opts.StartAfter = a.key(traceID, signal, fromSeq-1)
+	}
 	var keys []string
-	for obj := range a.client.ListObjects(ctx, a.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
+	for obj := range a.client.ListObjects(ctx, a.bucket, opts) {
 		if obj.Err != nil {
 			return nil, fmt.Errorf("list otlp archive: %w", obj.Err)
 		}
 		keys = append(keys, obj.Key)
 	}
 	sort.Strings(keys)
-	out := make([][]byte, 0, len(keys))
+	out := make([]domain.OTLPChunk, 0, len(keys))
 	for _, key := range keys {
+		seq, err := seqFromKey(key)
+		if err != nil {
+			continue
+		}
+		if seq < fromSeq {
+			continue
+		}
 		obj, err := a.client.GetObject(ctx, a.bucket, key, minio.GetObjectOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("get otlp chunk: %w", err)
@@ -63,9 +76,16 @@ func (a *S3OTLPArchive) Chunks(ctx context.Context, traceID, signal string) ([][
 		if err != nil {
 			return nil, fmt.Errorf("read otlp chunk: %w", err)
 		}
-		out = append(out, data)
+		out = append(out, domain.OTLPChunk{Seq: seq, Payload: data})
 	}
 	return out, nil
+}
+
+// seqFromKey parses the %020d sequence number from an archive object key.
+func seqFromKey(key string) (uint64, error) {
+	base := key[strings.LastIndex(key, "/")+1:]
+	base = strings.TrimSuffix(base, ".bin")
+	return strconv.ParseUint(base, 10, 64)
 }
 
 func (a *S3OTLPArchive) DeleteTrace(ctx context.Context, traceID string) error {
@@ -91,29 +111,51 @@ func (a *S3OTLPArchive) DeleteTrace(ctx context.Context, traceID string) error {
 
 // MemoryOTLPArchive is an in-memory OTLPArchive for tests and single-node dev.
 type MemoryOTLPArchive struct {
-	chunks map[string][][]byte
+	mu     sync.RWMutex
+	chunks map[string][]domain.OTLPChunk
 }
 
 // NewMemoryOTLPArchive returns an empty in-memory archive.
 func NewMemoryOTLPArchive() *MemoryOTLPArchive {
-	return &MemoryOTLPArchive{chunks: make(map[string][][]byte)}
+	return &MemoryOTLPArchive{chunks: make(map[string][]domain.OTLPChunk)}
 }
 
 var _ domain.OTLPArchive = (*MemoryOTLPArchive)(nil)
 
-func (a *MemoryOTLPArchive) Append(_ context.Context, traceID, signal string, _ uint64, payload []byte) error {
+func (a *MemoryOTLPArchive) Append(_ context.Context, traceID, signal string, seq uint64, payload []byte) error {
 	key := fmt.Sprintf("%s/%s", traceID, signal)
-	a.chunks[key] = append(a.chunks[key], append([]byte(nil), payload...))
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	chunks := a.chunks[key]
+	idx := sort.Search(len(chunks), func(i int) bool { return chunks[i].Seq >= seq })
+	if idx < len(chunks) && chunks[idx].Seq == seq {
+		chunks[idx].Payload = append([]byte(nil), payload...)
+	} else {
+		chunks = append(chunks, domain.OTLPChunk{})
+		copy(chunks[idx+1:], chunks[idx:])
+		chunks[idx] = domain.OTLPChunk{Seq: seq, Payload: append([]byte(nil), payload...)}
+	}
+	a.chunks[key] = chunks
 	return nil
 }
 
-func (a *MemoryOTLPArchive) Chunks(_ context.Context, traceID, signal string) ([][]byte, error) {
+func (a *MemoryOTLPArchive) ChunksAfter(_ context.Context, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
 	key := fmt.Sprintf("%s/%s", traceID, signal)
-	return a.chunks[key], nil
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	chunks := a.chunks[key]
+	idx := sort.Search(len(chunks), func(i int) bool { return chunks[i].Seq >= fromSeq })
+	out := make([]domain.OTLPChunk, 0, len(chunks)-idx)
+	for _, c := range chunks[idx:] {
+		out = append(out, domain.OTLPChunk{Seq: c.Seq, Payload: append([]byte(nil), c.Payload...)})
+	}
+	return out, nil
 }
 
 func (a *MemoryOTLPArchive) DeleteTrace(_ context.Context, traceID string) error {
 	prefix := fmt.Sprintf("%s/", traceID)
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	for key := range a.chunks {
 		if strings.HasPrefix(key, prefix) {
 			delete(a.chunks, key)

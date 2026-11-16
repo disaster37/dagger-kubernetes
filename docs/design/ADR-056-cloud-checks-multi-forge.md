@@ -25,3 +25,19 @@ and Gitea/Forgejo.
 ## Consequences
 One supervisor can drive checks for multiple forges without leaking secrets or
 auto-banning shared NAT egress IPs.
+
+## Update — residual-risk remediation (PR #70 review)
+- Check Jobs receive `DAGGER_CLOUD_TOKEN`/`DAGGER_KUBERNETES_TOKEN` and
+  `GIT_CLONE_TOKEN` from an ephemeral `check-env-*` Secret referenced via
+  `EnvFrom` (never argv). The Secret is owned by the Job and garbage-collected
+  with it; Jobs set `TTLSecondsAfterFinished`.
+- `check-runner` reports `/load` (checks + workflow files + jailed context
+  files) and `/complete` (per-check state/trace IDs) back to the supervisor.
+- Live and terminal states are reported to the forge (`SetCommitStatus` or
+  `CreateCheckRun`), with `/pipelines/<traceID>` links.
+- Fork PRs hold in `waiting_approval`; members may approve secretless runs,
+  only `org_admin`/global `admin` may set `include_secrets`.
+- A leader reconciler marks crashed/timed-out Jobs `failed` and reports
+  `CheckFailure`.
+- Org-scoped `dag_<org>_` tokens are admitted by `QuotaService` against the
+  org's groups (or fleet capacity for a fresh org).

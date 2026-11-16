@@ -85,7 +85,7 @@ func (s *CIOIDCService) Exchange(ctx context.Context, provider, idToken, project
 	if err != nil {
 		return nil, err
 	}
-	token, _, err := s.orgs.GenerateToken(ctx, org.ID)
+	token, err := s.orgs.EnsureToken(ctx, org.ID)
 	if err != nil {
 		return nil, err
 	}

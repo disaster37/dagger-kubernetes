@@ -63,6 +63,15 @@ const (
 	kindDeleteSecret
 	kindUpsertForgeSource
 	kindDeleteForgeSource
+	// Cloud parity replicated state (appended after every existing kind).
+	kindUpsertEnvironment
+	kindDeleteEnvironment
+	kindUpsertCheckRun
+	kindDeleteCheckRun
+	kindSyncProjectWorkflowDefs
+	kindCreateWorkflowRun
+	kindUpsertWorkflowRun
+	kindDeleteWorkflowRun
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -278,7 +287,63 @@ type (
 		CreatedAt               time.Time        `json:"created_at"`
 		UpdatedAt               time.Time        `json:"updated_at"`
 	}
+
+	cmdEnvironment struct {
+		Environment domain.Environment `json:"environment"`
+	}
+
+	cmdDeleteEnvironment struct {
+		OrgID string `json:"org_id"`
+		Name  string `json:"name"`
+	}
+
+	cmdCheckRun struct {
+		Record domain.CheckRunRecord `json:"record"`
+	}
+
+	cmdDeleteCheckRun struct {
+		ID string `json:"id"`
+	}
+
+	cmdSyncProjectWorkflowDefs struct {
+		OrgID     string                `json:"org_id"`
+		ProjectID string                `json:"project_id"`
+		Defs      []*domain.WorkflowDef `json:"defs"`
+	}
+
+	// cmdWorkflowRun is the snapshot-safe workflow-run payload. It preserves
+	// ContextFiles, which domain.WorkflowRun hides with json:"-".
+	cmdWorkflowRun struct {
+		Run          domain.WorkflowRun `json:"run"`
+		ContextFiles map[string][]byte  `json:"context_files,omitempty"`
+	}
+
+	cmdDeleteWorkflowRun struct {
+		ID string `json:"id"`
+	}
 )
+
+// cmdWorkflowRunFrom converts a domain.WorkflowRun into its snapshot-safe
+// command form.
+func cmdWorkflowRunFrom(run *domain.WorkflowRun) *cmdWorkflowRun {
+	if run == nil {
+		return nil
+	}
+	cp := *run
+	cp.ContextFiles = nil
+	return &cmdWorkflowRun{Run: cp, ContextFiles: run.ContextFiles}
+}
+
+// toDomain converts a command workflow-run payload back into a
+// domain.WorkflowRun.
+func (c *cmdWorkflowRun) toDomain() *domain.WorkflowRun {
+	if c == nil {
+		return nil
+	}
+	cp := c.Run
+	cp.ContextFiles = c.ContextFiles
+	return &cp
+}
 
 // cmdSecretFrom converts a domain.Secret into its snapshot-safe command form.
 func cmdSecretFrom(s *domain.Secret) *cmdSecret {
@@ -465,6 +530,12 @@ type fsmState struct {
 	secrets      map[string]*domain.Secret // key = scope|scopeID|name
 	forgeSources map[string]*domain.ForgeSource
 
+	environments     map[string]*domain.Environment // key = orgID/name
+	checkRuns        map[string]*domain.CheckRunRecord
+	workflowDefs     map[string]*domain.WorkflowDef // key = orgID/projectID/wfName
+	workflowRuns     map[string]*domain.WorkflowRun
+	workflowCounters map[string]int64 // key = orgID/projectID/wfName
+
 	traces map[string]*domain.TraceMeta
 
 	meta map[string]string
@@ -494,6 +565,11 @@ func newState() *fsmState {
 		orgMembersByUser:  make(map[string]map[string]struct{}),
 		secrets:           make(map[string]*domain.Secret),
 		forgeSources:      make(map[string]*domain.ForgeSource),
+		environments:      make(map[string]*domain.Environment),
+		checkRuns:         make(map[string]*domain.CheckRunRecord),
+		workflowDefs:      make(map[string]*domain.WorkflowDef),
+		workflowRuns:      make(map[string]*domain.WorkflowRun),
+		workflowCounters:  make(map[string]int64),
 		traces:            make(map[string]*domain.TraceMeta),
 		meta:              make(map[string]string),
 	}
@@ -672,6 +748,45 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 	case kindDeleteForgeSource:
 		return nil, applyPayload(cmd, "delete forge source", func(p cmdForgeSource) error {
 			delete(s.forgeSources, p.ID)
+			return nil
+		}), true
+	case kindUpsertEnvironment:
+		return nil, applyPayload(cmd, "environment", func(p cmdEnvironment) error {
+			return s.upsertEnvironment(&p.Environment)
+		}), true
+	case kindDeleteEnvironment:
+		return nil, applyPayload(cmd, "delete environment", func(p cmdDeleteEnvironment) error {
+			delete(s.environments, environmentKey(p.OrgID, p.Name))
+			return nil
+		}), true
+	case kindUpsertCheckRun:
+		return nil, applyPayload(cmd, "check run", func(p cmdCheckRun) error {
+			return s.upsertCheckRun(&p.Record)
+		}), true
+	case kindDeleteCheckRun:
+		return nil, applyPayload(cmd, "delete check run", func(p cmdDeleteCheckRun) error {
+			delete(s.checkRuns, p.ID)
+			return nil
+		}), true
+	case kindSyncProjectWorkflowDefs:
+		return nil, applyPayload(cmd, "sync workflow defs", func(p cmdSyncProjectWorkflowDefs) error {
+			return s.syncProjectWorkflowDefs(p.OrgID, p.ProjectID, p.Defs)
+		}), true
+	case kindCreateWorkflowRun:
+		var out *domain.WorkflowRun
+		err := applyPayload(cmd, "create workflow run", func(p cmdWorkflowRun) error {
+			run, err := s.createWorkflowRun(p.toDomain())
+			out = run
+			return err
+		})
+		return out, err, true
+	case kindUpsertWorkflowRun:
+		return nil, applyPayload(cmd, "workflow run", func(p cmdWorkflowRun) error {
+			return s.upsertWorkflowRun(p.toDomain())
+		}), true
+	case kindDeleteWorkflowRun:
+		return nil, applyPayload(cmd, "delete workflow run", func(p cmdDeleteWorkflowRun) error {
+			delete(s.workflowRuns, p.ID)
 			return nil
 		}), true
 	case kindUpsertGroup:
@@ -965,6 +1080,134 @@ func (s *fsmState) upsertForgeSource(src *domain.ForgeSource) error {
 	cp := *src
 	s.forgeSources[src.ID] = &cp
 	return nil
+}
+
+func environmentKey(orgID, name string) string {
+	return fmt.Sprintf("%s/%s", orgID, name)
+}
+
+// workflowSlug normalizes a workflow name for use in a run ID.
+func workflowSlug(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	lastDash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastDash = false
+			continue
+		}
+		if !lastDash && b.Len() > 0 {
+			b.WriteByte('-')
+			lastDash = true
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
+}
+
+func workflowDefKey(orgID, projectID, name string) string {
+	return fmt.Sprintf("%s/%s/%s", orgID, projectID, name)
+}
+
+func workflowCounterKey(orgID, projectID, name string) string {
+	return fmt.Sprintf("%s/%s/%s", orgID, projectID, name)
+}
+
+// upsertEnvironment stores a protected environment.
+func (s *fsmState) upsertEnvironment(env *domain.Environment) error {
+	if env == nil || env.OrgID == "" || env.Name == "" {
+		return fmt.Errorf("environment: %w", domain.ErrValidation)
+	}
+	cp := *env
+	cp.ApproverGroupIDs = append([]string(nil), env.ApproverGroupIDs...)
+	s.environments[environmentKey(env.OrgID, env.Name)] = &cp
+	return nil
+}
+
+// upsertCheckRun stores a Cloud Checks run record.
+func (s *fsmState) upsertCheckRun(rec *domain.CheckRunRecord) error {
+	if rec == nil || rec.ID == "" {
+		return fmt.Errorf("check run: %w", domain.ErrValidation)
+	}
+	cp := *rec
+	cp.Checks = append([]domain.CheckItem(nil), rec.Checks...)
+	cp.WorkflowFiles = copyStringMap(rec.WorkflowFiles)
+	cp.ContextFiles = copyBytesMap(rec.ContextFiles)
+	cp.ApprovedAt = copyTime(rec.ApprovedAt)
+	s.checkRuns[rec.ID] = &cp
+	return nil
+}
+
+// syncProjectWorkflowDefs replaces the indexed catalog for one project.
+func (s *fsmState) syncProjectWorkflowDefs(orgID, projectID string, defs []*domain.WorkflowDef) error {
+	prefix := fmt.Sprintf("%s/%s/", orgID, projectID)
+	for key := range s.workflowDefs {
+		if strings.HasPrefix(key, prefix) {
+			delete(s.workflowDefs, key)
+		}
+	}
+	for _, def := range defs {
+		if def == nil || def.Workflow.Name == "" {
+			continue
+		}
+		cp := *def
+		cp.ContextFiles = copyBytesMap(def.ContextFiles)
+		s.workflowDefs[workflowDefKey(orgID, projectID, def.Workflow.Name)] = &cp
+	}
+	return nil
+}
+
+// createWorkflowRun atomically assigns a monotonic run number and ID.
+func (s *fsmState) createWorkflowRun(run *domain.WorkflowRun) (*domain.WorkflowRun, error) {
+	if run == nil || run.OrgID == "" || run.ProjectID == "" || run.Workflow == "" {
+		return nil, fmt.Errorf("workflow run: %w", domain.ErrValidation)
+	}
+	key := workflowCounterKey(run.OrgID, run.ProjectID, run.Workflow)
+	s.workflowCounters[key]++
+	n := s.workflowCounters[key]
+	run.Number = n
+	if run.ID == "" {
+		run.ID = fmt.Sprintf("%s-%s-%d", run.ProjectID, workflowSlug(run.Workflow), n)
+	}
+	cp := *run
+	cp.ContextFiles = copyBytesMap(run.ContextFiles)
+	s.workflowRuns[run.ID] = &cp
+	out := cp
+	out.ContextFiles = copyBytesMap(run.ContextFiles)
+	return &out, nil
+}
+
+// upsertWorkflowRun stores a workflow run without touching the counter.
+func (s *fsmState) upsertWorkflowRun(run *domain.WorkflowRun) error {
+	if run == nil || run.ID == "" {
+		return fmt.Errorf("workflow run: %w", domain.ErrValidation)
+	}
+	cp := *run
+	cp.ContextFiles = copyBytesMap(run.ContextFiles)
+	s.workflowRuns[run.ID] = &cp
+	return nil
+}
+
+func copyStringMap(in map[string]string) map[string]string {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]string, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func copyBytesMap(in map[string][]byte) map[string][]byte {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string][]byte, len(in))
+	for k, v := range in {
+		out[k] = append([]byte(nil), v...)
+	}
+	return out
 }
 
 // storeOrg stores a deep copy of o and refreshes the name index.

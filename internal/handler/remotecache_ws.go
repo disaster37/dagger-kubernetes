@@ -2,6 +2,7 @@ package handler
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strings"
@@ -31,15 +32,17 @@ func (s *Server) handleRemoteCacheWS(ctx context.Context, c *app.RequestContext)
 		return
 	}
 	namespace := s.remoteCacheNamespace(c, id)
+	bearer := s.bearerFromRequest(c)
+	readOnly := string(c.Request.Header.Peek("X-Dagger-Cache-Mode")) == "read-only"
 	upgrader := websocket.HertzUpgrader{CheckOrigin: func(*app.RequestContext) bool { return true }}
 	if err := upgrader.Upgrade(c, func(conn *websocket.Conn) {
-		s.serveRemoteCacheConn(ctx, conn, namespace)
+		s.serveRemoteCacheConn(ctx, conn, namespace, bearer, readOnly)
 	}); err != nil {
 		s.logger.WithError(err).Debug("remote cache websocket upgrade failed")
 	}
 }
 
-func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn, namespace string) {
+func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn, namespace, bearer string, readOnly bool) {
 	defer func() { _ = conn.Close() }()
 	conn.SetReadLimit(remoteCacheMaxMessageBytes)
 	_ = conn.SetReadDeadline(time.Now().Add(3 * remoteCachePingInterval))
@@ -56,6 +59,15 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 			case <-stopPing:
 				return
 			case <-ticker.C:
+				if bearer != "" {
+					if _, err := s.auth.Resolve(ctx, bearer); err != nil {
+						if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) {
+							_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(remoteCacheCloseRevoked, "token revoked"), time.Now().Add(5*time.Second))
+							_ = conn.Close()
+							return
+						}
+					}
+				}
 				_ = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
 			}
 		}
@@ -65,7 +77,7 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 		if err != nil {
 			return
 		}
-		resp, err := s.remoteCache.Handle(ctx, namespace, msg)
+		resp, err := s.remoteCache.Handle(ctx, namespace, readOnly, msg)
 		if err != nil {
 			_ = conn.WriteMessage(mt, []byte(fmt.Sprintf(`{"type":"error","data":{"message":%q}}`, err.Error())))
 			continue

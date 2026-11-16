@@ -3,6 +3,7 @@ package repository
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,20 +20,18 @@ import (
 )
 
 // WorkflowExprEvaluator evaluates ${{ ... }} expressions with a sandboxed
-// file() reader jailed under root.
-type WorkflowExprEvaluator struct {
-	root string
-}
+// file() reader jailed under an explicit repository root.
+type WorkflowExprEvaluator struct{}
 
 var _ domain.WorkflowExprEvaluator = (*WorkflowExprEvaluator)(nil)
 
-// NewWorkflowExprEvaluator returns an evaluator jailed under root.
-func NewWorkflowExprEvaluator(root string) *WorkflowExprEvaluator {
-	return &WorkflowExprEvaluator{root: root}
+// NewWorkflowExprEvaluator returns an evaluator with no stored CWD path.
+func NewWorkflowExprEvaluator() *WorkflowExprEvaluator {
+	return &WorkflowExprEvaluator{}
 }
 
-// Eval compiles and evaluates expr with env plus the built-in helpers.
-func (e *WorkflowExprEvaluator) Eval(expression string, env map[string]any) (any, error) {
+// Eval compiles and evaluates expression with env plus the built-in helpers.
+func (e *WorkflowExprEvaluator) Eval(expression string, env map[string]any, repoRoot string) (any, error) {
 	expression = strings.TrimSpace(expression)
 	expression = strings.TrimPrefix(expression, "${{")
 	expression = strings.TrimSuffix(expression, "}}")
@@ -41,15 +40,17 @@ func (e *WorkflowExprEvaluator) Eval(expression string, env map[string]any) (any
 	for k, v := range env {
 		scope[k] = v
 	}
-	scope["file"] = e.file
+	scope["file"] = func(args ...string) (any, error) {
+		return e.file(repoRoot, args...)
+	}
 	scope["semver_parse"] = semverParse
 	scope["semver_bump"] = semverBump
 	scope["semver_with_prerelease"] = semverWithPrerelease
 	scope["semver_with_build"] = semverWithBuild
 	scope["slug"] = slug
 	scope["coalesce"] = coalesce
-	scope["next_semver"] = func(filePath, dotPath, bump string, releaseOnDefault bool) (string, error) {
-		return e.nextSemver(env, filePath, dotPath, bump, releaseOnDefault)
+	scope["next_semver"] = func(filePath string, rest ...any) (string, error) {
+		return e.nextSemver(env, repoRoot, filePath, rest...)
 	}
 	program, err := expr.Compile(expression, expr.Env(scope), expr.AllowUndefinedVariables())
 	if err != nil {
@@ -62,9 +63,21 @@ func (e *WorkflowExprEvaluator) Eval(expression string, env map[string]any) (any
 	return out, nil
 }
 
-// file reads a structured file under root and queries an optional dotted path.
-func (e *WorkflowExprEvaluator) file(path, dotPath string) (any, error) {
-	root, err := os.OpenRoot(e.root)
+// file reads a structured file under repoRoot and queries an optional dotted
+// path. A one-argument call returns the trimmed plain text.
+func (e *WorkflowExprEvaluator) file(repoRoot string, args ...string) (any, error) {
+	if len(args) == 0 || strings.TrimSpace(args[0]) == "" {
+		return nil, fmt.Errorf("workflow file() requires a path")
+	}
+	path := args[0]
+	dotPath := ""
+	if len(args) > 1 {
+		dotPath = args[1]
+	}
+	if strings.TrimSpace(repoRoot) == "" || filepath.Clean(repoRoot) == "." {
+		return nil, fmt.Errorf("workflow file() requires an explicit repository root")
+	}
+	root, err := os.OpenRoot(repoRoot)
 	if err != nil {
 		return nil, fmt.Errorf("open workflow root: %w", err)
 	}
@@ -74,24 +87,19 @@ func (e *WorkflowExprEvaluator) file(path, dotPath string) (any, error) {
 		return nil, fmt.Errorf("open workflow file %s: %w", path, err)
 	}
 	defer func() { _ = f.Close() }()
-	data := make([]byte, 0, 4096)
-	buf := make([]byte, 4096)
-	for {
-		n, err := f.Read(buf)
-		data = append(data, buf[:n]...)
-		if len(data) > 1<<20 {
-			return nil, fmt.Errorf("workflow file %s exceeds 1 MiB", path)
-		}
-		if err != nil {
-			break
-		}
+	data, err := io.ReadAll(io.LimitReader(f, 1<<20+1))
+	if err != nil {
+		return nil, fmt.Errorf("read workflow file %s: %w", path, err)
+	}
+	if len(data) > 1<<20 {
+		return nil, fmt.Errorf("workflow file %s exceeds 1 MiB", path)
+	}
+	if dotPath == "" {
+		return strings.TrimSpace(string(data)), nil
 	}
 	normalized, err := normalizeStructured(path, data)
 	if err != nil {
 		return nil, err
-	}
-	if dotPath == "" {
-		return strings.TrimSpace(string(data)), nil
 	}
 	res := gjson.GetBytes(normalized, dotPath)
 	if !res.Exists() {
@@ -100,11 +108,16 @@ func (e *WorkflowExprEvaluator) file(path, dotPath string) (any, error) {
 	return res.Value(), nil
 }
 
-// normalizeStructured converts YAML/TOML/INI/dotenv into JSON for gjson.
+// normalizeStructured converts YAML/JSON/TOML/INI/dotenv into JSON for gjson.
 func normalizeStructured(path string, data []byte) ([]byte, error) {
 	ext := strings.ToLower(filepath.Ext(path))
 	var v any
 	switch ext {
+	case ".json":
+		if !json.Valid(data) {
+			return nil, fmt.Errorf("parse json: invalid json")
+		}
+		return data, nil
 	case ".yaml", ".yml":
 		if err := yaml.Unmarshal(data, &v); err != nil {
 			return nil, fmt.Errorf("parse yaml: %w", err)
@@ -218,8 +231,26 @@ func coalesce(values ...any) any {
 
 // nextSemver computes the next version for a workflow run using the git
 // context (tag/PR/default branch/branch) and the run number.
-func (e *WorkflowExprEvaluator) nextSemver(env map[string]any, filePath, dotPath, bump string, releaseOnDefault bool) (string, error) {
-	raw, err := e.file(filePath, dotPath)
+func (e *WorkflowExprEvaluator) nextSemver(env map[string]any, repoRoot, filePath string, rest ...any) (string, error) {
+	dotPath := ""
+	bump := "patch"
+	releaseOnDefault := false
+	if len(rest) > 0 {
+		if s, ok := rest[0].(string); ok {
+			dotPath = s
+		}
+	}
+	if len(rest) > 1 {
+		if s, ok := rest[1].(string); ok && s != "" {
+			bump = s
+		}
+	}
+	if len(rest) > 2 {
+		if b, ok := rest[2].(bool); ok {
+			releaseOnDefault = b
+		}
+	}
+	raw, err := e.file(repoRoot, filePath, dotPath)
 	if err != nil {
 		return "", err
 	}
@@ -230,7 +261,7 @@ func (e *WorkflowExprEvaluator) nextSemver(env map[string]any, filePath, dotPath
 	git, _ := env["git"].(map[string]any)
 	run, _ := env["run"].(map[string]any)
 	runNumber := fmt.Sprintf("%v", run["number"])
-	if truthy(git["is_tag"]) {
+	if truthy(git["is_tag"]) || truthy(git["is_release"]) {
 		if tag, ok := git["tag_version"].(string); ok && tag != "" {
 			return tag, nil
 		}

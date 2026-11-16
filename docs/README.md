@@ -951,26 +951,47 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   (`POST /oauth/device/code`, `/api/v1/auth/device/approve`, `/oauth/token`).
   CI can exchange GitHub/GitLab OIDC ID tokens at `POST /v1/oidc`.
 - **Cloud GraphQL.** `POST /query` serves the Cloud-compatible schema
-  (`user`, `org`, `trace`, cursor-paginated traces).
+  (`user`, `org`, `trace`, cursor-paginated traces, per-org checks). Query
+  complexity is bounded by `graphql.max_depth`, `graphql.max_selections`,
+  `graphql.max_query_bytes`, and `graphql.max_parallelism`; introspection is
+  disabled unless `graphql.introspection_enabled: true`.
 - **OTLP read-back.** `GET /v1/{traces,logs,metrics}/:traceID` streams framed
   binary `application/vnd.dagger.otlp.stream` data for `dagger trace` and
   `dagger agent -r`.
 - **Remote cache.** `GET /v1/engine` is a read-through cache WebSocket backed
-  by S3 presigned URLs and a rebuildable `bbolt` index. Enable with
-  `cache.remote.enabled`; stats/purge live at `/api/v1/remote-cache`.
+  by S3 presigned URLs and a rebuildable `bbolt` index. Small blobs are packed
+  into `dagger-pack v1` objects and served as HTTP `206 Partial Content` via
+  presigned `Range` GET URLs (`cache.remote.pack_max_member_bytes`, default
+  4 MiB). Enable with `cache.remote.enabled`; stats/purge live at
+  `/api/v1/remote-cache`. `cache.remote.workers` bounds concurrent exports and
+  `cache.remote.gc_interval` controls GC + S3 index checkpointing.
 - **Cloud Checks.** Configure a forge under
   `/api/v1/orgs/<org>/integrations`, then webhooks at
-  `/v1/webhooks/<provider>/<sourceID>` dispatch `batch/v1` check Jobs. Fork PRs
-  hold for approval and never receive secrets.
+  `/v1/webhooks/<provider>/<sourceID>` dispatch `batch/v1` check Jobs. The
+  runner receives `DAGGER_CLOUD_TOKEN`/`DAGGER_KUBERNETES_TOKEN` from an
+  ephemeral `check-env-*` Secret (never argv). Fork PRs hold in
+  `waiting_approval` and never receive secrets; an org member may approve a
+  secretless run, while only `org_admin`/global `admin` may opt into
+  `include_secrets`. Crashed/timed-out Jobs are reconciled to `failed` and
+  reported back to the forge.
 - **Workflows.** `.dagger/workflows/*.y{a,}ml` supports `call:` jobs,
-  cross-repo `trigger:` jobs, typed `workflow_dispatch` inputs, schedules,
-  artifacts, and protected environments with human approval. Arbitrary
-  host-shell `run:` steps are intentionally unsupported.
+  cross-repo `trigger:` jobs (`wait` + `timeout`), typed `workflow_dispatch`
+  inputs, `robfig/cron` schedules, `on: artifact` listeners, artifacts, and
+  protected environments with human approval. `Approve` enforces
+  `org_admin`/approver-group RBAC, `prevent_self_approval`, and
+  `approval_timeout`, then resumes the DAG. Arbitrary host-shell `run:` steps
+  are intentionally unsupported.
+- **Environment secrets.** Secrets are scoped `org`, `project`, or
+  `environment` (`<orgID>/<envName>`). Resolution precedence is
+  `org/env > project > org`; environment secrets are only injected into a job
+  after its environment gate is approved. Check runs never receive environment
+  secrets.
 
 New configuration keys: `server.max_data_conns`,
 `server.internal_control_url`, `server.internal_data_host`,
 `otel.max_inflight_bytes`, `cli.include_prereleases`, `fleet.isolation`,
-`cache.remote.*`, `checks.*`, `workflows.*`, `forge.*`,
+`cache.remote.*` (including `pack_max_member_bytes` and `gc_interval`),
+`graphql.*`, `checks.*`, `workflows.*`, `forge.*`,
 `supervisor.cache_scratch.size_limit`, and `supervisor.gomemlimit`. See
 `config/config.app.yaml.sample` for the full reference.
 

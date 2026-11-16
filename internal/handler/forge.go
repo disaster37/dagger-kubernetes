@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"strconv"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -44,7 +45,7 @@ func (s *Server) handleForgeSourcesList(ctx context.Context, c *app.RequestConte
 
 // handleForgeSourceCreate creates a forge integration (admin only).
 func (s *Server) handleForgeSourceCreate(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.forges == nil {
@@ -68,7 +69,7 @@ func (s *Server) handleForgeSourceCreate(ctx context.Context, c *app.RequestCont
 
 // handleForgeSourceDelete deletes a forge integration (admin only).
 func (s *Server) handleForgeSourceDelete(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.forges == nil {
@@ -145,7 +146,7 @@ func (s *Server) handleOrgSecretsList(ctx context.Context, c *app.RequestContext
 
 // handleOrgSecretPut stores an org secret (admin only).
 func (s *Server) handleOrgSecretPut(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.secrets == nil {
@@ -166,7 +167,7 @@ func (s *Server) handleOrgSecretPut(ctx context.Context, c *app.RequestContext) 
 
 // handleOrgSecretDelete deletes an org secret (admin only).
 func (s *Server) handleOrgSecretDelete(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.secrets == nil {
@@ -183,7 +184,7 @@ func (s *Server) handleOrgSecretDelete(ctx context.Context, c *app.RequestContex
 // handleProjectSecretsList lists project secret metadata (admin only, matching
 // the PUT/DELETE endpoints).
 func (s *Server) handleProjectSecretsList(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.secrets == nil {
@@ -200,7 +201,7 @@ func (s *Server) handleProjectSecretsList(ctx context.Context, c *app.RequestCon
 
 // handleProjectSecretPut stores a project secret (admin only).
 func (s *Server) handleProjectSecretPut(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.secrets == nil {
@@ -221,7 +222,7 @@ func (s *Server) handleProjectSecretPut(ctx context.Context, c *app.RequestConte
 
 // handleProjectSecretDelete deletes a project secret (admin only).
 func (s *Server) handleProjectSecretDelete(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.secrets == nil {
@@ -233,4 +234,144 @@ func (s *Server) handleProjectSecretDelete(ctx context.Context, c *app.RequestCo
 		return
 	}
 	c.SetStatusCode(consts.StatusNoContent)
+}
+
+// queryLimit parses the ?limit= query parameter with a 100 default.
+func queryLimit(c *app.RequestContext) int {
+	limit := 100
+	if v := c.Query("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	return limit
+}
+
+// loadCheckRunForCaller loads a check run and enforces org visibility.
+func (s *Server) loadCheckRunForCaller(ctx context.Context, c *app.RequestContext) (*domain.CheckRunRecord, bool) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return nil, false
+	}
+	if s.checks == nil {
+		writeError(c, consts.StatusNotFound, "checks disabled")
+		return nil, false
+	}
+	record, err := s.checks.Get(ctx, c.Param("id"))
+	if err != nil {
+		s.writeServiceError(c, err)
+		return nil, false
+	}
+	if !s.orgAllowed(ctx, id, record.OrgID) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return nil, false
+	}
+	return record, true
+}
+
+// handleOrgChecksList lists Cloud Checks runs for an org (member/admin only).
+func (s *Server) handleOrgChecksList(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.checks == nil {
+		writeJSON(c, []*domain.CheckRunRecord{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	records, err := s.checks.List(ctx, &domain.CheckRunFilter{
+		OrgID: c.Param("org"), Status: c.Query("status"), Repo: c.Query("repo"), Limit: queryLimit(c),
+	})
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, records)
+}
+
+// handleCheckRunGet returns one check run (org member/admin only).
+func (s *Server) handleCheckRunGet(ctx context.Context, c *app.RequestContext) {
+	record, ok := s.loadCheckRunForCaller(ctx, c)
+	if !ok {
+		return
+	}
+	writeJSON(c, record)
+}
+
+type approveCheckRequest struct {
+	IncludeSecrets bool `json:"include_secrets"`
+}
+
+// handleCheckRunApprove releases a fork-PR hold (org member/admin).
+func (s *Server) handleCheckRunApprove(ctx context.Context, c *app.RequestContext) {
+	record, ok := s.loadCheckRunForCaller(ctx, c)
+	if !ok {
+		return
+	}
+	id := identityOf(c)
+	var req approveCheckRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	isOrgAdmin := id.IsAdmin() || (s.orgs != nil && s.orgs.IsOrgAdmin(ctx, record.OrgID, id.UserID))
+	updated, err := s.checks.ApproveForkRun(ctx, record.ID, id.UserID, req.IncludeSecrets, isOrgAdmin)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, updated)
+}
+
+// handleCheckRunRerun re-dispatches a check run (org member/admin).
+func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext) {
+	record, ok := s.loadCheckRunForCaller(ctx, c)
+	if !ok {
+		return
+	}
+	updated, err := s.checks.Rerun(ctx, record.ID)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, updated)
+}
+
+// handleCheckRunLoad records the check-runner load phase.
+func (s *Server) handleCheckRunLoad(ctx context.Context, c *app.RequestContext) {
+	record, ok := s.loadCheckRunForCaller(ctx, c)
+	if !ok {
+		return
+	}
+	var in service.LoadReportInput
+	if !decodeBody(c, &in) {
+		return
+	}
+	updated, err := s.checks.RecordLoad(ctx, record.OrgID, record.ID, in)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, updated)
+}
+
+// handleCheckRunComplete records the check-runner completion phase.
+func (s *Server) handleCheckRunComplete(ctx context.Context, c *app.RequestContext) {
+	record, ok := s.loadCheckRunForCaller(ctx, c)
+	if !ok {
+		return
+	}
+	var in service.CompleteReportInput
+	if !decodeBody(c, &in) {
+		return
+	}
+	updated, err := s.checks.RecordComplete(ctx, record.OrgID, record.ID, in)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, updated)
 }

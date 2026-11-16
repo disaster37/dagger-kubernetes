@@ -22,3 +22,14 @@ Dagger CLI/UI expect a Cloud-compatible GraphQL endpoint.
 ## Consequences
 The CLI can log in interactively and from CI without long-lived secrets, and
 Cloud clients can use the standard GraphQL contract.
+
+## Update — residual-risk remediation (PR #70 review)
+- GraphQL introspection is disabled by default (`graphql.introspection_enabled:
+  false`). Query depth, selection count, byte length, and parallelism are
+  bounded by `graphql.max_depth` (15), `graphql.max_selections` (250),
+  `graphql.max_query_bytes` (65536), and `graphql.max_parallelism` (10).
+- `org.traces(first:, after:)` clamps `first` to `[1, MaxTraceLimit]` and
+  implements cursor pagination (`pageInfo { hasNextPage endCursor }`).
+- `Org.checks(first:)` exposes Cloud Checks for CLI/UI parity.
+- `OrgService.EnsureToken` reuses a recoverable `dag_<org>_` token so OIDC
+  exchanges and supervisor restarts never invalidate in-flight runs.

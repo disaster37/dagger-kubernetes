@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"regexp"
 	"strings"
@@ -197,6 +198,23 @@ func (s *OrgService) GenerateToken(ctx context.Context, orgID string) (string, *
 		return "", nil, fmt.Errorf("%w: token service unavailable", domain.ErrValidation)
 	}
 	return s.tokens.GenerateFor(ctx, orgTokenSubject(o.ID), fmt.Sprintf("dag_%s_", o.Name))
+}
+
+// EnsureToken returns the existing org token plaintext when recoverable, or
+// generates a new one. It never invalidates an in-flight dag_<org>_ run.
+func (s *OrgService) EnsureToken(ctx context.Context, orgID string) (string, error) {
+	if s.tokens == nil {
+		return "", fmt.Errorf("%w: token service unavailable", domain.ErrValidation)
+	}
+	pt, err := s.tokens.Reveal(ctx, orgTokenSubject(orgID))
+	if err == nil {
+		return pt, nil
+	}
+	if !errors.Is(err, domain.ErrNotFound) && !errors.Is(err, domain.ErrTokenNotRecoverable) {
+		return "", err
+	}
+	pt, _, err = s.GenerateToken(ctx, orgID)
+	return pt, err
 }
 
 // TokenMeta returns the masked org token metadata.

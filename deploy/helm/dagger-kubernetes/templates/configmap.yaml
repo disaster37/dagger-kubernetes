@@ -129,6 +129,8 @@ data:
         ttl: {{ .Values.supervisor.config.cache.remote.ttl | quote }}
         max_bytes: {{ .Values.supervisor.config.cache.remote.maxBytes | int64 }}
         workers: {{ .Values.supervisor.config.cache.remote.workers }}
+        pack_max_member_bytes: {{ .Values.supervisor.config.cache.remote.packMaxMemberBytes | int64 }}
+        gc_interval: {{ .Values.supervisor.config.cache.remote.gcInterval | quote }}
 {{- if .Values.imageCache.enabled }}
     image_cache:
       # external_addr (ADR-046): node-reachable mirror ingress host; routes the
@@ -250,6 +252,12 @@ data:
       gitlab_api_url: {{ .Values.supervisor.config.forge.gitlabApiUrl | quote }}
       gitea_api_url: {{ .Values.supervisor.config.forge.giteaApiUrl | quote }}
       webhook_secret: ""
+    graphql:
+      introspection_enabled: {{ .Values.supervisor.config.graphql.introspectionEnabled }}
+      max_depth: {{ .Values.supervisor.config.graphql.maxDepth }}
+      max_selections: {{ .Values.supervisor.config.graphql.maxSelections }}
+      max_query_bytes: {{ .Values.supervisor.config.graphql.maxQueryBytes }}
+      max_parallelism: {{ .Values.supervisor.config.graphql.maxParallelism }}
 {{- with .Values.supervisor.config.pipeline }}
     pipeline:
       metrics:

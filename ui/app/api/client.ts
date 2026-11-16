@@ -3,6 +3,7 @@ import { installAuthInterceptors, type AuthRecoveryMode, type AuthRequestConfig 
 import { useAuthStore } from '~/stores/auth'
 import type {
   AuthUser,
+  CheckRunRecord,
   ConnectEnvSnapshot,
   EngineCachePurgeResult,
   FleetInfo,
@@ -16,10 +17,17 @@ import type {
   ImageCachePruneAllResult,
   ImageCachePruneRef,
   ImageCachePruneResult,
+  ForgeSource,
   LogSearchPage,
   LogSearchRequest,
+  Org,
+  OrgMember,
+  OrgTokenMeta,
   PlatformStatus,
   Project,
+  ProtectedEnvironment,
+  RemoteCacheStats,
+  SecretMeta,
   Providers,
   TokenMeta,
   TraceDetail,
@@ -28,6 +36,8 @@ import type {
   TraceMetrics,
   TraceRow,
   UserRow,
+  WorkflowDef,
+  WorkflowRun,
 } from '~/api/types'
 
 const api = axios.create({
@@ -265,4 +275,149 @@ export function connectLiveTrace(id: string): EventSource {
 // cookie; the supervisor also accepts ?token= via query fallback).
 export function connectLivePipelines(): EventSource {
   return new EventSource('/api/v1/traces/live')
+}
+
+// --- Cloud parity: orgs, environments, secrets, integrations ---
+export async function listOrgs(): Promise<Org[]> {
+  const { data } = await api.get('/api/v1/orgs')
+  return data
+}
+export async function createOrg(payload: { name: string; display_name?: string }): Promise<Org> {
+  const { data } = await api.post('/api/v1/orgs', payload)
+  return data
+}
+export async function listOrgMembers(org: string): Promise<OrgMember[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/members`)
+  return data
+}
+export async function setOrgMember(org: string, userId: string, role: string): Promise<void> {
+  await api.put(`/api/v1/orgs/${org}/members`, { user_id: userId, role })
+}
+export async function removeOrgMember(org: string, userId: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/members/${userId}`)
+}
+export async function getOrgToken(org: string): Promise<OrgTokenMeta> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/token`)
+  return data
+}
+export async function generateOrgToken(org: string): Promise<{ token: string; meta: TokenMeta }> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/token`)
+  return data
+}
+export async function revokeOrgToken(org: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/token`)
+}
+export async function listOrgSecrets(org: string): Promise<SecretMeta[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/secrets`)
+  return data
+}
+export async function putOrgSecret(org: string, name: string, value: string): Promise<SecretMeta> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/secrets`, { name, value })
+  return data
+}
+export async function deleteOrgSecret(org: string, name: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/secrets/${name}`)
+}
+export async function listProjectSecrets(projectId: string): Promise<SecretMeta[]> {
+  const { data } = await api.get(`/api/v1/projects/${projectId}/secrets`)
+  return data
+}
+export async function putProjectSecret(projectId: string, name: string, value: string): Promise<SecretMeta> {
+  const { data } = await api.put(`/api/v1/projects/${projectId}/secrets`, { name, value })
+  return data
+}
+export async function deleteProjectSecret(projectId: string, name: string): Promise<void> {
+  await api.delete(`/api/v1/projects/${projectId}/secrets/${name}`)
+}
+export async function listEnvironments(org: string): Promise<ProtectedEnvironment[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/environments`)
+  return data
+}
+export async function putEnvironment(org: string, env: string, payload: { approver_group_ids: string[]; prevent_self_approval: boolean; approval_timeout: string }): Promise<ProtectedEnvironment> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/environments/${env}`, payload)
+  return data
+}
+export async function deleteEnvironment(org: string, env: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/environments/${env}`)
+}
+export async function listEnvSecrets(org: string, env: string): Promise<SecretMeta[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/environments/${env}/secrets`)
+  return data
+}
+export async function putEnvSecret(org: string, env: string, name: string, value: string): Promise<SecretMeta> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/environments/${env}/secrets`, { name, value })
+  return data
+}
+export async function deleteEnvSecret(org: string, env: string, name: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/environments/${env}/secrets/${name}`)
+}
+export async function listForgeSources(org: string): Promise<ForgeSource[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/integrations`)
+  return data
+}
+export async function createForgeSource(org: string, payload: Record<string, unknown>): Promise<ForgeSource> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/integrations`, payload)
+  return data
+}
+export async function deleteForgeSource(org: string, sourceId: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/integrations/${sourceId}`)
+}
+
+// --- Cloud Checks ---
+export async function listOrgChecks(org: string, params: { status?: string; repo?: string; limit?: number } = {}): Promise<CheckRunRecord[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/checks`, { params })
+  return data
+}
+export async function approveForkCheckRun(id: string, includeSecrets = false): Promise<CheckRunRecord> {
+  const { data } = await api.post(`/api/v1/checks/runs/${id}/approve`, { include_secrets: includeSecrets })
+  return data
+}
+export async function rerunCheckRun(id: string): Promise<CheckRunRecord> {
+  const { data } = await api.post(`/api/v1/checks/runs/${id}/rerun`)
+  return data
+}
+
+// --- Workflows ---
+export async function listOrgWorkflows(org: string, project?: string): Promise<WorkflowDef[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/workflows`, { params: { project } })
+  return data
+}
+export async function dispatchWorkflow(org: string, payload: { project_id: string; workflow: string; ref?: string; inputs?: Record<string, unknown> }): Promise<WorkflowRun> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/workflows/dispatch`, payload)
+  return data
+}
+export async function listOrgWorkflowRuns(org: string, params: { project?: string; status?: string; limit?: number } = {}): Promise<WorkflowRun[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/workflows/runs`, { params })
+  return data
+}
+export async function getWorkflowRun(runId: string): Promise<WorkflowRun> {
+  const { data } = await api.get(`/api/v1/workflows/runs/${runId}`)
+  return data
+}
+export async function approveWorkflowJob(runId: string, job: string): Promise<WorkflowRun> {
+  const { data } = await api.post(`/api/v1/workflows/runs/${runId}/approve/${job}`)
+  return data
+}
+export async function rejectWorkflowJob(runId: string, job: string, reason = ''): Promise<WorkflowRun> {
+  const { data } = await api.post(`/api/v1/workflows/runs/${runId}/reject/${job}`, { reason })
+  return data
+}
+
+// --- Artifacts ---
+export async function listArtifacts(params: { org: string; project?: string; run?: string }): Promise<string[]> {
+  const { data } = await api.get('/api/v1/artifacts', { params })
+  return data
+}
+export async function downloadArtifactBlob(key: string): Promise<Blob> {
+  const { data } = await api.get('/api/v1/artifacts/download', { params: { key }, responseType: 'blob' })
+  return data
+}
+
+// --- Remote cache ---
+export async function fetchRemoteCacheStats(namespace?: string): Promise<RemoteCacheStats> {
+  const { data } = await api.get('/api/v1/remote-cache', { params: { namespace } })
+  return data
+}
+export async function purgeRemoteCache(namespace: string): Promise<void> {
+  await api.post('/api/v1/remote-cache/purge', null, { params: { namespace } })
 }

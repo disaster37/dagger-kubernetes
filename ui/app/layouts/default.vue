@@ -67,6 +67,11 @@ const navItems = computed(() => {
   const items: { label: string; to: string }[] = [
     { label: 'Pipelines', to: '/pipelines' },
     { label: 'History', to: '/history' },
+    { label: 'Organizations', to: '/orgs' },
+    { label: 'Checks', to: '/checks' },
+    { label: 'Workflows', to: '/workflows' },
+    { label: 'Artifacts', to: '/artifacts' },
+    { label: 'Remote cache', to: '/remote-cache' },
   ]
   if (auth.isAdmin) items.push({ label: 'Image cache', to: '/image-cache' })
   items.push(

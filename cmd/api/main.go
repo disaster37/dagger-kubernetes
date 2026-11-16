@@ -223,7 +223,8 @@ func run(c *cli.Context) error {
 	orgRepo := repository.NewOrgRepo(raftStore)
 	tokenRepo := repository.NewTokenRepo(raftStore)
 	traceMetaRepo := repository.NewTraceMetaRepo(raftStore)
-	cloudGraphQL := repository.NewCloudGraphQL(userRepo, orgRepo, traceMetaRepo)
+	checkRunRepo := repository.NewCheckRunRepo(raftStore)
+	cloudGraphQL := repository.NewCloudGraphQL(userRepo, orgRepo, traceMetaRepo, checkRunRepo, cfg.GraphQL)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -249,10 +250,8 @@ func run(c *cli.Context) error {
 	forgeSvc := service.NewForgeService(forgeSourceRepo, secretSvc, forgeProviders, cfg.Server.PublicURL, logger)
 	var checkRunner domain.CheckJobRunner
 	if clientset != nil {
-		checkRunner = repository.NewK8sJobRunner(clientset, cfg.Checks.Namespace, cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.CA.MintingCASecret)
+		checkRunner = repository.NewK8sJobRunner(clientset, cfg.Checks.Namespace, cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret)
 	}
-	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, forgeProviders, logger)
-
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
 	if cfg.Auth.Internal.Enabled && cfg.Auth.Internal.TokensFile != "" {
@@ -434,10 +433,10 @@ func run(c *cli.Context) error {
 		if err != nil {
 			return fmt.Errorf("create remote cache store: %w", err)
 		}
-		remoteCacheSvc = service.NewRemoteCacheService(index, store, cfg.Cache.Remote.TTL, cfg.Cache.Remote.MaxBytes, metrics, logger)
+		remoteCacheSvc = service.NewRemoteCacheService(index, store, cfg.Cache.Remote.TTL, cfg.Cache.Remote.MaxBytes, cfg.Cache.Remote.Workers, cfg.Cache.Remote.PackMaxMemberBytes, cfg.Cache.Remote.GCInterval, metrics, logger)
 		wsDialer = repository.NewGorillaWSLeaderDialer(dynamicCA.ForwardTLSProvider())
 		if kp, ok := provider.(*repository.K8sProvider); ok {
-			token, _, err := orgsSvc.GenerateToken(ctx, domain.DefaultOrgID)
+			token, err := orgsSvc.EnsureToken(ctx, domain.DefaultOrgID)
 			if err != nil {
 				logger.WithError(err).Warn("remote cache: could not mint engine token")
 			} else {
@@ -451,9 +450,18 @@ func run(c *cli.Context) error {
 	}
 	var workflowRunner domain.WorkflowJobRunner
 	if clientset != nil {
-		workflowRunner = repository.NewK8sWorkflowRunner(clientset, cfg.Workflows.Namespace, cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL)
+		workflowRunner = repository.NewK8sWorkflowRunner(clientset, cfg.Workflows.Namespace, cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL, cfg.CA.MintingCASecret)
 	}
-	workflowSvc := service.NewWorkflowService(repository.NewWorkflowFileParser(), repository.NewWorkflowExprEvaluator("."), artifactStore, workflowRunner, secretSvc, logger)
+	envRepo := repository.NewEnvironmentRepo(raftStore)
+	workflowRepo := repository.NewWorkflowRepo(raftStore)
+	workflowSvc := service.NewWorkflowService(
+		workflowRepo, envRepo, orgsSvc, projectsSvc, forgeSourceRepo,
+		repository.NewWorkflowFileParser(), repository.NewWorkflowExprEvaluator(),
+		artifactStore, workflowRunner, secretSvc,
+		service.WorkflowServiceConfig{DefaultTimeout: cfg.Workflows.DefaultTimeout, MaxParallel: cfg.Workflows.MaxParallel},
+		logger,
+	)
+	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, logger)
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
 	historyPurgeSvc.SetOTLPArchive(otlpArchive)
 	statusSvc := service.NewStatusService(cfg, fleetManager, logger, raftStore)
@@ -525,22 +533,26 @@ func run(c *cli.Context) error {
 	}
 
 	server := handler.NewServer(&handler.ServerConfig{
-		ControlAddr:          cfg.Server.ControlAddr,
-		DataAddr:             cfg.Server.DataAddr,
-		DataHost:             cfg.Server.DataHost,
-		CollectorURL:         cfg.Telemetry.CollectorURL,
-		VictoriaURL:          cfg.Telemetry.VictoriaURL,
-		CertPath:             controlTLSCertPath,
-		KeyPath:              controlTLSKeyPath,
-		PipelineURL:          cfg.Server.PublicURL,
-		OTelMaxBodyBytes:     cfg.OTel.IngestMaxBodySize,
-		OTelMaxInflightBytes: cfg.OTel.MaxInflightBytes,
-		MaxDataConns:         cfg.Server.MaxDataConns,
-		InternalTLSCert:      &internalTLS,
-		ControlTLSProvider:   controlTLSProvider,
-		DataTLSProvider:      dataTLSProvider,
-		InternalTLSProvider:  dynamicCA.InternalTLSProvider(),
-		ForwardTLSProvider:   dynamicCA.ForwardTLSProvider(),
+		ControlAddr:           cfg.Server.ControlAddr,
+		DataAddr:              cfg.Server.DataAddr,
+		DataHost:              cfg.Server.DataHost,
+		CollectorURL:          cfg.Telemetry.CollectorURL,
+		VictoriaURL:           cfg.Telemetry.VictoriaURL,
+		CertPath:              controlTLSCertPath,
+		KeyPath:               controlTLSKeyPath,
+		PipelineURL:           cfg.Server.PublicURL,
+		OTelMaxBodyBytes:      cfg.OTel.IngestMaxBodySize,
+		OTelMaxInflightBytes:  cfg.OTel.MaxInflightBytes,
+		MaxDataConns:          cfg.Server.MaxDataConns,
+		CLIIncludePrereleases: cfg.CLI.IncludePrereleases,
+		InternalControlURL:    cfg.Server.InternalControlURL,
+		InternalDataHost:      cfg.Server.InternalDataHost,
+		FleetIsolation:        cfg.Fleet.Isolation,
+		InternalTLSCert:       &internalTLS,
+		ControlTLSProvider:    controlTLSProvider,
+		DataTLSProvider:       dataTLSProvider,
+		InternalTLSProvider:   dynamicCA.InternalTLSProvider(),
+		ForwardTLSProvider:    dynamicCA.ForwardTLSProvider(),
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -566,6 +578,7 @@ func run(c *cli.Context) error {
 		Checks:               checksSvc,
 		Forge:                forgeSvc,
 		Secrets:              secretSvc,
+		Environments:         service.NewEnvironmentService(envRepo, logger),
 		Workflows:            workflowSvc,
 		Artifacts:            artifactStore,
 		WSLeaderDialer:       wsDialer,
@@ -605,6 +618,11 @@ func run(c *cli.Context) error {
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
 	go otlpStreamSvc.Start(ctx)
+	go checksSvc.StartReconciler(ctx, raftStore.IsLeader)
+	if remoteCacheSvc != nil {
+		go remoteCacheSvc.Start(ctx, raftStore.IsLeader)
+	}
+	go workflowSvc.StartScheduler(ctx, raftStore.IsLeader)
 
 	stopMetricsRecorder := func() {}
 	if metricsRecorder != nil {

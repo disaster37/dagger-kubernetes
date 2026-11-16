@@ -25,10 +25,31 @@
           />
         </template>
         <template #actions-cell="{ row }">
-          <UButton size="xs" color="error" variant="soft" @click="askDeleteProject(row.original)">Delete</UButton>
+          <div class="flex gap-2">
+            <UButton size="xs" variant="soft" @click="openSecrets(row.original)">Secrets</UButton>
+            <UButton size="xs" color="error" variant="soft" @click="askDeleteProject(row.original)">Delete</UButton>
+          </div>
         </template>
       </UTable>
     </UCard>
+
+    <UModal v-model:open="secretsOpen" :title="`Secrets · ${secretsProject?.name || ''}`">
+      <template #body>
+        <div class="space-y-3">
+          <div class="flex flex-wrap items-end gap-2">
+            <UInput v-model="secretName" placeholder="NAME" />
+            <UInput v-model="secretValue" type="password" placeholder="value" />
+            <UButton size="xs" @click="saveSecret">Save</UButton>
+          </div>
+          <ul class="space-y-1 text-[13px]">
+            <li v-for="s in projectSecrets" :key="s.id" class="flex items-center justify-between">
+              <code>{{ s.name }}</code>
+              <UButton size="xs" color="error" variant="soft" @click="removeSecret(s.name)">Delete</UButton>
+            </li>
+          </ul>
+        </div>
+      </template>
+    </UModal>
 
     <UModal v-model:open="confirmOpen" title="Delete project">
       <template #body>
@@ -45,14 +66,20 @@
 </template>
 
 <script setup lang="ts">
-import { listProjects, createProject as apiCreateProject, updateProject, deleteProject as apiDeleteProject, listGroups } from '~/api/client'
-import type { Project, Group } from '~/api/types'
+import { listProjects, createProject as apiCreateProject, updateProject, deleteProject as apiDeleteProject, listGroups, listProjectSecrets, putProjectSecret, deleteProjectSecret } from '~/api/client'
+import type { Project, Group, SecretMeta } from '~/api/types'
 
 const toast = useToast()
 const projects = ref<Project[]>([])
 const groups = ref<Group[]>([])
 const newProject = ref({ name: '', group_id: '__unassigned__' })
 const createError = ref('')
+
+const secretsOpen = ref(false)
+const secretsProject = ref<Project | null>(null)
+const projectSecrets = ref<SecretMeta[]>([])
+const secretName = ref('')
+const secretValue = ref('')
 
 const confirmOpen = ref(false)
 const confirmMessage = ref('')
@@ -106,6 +133,24 @@ function askDeleteProject(p: Project) {
   confirmMessage.value = `Delete project ${p.name}?`
   confirmAction = () => run(() => apiDeleteProject(p.id), 'Failed to delete project')
   confirmOpen.value = true
+}
+
+async function openSecrets(p: Project) {
+  secretsProject.value = p
+  projectSecrets.value = await listProjectSecrets(p.id)
+  secretsOpen.value = true
+}
+async function saveSecret() {
+  if (!secretsProject.value || !secretName.value) return
+  await putProjectSecret(secretsProject.value.id, secretName.value, secretValue.value)
+  secretName.value = ''
+  secretValue.value = ''
+  projectSecrets.value = await listProjectSecrets(secretsProject.value.id)
+}
+async function removeSecret(name: string) {
+  if (!secretsProject.value) return
+  await deleteProjectSecret(secretsProject.value.id, name)
+  projectSecrets.value = await listProjectSecrets(secretsProject.value.id)
 }
 
 function runConfirmed() {

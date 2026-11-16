@@ -3,9 +3,11 @@ package handler
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
+	raftconfig "github.com/disaster37/go-raft/config"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/service"
@@ -20,6 +22,28 @@ type orgRequest struct {
 type orgMemberRequest struct {
 	UserID string `json:"user_id"`
 	Role   string `json:"role"`
+}
+
+type environmentRequest struct {
+	ApproverGroupIDs    []string `json:"approver_group_ids"`
+	PreventSelfApproval bool     `json:"prevent_self_approval"`
+	ApprovalTimeout     string   `json:"approval_timeout"`
+}
+
+// requireOrgAdmin allows a global admin or a direct org_admin of org.
+func (s *Server) requireOrgAdmin(ctx context.Context, c *app.RequestContext, org string) bool {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return false
+	}
+	if id.IsAdmin() {
+		return true
+	}
+	if s.orgs != nil && id.UserID != "" && s.orgs.IsOrgAdmin(ctx, org, id.UserID) {
+		return true
+	}
+	writeError(c, consts.StatusForbidden, "forbidden")
+	return false
 }
 
 // handleOrgsList lists organizations the caller can access (all for admins).
@@ -73,7 +97,7 @@ func (s *Server) handleOrgGet(ctx context.Context, c *app.RequestContext) {
 
 // handleOrgCreate creates an organization (admin only).
 func (s *Server) handleOrgCreate(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.orgs == nil {
@@ -94,7 +118,7 @@ func (s *Server) handleOrgCreate(ctx context.Context, c *app.RequestContext) {
 
 // handleOrgUpdate updates display name/features (admin only).
 func (s *Server) handleOrgUpdate(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.orgs == nil {
@@ -115,7 +139,7 @@ func (s *Server) handleOrgUpdate(ctx context.Context, c *app.RequestContext) {
 
 // handleOrgDelete deletes an organization (admin only).
 func (s *Server) handleOrgDelete(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireAdmin(ctx, c) {
 		return
 	}
 	if s.orgs == nil {
@@ -153,7 +177,7 @@ func (s *Server) handleOrgMembers(ctx context.Context, c *app.RequestContext) {
 
 // handleOrgSetMember adds/updates a direct org membership (admin only).
 func (s *Server) handleOrgSetMember(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.orgs == nil {
@@ -173,7 +197,7 @@ func (s *Server) handleOrgSetMember(ctx context.Context, c *app.RequestContext) 
 
 // handleOrgRemoveMember removes a direct org membership (admin only).
 func (s *Server) handleOrgRemoveMember(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.orgs == nil {
@@ -215,7 +239,7 @@ func (s *Server) handleOrgTokenMeta(ctx context.Context, c *app.RequestContext) 
 
 // handleOrgTokenGenerate issues/rotates the org-scoped dag_<org>_ token.
 func (s *Server) handleOrgTokenGenerate(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.orgs == nil {
@@ -232,7 +256,7 @@ func (s *Server) handleOrgTokenGenerate(ctx context.Context, c *app.RequestConte
 
 // handleOrgTokenRevoke revokes the org token.
 func (s *Server) handleOrgTokenRevoke(ctx context.Context, c *app.RequestContext) {
-	if _, ok := s.requireAdmin(ctx, c); !ok {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
 		return
 	}
 	if s.orgs == nil {
@@ -240,6 +264,137 @@ func (s *Server) handleOrgTokenRevoke(ctx context.Context, c *app.RequestContext
 		return
 	}
 	if err := s.orgs.RevokeToken(ctx, c.Param("org")); err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.SetStatusCode(consts.StatusNoContent)
+}
+
+// handleEnvironmentsList lists protected environments (member/admin only).
+func (s *Server) handleEnvironmentsList(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.environments == nil {
+		writeJSON(c, []*domain.Environment{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	envs, err := s.environments.List(ctx, c.Param("org"))
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, envs)
+}
+
+// handleEnvironmentPut creates/updates a protected environment (org admin only).
+func (s *Server) handleEnvironmentPut(ctx context.Context, c *app.RequestContext) {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+		return
+	}
+	if s.environments == nil {
+		writeError(c, consts.StatusServiceUnavailable, "environment service unavailable")
+		return
+	}
+	var req environmentRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	var timeout time.Duration
+	if req.ApprovalTimeout != "" {
+		d, err := raftconfig.ParseExtendedDuration(req.ApprovalTimeout)
+		if err != nil {
+			writeError(c, consts.StatusBadRequest, "invalid approval_timeout")
+			return
+		}
+		timeout = d
+	}
+	env, err := s.environments.Upsert(ctx, c.Param("org"), c.Param("env"), service.EnvironmentInput{
+		ApproverGroupIDs:    req.ApproverGroupIDs,
+		PreventSelfApproval: req.PreventSelfApproval,
+		ApprovalTimeout:     timeout,
+	})
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, env)
+}
+
+// handleEnvironmentDelete deletes a protected environment (org admin only).
+func (s *Server) handleEnvironmentDelete(ctx context.Context, c *app.RequestContext) {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+		return
+	}
+	if s.environments == nil {
+		writeError(c, consts.StatusServiceUnavailable, "environment service unavailable")
+		return
+	}
+	if err := s.environments.Delete(ctx, c.Param("org"), c.Param("env")); err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.SetStatusCode(consts.StatusNoContent)
+}
+
+// handleEnvSecretsList lists environment secret metadata (member/admin only).
+func (s *Server) handleEnvSecretsList(ctx context.Context, c *app.RequestContext) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return
+	}
+	if s.secrets == nil {
+		writeJSON(c, []*domain.Secret{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	secrets, err := s.secrets.ListEnvironment(ctx, c.Param("org"), c.Param("env"))
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	writeJSON(c, secrets)
+}
+
+// handleEnvSecretPut stores an environment secret (org admin only).
+func (s *Server) handleEnvSecretPut(ctx context.Context, c *app.RequestContext) {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+		return
+	}
+	if s.secrets == nil {
+		writeError(c, consts.StatusServiceUnavailable, "secret service unavailable")
+		return
+	}
+	var req secretRequest
+	if !decodeBody(c, &req) {
+		return
+	}
+	sec, err := s.secrets.PutEnvironment(ctx, c.Param("org"), c.Param("env"), req.Name, req.Value)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.JSON(consts.StatusCreated, sec)
+}
+
+// handleEnvSecretDelete deletes an environment secret (org admin only).
+func (s *Server) handleEnvSecretDelete(ctx context.Context, c *app.RequestContext) {
+	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+		return
+	}
+	if s.secrets == nil {
+		writeError(c, consts.StatusServiceUnavailable, "secret service unavailable")
+		return
+	}
+	if err := s.secrets.DeleteEnvironment(ctx, c.Param("org"), c.Param("env"), c.Param("name")); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}

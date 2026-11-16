@@ -21,3 +21,14 @@ using a framed binary stream.
 
 ## Consequences
 Read-back is lossless and streaming, and history retention covers archives.
+
+## Update — residual-risk remediation (PR #70 review)
+- Sequence numbers are assigned exactly once at ingest and are immutable.
+  Archive retries reuse the same `(Seq, Payload)` pair, eliminating drift.
+- `OTLPArchive.ChunksAfter(fromSeq)` uses S3 `ListObjectsOptions.StartAfter`
+  so cold reads are `O(k)` in newly archived chunks, never `O(n)`.
+- `GET /v1/{traces,logs,metrics}/:traceID?after=<seq>` resumes at `seq+1`.
+  Live readers wake on an in-memory notify channel (1s fallback poll) and the
+  terminal frame is emitted only after a final drain.
+- The live ring is bounded (256 chunks / 16 MiB) and idle terminal buffers are
+  evicted after 30s.

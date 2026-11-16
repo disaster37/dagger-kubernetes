@@ -1,29 +1,75 @@
 <template>
   <div>
     <h1 class="mb-6 text-2xl font-semibold">Remote Cache</h1>
-    <UAlert v-if="error" color="error" variant="soft" :description="error" />
-    <UCard v-if="stats">
-      <div class="grid grid-cols-3 gap-4">
+    <UAlert v-if="error" color="error" variant="soft" :description="error" class="mb-4" />
+    <UAlert v-if="stats && !stats.enabled" color="neutral" variant="soft" description="Remote cache is disabled (cache.remote.enabled: false)." class="mb-4" />
+    <UCard>
+      <div class="mb-4 flex flex-wrap items-end gap-3">
+        <UFormField label="Namespace">
+          <USelect v-model="namespace" :items="namespaceOptions" @update:model-value="load" />
+        </UFormField>
+        <UButton @click="load">Refresh</UButton>
+        <UButton v-if="auth.isAdmin" color="error" variant="soft" @click="showPurge = true">Purge cache</UButton>
+      </div>
+      <div v-if="stats && stats.enabled" class="grid grid-cols-3 gap-4">
         <div><p class="text-[13px] text-muted">Namespace</p><p class="font-semibold">{{ stats.namespace }}</p></div>
         <div><p class="text-[13px] text-muted">Entries</p><p class="font-semibold">{{ stats.entries }}</p></div>
-        <div><p class="text-[13px] text-muted">Bytes</p><p class="font-semibold">{{ stats.bytes }}</p></div>
+        <div><p class="text-[13px] text-muted">Size</p><p class="font-semibold">{{ formatBytes(stats.bytes || 0) }}</p></div>
       </div>
     </UCard>
+
+    <UModal v-model:open="showPurge">
+      <UCard>
+        <template #header><h2 class="font-semibold">Purge {{ namespace }}?</h2></template>
+        <p class="text-[13px] text-muted">This deletes every cached object and index entry in the namespace.</p>
+        <div class="mt-4 flex justify-end gap-2">
+          <UButton variant="soft" @click="showPurge = false">Cancel</UButton>
+          <UButton color="error" @click="purge">Purge</UButton>
+        </div>
+      </UCard>
+    </UModal>
   </div>
 </template>
 
 <script setup lang="ts">
-import api from '~/api/client'
+import { fetchRemoteCacheStats, listOrgs, purgeRemoteCache } from '~/api/client'
+import type { Org, RemoteCacheStats } from '~/api/types'
+import { useAuthStore } from '~/stores/auth'
 
-const stats = ref<any>(null)
+const auth = useAuthStore()
+const orgs = ref<Org[]>([])
+const namespace = ref('_shared')
+const stats = ref<RemoteCacheStats | null>(null)
 const error = ref('')
+const showPurge = ref(false)
+const namespaceOptions = computed(() => ['_shared', ...orgs.value.map(o => o.id)])
 
-onMounted(async () => {
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MiB`
+  return `${(bytes / 1024 / 1024 / 1024).toFixed(1)} GiB`
+}
+async function load() {
+  error.value = ''
   try {
-    const { data } = await api.get('/api/v1/remote-cache')
-    stats.value = data
+    stats.value = await fetchRemoteCacheStats(namespace.value)
   } catch (e: any) {
     error.value = e?.response?.data?.message ?? 'Failed to load remote cache stats'
   }
+}
+async function purge() {
+  await purgeRemoteCache(namespace.value)
+  showPurge.value = false
+  await load()
+}
+
+onMounted(async () => {
+  try {
+    orgs.value = await listOrgs()
+  } catch {
+    orgs.value = []
+  }
+  await load()
 })
 </script>

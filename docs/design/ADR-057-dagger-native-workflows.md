@@ -26,3 +26,18 @@ without arbitrary host-shell execution.
 ## Consequences
 Workflows are portable, secret-safe, and auditable, with no host-shell escape
 hatch.
+
+## Update — residual-risk remediation (PR #70 review)
+- `file()` requires an explicit repository root (never supervisor `"."`),
+  supports `.json` and 1-arg plain text, and is jailed with `os.OpenRoot`.
+- The expression context includes full `git.*`, `run.*`, `inputs.*`,
+  `needs.<job>.outputs.*`, and `artifact.*`; `next_semver` handles tag,
+  release, PR, default-branch (`rc` vs release), and feature branches.
+- Runs are replicated in Raft with atomic monotonic numbers; `spec` is frozen
+  so `Approve` survives leader failover and repo edits.
+- `Approve`/`Reject` enforce `org_admin`/approver-group RBAC,
+  `prevent_self_approval`, and `approval_timeout`, then resume the DAG.
+- Cross-repo `trigger:` jobs run natively on the leader with `wait`/`timeout`
+  and zero K8s pods held while waiting.
+- `robfig/cron/v3` schedules and `on: artifact` listeners are evaluated on the
+  leader; `after_checks` workflows start only after checks succeed.

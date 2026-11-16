@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	authcrypto "github.com/disaster37/go-auth/crypto"
@@ -40,6 +41,17 @@ func (s *SecretService) sealer(scope domain.SecretScope, scopeID string) (*authc
 func (s *SecretService) Put(ctx context.Context, scope domain.SecretScope, scopeID, name, value string) (*domain.Secret, error) {
 	if name == "" || scopeID == "" {
 		return nil, fmt.Errorf("%w: secret name and scope id are required", domain.ErrValidation)
+	}
+	if scope == domain.SecretScopeEnvironment {
+		orgID, envName, ok := strings.Cut(scopeID, "/")
+		if !ok {
+			return nil, fmt.Errorf("%w: environment scope id must be <orgID>/<envName>", domain.ErrValidation)
+		}
+		canonical, err := domain.EnvironmentScopeID(orgID, envName)
+		if err != nil {
+			return nil, err
+		}
+		scopeID = canonical
 	}
 	sealer, err := s.sealer(scope, scopeID)
 	if err != nil {
@@ -111,11 +123,48 @@ func (s *SecretService) SealRaw(scope domain.SecretScope, scopeID, plaintext str
 	return sealer.SealString(plaintext)
 }
 
+// PutEnvironment seals and stores an environment-scoped secret under the
+// tenant-isolated "<orgID>/<envName>" scope.
+func (s *SecretService) PutEnvironment(ctx context.Context, orgID, envName, name, value string) (*domain.Secret, error) {
+	scopeID, err := domain.EnvironmentScopeID(orgID, envName)
+	if err != nil {
+		return nil, err
+	}
+	return s.Put(ctx, domain.SecretScopeEnvironment, scopeID, name, value)
+}
+
+// ListEnvironment lists environment secret metadata.
+func (s *SecretService) ListEnvironment(ctx context.Context, orgID, envName string) ([]*domain.Secret, error) {
+	scopeID, err := domain.EnvironmentScopeID(orgID, envName)
+	if err != nil {
+		return nil, err
+	}
+	return s.List(ctx, domain.SecretScopeEnvironment, scopeID)
+}
+
+// DeleteEnvironment removes an environment secret.
+func (s *SecretService) DeleteEnvironment(ctx context.Context, orgID, envName, name string) error {
+	scopeID, err := domain.EnvironmentScopeID(orgID, envName)
+	if err != nil {
+		return err
+	}
+	return s.Delete(ctx, domain.SecretScopeEnvironment, scopeID, name)
+}
+
+// RevealEnvironment decrypts an environment secret.
+func (s *SecretService) RevealEnvironment(ctx context.Context, orgID, envName, name string) (string, error) {
+	scopeID, err := domain.EnvironmentScopeID(orgID, envName)
+	if err != nil {
+		return "", err
+	}
+	return s.Reveal(ctx, domain.SecretScopeEnvironment, scopeID, name)
+}
+
 // Resolve returns the effective secret value for a job: environment overrides
 // project, which overrides org.
 func (s *SecretService) Resolve(ctx context.Context, orgID, projectID, environment, name string) (string, error) {
 	if environment != "" {
-		if v, err := s.Reveal(ctx, domain.SecretScopeEnvironment, environment, name); err == nil {
+		if v, err := s.RevealEnvironment(ctx, orgID, environment, name); err == nil {
 			return v, nil
 		}
 	}
@@ -125,4 +174,49 @@ func (s *SecretService) Resolve(ctx context.Context, orgID, projectID, environme
 		}
 	}
 	return s.Reveal(ctx, domain.SecretScopeOrg, orgID, name)
+}
+
+// ResolveJobSecrets resolves every named secret in names using Resolve; it
+// returns an error if any declared secret is missing.
+func (s *SecretService) ResolveJobSecrets(ctx context.Context, orgID, projectID, approvedEnvironment string, names []string) (map[string]string, error) {
+	out := make(map[string]string, len(names))
+	for _, name := range names {
+		v, err := s.Resolve(ctx, orgID, projectID, approvedEnvironment, name)
+		if err != nil {
+			return nil, fmt.Errorf("resolve secret %s: %w", name, err)
+		}
+		out[name] = v
+	}
+	return out, nil
+}
+
+// ResolveAllForCheck merges all Org secrets overridden by all Project secrets
+// for non-fork check runs (never includes Environment secrets).
+func (s *SecretService) ResolveAllForCheck(ctx context.Context, orgID, projectID string) (map[string]string, error) {
+	out := make(map[string]string)
+	orgSecrets, err := s.List(ctx, domain.SecretScopeOrg, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for _, sec := range orgSecrets {
+		v, err := s.Reveal(ctx, domain.SecretScopeOrg, orgID, sec.Name)
+		if err != nil {
+			return nil, err
+		}
+		out[sec.Name] = v
+	}
+	if projectID != "" {
+		projectSecrets, err := s.List(ctx, domain.SecretScopeProject, projectID)
+		if err != nil {
+			return nil, err
+		}
+		for _, sec := range projectSecrets {
+			v, err := s.Reveal(ctx, domain.SecretScopeProject, projectID, sec.Name)
+			if err != nil {
+				return nil, err
+			}
+			out[sec.Name] = v
+		}
+	}
+	return out, nil
 }

@@ -124,3 +124,33 @@ func TestQuotaUsageByGroup(t *testing.T) {
 		t.Fatalf("g2 usage = %d, want 2", usage["g2"])
 	}
 }
+
+func TestQuotaOrgTokenAdmitted(t *testing.T) {
+	g := &domain.Group{ID: "g1", OrgID: "acme", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 8}
+	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, &stubSessionStore{})
+	id := &domain.Identity{UserID: "org:acme", OrgID: "acme", Role: domain.RoleUser}
+	if err := q.CheckEngineAccess(context.Background(), id); err != nil {
+		t.Fatalf("org token: %v", err)
+	}
+}
+
+func TestQuotaOrgTokenFreshOrgAdmitted(t *testing.T) {
+	q := newQuotaForTest(t, nil, nil, &stubSessionStore{})
+	id := &domain.Identity{UserID: "org:acme", OrgID: "acme", Role: domain.RoleUser}
+	if err := q.CheckEngineAccess(context.Background(), id); err != nil {
+		t.Fatalf("fresh org: %v", err)
+	}
+}
+
+func TestQuotaOrgTokenExhausted(t *testing.T) {
+	g := &domain.Group{ID: "g1", OrgID: "acme", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1}
+	sessions := &stubSessionStore{}
+	sessions.Register("fp1", "v", "pod", "inst", "trace", "u")
+	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, sessions)
+	id := &domain.Identity{UserID: "org:acme", OrgID: "acme", Role: domain.RoleUser}
+	if err := q.CheckEngineAccess(ctxBackground(), id); err != domain.ErrQuotaExhausted {
+		t.Fatalf("exhausted: %v", err)
+	}
+}
+
+func ctxBackground() context.Context { return context.Background() }

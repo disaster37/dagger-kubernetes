@@ -80,9 +80,16 @@ func ReadOTLPFrame(r io.Reader) (OTLPFrame, error) {
 	return f, nil
 }
 
+// OTLPChunk is one archived OTLP payload with its immutable sequence number.
+type OTLPChunk struct {
+	Seq     uint64
+	Payload []byte
+}
+
 // OTLPArchive persists raw OTLP protobuf chunks per (traceID, signal).
 type OTLPArchive interface {
 	Append(ctx context.Context, traceID, signal string, seq uint64, payload []byte) error
-	Chunks(ctx context.Context, traceID, signal string) ([][]byte, error)
+	// ChunksAfter returns archived chunks with Seq >= fromSeq in ascending order.
+	ChunksAfter(ctx context.Context, traceID, signal string, fromSeq uint64) ([]OTLPChunk, error)
 	DeleteTrace(ctx context.Context, traceID string) error
 }

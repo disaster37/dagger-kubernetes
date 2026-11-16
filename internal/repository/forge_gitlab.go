@@ -29,6 +29,13 @@ func NewGitLabForge(apiURL string) *GitLabForge {
 
 func (g *GitLabForge) Kind() domain.ForgeKind { return domain.ForgeGitLab }
 
+func (g *GitLabForge) apiBase(source *domain.ForgeSource) string {
+	if source != nil && source.BaseURL != "" {
+		return strings.TrimSuffix(source.BaseURL, "/")
+	}
+	return g.apiURL
+}
+
 func (g *GitLabForge) projectPath(repo string) string {
 	return url.PathEscape(repo)
 }
@@ -41,7 +48,7 @@ func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	form.Set("tag_push_events", "true")
 	form.Set("merge_requests_events", "true")
 	form.Set("releases_events", "true")
-	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/projects/%s/hooks", g.apiURL, g.projectPath(source.Repo)), "PRIVATE-TOKEN", token, []byte(form.Encode()), "application/x-www-form-urlencoded")
+	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/projects/%s/hooks", g.apiBase(source), g.projectPath(source.Repo)), "PRIVATE-TOKEN", token, []byte(form.Encode()), "application/x-www-form-urlencoded")
 	if err != nil {
 		return "", err
 	}
@@ -53,7 +60,7 @@ func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 }
 
 func (g *GitLabForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/projects/%s/hooks/%s", g.apiURL, g.projectPath(source.Repo), webhookID), "PRIVATE-TOKEN", token, nil, "")
+	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/projects/%s/hooks/%s", g.apiBase(source), g.projectPath(source.Repo), webhookID), "PRIVATE-TOKEN", token, nil, "")
 	return err
 }
 
@@ -69,7 +76,7 @@ func (g *GitLabForge) SetCommitStatus(ctx context.Context, source *domain.ForgeS
 	form.Set("name", run.Name)
 	form.Set("description", run.Title)
 	form.Set("target_url", run.DetailsURL)
-	_, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/projects/%s/statuses/%s", g.apiURL, g.projectPath(source.Repo), run.HeadSHA), "PRIVATE-TOKEN", token, []byte(form.Encode()), "application/x-www-form-urlencoded")
+	_, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/projects/%s/statuses/%s", g.apiBase(source), g.projectPath(source.Repo), run.HeadSHA), "PRIVATE-TOKEN", token, []byte(form.Encode()), "application/x-www-form-urlencoded")
 	return err
 }
 
