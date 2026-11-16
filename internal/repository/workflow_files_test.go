@@ -23,6 +23,7 @@ jobs:
   deploy:
     needs: [build]
     environment: prod
+    approval_timeout: 24h
     trigger:
       repo: acme/infra
       workflow: deploy
@@ -41,5 +42,8 @@ jobs:
 	}
 	if wf.Jobs["deploy"].Trigger == nil || !wf.Jobs["deploy"].Trigger.Wait {
 		t.Fatalf("trigger = %+v", wf.Jobs["deploy"].Trigger)
+	}
+	if wf.Jobs["deploy"].ApprovalTimeout.Hours() != 24 {
+		t.Fatalf("approval timeout = %v", wf.Jobs["deploy"].ApprovalTimeout)
 	}
 }

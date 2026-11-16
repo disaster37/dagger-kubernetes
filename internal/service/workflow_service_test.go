@@ -221,6 +221,7 @@ func TestWorkflowServiceReject(t *testing.T) {
 		Name: "release",
 		Jobs: map[string]domain.WorkflowJob{
 			"deploy": {Call: "deploy", Environment: "prod"},
+			"notify": {Call: "notify", Needs: []string{"deploy"}},
 		},
 	}
 	runner := &fakeWorkflowRunner{}
@@ -237,6 +238,9 @@ func TestWorkflowServiceReject(t *testing.T) {
 	}
 	if rejected.Jobs["deploy"].Status != "failed" || rejected.Status != "failed" {
 		t.Fatalf("run = %+v", rejected)
+	}
+	if rejected.Jobs["notify"].Status != "skipped" {
+		t.Fatalf("downstream = %+v", rejected.Jobs["notify"])
 	}
 }
 

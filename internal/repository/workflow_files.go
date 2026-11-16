@@ -50,16 +50,17 @@ type rawInput struct {
 }
 
 type rawJob struct {
-	Call          string            `yaml:"call"`
-	Trigger       *rawTrigger       `yaml:"trigger"`
-	Needs         any               `yaml:"needs"`
-	If            string            `yaml:"if"`
-	Outputs       map[string]string `yaml:"outputs"`
-	Artifacts     []rawArtifact     `yaml:"artifacts"`
-	UsesArtifacts any               `yaml:"uses_artifacts"`
-	Environment   string            `yaml:"environment"`
-	Timeout       string            `yaml:"timeout"`
-	Secrets       any               `yaml:"secrets"`
+	Call            string            `yaml:"call"`
+	Trigger         *rawTrigger       `yaml:"trigger"`
+	Needs           any               `yaml:"needs"`
+	If              string            `yaml:"if"`
+	Outputs         map[string]string `yaml:"outputs"`
+	Artifacts       []rawArtifact     `yaml:"artifacts"`
+	UsesArtifacts   any               `yaml:"uses_artifacts"`
+	Environment     string            `yaml:"environment"`
+	Timeout         string            `yaml:"timeout"`
+	ApprovalTimeout string            `yaml:"approval_timeout"`
+	Secrets         any               `yaml:"secrets"`
 }
 
 type rawTrigger struct {
@@ -139,6 +140,13 @@ func convertJob(rj *rawJob) (domain.WorkflowJob, error) {
 			return job, fmt.Errorf("timeout: %w", err)
 		}
 		job.Timeout = d
+	}
+	if rj.ApprovalTimeout != "" {
+		d, err := raftconfig.ParseExtendedDuration(rj.ApprovalTimeout)
+		if err != nil {
+			return job, fmt.Errorf("approval timeout: %w", err)
+		}
+		job.ApprovalTimeout = d
 	}
 	if rj.Trigger != nil {
 		tr := &domain.WorkflowTrigger{Repo: rj.Trigger.Repo, Workflow: rj.Trigger.Workflow, Wait: rj.Trigger.Wait, Inputs: rj.Trigger.Inputs}

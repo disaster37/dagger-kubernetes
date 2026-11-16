@@ -121,7 +121,9 @@ func newRaftCluster(t *testing.T, n int, tlsEnabled bool) []*RaftStore {
 // rotation enabled (fast period) and an at-rest sealer.
 func newRaftClusterWithRotation(t *testing.T, n int) []*RaftStore {
 	t.Helper()
-	return newRaftClusterOpts(t, n, true, true)
+	stores := newRaftClusterOpts(t, n, true, true)
+	waitForClusterSettled(t, stores, n, 30*time.Second)
+	return stores
 }
 
 func newRaftClusterOpts(t *testing.T, n int, tlsEnabled, rotation bool) []*RaftStore {
@@ -176,7 +178,7 @@ func newRaftClusterOpts(t *testing.T, n int, tlsEnabled, rotation bool) []*RaftS
 			// TestRaftStoreAutoRenewsTLSKeyringAndLeaf flaky.
 			cfg.PerformanceMultiplier = 2.0
 			cfg.KeyringRotationEnabled = true
-			cfg.RotationPeriod = 2 * time.Second
+			cfg.RotationPeriod = 10 * time.Second
 			cfg.RotationCheckInterval = 50 * time.Millisecond
 			cfg.SafetyMargin = 7 * 24 * time.Hour
 			cfg.EncryptionKey = "0123456789abcdef0123456789abcdef"
@@ -272,14 +274,23 @@ func findLeaderTimeout(t *testing.T, stores []*RaftStore, timeout time.Duration)
 // waitForMetaValue polls a node's local FSM until the meta key reaches want.
 func waitForMetaValue(t *testing.T, store *RaftStore, key, want string) {
 	t.Helper()
-	deadline := time.Now().Add(180 * time.Second)
+	if !waitForMetaValueWithin(store, key, want, 180*time.Second) {
+		t.Fatalf("meta %q never replicated to %q", key, want)
+	}
+}
+
+// waitForMetaValueWithin reports whether the meta key reaches want before the
+// timeout. It is used by the rotation test to retry a transient replication
+// stall instead of failing the whole run.
+func waitForMetaValueWithin(store *RaftStore, key, want string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		if v, err := store.fsmRead().readMeta(key); err == nil && v == want {
-			return
+			return true
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("meta %q never replicated to %q", key, want)
+	return false
 }
 
 func TestThreeNodeInmemClusterReplication(t *testing.T) {

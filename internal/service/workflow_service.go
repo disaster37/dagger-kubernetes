@@ -446,6 +446,7 @@ func (s *WorkflowService) Approve(ctx context.Context, runID, jobName string, ca
 		jr.Status = "failed"
 		jr.Error = "approval timed out"
 		s.updateJob(run, jobName, &jr)
+		s.skipDependents(run, jobName)
 		s.finishRun(run)
 		_ = s.persist(ctx, run)
 		return run, fmt.Errorf("%w: approval deadline expired", domain.ErrValidation)
@@ -486,6 +487,7 @@ func (s *WorkflowService) Reject(ctx context.Context, runID, jobName string, cal
 	jr.RejectedBy = caller.UserID
 	jr.Error = reason
 	s.updateJob(run, jobName, &jr)
+	s.skipDependents(run, jobName)
 	s.finishRun(run)
 	if err := s.persist(ctx, run); err != nil {
 		return nil, err
@@ -787,6 +789,30 @@ func (s *WorkflowService) updateJob(run *domain.WorkflowRun, name string, jr *do
 	defer s.mu.Unlock()
 	run.Jobs[name] = *jr
 	run.UpdatedAt = time.Now().UTC()
+}
+
+// skipDependents marks every transitive dependent of jobName as skipped.
+func (s *WorkflowService) skipDependents(run *domain.WorkflowRun, jobName string) {
+	if run.Spec == nil {
+		return
+	}
+	skipped := map[string]bool{jobName: true}
+	for changed := true; changed; {
+		changed = false
+		for name, job := range run.Spec.Jobs { //nolint:gocritic // map values are not addressable
+			if skipped[name] {
+				continue
+			}
+			for _, dep := range job.Needs {
+				if skipped[dep] {
+					skipped[name] = true
+					s.setJobStatus(run, name, "skipped", "")
+					changed = true
+					break
+				}
+			}
+		}
+	}
 }
 
 func (s *WorkflowService) finishRun(run *domain.WorkflowRun) {
