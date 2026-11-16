@@ -50,8 +50,11 @@ func (s *ConnectService) ConnectEnv(ctx context.Context, userID, version string,
 	}
 
 	envs := []domain.ConnectEnvVar{
+		{Name: "DAGGER_ENGINE", Value: "cloud", Required: true, Description: "Selects the Dagger Cloud engine driver."},
 		{Name: "DAGGER_CLOUD_URL", Value: s.cfg.Server.PublicURL, Required: true, Description: "Control-plane URL the Dagger CLI talks to (replaces Dagger Cloud)."},
-		{Name: "DAGGER_CLOUD_TOKEN", Value: tokenValue, Required: true, Secret: true, Description: "Your per-user API token (dct_...)."},
+		{Name: "DAGGER_CLOUD_EXTERNAL_URL", Value: s.cfg.Server.PublicURL, Required: false, Description: "Browser-facing control-plane URL."},
+		{Name: "DAGGER_CLOUD_AUTH_URL", Value: s.cfg.Server.PublicURL, Required: false, Description: "OAuth/device-flow authorization URL."},
+		{Name: "DAGGER_CLOUD_TOKEN", Value: tokenValue, Required: true, Secret: true, Description: "Your API token (dct_... or org-scoped dag_<org>_...)."},
 		{Name: "_EXPERIMENTAL_DAGGER_RUNNER_HOST", Value: "dagger-cloud://self", Required: true, Description: "Tells the CLI to provision a remote engine via the cloud driver."},
 	}
 

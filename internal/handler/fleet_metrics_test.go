@@ -40,7 +40,7 @@ func TestHandleFleetMetricsInvalidVersion(t *testing.T) {
 		"dagger-kubernetes", 15*time.Second, time.Minute, 0, env.server.logger)
 	e := newFleetMetricsEngine(env.server)
 
-	for _, version := range []string{"bad", "v0.19", "v0.19.0-rc1"} {
+	for _, version := range []string{"bad", "v0.19"} {
 		resp := ut.PerformRequest(e, "GET", "/api/v1/fleet/"+version+"/metrics", nil,
 			ut.Header{Key: "Authorization", Value: bearer})
 		if resp.Result().StatusCode() != http.StatusBadRequest {

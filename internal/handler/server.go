@@ -30,6 +30,7 @@ import (
 	"github.com/hertz-contrib/reverseproxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
@@ -55,7 +56,10 @@ const (
 	// control-API cap.
 	defaultOTLPMaxBodyBytes = int64(64 << 20) // 64 MiB
 
-	maxDataConnections = 512 // concurrent data-plane connections (M4).
+	// defaultOTelMaxInflightBytes caps concurrently buffered OTLP heap usage.
+	defaultOTelMaxInflightBytes = int64(256 << 20) // 256 MiB
+
+	defaultMaxDataConnections = 2048 // concurrent data-plane connections (M4).
 
 	otelSignalKey = "otel_signal" // per-request OTel signal label (B1).
 	otelErrorKey  = "otel_error"  // set when the OTel proxy hit a transport error (B1).
@@ -102,6 +106,8 @@ type EngineRequest struct {
 	Module               string   `json:"module"`
 	Function             string   `json:"function"`
 	ExecCmd              []string `json:"exec_cmd"`
+	GitRemote            string   `json:"git_remote"`
+	WorkspacePath        string   `json:"workspace_path"`
 	ClientID             string   `json:"client_id"`
 	MinimumEngineVersion string   `json:"minimum_engine_version"`
 	TraceID              string   `json:"trace_id"`
@@ -116,6 +122,7 @@ type EngineSpecResponse struct {
 	Location   string                          `json:"location"`
 	OrgID      string                          `json:"org_id,omitempty"`
 	UserID     string                          `json:"user_id,omitempty"`
+	ClaimID    string                          `json:"claim_id,omitempty"`
 }
 
 // ErrorResponse is the standard error body shape.
@@ -147,6 +154,18 @@ type Deps struct {
 	Users                *service.UserService
 	Groups               *service.GroupService
 	Projects             *service.ProjectService
+	Orgs                 *service.OrgService
+	DeviceAuth           *service.DeviceAuthService
+	CIOIDC               *service.CIOIDCService
+	CloudGraphQL         *repository.CloudGraphQL
+	OTLPStream           *service.OTLPStreamService
+	RemoteCache          *service.RemoteCacheService
+	Checks               *service.ChecksService
+	Forge                *service.ForgeService
+	Secrets              *service.SecretService
+	Workflows            *service.WorkflowService
+	Artifacts            domain.ArtifactStore
+	WSLeaderDialer       repository.WSLeaderDialer
 	Tokens               *service.TokenService
 	Quota                *service.QuotaService
 	Attribution          *service.AttributionService
@@ -210,6 +229,19 @@ type ServerConfig struct {
 	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
 	// (64 MiB). The control-API maxControlBody cap is unaffected.
 	OTelMaxBodyBytes int64
+	// OTelMaxInflightBytes caps the total bytes of concurrently buffered OTLP
+	// bodies. 0 = default (256 MiB).
+	OTelMaxInflightBytes int64
+	// MaxDataConns bounds concurrent data-plane tunnels. 0 = default (2048).
+	MaxDataConns int
+	// CLIIncludePrereleases includes vX.Y.Z-beta.* in "latest" resolution.
+	CLIIncludePrereleases bool
+	// InternalControlURL / InternalDataHost are the in-cluster endpoints
+	// returned to engine/runner pods to avoid hairpin NAT.
+	InternalControlURL string
+	InternalDataHost   string
+	// FleetIsolation mirrors fleet.isolation ("per_org" | "shared").
+	FleetIsolation string
 
 	// Dynamic per-handshake TLS providers (ADR-050). When set they take
 	// precedence over the static CertPath/KeyPath/InternalTLSCert so renewed
@@ -242,6 +274,7 @@ type Server struct {
 	relayListener       net.Listener
 	relayInPort         int
 	dataConnSem         chan struct{}
+	otelSem             *semaphore.Weighted
 	leaderInfo          leaderInfo
 	forwardTLSProvider  *rafttransport.DynamicTLSProvider
 	forwarder           *httpext.Forwarder
@@ -257,6 +290,18 @@ type Server struct {
 	users               *service.UserService
 	groups              *service.GroupService
 	projects            *service.ProjectService
+	orgs                *service.OrgService
+	deviceAuth          *service.DeviceAuthService
+	ciOIDC              *service.CIOIDCService
+	cloudGraphQL        *repository.CloudGraphQL
+	otlpStream          *service.OTLPStreamService
+	remoteCache         *service.RemoteCacheService
+	checks              *service.ChecksService
+	forges              *service.ForgeService
+	secrets             *service.SecretService
+	workflows           *service.WorkflowService
+	artifacts           domain.ArtifactStore
+	wsDialer            repository.WSLeaderDialer
 	tokens              *service.TokenService
 	quota               *service.QuotaService
 	attribution         *service.AttributionService
@@ -284,6 +329,14 @@ type Server struct {
 
 // NewServer constructs a Server from a config and a Deps bundle.
 func NewServer(cfg *ServerConfig, deps *Deps) *Server {
+	maxConns := cfg.MaxDataConns
+	if maxConns <= 0 {
+		maxConns = defaultMaxDataConnections
+	}
+	inflight := cfg.OTelMaxInflightBytes
+	if inflight <= 0 {
+		inflight = defaultOTelMaxInflightBytes
+	}
 	return &Server{
 		cfg:                cfg,
 		logger:             deps.Logger,
@@ -297,7 +350,8 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		lifecycle:          deps.Lifecycle,
 		traces:             deps.Traces,
 		logs:               deps.Logs,
-		dataConnSem:        make(chan struct{}, maxDataConnections),
+		dataConnSem:        make(chan struct{}, maxConns),
+		otelSem:            semaphore.NewWeighted(inflight),
 		leaderInfo:         deps.LeaderInfo,
 		forwardTLSProvider: deps.ForwardTLSProvider,
 
@@ -309,6 +363,18 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		users:               deps.Users,
 		groups:              deps.Groups,
 		projects:            deps.Projects,
+		orgs:                deps.Orgs,
+		deviceAuth:          deps.DeviceAuth,
+		ciOIDC:              deps.CIOIDC,
+		cloudGraphQL:        deps.CloudGraphQL,
+		otlpStream:          deps.OTLPStream,
+		remoteCache:         deps.RemoteCache,
+		checks:              deps.Checks,
+		forges:              deps.Forge,
+		secrets:             deps.Secrets,
+		workflows:           deps.Workflows,
+		artifacts:           deps.Artifacts,
+		wsDialer:            deps.WSLeaderDialer,
 		tokens:              deps.Tokens,
 		quota:               deps.Quota,
 		attribution:         deps.Attribution,
@@ -641,6 +707,12 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.POST("/v1/traces", s.handleOTel("traces"))
 	h.POST("/v1/logs", s.handleOTel("logs"))
 	h.POST("/v1/metrics", s.handleOTel("metrics"))
+	h.GET("/v1/traces/:traceID", s.handleOTLPStream("traces"))
+	h.GET("/v1/logs/:traceID", s.handleOTLPStream("logs"))
+	h.GET("/v1/metrics/:traceID", s.handleOTLPStream("metrics"))
+	h.GET("/v1/engine", s.handleRemoteCacheWS)
+	h.POST("/v1/oidc", s.handleCIOIDC)
+	h.POST("/query", s.handleCloudGraphQL)
 
 	h.GET("/api/v1/fleet", s.handleFleetInfo)
 	h.GET("/api/v1/fleet/:version/metrics", s.handleFleetMetrics)
@@ -653,6 +725,8 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/image-cache", s.adminOnly(s.handleImageCacheInfo))
 	h.POST("/api/v1/image-cache/prune", s.adminOnly(s.handleImageCachePrune))
 	h.POST("/api/v1/image-cache/prune-all", s.adminOnly(s.handleImageCachePruneAll))
+	h.GET("/api/v1/remote-cache", s.handleRemoteCacheStats)
+	h.POST("/api/v1/remote-cache/purge", s.adminOnly(s.handleRemoteCachePurge))
 	h.GET("/api/v1/connect/env", s.handleConnectEnv)
 	h.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
 	h.GET("/api/v1/cli/:version", s.handleCLIDownload)
@@ -667,6 +741,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/auth/oauth/github/callback", s.handleOAuthCallback)
 	h.GET("/api/v1/auth/oauth/oidc/login", s.handleOAuthOIDCLogin)
 	h.GET("/api/v1/auth/oauth/oidc/callback", s.handleOAuthOIDCCallback)
+	h.POST("/oauth/device/code", s.handleDeviceCode)
+	h.POST("/oauth/token", s.handleDeviceToken)
+	h.POST("/api/v1/auth/device/approve", s.handleDeviceApprove)
 	h.GET("/api/v1/auth/me", s.handleMe)
 	h.PUT("/api/v1/auth/password", s.handleChangePassword)
 
@@ -696,6 +773,33 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.DELETE("/api/v1/groups/:id", s.adminOnly(s.handleGroupDelete))
 	h.GET("/api/v1/groups/:id/members", s.adminOnly(s.handleGroupMembers))
 	h.PUT("/api/v1/groups/:id/members", s.adminOnly(s.handleGroupSetMembers))
+
+	// Organization tenancy CRUD + members + org tokens.
+	h.GET("/api/v1/orgs", s.handleOrgsList)
+	h.POST("/api/v1/orgs", s.handleOrgCreate)
+	h.GET("/api/v1/orgs/:org", s.handleOrgGet)
+	h.PUT("/api/v1/orgs/:org", s.handleOrgUpdate)
+	h.DELETE("/api/v1/orgs/:org", s.handleOrgDelete)
+	h.GET("/api/v1/orgs/:org/members", s.handleOrgMembers)
+	h.PUT("/api/v1/orgs/:org/members", s.handleOrgSetMember)
+	h.DELETE("/api/v1/orgs/:org/members/:userID", s.handleOrgRemoveMember)
+	h.GET("/api/v1/orgs/:org/token", s.handleOrgTokenMeta)
+	h.POST("/api/v1/orgs/:org/token", s.handleOrgTokenGenerate)
+	h.DELETE("/api/v1/orgs/:org/token", s.handleOrgTokenRevoke)
+	h.GET("/api/v1/orgs/:org/integrations", s.handleForgeSourcesList)
+	h.POST("/api/v1/orgs/:org/integrations", s.handleForgeSourceCreate)
+	h.DELETE("/api/v1/orgs/:org/integrations/:sourceID", s.handleForgeSourceDelete)
+	h.GET("/api/v1/orgs/:org/secrets", s.handleOrgSecretsList)
+	h.PUT("/api/v1/orgs/:org/secrets", s.handleOrgSecretPut)
+	h.DELETE("/api/v1/orgs/:org/secrets/:name", s.handleOrgSecretDelete)
+	h.GET("/api/v1/projects/:id/secrets", s.handleProjectSecretsList)
+	h.PUT("/api/v1/projects/:id/secrets", s.handleProjectSecretPut)
+	h.DELETE("/api/v1/projects/:id/secrets/:name", s.handleProjectSecretDelete)
+	h.POST("/v1/webhooks/:provider/:sourceID", s.handleForgeWebhook)
+	h.GET("/api/v1/workflows/runs/:runID", s.handleWorkflowRunGet)
+	h.POST("/api/v1/workflows/runs/:runID/approve/:job", s.handleWorkflowApprove)
+	h.GET("/api/v1/artifacts", s.handleArtifactsList)
+	h.GET("/api/v1/artifacts/download", s.handleArtifactDownload)
 
 	// Admin project CRUD.
 	h.GET("/api/v1/projects", s.adminOnly(s.handleProjectsList))
@@ -874,8 +978,9 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 
+	orgSlug := s.resolveOrgSlug(ctx, c, id)
 	start := time.Now()
-	result, err := s.fleetManager.Acquire(ctx, verStr)
+	result, err := s.fleetManager.AcquireForOrg(ctx, orgSlug, verStr)
 	if err != nil {
 		s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "error").Inc()
 		writeError(c, consts.StatusTooManyRequests, "no engine capacity")
@@ -921,6 +1026,9 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	s.attribution.Provision(ctx, req.TraceID, attributionUserID(id), verStr)
 
 	engineURL := s.cfg.DataHost
+	if s.cfg.InternalDataHost != "" && isInClusterRequest(c) {
+		engineURL = s.cfg.InternalDataHost
+	}
 	if _, _, err := net.SplitHostPort(engineURL); err != nil {
 		engineURL = fmt.Sprintf("%s:443", engineURL)
 	}
@@ -931,11 +1039,41 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 		Cert:       clientCert,
 		InstanceID: instanceID,
 		Location:   "k8s",
-		OrgID:      "",
+		OrgID:      orgSlug,
 		UserID:     id.Username,
+		ClaimID:    fmt.Sprintf("claim-%s", instanceID),
 	}
 
 	c.JSON(consts.StatusCreated, resp)
+}
+
+// resolveOrgSlug resolves the effective org for an engine request: the
+// identity's org token scope, the X-Dagger-Org header, or the user's single
+// org membership. Falls back to the bootstrap "default" org.
+func (s *Server) resolveOrgSlug(ctx context.Context, c *app.RequestContext, id *domain.Identity) string {
+	if id != nil && id.OrgID != "" {
+		return id.OrgID
+	}
+	if hdr := strings.TrimSpace(string(c.Request.Header.Peek("X-Dagger-Org"))); hdr != "" {
+		return strings.ToLower(hdr)
+	}
+	if s.orgs != nil && id != nil && id.UserID != "" {
+		if orgs, err := s.orgs.OrgsForUser(ctx, id.UserID); err == nil && len(orgs) == 1 {
+			return orgs[0].Name
+		}
+	}
+	return domain.DefaultOrgID
+}
+
+// isInClusterRequest reports whether the request originates from a private
+// (in-cluster) address.
+func isInClusterRequest(c *app.RequestContext) bool {
+	host, _, err := net.SplitHostPort(c.RemoteAddr().String())
+	if err != nil {
+		host = c.RemoteAddr().String()
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && (ip.IsPrivate() || ip.IsLoopback())
 }
 
 func (s *Server) extractVersion(image string) (*domain.Version, error) {
@@ -981,17 +1119,51 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 			return
 		}
 
-		// Best-effort attribution for traces (Hertz buffers the body, so
-		// reading it does not consume it for the reverse proxy). The same
-		// bytes are reused below to fan out live SSE re-fetch events.
+		// Decode the OTLP body exactly once for attribution, live fan-out, and
+		// cache-event hooks. The bytes are put back on the request so the
+		// reverse proxy forwards the identical payload.
 		var body []byte
+		var batch service.OTLPBatch
 		if signal == "traces" || signal == "logs" {
-			body, _ = c.Body()
+			var err error
+			body, err = readBoundedBody(c, int(limit))
+			if err != nil {
+				s.metrics.OTelIngestTotal.WithLabelValues(signal, "error").Inc()
+				if errors.Is(err, errBodyTooLarge) {
+					writeError(c, consts.StatusRequestEntityTooLarge, "otel body too large")
+				} else {
+					writeError(c, consts.StatusBadRequest, "invalid body")
+				}
+				return
+			}
+			c.Request.SetBody(body)
+			batch = service.ExtractOTLPBatch(signal, body)
 		}
-		if signal == "traces" && len(body) > 0 {
-			sums := service.ExtractTraceSummaries(body)
-			for i := range sums {
-				s.attribution.Ingest(ctx, sums[i].TraceID, attributionUserID(id), sums[i].CIRepo, sums[i].GitRemote, sums[i].CIProvider, sums[i].Version, sums[i].Status, sums[i].DurationMS, sums[i].StartedAt)
+
+		// Weighted memory gate: reject cleanly when buffered OTLP bodies would
+		// exceed the configured heap budget instead of OOM-killing the leader.
+		if len(body) > 0 {
+			if !s.otelSem.TryAcquire(int64(len(body))) {
+				s.metrics.OTelIngestTotal.WithLabelValues(signal, "saturated").Inc()
+				writeError(c, consts.StatusServiceUnavailable, "otel ingest saturated, retry later")
+				return
+			}
+			defer s.otelSem.Release(int64(len(body)))
+		}
+
+		if s.otlpStream != nil && len(body) > 0 {
+			for _, traceID := range batch.TraceIDs {
+				s.otlpStream.Ingest(ctx, traceID, signal, body)
+			}
+			for _, traceID := range batch.LogTraceIDs {
+				s.otlpStream.Ingest(ctx, traceID, signal, body)
+			}
+		}
+
+		if signal == "traces" {
+			for i := range batch.Summaries {
+				sums := batch.Summaries[i]
+				s.attribution.Ingest(ctx, sums.TraceID, attributionUserID(id), sums.CIRepo, sums.GitRemote, sums.CIProvider, sums.Version, sums.Status, sums.DurationMS, sums.StartedAt)
 			}
 		}
 
@@ -1007,7 +1179,7 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 
 		// Broadcast a lightweight re-fetch signal to live SSE subscribers,
 		// independent of proxy success.
-		s.broadcastOTelUpdate(signal, body)
+		s.broadcastOTelUpdate(signal, &batch)
 	}
 }
 
@@ -1016,20 +1188,20 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 // re-fetch steps/logs without waiting for the next poll. A trace ingest also
 // means the pipeline list changed (new pipeline or status/duration update), so
 // it additionally notifies the pipelines-overview topic.
-func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
-	if s.liveHub == nil || len(body) == 0 {
+func (s *Server) broadcastOTelUpdate(signal string, batch *service.OTLPBatch) {
+	if s.liveHub == nil {
 		return
 	}
 	switch signal {
 	case "traces":
-		for _, traceID := range service.ExtractTraceIDs(body) {
+		for _, traceID := range batch.TraceIDs {
 			if traceID != "" {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "trace_update"})
 			}
 		}
 		s.liveHub.Broadcast(domain.PipelinesTopic, map[string]string{"type": "pipelines_update"})
 	case "logs":
-		for _, traceID := range service.ExtractLogTraceIDs(body) {
+		for _, traceID := range batch.LogTraceIDs {
 			if traceID != "" {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "logs_update"})
 			}

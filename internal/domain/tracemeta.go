@@ -37,6 +37,7 @@ func ValidTraceIDKey(id string) bool {
 // and visibility checks.
 type TraceMeta struct {
 	TraceID       string    `json:"trace_id"`
+	OrgID         string    `json:"org_id,omitempty"`
 	UserID        string    `json:"user_id,omitempty"`
 	GroupID       string    `json:"group_id,omitempty"`
 	ProjectName   string    `json:"project_name,omitempty"`
@@ -66,6 +67,7 @@ const (
 
 // TraceFilter scopes a trace listing query.
 type TraceFilter struct {
+	OrgID             string   // "" = no org restriction
 	GroupIDs          []string // empty = no group restriction (admin)
 	IncludeUnassigned bool     // admin: true (all); user: only their own user_id fallback
 	UnassignedOnly    bool     // admin "unassigned" view: only traces without a group

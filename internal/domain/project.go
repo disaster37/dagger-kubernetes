@@ -8,6 +8,7 @@ import (
 // Project is a CI pipeline (identified by repo slug) assigned to a group.
 type Project struct {
 	ID        string    `json:"id"`
+	OrgID     string    `json:"org_id"`
 	Name      string    `json:"name"`               // canonical CI repo slug, e.g. "github.com/acme/api"
 	GroupID   string    `json:"group_id,omitempty"` // empty = unassigned
 	CreatedAt time.Time `json:"created_at"`

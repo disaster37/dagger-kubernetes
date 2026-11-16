@@ -59,6 +59,14 @@ func main() {
 		Usage:  "Dagger Kubernetes CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
 		Flags:  ciFlags(),
 		Action: run,
+		Commands: []*cli.Command{
+			{
+				Name:   "check-runner",
+				Usage:  "run Cloud Checks for a commit (used by leader-created Jobs)",
+				Flags:  checkRunnerFlags(),
+				Action: runCheckRunner,
+			},
+		},
 	}
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)

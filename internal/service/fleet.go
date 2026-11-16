@@ -20,6 +20,7 @@ type Manager struct {
 	maxSessionsPerReplica int
 	replicaIdleTTL        time.Duration
 	versionRetention      time.Duration
+	isolation             string
 	logger                *logrus.Logger
 }
 
@@ -28,6 +29,8 @@ type ManagerConfig struct {
 	MaxSessionsPerReplica int
 	ReplicaIdleTTL        time.Duration
 	VersionRetention      time.Duration
+	// Isolation is "per_org" (default) or "shared".
+	Isolation string
 }
 
 func NewManager(provider domain.FleetProvider, sessions domain.SessionStore, cfg ManagerConfig, logger *logrus.Logger, metrics *observ.Metrics) *Manager {
@@ -39,20 +42,40 @@ func NewManager(provider domain.FleetProvider, sessions domain.SessionStore, cfg
 		maxSessionsPerReplica: cfg.MaxSessionsPerReplica,
 		replicaIdleTTL:        cfg.ReplicaIdleTTL,
 		versionRetention:      cfg.VersionRetention,
+		isolation:             cfg.Isolation,
 		logger:                logger,
 	}
 }
 
+// providerForOrg returns the provider scoped to orgSlug when per-org isolation
+// is enabled and the provider supports scoping.
+func (m *Manager) providerForOrg(orgSlug string) domain.FleetProvider {
+	if m.isolation != "per_org" || orgSlug == "" {
+		return m.provider
+	}
+	if scoped, ok := m.provider.(domain.ScopedFleetProvider); ok {
+		return scoped.WithScope(orgSlug)
+	}
+	return m.provider
+}
+
 func (m *Manager) Acquire(ctx context.Context, version string) (*domain.AcquireResult, error) {
-	image := m.provider.GetEngineImage(version)
-	if err := m.provider.EnsureStatefulSet(version, image); err != nil {
+	return m.AcquireForOrg(ctx, "", version)
+}
+
+// AcquireForOrg provisions/acquires an engine replica scoped to orgSlug when
+// fleet.isolation=per_org.
+func (m *Manager) AcquireForOrg(ctx context.Context, orgSlug, version string) (*domain.AcquireResult, error) {
+	provider := m.providerForOrg(orgSlug)
+	image := provider.GetEngineImage(version)
+	if err := provider.EnsureStatefulSet(version, image); err != nil {
 		return nil, fmt.Errorf("ensure statefulset: %w", err)
 	}
-	if err := m.provider.EnsureService(version); err != nil {
+	if err := provider.EnsureService(version); err != nil {
 		return nil, fmt.Errorf("ensure service: %w", err)
 	}
 
-	replicas, err := m.provider.GetReplicas(version)
+	replicas, err := provider.GetReplicas(version)
 	if err != nil {
 		return nil, fmt.Errorf("get replicas: %w", err)
 	}
@@ -99,16 +122,19 @@ func (m *Manager) Acquire(ctx context.Context, version string) (*domain.AcquireR
 		"target":  targetReplicas,
 	}).Info("scaling up")
 
-	if err := m.provider.ScaleUp(version, targetReplicas); err != nil {
+	if err := provider.ScaleUp(version, targetReplicas); err != nil {
 		return nil, fmt.Errorf("scale up: %w", err)
 	}
 
 	newPodName := domain.PodName(version, currentCount)
-	if err := m.provider.WaitForReady(version, newPodName); err != nil {
+	if m.isolation == "per_org" && orgSlug != "" {
+		newPodName = domain.OrgPodName(orgSlug, version, currentCount)
+	}
+	if err := provider.WaitForReady(version, newPodName); err != nil {
 		return nil, fmt.Errorf("wait for ready: %w", err)
 	}
 
-	ip, err := m.provider.GetReadyReplicaIP(version, newPodName)
+	ip, err := provider.GetReadyReplicaIP(version, newPodName)
 	if err != nil {
 		return nil, fmt.Errorf("get replica IP: %w", err)
 	}
@@ -126,15 +152,25 @@ func (m *Manager) Unpin(certFP string) {
 }
 
 func (m *Manager) GetVersionFleet(version string) (*domain.FleetInfo, error) {
-	replicas, err := m.provider.GetReplicas(version)
+	return m.GetVersionFleetForOrg("", version)
+}
+
+// GetVersionFleetForOrg returns fleet info scoped to orgSlug.
+func (m *Manager) GetVersionFleetForOrg(orgSlug, version string) (*domain.FleetInfo, error) {
+	provider := m.providerForOrg(orgSlug)
+	replicas, err := provider.GetReplicas(version)
 	if err != nil {
 		return nil, fmt.Errorf("get replicas: %w", err)
 	}
 	m.observeReplicas(version, replicas)
 
+	stsName := domain.StsName(version)
+	if m.isolation == "per_org" && orgSlug != "" {
+		stsName = domain.OrgStsName(orgSlug, version)
+	}
 	info := &domain.FleetInfo{
 		Version:  version,
-		STSName:  domain.StsName(version),
+		STSName:  stsName,
 		Replicas: len(replicas),
 	}
 
@@ -150,21 +186,28 @@ func (m *Manager) GetVersionFleet(version string) (*domain.FleetInfo, error) {
 }
 
 func (m *Manager) Sweep(ctx context.Context) error {
-	versions, err := m.provider.AllVersions()
+	return m.SweepForOrg(ctx, "")
+}
+
+// SweepForOrg sweeps the fleet scoped to orgSlug.
+func (m *Manager) SweepForOrg(ctx context.Context, orgSlug string) error {
+	provider := m.providerForOrg(orgSlug)
+	versions, err := provider.AllVersions()
 	if err != nil {
 		return fmt.Errorf("all versions: %w", err)
 	}
 
 	for _, version := range versions {
-		if err := m.sweepVersion(version); err != nil {
-			m.logger.WithField("version", version).WithError(err).Error("sweep version error")
+		if err := m.sweepVersion(orgSlug, version); err != nil {
+			m.logger.WithFields(logrus.Fields{"org": orgSlug, "version": version}).WithError(err).Error("sweep version error")
 		}
 	}
 	return nil
 }
 
-func (m *Manager) sweepVersion(version string) error {
-	replicas, err := m.provider.GetReplicas(version)
+func (m *Manager) sweepVersion(orgSlug, version string) error {
+	provider := m.providerForOrg(orgSlug)
+	replicas, err := provider.GetReplicas(version)
 	if err != nil {
 		return fmt.Errorf("get replicas: %w", err)
 	}
@@ -187,7 +230,7 @@ func (m *Manager) sweepVersion(version string) error {
 			"idle":    idle,
 		}).Info("scaling down idle replica")
 
-		if err := m.provider.ScaleDown(version, r.Ordinal); err != nil {
+		if err := provider.ScaleDown(version, r.Ordinal); err != nil {
 			return fmt.Errorf("scale down %s: %w", r.Name, err)
 		}
 		break
@@ -201,23 +244,24 @@ func (m *Manager) sweepVersion(version string) error {
 
 	if len(replicas) > 0 {
 		// Version is active (has pods); clear any stale idle-since stamp.
-		return m.clearIdleSinceIfPresent(version)
+		return m.clearIdleSinceIfPresent(orgSlug, version)
 	}
 
 	// Zero replicas: run idle tracking + GC.
-	return m.gcIdleVersion(version)
+	return m.gcIdleVersion(orgSlug, version)
 }
 
 // clearIdleSinceIfPresent removes the idle-since annotation when it exists.
-func (m *Manager) clearIdleSinceIfPresent(version string) error {
-	_, ok, err := m.provider.VersionIdleSince(version)
+func (m *Manager) clearIdleSinceIfPresent(orgSlug, version string) error {
+	provider := m.providerForOrg(orgSlug)
+	_, ok, err := provider.VersionIdleSince(version)
 	if err != nil {
 		return fmt.Errorf("get idle since: %w", err)
 	}
 	if !ok {
 		return nil
 	}
-	if err := m.provider.SetVersionIdleSince(version, time.Time{}); err != nil {
+	if err := provider.SetVersionIdleSince(version, time.Time{}); err != nil {
 		return fmt.Errorf("clear idle since: %w", err)
 	}
 	return nil
@@ -225,7 +269,8 @@ func (m *Manager) clearIdleSinceIfPresent(version string) error {
 
 // gcIdleVersion evaluates idle-since tracking and, once version_retention
 // elapses, deletes the idle version's Service then StatefulSet.
-func (m *Manager) gcIdleVersion(version string) error {
+func (m *Manager) gcIdleVersion(orgSlug, version string) error {
+	provider := m.providerForOrg(orgSlug)
 	if m.versionRetention <= 0 {
 		return nil // feature disabled
 	}
@@ -234,15 +279,15 @@ func (m *Manager) gcIdleVersion(version string) error {
 		// Stale sessions still pin this (dead) version; be conservative and
 		// restart the idle clock so GC does not fire prematurely once the
 		// sessions are reaped.
-		return m.clearIdleSinceIfPresent(version)
+		return m.clearIdleSinceIfPresent(orgSlug, version)
 	}
 
-	idleSince, ok, err := m.provider.VersionIdleSince(version)
+	idleSince, ok, err := provider.VersionIdleSince(version)
 	if err != nil {
 		if ok {
 			// Malformed annotation: log + reset to now, do not crash.
 			m.logger.WithField("version", version).WithError(err).Warn("resetting malformed idle-since annotation")
-			if setErr := m.provider.SetVersionIdleSince(version, time.Now()); setErr != nil {
+			if setErr := provider.SetVersionIdleSince(version, time.Now()); setErr != nil {
 				return fmt.Errorf("reset idle since: %w", setErr)
 			}
 			return nil
@@ -253,7 +298,7 @@ func (m *Manager) gcIdleVersion(version string) error {
 	now := time.Now()
 	if !ok {
 		// First idle observation: stamp and wait for version_retention.
-		if err := m.provider.SetVersionIdleSince(version, now); err != nil {
+		if err := provider.SetVersionIdleSince(version, now); err != nil {
 			return fmt.Errorf("set idle since: %w", err)
 		}
 		return nil
@@ -265,10 +310,10 @@ func (m *Manager) gcIdleVersion(version string) error {
 
 	// Delete the Service first (self-healing: if the STS delete fails, the
 	// next sweep still lists the STS and retries), then the StatefulSet.
-	if err := m.provider.DeleteService(version); err != nil {
+	if err := provider.DeleteService(version); err != nil {
 		return fmt.Errorf("delete service %s: %w", version, err)
 	}
-	if err := m.provider.DeleteStatefulSet(version); err != nil {
+	if err := provider.DeleteStatefulSet(version); err != nil {
 		return fmt.Errorf("delete statefulset %s: %w", version, err)
 	}
 	m.logger.WithField("version", version).Info("deleted idle engine fleet version")
@@ -297,14 +342,19 @@ func sortDescendingOrdinal(replicas []domain.Replica) {
 }
 
 func (m *Manager) AllFleetInfo() ([]domain.FleetInfo, error) {
-	versions, err := m.provider.AllVersions()
+	return m.AllFleetInfoForOrg("")
+}
+
+// AllFleetInfoForOrg returns fleet info for every version scoped to orgSlug.
+func (m *Manager) AllFleetInfoForOrg(orgSlug string) ([]domain.FleetInfo, error) {
+	versions, err := m.providerForOrg(orgSlug).AllVersions()
 	if err != nil {
 		return nil, fmt.Errorf("all versions: %w", err)
 	}
 
 	infos := make([]domain.FleetInfo, 0, len(versions))
 	for _, v := range versions {
-		info, err := m.GetVersionFleet(v)
+		info, err := m.GetVersionFleetForOrg(orgSlug, v)
 		if err != nil {
 			m.logger.WithField("version", v).WithError(err).Error("get version fleet")
 			continue

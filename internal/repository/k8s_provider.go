@@ -25,6 +25,7 @@ const (
 	engineLabelApp     = "app"
 	engineLabelValue   = "dagger-engine"
 	engineLabelVersion = "version"
+	engineLabelOrg     = "dagger-kubernetes.io/org"
 	enginePort         = 9999
 
 	engineConfigMapName = "dagger-engine-config"
@@ -74,11 +75,14 @@ type K8sProviderConfig struct {
 	RegistryMirrors     map[string][]string            // engine.toml: [registry."<host>"] mirrors
 	MirrorHTTP          []string                       // engine.toml: [registry."<mirror>"] http = true
 	ImageCacheMirrors   []domain.ImageCacheMirror      // engine-image routing through TLS image-cache mirrors
+	RemoteCacheURL      string                         // engine.toml [remoteCache] url
+	RemoteCacheToken    string                         // DAGGER_CLOUD_TOKEN injected into engine pods
 }
 
 type K8sProvider struct {
 	clientset kubernetes.Interface
 	cfg       K8sProviderConfig
+	scope     string // org slug when fleet.isolation=per_org
 }
 
 var _ domain.FleetProvider = (*K8sProvider)(nil)
@@ -125,11 +129,38 @@ func NewK8sProvider(clientset kubernetes.Interface, cfg K8sProviderConfig) *K8sP
 	}
 }
 
+// SetRemoteCache configures the engine.toml [remoteCache] URL and the
+// DAGGER_CLOUD_TOKEN injected into engine pods.
+func (p *K8sProvider) SetRemoteCache(url, token string) {
+	p.cfg.RemoteCacheURL = url
+	p.cfg.RemoteCacheToken = token
+}
+
+// WithScope returns a shallow copy of the provider scoped to orgSlug. An empty
+// slug returns the shared (unscoped) provider.
+func (p *K8sProvider) WithScope(orgSlug string) domain.FleetProvider {
+	cp := *p
+	cp.scope = orgSlug
+	return &cp
+}
+
 func (p *K8sProvider) engineLabels(version string) map[string]string {
-	return map[string]string{
+	labelMap := map[string]string{
 		engineLabelApp:     engineLabelValue,
 		engineLabelVersion: version,
 	}
+	if p.scope != "" {
+		labelMap[engineLabelOrg] = p.scope
+	}
+	return labelMap
+}
+
+func (p *K8sProvider) stsName(version string) string {
+	return domain.OrgStsName(p.scope, version)
+}
+
+func (p *K8sProvider) serviceName(version string) string {
+	return domain.OrgServiceName(p.scope, version)
 }
 
 // renderEngineTOML renders the fleet-wide Dagger engine configuration.
@@ -139,6 +170,7 @@ func (p *K8sProvider) renderEngineTOML() string {
 		LogFormat:       p.cfg.LogFormat,
 		RegistryMirrors: p.cfg.RegistryMirrors,
 		MirrorHTTP:      p.cfg.MirrorHTTP,
+		RemoteCacheURL:  p.cfg.RemoteCacheURL,
 	}.render()
 }
 
@@ -152,7 +184,7 @@ func (p *K8sProvider) EnsureStatefulSet(version, image string) error {
 		return fmt.Errorf("ensure engine config map: %w", err)
 	}
 
-	name := domain.StsName(version)
+	name := p.stsName(version)
 	labelMap := p.engineLabels(version)
 
 	sts := p.buildStatefulSet(name, version, image, labelMap, daggerTOML)
@@ -254,7 +286,7 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 			Labels:    labelMap,
 		},
 		Spec: appsv1.StatefulSetSpec{
-			ServiceName:         domain.ServiceName(version),
+			ServiceName:         p.serviceName(version),
 			Replicas:            &replicas,
 			PodManagementPolicy: appsv1.ParallelPodManagement,
 			UpdateStrategy: appsv1.StatefulSetUpdateStrategy{
@@ -295,7 +327,10 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 // literal and secret-sourced vars (each group sorted by name for deterministic
 // specs).
 func (p *K8sProvider) engineEnv() []corev1.EnvVar {
-	env := make([]corev1.EnvVar, 0, len(p.cfg.ExtraEnv)+len(p.cfg.ExtraEnvFrom))
+	env := make([]corev1.EnvVar, 0, len(p.cfg.ExtraEnv)+len(p.cfg.ExtraEnvFrom)+1)
+	if p.cfg.RemoteCacheToken != "" {
+		env = append(env, corev1.EnvVar{Name: "DAGGER_CLOUD_TOKEN", Value: p.cfg.RemoteCacheToken})
+	}
 	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
 		env = append(env, corev1.EnvVar{Name: name, Value: p.cfg.ExtraEnv[name]})
 	}
@@ -482,7 +517,7 @@ func (p *K8sProvider) DeleteStatefulSet(version string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	name := domain.StsName(version)
+	name := p.stsName(version)
 	err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete statefulset %s: %w", name, err)
@@ -494,7 +529,7 @@ func (p *K8sProvider) EnsureService(version string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	name := domain.ServiceName(version)
+	name := p.serviceName(version)
 	labelMap := p.engineLabels(version)
 
 	svc := &corev1.Service{
@@ -536,7 +571,7 @@ func (p *K8sProvider) DeleteService(version string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	name := domain.ServiceName(version)
+	name := p.serviceName(version)
 	err := p.clientset.CoreV1().Services(p.cfg.Namespace).Delete(ctx, name, metav1.DeleteOptions{})
 	if err != nil && !apierrors.IsNotFound(err) {
 		return fmt.Errorf("delete service %s: %w", name, err)
@@ -604,7 +639,7 @@ func (p *K8sProvider) ListPVCs(version string) ([]domain.PVCInfo, error) {
 	var out []domain.PVCInfo
 	for i := range pvcList.Items {
 		pvc := &pvcList.Items[i]
-		ordinal := extractPVCOrdinal(pvc.Name, version)
+		ordinal := extractScopedPVCOrdinal(pvc.Name, p.stsName(version))
 		if ordinal < 0 {
 			continue
 		}
@@ -644,7 +679,7 @@ func (p *K8sProvider) ScaleDown(version string, _ int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	name := domain.StsName(version)
+	name := p.stsName(version)
 	sts, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return fmt.Errorf("get statefulset %s: %w", name, err)
@@ -663,7 +698,7 @@ func (p *K8sProvider) ScaleDown(version string, _ int) error {
 }
 
 func (p *K8sProvider) setReplicas(ctx context.Context, version string, replicas int32) error {
-	name := domain.StsName(version)
+	name := p.stsName(version)
 	var lastErr error
 	for attempt := 0; attempt < 5; attempt++ {
 		sts, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
@@ -737,9 +772,11 @@ func (p *K8sProvider) AllVersions() ([]string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	selector := labels.SelectorFromSet(map[string]string{
-		engineLabelApp: engineLabelValue,
-	}).String()
+	selectorMap := map[string]string{engineLabelApp: engineLabelValue}
+	if p.scope != "" {
+		selectorMap[engineLabelOrg] = p.scope
+	}
+	selector := labels.SelectorFromSet(selectorMap).String()
 
 	stsList, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: selector,
@@ -764,7 +801,7 @@ func (p *K8sProvider) VersionIdleSince(version string) (time.Time, bool, error) 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	name := domain.StsName(version)
+	name := p.stsName(version)
 	sts, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -790,7 +827,7 @@ func (p *K8sProvider) SetVersionIdleSince(version string, idleSince time.Time) e
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	name := domain.StsName(version)
+	name := p.stsName(version)
 	sts, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -824,7 +861,7 @@ func (p *K8sProvider) isPodReady(pod *corev1.Pod) bool {
 }
 
 func (p *K8sProvider) extractOrdinal(podName, version string) int {
-	prefix := fmt.Sprintf("dagger-engine-%s-", domain.VersionSlug(version))
+	prefix := fmt.Sprintf("%s-", p.stsName(version))
 	suffix, ok := strings.CutPrefix(podName, prefix)
 	if !ok {
 		return -1
@@ -840,7 +877,11 @@ func (p *K8sProvider) extractOrdinal(podName, version string) int {
 // (<volume-claim-template>-<stsName>-<ordinal>). Returns -1 when the name does
 // not follow the convention.
 func extractPVCOrdinal(pvcName, version string) int {
-	prefix := fmt.Sprintf("%s-%s-", volumeDaggerKubernetes, domain.StsName(version))
+	return extractScopedPVCOrdinal(pvcName, domain.StsName(version))
+}
+
+func extractScopedPVCOrdinal(pvcName, stsName string) int {
+	prefix := fmt.Sprintf("%s-%s-", volumeDaggerKubernetes, stsName)
 	suffix, ok := strings.CutPrefix(pvcName, prefix)
 	if !ok {
 		return -1

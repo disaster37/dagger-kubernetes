@@ -54,6 +54,15 @@ const (
 	kindUserState
 	kindSoftDeleteUser
 	kindOAuthUserMutation
+	// Organization tenancy commands (appended after every existing kind).
+	kindUpsertOrg
+	kindDeleteOrg
+	kindSetOrgMember
+	kindRemoveOrgMember
+	kindUpsertSecret
+	kindDeleteSecret
+	kindUpsertForgeSource
+	kindDeleteForgeSource
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -219,6 +228,32 @@ type (
 		FallbackGroupID  string                       `json:"fallback_group_id,omitempty"`
 		At               time.Time                    `json:"at"`
 	}
+
+	cmdOrg struct {
+		Org    domain.Org `json:"org"`
+		Create bool       `json:"create"`
+	}
+
+	cmdOrgMember struct {
+		OrgID  string         `json:"org_id"`
+		UserID string         `json:"user_id"`
+		Role   domain.OrgRole `json:"role"`
+		At     time.Time      `json:"at"`
+	}
+
+	cmdSecret struct {
+		Secret domain.Secret `json:"secret"`
+	}
+
+	cmdDeleteSecret struct {
+		Scope   domain.SecretScope `json:"scope"`
+		ScopeID string             `json:"scope_id"`
+		Name    string             `json:"name"`
+	}
+
+	cmdForgeSource struct {
+		Source domain.ForgeSource `json:"source"`
+	}
 )
 
 // toDomain converts a command user payload into a domain.User.
@@ -320,6 +355,14 @@ type fsmState struct {
 	projects       map[string]*domain.Project
 	projectsByName map[string]string
 
+	orgs             map[string]*domain.Org
+	orgsByName       map[string]string
+	orgMembers       map[string]map[string]domain.OrgRole // orgID -> userID -> role
+	orgMembersByUser map[string]map[string]struct{}       // userID -> set(orgID)
+
+	secrets      map[string]*domain.Secret // key = scope|scopeID|name
+	forgeSources map[string]*domain.ForgeSource
+
 	traces map[string]*domain.TraceMeta
 
 	meta map[string]string
@@ -330,7 +373,7 @@ type fsmState struct {
 }
 
 func newState() *fsmState {
-	return &fsmState{
+	st := &fsmState{
 		users:             make(map[string]*domain.User),
 		usersByName:       make(map[string]string),
 		usersByOAuth:      make(map[string]string),
@@ -343,8 +386,48 @@ func newState() *fsmState {
 		tokensByUser:      make(map[string]string),
 		projects:          make(map[string]*domain.Project),
 		projectsByName:    make(map[string]string),
+		orgs:              make(map[string]*domain.Org),
+		orgsByName:        make(map[string]string),
+		orgMembers:        make(map[string]map[string]domain.OrgRole),
+		orgMembersByUser:  make(map[string]map[string]struct{}),
+		secrets:           make(map[string]*domain.Secret),
+		forgeSources:      make(map[string]*domain.ForgeSource),
 		traces:            make(map[string]*domain.TraceMeta),
 		meta:              make(map[string]string),
+	}
+	st.ensureDefaultOrg()
+	return st
+}
+
+// ensureDefaultOrg installs the deterministic bootstrap organization and
+// migrates legacy rows with an empty OrgID into it. It is idempotent and is
+// called on fresh state and after snapshot restore.
+func (s *fsmState) ensureDefaultOrg() {
+	if _, ok := s.orgs[domain.DefaultOrgID]; !ok {
+		now := time.Unix(0, 0).UTC()
+		s.storeOrg(&domain.Org{
+			ID:          domain.DefaultOrgID,
+			Name:        domain.DefaultOrgID,
+			DisplayName: "Default",
+			Features:    append([]string(nil), domain.DefaultOrgFeatures...),
+			CreatedAt:   now,
+			UpdatedAt:   now,
+		})
+	}
+	for _, g := range s.groups {
+		if g.OrgID == "" {
+			g.OrgID = domain.DefaultOrgID
+		}
+	}
+	for _, p := range s.projects {
+		if p.OrgID == "" {
+			p.OrgID = domain.DefaultOrgID
+		}
+	}
+	for _, t := range s.traces {
+		if t.OrgID == "" {
+			t.OrgID = domain.DefaultOrgID
+		}
 	}
 }
 
@@ -424,6 +507,8 @@ func (f *FSM) applySetMetaLocked(cmd *command) error {
 // applyEntityCommand handles user/group/project/token commands. Handled
 // commands may return a non-nil response object (the committed snapshot) which
 // the repository layer type-checks.
+//
+//nolint:gocyclo // command dispatch table
 func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 	switch cmd.Kind {
 	case kindUpsertUser:
@@ -455,6 +540,38 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 			return err
 		})
 		return out, err, true
+	case kindUpsertOrg:
+		return nil, applyPayload(cmd, "org", func(p cmdOrg) error {
+			return s.upsertOrg(&p.Org, p.Create)
+		}), true
+	case kindDeleteOrg:
+		return nil, applyPayload(cmd, "delete org", s.deleteOrg), true
+	case kindSetOrgMember:
+		return nil, applyPayload(cmd, "set org member", func(p cmdOrgMember) error {
+			return s.setOrgMember(p)
+		}), true
+	case kindRemoveOrgMember:
+		return nil, applyPayload(cmd, "remove org member", func(p cmdOrgMember) error {
+			return s.removeOrgMember(p.OrgID, p.UserID)
+		}), true
+	case kindUpsertSecret:
+		return nil, applyPayload(cmd, "secret", func(p cmdSecret) error {
+			return s.upsertSecret(&p.Secret)
+		}), true
+	case kindDeleteSecret:
+		return nil, applyPayload(cmd, "delete secret", func(p cmdDeleteSecret) error {
+			delete(s.secrets, secretKey(p.Scope, p.ScopeID, p.Name))
+			return nil
+		}), true
+	case kindUpsertForgeSource:
+		return nil, applyPayload(cmd, "forge source", func(p cmdForgeSource) error {
+			return s.upsertForgeSource(&p.Source)
+		}), true
+	case kindDeleteForgeSource:
+		return nil, applyPayload(cmd, "delete forge source", func(p cmdForgeSource) error {
+			delete(s.forgeSources, p.Source.ID)
+			return nil
+		}), true
 	case kindUpsertGroup:
 		return nil, applyPayload(cmd, "group", func(p cmdGroup) error {
 			return s.upsertGroup(&p.Group, p.Create)
@@ -707,14 +824,141 @@ func isActiveAdmin(u *domain.User) bool {
 
 func (s *fsmState) storeGroup(g *domain.Group) {
 	cp := *g
+	if cp.OrgID == "" {
+		cp.OrgID = domain.DefaultOrgID
+	}
 	s.groups[g.ID] = &cp
 	s.groupsByName[strings.ToLower(g.Name)] = g.ID
 }
 
 func (s *fsmState) storeProject(p *domain.Project) {
 	cp := *p
+	if cp.OrgID == "" {
+		cp.OrgID = domain.DefaultOrgID
+	}
 	s.projects[p.ID] = &cp
 	s.projectsByName[strings.ToLower(p.Name)] = p.ID
+}
+
+// secretKey builds the FSM key for a scoped secret.
+func secretKey(scope domain.SecretScope, scopeID, name string) string {
+	return fmt.Sprintf("%s|%s|%s", scope, scopeID, name)
+}
+
+// upsertSecret stores a sealed secret.
+func (s *fsmState) upsertSecret(sec *domain.Secret) error {
+	if sec == nil || sec.Name == "" || sec.ScopeID == "" {
+		return fmt.Errorf("secret: %w", domain.ErrValidation)
+	}
+	cp := *sec
+	s.secrets[secretKey(sec.Scope, sec.ScopeID, sec.Name)] = &cp
+	return nil
+}
+
+// upsertForgeSource stores a forge integration.
+func (s *fsmState) upsertForgeSource(src *domain.ForgeSource) error {
+	if src == nil || src.ID == "" || src.OrgID == "" {
+		return fmt.Errorf("forge source: %w", domain.ErrValidation)
+	}
+	cp := *src
+	s.forgeSources[src.ID] = &cp
+	return nil
+}
+
+// storeOrg stores a deep copy of o and refreshes the name index.
+func (s *fsmState) storeOrg(o *domain.Org) {
+	cp := *o
+	cp.Features = append([]string(nil), o.Features...)
+	s.orgs[o.ID] = &cp
+	s.orgsByName[strings.ToLower(o.Name)] = o.ID
+}
+
+// upsertOrg applies a create or update command.
+func (s *fsmState) upsertOrg(o *domain.Org, create bool) error {
+	if o == nil || o.ID == "" || o.Name == "" {
+		return fmt.Errorf("org: %w", domain.ErrValidation)
+	}
+	if create {
+		if _, ok := s.orgs[o.ID]; ok {
+			return fmt.Errorf("org %s: %w", o.ID, domain.ErrConflict)
+		}
+		if _, ok := s.orgsByName[strings.ToLower(o.Name)]; ok {
+			return fmt.Errorf("org %s: %w", o.Name, domain.ErrConflict)
+		}
+	} else {
+		existing, ok := s.orgs[o.ID]
+		if !ok {
+			return fmt.Errorf("org %s: %w", o.ID, domain.ErrNotFound)
+		}
+		if other, ok := s.orgsByName[strings.ToLower(o.Name)]; ok && other != o.ID {
+			return fmt.Errorf("org %s: %w", o.Name, domain.ErrConflict)
+		}
+		if existing.Name != o.Name {
+			delete(s.orgsByName, strings.ToLower(existing.Name))
+		}
+	}
+	if len(o.Features) == 0 {
+		o.Features = append([]string(nil), domain.DefaultOrgFeatures...)
+	}
+	s.storeOrg(o)
+	return nil
+}
+
+// deleteOrg removes an organization and its direct memberships. Groups and
+// projects are left intact (they retain their OrgID for audit).
+func (s *fsmState) deleteOrg(id string) error {
+	o, ok := s.orgs[id]
+	if !ok {
+		return fmt.Errorf("org %s: %w", id, domain.ErrNotFound)
+	}
+	if id == domain.DefaultOrgID {
+		return fmt.Errorf("org %s: %w", id, domain.ErrForbidden)
+	}
+	for uid := range s.orgMembers[id] {
+		delete(s.orgMembersByUser[uid], id)
+		if len(s.orgMembersByUser[uid]) == 0 {
+			delete(s.orgMembersByUser, uid)
+		}
+	}
+	delete(s.orgMembers, id)
+	delete(s.orgs, id)
+	delete(s.orgsByName, strings.ToLower(o.Name))
+	return nil
+}
+
+// setOrgMember adds or updates a direct org membership.
+func (s *fsmState) setOrgMember(p cmdOrgMember) error {
+	if _, ok := s.orgs[p.OrgID]; !ok {
+		return fmt.Errorf("org %s: %w", p.OrgID, domain.ErrNotFound)
+	}
+	if _, ok := s.users[p.UserID]; !ok {
+		return fmt.Errorf("user %s: %w", p.UserID, domain.ErrNotFound)
+	}
+	if p.Role != domain.OrgAdmin && p.Role != domain.OrgMember {
+		return fmt.Errorf("org role %q: %w", p.Role, domain.ErrValidation)
+	}
+	if s.orgMembers[p.OrgID] == nil {
+		s.orgMembers[p.OrgID] = make(map[string]domain.OrgRole)
+	}
+	s.orgMembers[p.OrgID][p.UserID] = p.Role
+	if s.orgMembersByUser[p.UserID] == nil {
+		s.orgMembersByUser[p.UserID] = make(map[string]struct{})
+	}
+	s.orgMembersByUser[p.UserID][p.OrgID] = struct{}{}
+	return nil
+}
+
+// removeOrgMember deletes a direct org membership (idempotent).
+func (s *fsmState) removeOrgMember(orgID, userID string) error {
+	delete(s.orgMembers[orgID], userID)
+	if len(s.orgMembers[orgID]) == 0 {
+		delete(s.orgMembers, orgID)
+	}
+	delete(s.orgMembersByUser[userID], orgID)
+	if len(s.orgMembersByUser[userID]) == 0 {
+		delete(s.orgMembersByUser, userID)
+	}
+	return nil
 }
 
 func (s *fsmState) deleteUser(id string) error {
@@ -1745,6 +1989,9 @@ func containsFold(s, substr string) bool {
 }
 
 func traceMatches(f *domain.TraceFilter, m *domain.TraceMeta) bool {
+	if f.OrgID != "" && m.OrgID != "" && m.OrgID != f.OrgID {
+		return false
+	}
 	if f.UnassignedOnly {
 		return m.GroupID == ""
 	}

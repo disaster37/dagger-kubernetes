@@ -89,6 +89,13 @@ func NewCLIService(
 // cached. The release list is fetched through an in-memory TTL cache to absorb
 // GitHub API rate limits.
 func (s *CLIService) ResolveLatest(ctx context.Context, osName, arch string) (*domain.CLIArtifact, error) {
+	return s.ResolveLatestWithPrereleases(ctx, osName, arch, false)
+}
+
+// ResolveLatestWithPrereleases resolves the highest allowed release, optionally
+// including SemVer pre-releases (v1.0.0-beta.*). Explicit pre-release downloads
+// are always allowed regardless of this flag.
+func (s *CLIService) ResolveLatestWithPrereleases(ctx context.Context, osName, arch string, includePrereleases bool) (*domain.CLIArtifact, error) {
 	releases, err := s.listReleases(ctx)
 	if err != nil {
 		return nil, err
@@ -98,6 +105,9 @@ func (s *CLIService) ResolveLatest(ctx context.Context, osName, arch string) (*d
 	for _, raw := range releases {
 		v, err := domain.Parse(raw)
 		if err != nil || !s.resolver.IsAllowed(v) {
+			continue
+		}
+		if v.IsPreRelease() && !includePrereleases {
 			continue
 		}
 		if best == nil || v.Compare(best) > 0 {

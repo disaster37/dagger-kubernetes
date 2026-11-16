@@ -13,6 +13,7 @@ type engineTOML struct {
 	LogFormat       string
 	RegistryMirrors map[string][]string
 	MirrorHTTP      []string // mirror host[:port] strings dialed over plaintext HTTP
+	RemoteCacheURL  string   // [remoteCache] url; "" omits the section
 }
 
 // render returns the engine.toml content, or "" when the configuration is
@@ -37,6 +38,9 @@ func (c engineTOML) render() string {
 	}
 	for _, mirror := range sortedUnique(c.MirrorHTTP) {
 		sections = append(sections, fmt.Sprintf("[registry.%s]\n  http = true\n", tomlQuote(mirror)))
+	}
+	if c.RemoteCacheURL != "" {
+		sections = append(sections, fmt.Sprintf("[remoteCache]\n  url = %s\n", tomlQuote(c.RemoteCacheURL)))
 	}
 	return strings.Join(sections, "\n")
 }

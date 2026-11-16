@@ -81,22 +81,7 @@ func extractTraceSpans(body []byte) []spanWithResource {
 // (not just roots). Malformed bodies yield nil; spans without a trace ID are
 // skipped.
 func ExtractTraceIDs(body []byte) []string {
-	spans := extractTraceSpans(body)
-	if len(spans) == 0 {
-		return nil
-	}
-
-	seen := make(map[string]bool, len(spans))
-	out := make([]string, 0, len(spans))
-	for i := range spans {
-		tid := hex.EncodeToString(spans[i].span.GetTraceId())
-		if tid == "" || seen[tid] {
-			continue
-		}
-		seen[tid] = true
-		out = append(out, tid)
-	}
-	return out
+	return traceIDsFromSpans(extractTraceSpans(body))
 }
 
 // ExtractLogTraceIDs parses an OTLP/HTTP protobuf body
@@ -161,7 +146,12 @@ func ExtractLogTraceIDs(body []byte) []string {
 // protowire so the collector package (which drags in the gRPC gateway) is not
 // imported, then each ResourceSpans is decoded with the typed trace proto.
 func ExtractTraceSummaries(body []byte) []TraceIngestSummary {
-	spans := extractTraceSpans(body)
+	return summariesFromSpans(extractTraceSpans(body))
+}
+
+// summariesFromSpans builds one summary per distinct root trace from an
+// already-decoded span set.
+func summariesFromSpans(spans []spanWithResource) []TraceIngestSummary {
 	if len(spans) == 0 {
 		return nil
 	}
@@ -299,4 +289,157 @@ func buildSummary(s *spanWithResource) TraceIngestSummary {
 	}
 
 	return sum
+}
+
+// CacheEvent is a cache-related signal extracted from OTLP telemetry in the
+// same single pass as trace/log metadata. It feeds the read-through remote
+// cache index (ADR-055).
+type CacheEvent struct {
+	TraceID string
+	Kind    string
+	Key     string
+	Value   string
+	Size    int64
+}
+
+// OTLPBatch is the complete result of decoding one OTLP request body exactly
+// once: trace summaries, every trace ID present, log trace IDs, and cache
+// events. Callers must not re-unmarshal the body after calling ExtractOTLPBatch.
+type OTLPBatch struct {
+	Summaries   []TraceIngestSummary
+	TraceIDs    []string
+	LogTraceIDs []string
+	CacheEvents []CacheEvent
+}
+
+// ExtractOTLPBatch decodes an OTLP/HTTP protobuf body at most once and returns
+// every derived signal. signal is "traces", "logs", or "metrics"; metrics
+// bodies are not decoded (they carry no trace metadata used by the supervisor).
+func ExtractOTLPBatch(signal string, body []byte) OTLPBatch {
+	switch signal {
+	case "traces":
+		spans := extractTraceSpans(body)
+		if len(spans) == 0 {
+			return OTLPBatch{}
+		}
+		return OTLPBatch{
+			Summaries:   summariesFromSpans(spans),
+			TraceIDs:    traceIDsFromSpans(spans),
+			CacheEvents: cacheEventsFromSpans(spans),
+		}
+	case "logs":
+		return extractLogBatch(body)
+	default:
+		return OTLPBatch{}
+	}
+}
+
+// traceIDsFromSpans returns the distinct hex trace IDs of every span.
+func traceIDsFromSpans(spans []spanWithResource) []string {
+	if len(spans) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(spans))
+	out := make([]string, 0, len(spans))
+	for i := range spans {
+		tid := hex.EncodeToString(spans[i].span.GetTraceId())
+		if tid == "" || seen[tid] {
+			continue
+		}
+		seen[tid] = true
+		out = append(out, tid)
+	}
+	return out
+}
+
+// cacheEventsFromSpans extracts dagger.io/cache.* span attributes.
+func cacheEventsFromSpans(spans []spanWithResource) []CacheEvent {
+	var out []CacheEvent
+	for i := range spans {
+		sp := spans[i].span
+		tid := hex.EncodeToString(sp.GetTraceId())
+		for _, kv := range sp.GetAttributes() {
+			key := kv.GetKey()
+			if len(key) <= len("dagger.io/cache.") || key[:len("dagger.io/cache.")] != "dagger.io/cache." {
+				continue
+			}
+			sv, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue)
+			if !ok {
+				continue
+			}
+			out = append(out, CacheEvent{
+				TraceID: tid,
+				Kind:    key[len("dagger.io/cache."):],
+				Key:     key,
+				Value:   sv.StringValue,
+			})
+		}
+	}
+	return out
+}
+
+// extractLogBatch decodes an ExportLogsServiceRequest once, returning trace IDs
+// and cache events from log record attributes.
+func extractLogBatch(body []byte) OTLPBatch {
+	if len(body) == 0 {
+		return OTLPBatch{}
+	}
+	seen := make(map[string]bool)
+	var batch OTLPBatch
+	for len(body) > 0 {
+		num, typ, n := protowire.ConsumeTag(body)
+		if n < 0 {
+			return OTLPBatch{}
+		}
+		body = body[n:]
+		if num == 1 && typ == protowire.BytesType {
+			rlBytes, n := protowire.ConsumeBytes(body)
+			if n < 0 {
+				return OTLPBatch{}
+			}
+			body = body[n:]
+
+			var rl logspb.ResourceLogs
+			if err := proto.Unmarshal(rlBytes, &rl); err != nil {
+				return OTLPBatch{}
+			}
+			for _, sl := range rl.GetScopeLogs() {
+				for _, lr := range sl.GetLogRecords() {
+					tid := hex.EncodeToString(lr.GetTraceId())
+					if tid != "" && !seen[tid] {
+						seen[tid] = true
+						batch.LogTraceIDs = append(batch.LogTraceIDs, tid)
+					}
+					batch.CacheEvents = append(batch.CacheEvents, cacheEventsFromLogRecord(tid, lr)...)
+				}
+			}
+		} else {
+			n := protowire.ConsumeFieldValue(num, typ, body)
+			if n < 0 {
+				return OTLPBatch{}
+			}
+			body = body[n:]
+		}
+	}
+	return batch
+}
+
+// cacheEventsFromLogRecord extracts dagger.io/cache.* and dagger.io/engine.event
+// attributes from one log record.
+func cacheEventsFromLogRecord(traceID string, lr *logspb.LogRecord) []CacheEvent {
+	var out []CacheEvent
+	for _, kv := range lr.GetAttributes() {
+		key := kv.GetKey()
+		sv, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue)
+		if !ok {
+			continue
+		}
+		switch {
+		case key == "dagger.io/engine.event":
+			out = append(out, CacheEvent{TraceID: traceID, Kind: "engine.event", Key: key, Value: sv.StringValue})
+		case len(key) > len("dagger.io/cache.") && key[:len("dagger.io/cache.")] == "dagger.io/cache.":
+			out = append(out, CacheEvent{TraceID: traceID, Kind: key[len("dagger.io/cache."):], Key: key, Value: sv.StringValue})
+		}
+	}
+	return out
 }

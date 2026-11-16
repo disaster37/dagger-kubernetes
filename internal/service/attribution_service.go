@@ -50,6 +50,10 @@ func (a *AttributionService) Provision(ctx context.Context, traceID, userID, ver
 // unbounded values (CWE-770).
 const maxIngestFieldLen = 256
 
+// ingestDedupWindow suppresses repeated non-terminal Raft writes for the same
+// trace within this window (ADR-051). Terminal transitions always write.
+const ingestDedupWindow = 15 * time.Second
+
 // Ingest enriches trace_meta from an OTLP-derived summary. When repo is
 // non-empty it upserts the project, resolves the group (explicit assignment
 // wins; otherwise regex auto-assign by group id order), and writes the row.
@@ -79,21 +83,31 @@ func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo
 		status = ""
 	}
 
-	var groupID string
+	var groupID, orgID string
 	if repo != "" {
 		proj, err := a.projects.GetOrCreateByName(ctx, repo)
 		if err != nil {
 			a.logger.WithError(err).WithField("ci_repo", repo).Warn("attribution: project upsert failed")
 		} else {
 			groupID = proj.GroupID
+			orgID = proj.OrgID
 			if groupID == "" {
 				groupID = a.resolveGroup(ctx, proj)
 			}
 		}
 	}
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
+
+	now := time.Now().UTC()
+	if a.ingestUnchanged(ctx, traceID, groupID, repo, status, now) {
+		return
+	}
 
 	m := &domain.TraceMeta{
 		TraceID:     traceID,
+		OrgID:       orgID,
 		UserID:      userID,
 		GroupID:     groupID,
 		ProjectName: repo,
@@ -103,11 +117,36 @@ func (a *AttributionService) Ingest(ctx context.Context, traceID, userID, ciRepo
 		CIRepo:      repo,
 		DurationMS:  durationMS,
 		StartedAt:   startedAt,
-		UpdatedAt:   time.Now().UTC(),
+		UpdatedAt:   now,
 	}
 	if err := a.traceMeta.UpsertIngest(ctx, m); err != nil {
 		a.logger.WithError(err).WithField("trace_id", traceID).Warn("attribution ingest failed")
 	}
+}
+
+// ingestUnchanged reports whether a non-terminal ingest would be a no-op: the
+// stored row already has the same status/group/repo and was updated within the
+// dedup window. Terminal statuses are never deduplicated.
+func (a *AttributionService) ingestUnchanged(ctx context.Context, traceID, groupID, repo, status string, now time.Time) bool {
+	if isTerminalStatus(status) {
+		return false
+	}
+	existing, err := a.traceMeta.Get(ctx, traceID)
+	if err != nil || existing == nil {
+		return false
+	}
+	if isTerminalStatus(existing.Status) {
+		return false
+	}
+	if existing.Status != status || existing.GroupID != groupID || existing.CIRepo != repo {
+		return false
+	}
+	return now.Sub(existing.UpdatedAt) < ingestDedupWindow
+}
+
+// isTerminalStatus reports whether a trace status is final.
+func isTerminalStatus(status string) bool {
+	return status == "success" || status == "failed"
 }
 
 // MarkFailed transitions a non-terminal trace to "failed" with reason.

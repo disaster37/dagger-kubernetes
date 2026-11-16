@@ -60,7 +60,7 @@ func (r *Resolver) ResolveMinimal(raw string) (*domain.Version, error) {
 	if err != nil {
 		return nil, fmt.Errorf("parse version: %w", err)
 	}
-	if v.Patch != 0 {
+	if v.Patch != 0 || v.PreRelease != "" {
 		return v, nil
 	}
 

@@ -67,6 +67,21 @@ func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Ident
 		return a.identityForUser(ctx, tok.UserID, domain.AuthAPIToken, 0)
 	}
 
+	if orgName, ok := ParseOrgToken(bearer); ok {
+		tok, err := a.tokens.Validate(ctx, bearer)
+		if err != nil {
+			a.logger.WithError(err).Debug("org token validate failed")
+			return nil, domain.ErrUnauthenticated
+		}
+		return &domain.Identity{
+			UserID:   tok.UserID,
+			Username: orgName,
+			Role:     domain.RoleUser,
+			Method:   domain.AuthAPIToken,
+			OrgID:    orgName,
+		}, nil
+	}
+
 	if claims, err := a.jwt.ParseAccess(bearer); err == nil {
 		return a.identityForUser(ctx, claims.UserID, domain.AuthJWT, claims.TokenVersion)
 	}

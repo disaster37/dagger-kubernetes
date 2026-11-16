@@ -938,6 +938,42 @@ and restores the raw upstream configuration.
 
 ---
 
+## Dagger Cloud 1.0 parity
+
+The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
+
+- **SemVer pre-releases & tenancy.** `v1.0.0-beta.*` engines are accepted
+  explicitly. `cli.include_prereleases` (default `false`) controls `latest`;
+  `?prerelease=true` overrides per request. Organizations are managed under
+  `/api/v1/orgs` with `org_admin`/`member` memberships and org-scoped
+  `dag_<org>_` tokens. `fleet.isolation` is `per_org` (default) or `shared`.
+- **CLI login & CI auth.** `dagger login` uses RFC 8628
+  (`POST /oauth/device/code`, `/api/v1/auth/device/approve`, `/oauth/token`).
+  CI can exchange GitHub/GitLab OIDC ID tokens at `POST /v1/oidc`.
+- **Cloud GraphQL.** `POST /query` serves the Cloud-compatible schema
+  (`user`, `org`, `trace`, cursor-paginated traces).
+- **OTLP read-back.** `GET /v1/{traces,logs,metrics}/:traceID` streams framed
+  binary `application/vnd.dagger.otlp.stream` data for `dagger trace` and
+  `dagger agent -r`.
+- **Remote cache.** `GET /v1/engine` is a read-through cache WebSocket backed
+  by S3 presigned URLs and a rebuildable `bbolt` index. Enable with
+  `cache.remote.enabled`; stats/purge live at `/api/v1/remote-cache`.
+- **Cloud Checks.** Configure a forge under
+  `/api/v1/orgs/<org>/integrations`, then webhooks at
+  `/v1/webhooks/<provider>/<sourceID>` dispatch `batch/v1` check Jobs. Fork PRs
+  hold for approval and never receive secrets.
+- **Workflows.** `.dagger/workflows/*.y{a,}ml` supports `call:` jobs,
+  cross-repo `trigger:` jobs, typed `workflow_dispatch` inputs, schedules,
+  artifacts, and protected environments with human approval. Arbitrary
+  host-shell `run:` steps are intentionally unsupported.
+
+New configuration keys: `server.max_data_conns`,
+`server.internal_control_url`, `server.internal_data_host`,
+`otel.max_inflight_bytes`, `cli.include_prereleases`, `fleet.isolation`,
+`cache.remote.*`, `checks.*`, `workflows.*`, `forge.*`,
+`supervisor.cache_scratch.size_limit`, and `supervisor.gomemlimit`. See
+`config/config.app.yaml.sample` for the full reference.
+
 ## Pipeline history retention
 
 Pipeline history = trace metadata (Raft FSM) + Loki logs + VictoriaMetrics

@@ -35,6 +35,7 @@ type HistoryPurgeService struct {
 	gcCfg      domain.HistoryGCConfig
 	logger     *logrus.Logger
 	metricsObs *observ.Metrics // may be nil
+	archive    domain.OTLPArchive
 
 	mu       sync.Mutex
 	cached   *domain.HistoryStats
@@ -64,6 +65,10 @@ func NewHistoryPurgeService(
 		metricsObs: obs,
 	}
 }
+
+// SetOTLPArchive wires the framed OTLP archive so purges also delete archived
+// chunks (ADR-054).
+func (s *HistoryPurgeService) SetOTLPArchive(a domain.OTLPArchive) { s.archive = a }
 
 // telemetryDeleteCounts aggregates best-effort Loki + VictoriaMetrics delete
 // outcomes for one trace.
@@ -102,6 +107,12 @@ func (s *HistoryPurgeService) deleteTraceTelemetry(ctx context.Context, traceID 
 // outcome and any trace_meta delete error.
 func (s *HistoryPurgeService) purgeTrace(ctx context.Context, traceID string) (telemetryDeleteCounts, error) {
 	tc := s.deleteTraceTelemetry(ctx, traceID)
+	if s.archive != nil {
+		if err := s.archive.DeleteTrace(ctx, traceID); err != nil {
+			s.logger.WithField("trace_id", traceID).WithError(err).Warn("otlp archive delete failed")
+			tc.errors++
+		}
+	}
 	if err := s.traceMeta.Delete(ctx, traceID); err != nil {
 		return tc, err
 	}

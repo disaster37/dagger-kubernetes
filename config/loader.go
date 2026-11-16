@@ -45,6 +45,9 @@ var supervisorValidations = []validation{
 	{wrap: "validate ci config", fn: validateCIConfig},
 	{wrap: "validate otel config", fn: validateOTelConfig},
 	{wrap: "validate pipeline metrics config", fn: validatePipelineMetricsConfig},
+	{wrap: "validate remote cache config", fn: validateRemoteCacheConfig},
+	{wrap: "validate checks config", fn: validateChecksConfig},
+	{wrap: "validate workflows config", fn: validateWorkflowsConfig},
 }
 
 // ciWrapperValidations is the client-relevant subset. The wrapper consumes only
@@ -81,6 +84,9 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("server.data_addr", ":8443")
 	v.SetDefault("server.data_hostname", "data.supv.example.com")
 	v.SetDefault("server.public_url", "https://supv.example.com")
+	v.SetDefault("server.max_data_conns", 2048)
+	v.SetDefault("server.internal_control_url", "")
+	v.SetDefault("server.internal_data_host", "")
 
 	v.SetDefault("auth.internal.enabled", true)
 	v.SetDefault("auth.internal.tokens_file", "/etc/dagger-kubernetes/tokens")
@@ -118,6 +124,9 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("auth.bootstrap_admin.username", "admin")
 	v.SetDefault("auth.bootstrap_admin.password", "")
 	v.SetDefault("auth.bootstrap_admin.password_file", "")
+
+	v.SetDefault("auth.device.code_ttl", 10*time.Minute)
+	v.SetDefault("auth.device.poll_interval", 5*time.Second)
 
 	v.SetDefault("auth.cookie.access_name", "dagger_kubernetes_access")
 	v.SetDefault("auth.cookie.refresh_name", "dagger_kubernetes_refresh")
@@ -222,6 +231,15 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("cache.s3.access_key", "")
 	v.SetDefault("cache.s3.secret_key", "")
 
+	v.SetDefault("cache.remote.enabled", false)
+	v.SetDefault("cache.remote.bucket", "")
+	v.SetDefault("cache.remote.prefix", "remote-cache")
+	v.SetDefault("cache.remote.s3_engine_endpoint", "")
+	v.SetDefault("cache.remote.index_path", "/var/cache/dagger-kubernetes/remotecache.db")
+	v.SetDefault("cache.remote.ttl", 720*time.Hour)
+	v.SetDefault("cache.remote.max_bytes", int64(100<<30))
+	v.SetDefault("cache.remote.workers", 16)
+
 	// Local image mirrors (Zot) the supervisor lists/prunes over their OCI
 	// Distribution v2 API. Admin-visible/read-only; the Helm chart renders the
 	// block from what it deploys.
@@ -269,6 +287,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("fleet.engine_registry_mirrors", map[string][]string{})
 	v.SetDefault("fleet.engine_registry_mirrors_http", []string{})
 	v.SetDefault("fleet.engine_extra_env_from", map[string]domain.EnvVarSource{})
+	v.SetDefault("fleet.isolation", "per_org")
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
@@ -286,6 +305,8 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("supervisor.dataplane.tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")
 	v.SetDefault("supervisor.dataplane.tls.key_path", "/etc/dagger-kubernetes/tls/tls.key")
 	v.SetDefault("supervisor.dataplane.tls.reload_poll_interval", 5*time.Second)
+	v.SetDefault("supervisor.cache_scratch.size_limit", "8Gi")
+	v.SetDefault("supervisor.gomemlimit", "")
 
 	v.SetDefault("version.floor", "v0.19.0")
 	v.SetDefault("version.allowlist", []string{})
@@ -307,12 +328,33 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("cli.upstream.download_base", "https://github.com/dagger/dagger/releases/download")
 	v.SetDefault("cli.upstream.github_token", "")
 	v.SetDefault("cli.ci_wrapper_path", "/usr/local/bin/dagger-kubernetes-ci")
+	v.SetDefault("cli.include_prereleases", false)
 
 	v.SetDefault("log_level", "info")
 	v.SetDefault("log_format", "json")
 
 	v.SetDefault("otel.otlp_endpoint", "")
 	v.SetDefault("otel.ingest_max_body_size", int64(64<<20)) // 64 MiB
+	v.SetDefault("otel.max_inflight_bytes", int64(256<<20))  // 256 MiB
+
+	v.SetDefault("checks.enabled", false)
+	v.SetDefault("checks.namespace", "")
+	v.SetDefault("checks.job_image", "ghcr.io/dagger/dagger:latest")
+	v.SetDefault("checks.timeout", 30*time.Minute)
+	v.SetDefault("checks.github_oidc_issuer", "https://token.actions.githubusercontent.com")
+	v.SetDefault("checks.gitlab_oidc_issuer", "https://gitlab.com")
+	v.SetDefault("checks.oidc_audience", "dagger-kubernetes")
+
+	v.SetDefault("workflows.enabled", false)
+	v.SetDefault("workflows.namespace", "")
+	v.SetDefault("workflows.job_image", "ghcr.io/dagger/dagger:latest")
+	v.SetDefault("workflows.default_timeout", 30*time.Minute)
+	v.SetDefault("workflows.max_parallel", 8)
+
+	v.SetDefault("forge.github_api_url", "https://api.github.com")
+	v.SetDefault("forge.gitlab_api_url", "https://gitlab.com/api/v4")
+	v.SetDefault("forge.gitea_api_url", "")
+	v.SetDefault("forge.webhook_secret", "")
 
 	v.AutomaticEnv()
 
@@ -727,6 +769,9 @@ func validateOAuthRevalidation(cfg *domain.Config) error {
 // `version_retention: 24`) is decoded by Viper/mapstructure as *nanoseconds*,
 // not hours, which would GC idle fleets within one sweep tick.
 func validateFleetConfig(cfg *domain.Config) error {
+	if cfg.Fleet.Isolation != "" && cfg.Fleet.Isolation != "per_org" && cfg.Fleet.Isolation != "shared" {
+		return fmt.Errorf("fleet.isolation must be \"per_org\" or \"shared\"")
+	}
 	if cfg.Fleet.VersionRetention > 0 && cfg.Fleet.VersionRetention < time.Minute {
 		return fmt.Errorf("fleet.version_retention = %v is too small; use a duration with an explicit unit of at least 1m (or <= 0 to disable GC)", cfg.Fleet.VersionRetention)
 	}
@@ -848,6 +893,58 @@ func validateCIConfig(cfg *domain.Config) error {
 func validateOTelConfig(cfg *domain.Config) error {
 	if cfg.OTel.IngestMaxBodySize < 0 {
 		return fmt.Errorf("otel.ingest_max_body_size must be >= 0")
+	}
+	if cfg.OTel.MaxInflightBytes < 0 {
+		return fmt.Errorf("otel.max_inflight_bytes must be >= 0")
+	}
+	return nil
+}
+
+// validateRemoteCacheConfig guards the read-through remote cache settings.
+func validateRemoteCacheConfig(cfg *domain.Config) error {
+	r := cfg.Cache.Remote
+	if !r.Enabled {
+		return nil
+	}
+	if r.Workers < 0 {
+		return fmt.Errorf("cache.remote.workers must be >= 0")
+	}
+	if r.TTL < 0 {
+		return fmt.Errorf("cache.remote.ttl must be >= 0")
+	}
+	if r.MaxBytes < 0 {
+		return fmt.Errorf("cache.remote.max_bytes must be >= 0")
+	}
+	if r.IndexPath == "" {
+		return fmt.Errorf("cache.remote.index_path must not be empty when cache.remote.enabled is true")
+	}
+	return nil
+}
+
+// validateChecksConfig guards Cloud Checks settings.
+func validateChecksConfig(cfg *domain.Config) error {
+	if !cfg.Checks.Enabled {
+		return nil
+	}
+	if cfg.Checks.Timeout <= 0 {
+		return fmt.Errorf("checks.timeout must be > 0 when checks.enabled is true")
+	}
+	if cfg.Checks.JobImage == "" {
+		return fmt.Errorf("checks.job_image must not be empty when checks.enabled is true")
+	}
+	return nil
+}
+
+// validateWorkflowsConfig guards Dagger-native workflow settings.
+func validateWorkflowsConfig(cfg *domain.Config) error {
+	if !cfg.Workflows.Enabled {
+		return nil
+	}
+	if cfg.Workflows.DefaultTimeout <= 0 {
+		return fmt.Errorf("workflows.default_timeout must be > 0 when workflows.enabled is true")
+	}
+	if cfg.Workflows.MaxParallel < 0 {
+		return fmt.Errorf("workflows.max_parallel must be >= 0")
 	}
 	return nil
 }

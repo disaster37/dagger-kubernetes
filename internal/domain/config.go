@@ -23,6 +23,9 @@ type Config struct {
 	Raft        RaftConfig        `mapstructure:"raft"`
 	CLI         CLIConfig         `mapstructure:"cli"`
 	Attribution AttributionConfig `mapstructure:"attribution"`
+	Checks      ChecksConfig      `mapstructure:"checks"`
+	Workflows   WorkflowConfig    `mapstructure:"workflows"`
+	Forge       ForgeConfig       `mapstructure:"forge"`
 }
 
 // SupervisorConfig groups the supervisor's own subcomponent configuration.
@@ -31,7 +34,16 @@ type Config struct {
 // paths) plus the embedded minting-CA persistence path, so the section name
 // states exactly what it configures (see ADR-005).
 type SupervisorConfig struct {
-	Dataplane SupervisorDataplaneConfig `mapstructure:"dataplane"`
+	Dataplane    SupervisorDataplaneConfig `mapstructure:"dataplane"`
+	CacheScratch CacheScratchConfig        `mapstructure:"cache_scratch"`
+	GoMemLimit   string                    `mapstructure:"gomemlimit"`
+}
+
+// CacheScratchConfig configures the dedicated scratch emptyDir used by the
+// rebuildable remote-cache bbolt index (ADR-051/ADR-055). It is isolated from
+// the Raft PVC so cache churn never competes with raft.db/snapshots.
+type CacheScratchConfig struct {
+	SizeLimit string `mapstructure:"size_limit"`
 }
 
 // SupervisorDataplaneConfig configures the mTLS L4 data plane served by the
@@ -45,6 +57,14 @@ type ServerConfig struct {
 	DataAddr    string `mapstructure:"data_addr"`
 	DataHost    string `mapstructure:"data_hostname"`
 	PublicURL   string `mapstructure:"public_url"`
+	// MaxDataConns bounds concurrent data-plane tunnels (default 2048).
+	MaxDataConns int `mapstructure:"max_data_conns"`
+	// InternalControlURL is the in-cluster control-plane URL injected into
+	// engine/runner pods (e.g. https://<release>-control.<ns>.svc:8080).
+	InternalControlURL string `mapstructure:"internal_control_url"`
+	// InternalDataHost is the in-cluster data-plane host returned to
+	// in-cluster engine/runner callers (e.g. <release>-data.<ns>.svc:8443).
+	InternalDataHost string `mapstructure:"internal_data_host"`
 }
 
 type AuthConfig struct {
@@ -56,6 +76,13 @@ type AuthConfig struct {
 	Cookie         CookieConfig         `mapstructure:"cookie"`
 	CORS           CORSConfig           `mapstructure:"cors"`
 	Security       SecurityConfig       `mapstructure:"security"`
+	Device         DeviceAuthConfig     `mapstructure:"device"`
+}
+
+// DeviceAuthConfig configures the RFC 8628 device authorization flow.
+type DeviceAuthConfig struct {
+	CodeTTL      time.Duration `mapstructure:"code_ttl"`
+	PollInterval time.Duration `mapstructure:"poll_interval"`
 }
 
 // SecurityConfig configures the go-secguard guardrails: per-account lockout,
@@ -338,7 +365,29 @@ type TelemetryConfig struct {
 }
 
 type CacheConfig struct {
-	S3 S3Config `mapstructure:"s3"`
+	S3     S3Config          `mapstructure:"s3"`
+	Remote RemoteCacheConfig `mapstructure:"remote"`
+}
+
+// RemoteCacheConfig configures the read-through remote cache service
+// (GET /v1/engine, ADR-055).
+type RemoteCacheConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Bucket overrides cache.s3.bucket for remote-cache objects.
+	Bucket string `mapstructure:"bucket"`
+	// Prefix is the S3 key prefix for bundles/blobs/index checkpoints.
+	Prefix string `mapstructure:"prefix"`
+	// S3EngineEndpoint is the endpoint used to sign presigned URLs handed to
+	// engine pods (must match the Host they dial in-cluster).
+	S3EngineEndpoint string `mapstructure:"s3_engine_endpoint"`
+	// IndexPath is the bbolt file path (default /var/cache/dagger-kubernetes/remotecache.db).
+	IndexPath string `mapstructure:"index_path"`
+	// TTL bounds how long an index entry/object is retained.
+	TTL time.Duration `mapstructure:"ttl"`
+	// MaxBytes bounds the total stored bytes before GC evicts oldest entries.
+	MaxBytes int64 `mapstructure:"max_bytes"`
+	// Workers bounds concurrent bundle export/upload work (default 16).
+	Workers int `mapstructure:"workers"`
 }
 
 // S3Config is the shared S3 client configuration consumed by the CLI cache
@@ -457,6 +506,9 @@ type FleetConfig struct {
 	// the mirror host itself to be marked http for in-cluster plaintext
 	// mirrors).
 	EngineRegistryMirrorsHTTP []string `mapstructure:"engine_registry_mirrors_http"`
+	// Isolation is "per_org" (default) or "shared". per_org scopes engine
+	// StatefulSets/Services/PVCs and remote-cache namespaces by org.
+	Isolation string `mapstructure:"isolation"`
 }
 
 type CAConfig struct {
@@ -520,6 +572,10 @@ type DroneConfig struct {
 
 type OTelConfig struct {
 	OTLPEndpoint string `mapstructure:"otlp_endpoint"`
+	// MaxInflightBytes caps the total bytes of concurrently buffered OTLP
+	// bodies (default 256 MiB). Saturation returns 503 instead of OOM-killing
+	// the Raft leader.
+	MaxInflightBytes int64 `mapstructure:"max_inflight_bytes"`
 	// IngestMaxBodySize caps OTLP ingest request bodies (bytes). It is
 	// deliberately separate from the 4 MiB control-API cap: OTLP log/trace
 	// batches are legitimately large. 0 = use the handler default (64 MiB).
@@ -534,6 +590,9 @@ type CLIConfig struct {
 	DownloadTimeout time.Duration     `mapstructure:"download_timeout"`
 	Upstream        CLIUpstreamConfig `mapstructure:"upstream"`
 	CIWrapperPath   string            `mapstructure:"ci_wrapper_path"` // path to pre-built dagger-kubernetes-ci binary
+	// IncludePrereleases includes vX.Y.Z-beta.* releases in the "latest"
+	// resolution. Explicit pre-release downloads always work regardless.
+	IncludePrereleases bool `mapstructure:"include_prereleases"`
 
 	// S3-specific settings for the CLI cache. The rest of the S3 client
 	// (endpoint, region, SSL, credentials) is configured via cache.s3.*.
@@ -547,4 +606,43 @@ type CLIUpstreamConfig struct {
 	ReleasesURL  string `mapstructure:"releases_url"`  // https://api.github.com/repos/dagger/dagger/releases
 	DownloadBase string `mapstructure:"download_base"` // https://github.com/dagger/dagger/releases/download
 	GitHubToken  string `mapstructure:"github_token"`  // optional, raises API rate limit; set via env only
+}
+
+// ChecksConfig configures Cloud Checks (ADR-056).
+type ChecksConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Namespace is where check-run Jobs are created (default fleet.namespace).
+	Namespace string `mapstructure:"namespace"`
+	// JobImage is the runner image used for check Jobs.
+	JobImage string `mapstructure:"job_image"`
+	// Timeout bounds a single check-run Job.
+	Timeout time.Duration `mapstructure:"timeout"`
+	// GitHubOIDCIssuer is the GitHub Actions OIDC issuer URL.
+	GitHubOIDCIssuer string `mapstructure:"github_oidc_issuer"`
+	// GitLabOIDCIssuer is the default GitLab CI OIDC issuer URL.
+	GitLabOIDCIssuer string `mapstructure:"gitlab_oidc_issuer"`
+	// OIDCAudience is the expected audience of CI OIDC ID tokens.
+	OIDCAudience string `mapstructure:"oidc_audience"`
+}
+
+// WorkflowConfig configures Dagger-native CD workflows (ADR-057).
+type WorkflowConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+	// Namespace is where workflow Jobs are created (default fleet.namespace).
+	Namespace string `mapstructure:"namespace"`
+	// JobImage is the runner image used for workflow Jobs.
+	JobImage string `mapstructure:"job_image"`
+	// DefaultTimeout bounds a workflow job when it declares no timeout.
+	DefaultTimeout time.Duration `mapstructure:"default_timeout"`
+	// MaxParallel bounds concurrently running jobs in one workflow run.
+	MaxParallel int `mapstructure:"max_parallel"`
+}
+
+// ForgeConfig configures outbound forge API endpoints (ADR-056).
+type ForgeConfig struct {
+	GitHubAPIURL string `mapstructure:"github_api_url"`
+	GitLabAPIURL string `mapstructure:"gitlab_api_url"`
+	GiteaAPIURL  string `mapstructure:"gitea_api_url"`
+	// WebhookSecret is the fallback HMAC secret when a source has none.
+	WebhookSecret string `mapstructure:"webhook_secret"`
 }

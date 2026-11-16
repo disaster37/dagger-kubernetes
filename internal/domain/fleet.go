@@ -2,7 +2,6 @@ package domain
 
 import (
 	"fmt"
-	"strings"
 	"time"
 )
 
@@ -67,20 +66,41 @@ type FleetProvider interface {
 	DeletePVC(name string) error
 }
 
-func VersionSlug(version string) string {
-	return strings.ReplaceAll(version, ".", "-")
-}
-
 func StsName(version string) string {
 	return fmt.Sprintf("dagger-engine-%s", VersionSlug(version))
+}
+
+// OrgStsName returns the per-org StatefulSet name used when
+// fleet.isolation=per_org.
+func OrgStsName(orgSlug, version string) string {
+	if orgSlug == "" {
+		return StsName(version)
+	}
+	return fmt.Sprintf("dagger-engine-%s-%s", VersionSlug(orgSlug), VersionSlug(version))
 }
 
 func PodName(version string, ordinal int) string {
 	return fmt.Sprintf("dagger-engine-%s-%d", VersionSlug(version), ordinal)
 }
 
+// OrgPodName returns the per-org pod name used when fleet.isolation=per_org.
+func OrgPodName(orgSlug, version string, ordinal int) string {
+	return fmt.Sprintf("%s-%d", OrgStsName(orgSlug, version), ordinal)
+}
+
 // ServiceName returns the headless service name, which by design matches the
 // StatefulSet name.
 func ServiceName(version string) string {
 	return StsName(version)
+}
+
+// OrgServiceName returns the per-org headless service name.
+func OrgServiceName(orgSlug, version string) string {
+	return OrgStsName(orgSlug, version)
+}
+
+// ScopedFleetProvider is implemented by providers that can scope their
+// StatefulSets/Services/PVCs to an organization (fleet.isolation=per_org).
+type ScopedFleetProvider interface {
+	WithScope(orgSlug string) FleetProvider
 }

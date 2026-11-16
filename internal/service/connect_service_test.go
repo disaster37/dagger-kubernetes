@@ -83,8 +83,8 @@ func TestConnectEnvNoVersionMasked(t *testing.T) {
 	if snap.Token.Prefix == "" {
 		t.Fatal("Token.Prefix empty")
 	}
-	if len(snap.EnvVars) != 3 {
-		t.Fatalf("EnvVars = %d, want 3", len(snap.EnvVars))
+	if len(snap.EnvVars) != 6 {
+		t.Fatalf("EnvVars = %d, want 6", len(snap.EnvVars))
 	}
 	if got := envValue(snap.EnvVars, "DAGGER_CLOUD_TOKEN"); got != "" {
 		t.Fatalf("masked token value = %q, want empty", got)
@@ -130,8 +130,8 @@ func TestConnectEnvWithVersion(t *testing.T) {
 	if snap.SelectedVersion != "v0.21.4" {
 		t.Fatalf("SelectedVersion = %q", snap.SelectedVersion)
 	}
-	if len(snap.EnvVars) != 4 {
-		t.Fatalf("EnvVars = %d, want 4", len(snap.EnvVars))
+	if len(snap.EnvVars) != 7 {
+		t.Fatalf("EnvVars = %d, want 7", len(snap.EnvVars))
 	}
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_TAG"); got != "v0.21.4" {
 		t.Fatalf("TAG = %q", got)
@@ -211,8 +211,8 @@ func TestConnectEnvEmptyUserID(t *testing.T) {
 	if snap.Token.Exists {
 		t.Fatal("empty user id should yield missing token")
 	}
-	if len(snap.EnvVars) != 3 {
-		t.Fatalf("EnvVars = %d, want 3", len(snap.EnvVars))
+	if len(snap.EnvVars) != 6 {
+		t.Fatalf("EnvVars = %d, want 6", len(snap.EnvVars))
 	}
 }
 

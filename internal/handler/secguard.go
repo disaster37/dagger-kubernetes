@@ -28,11 +28,15 @@ var securityExemptPaths = map[string]struct{}{
 	"/metrics": {},
 }
 
-// isSecurityExemptPath reports whether path bypasses the security guard. Only
-// API routes (/api/*, /v1/*) are guarded; SPA assets and probes are exempt.
+// isSecurityExemptPath reports whether path bypasses the security guard. API
+// routes (/api/*, /v1/*), the Cloud GraphQL endpoint (/query), and OAuth
+// endpoints (/oauth/*) are guarded; SPA assets and probes are exempt.
 func isSecurityExemptPath(path string) bool {
 	if _, ok := securityExemptPaths[path]; ok {
 		return true
+	}
+	if path == "/query" || strings.HasPrefix(path, "/oauth/") {
+		return false
 	}
 	return !strings.HasPrefix(path, "/api/") && !strings.HasPrefix(path, "/v1/")
 }
@@ -131,7 +135,7 @@ func (s *Server) secguardMiddleware() app.HandlerFunc {
 			return
 		}
 
-		if strings.HasPrefix(path, "/api/v1/auth/") && s.guard.Config.RateLimit.Enabled {
+		if (strings.HasPrefix(path, "/api/v1/auth/") || strings.HasPrefix(path, "/oauth/")) && s.guard.Config.RateLimit.Enabled {
 			if !s.guard.RateLimiter.Allow(ip, s.guard.Config.RateLimit.MaxRequests, s.guard.Config.RateLimit.Window) {
 				s.metrics.SecurityRejectionsTotal.WithLabelValues("rate_limited").Inc()
 				writeError(c, consts.StatusTooManyRequests, "rate limit exceeded, try again later")

@@ -67,6 +67,10 @@ spec:
           env:
             - name: DAGGER_KUBERNETES_LOG_LEVEL
               value: {{ .Values.supervisor.config.logLevel | quote }}
+            {{- if .Values.supervisor.gomemlimit }}
+            - name: GOMEMLIMIT
+              value: {{ .Values.supervisor.gomemlimit | quote }}
+            {{- end }}
             # Stable node ID = StatefulSet pod name (<sts>-<ordinal>), which
             # matches the DNS peer IDs derived from the fixed
             # raft.statefulset_name / headless_service config.
@@ -160,6 +164,8 @@ spec:
             {{- end }}
             - name: db
               mountPath: /var/lib/dagger-kubernetes
+            - name: cache-scratch
+              mountPath: /var/cache/dagger-kubernetes
             - name: tmp
               mountPath: /tmp
             {{- if .Values.supervisor.config.fleet.engineCaSecret }}
@@ -217,6 +223,9 @@ spec:
           secret:
             secretName: {{ .Values.dataIngress.tls.secretName | default .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
         {{- end }}
+        - name: cache-scratch
+          emptyDir:
+            sizeLimit: {{ .Values.supervisor.cacheScratch.sizeLimit | default "8Gi" | quote }}
         - name: tmp
           emptyDir: {}
         {{- if .Values.supervisor.config.fleet.engineCaSecret }}

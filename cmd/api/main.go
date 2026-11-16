@@ -220,13 +220,38 @@ func run(c *cli.Context) error {
 	userRepo := repository.NewUserRepo(raftStore)
 	groupRepo := repository.NewGroupRepo(raftStore)
 	projectRepo := repository.NewProjectRepo(raftStore)
+	orgRepo := repository.NewOrgRepo(raftStore)
 	tokenRepo := repository.NewTokenRepo(raftStore)
 	traceMetaRepo := repository.NewTraceMetaRepo(raftStore)
+	cloudGraphQL := repository.NewCloudGraphQL(userRepo, orgRepo, traceMetaRepo)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, tokenEncKey)
+	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger)
+	if err := orgsSvc.EnsureDefault(ctx); err != nil && !errors.Is(err, domain.ErrNotLeader) {
+		return fmt.Errorf("bootstrap default org: %w", err)
+	}
+	ciOIDCSvc := service.NewCIOIDCService(map[string]string{
+		"github": cfg.Checks.GitHubOIDCIssuer,
+		"gitlab": cfg.Checks.GitLabOIDCIssuer,
+	}, cfg.Checks.OIDCAudience, orgsSvc, projectsSvc, logger)
+
+	secretRepo := repository.NewSecretRepo(raftStore)
+	forgeSourceRepo := repository.NewForgeSourceRepo(raftStore)
+	secretSvc := service.NewSecretService(secretRepo, tokenEncKey, logger)
+	forgeProviders := []domain.ForgeProvider{
+		repository.NewGitHubForge(cfg.Forge.GitHubAPIURL),
+		repository.NewGitLabForge(cfg.Forge.GitLabAPIURL),
+		repository.NewGiteaForge(cfg.Forge.GiteaAPIURL),
+	}
+	forgeSvc := service.NewForgeService(forgeSourceRepo, secretSvc, forgeProviders, cfg.Server.PublicURL, logger)
+	var checkRunner domain.CheckJobRunner
+	if clientset != nil {
+		checkRunner = repository.NewK8sJobRunner(clientset, cfg.Checks.Namespace, cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.CA.MintingCASecret)
+	}
+	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, forgeProviders, logger)
 
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
@@ -235,6 +260,7 @@ func run(c *cli.Context) error {
 	}
 
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
+	deviceAuthSvc := service.NewDeviceAuthService(service.NewMemoryDeviceAuthStore(), usersSvc, groupRepo, jwtSvc, cfg.Auth.Device.CodeTTL, cfg.Auth.Device.PollInterval, logger)
 
 	// Bootstrap admin (idempotent: only when user count is 0).
 	if err := bootstrapAdmin(ctx, cfg, usersSvc, logger); err != nil {
@@ -322,6 +348,7 @@ func run(c *cli.Context) error {
 		MaxSessionsPerReplica: cfg.Fleet.MaxSessionsPerReplica,
 		ReplicaIdleTTL:        cfg.Fleet.ReplicaIdleTTL,
 		VersionRetention:      cfg.Fleet.VersionRetention,
+		Isolation:             cfg.Fleet.Isolation,
 	}, logger, metrics)
 
 	// Per-version local-cache purge: prune every running engine pod in-process
@@ -383,7 +410,52 @@ func run(c *cli.Context) error {
 		s3Client = client
 	}
 
+	var otlpArchive domain.OTLPArchive = repository.NewMemoryOTLPArchive()
+	if s3Client != nil && cfg.Cache.S3.Bucket != "" {
+		otlpArchive = repository.NewS3OTLPArchive(s3Client, cfg.Cache.S3.Bucket, "otlp-archive", logger)
+	}
+	otlpStreamSvc := service.NewOTLPStreamService(otlpArchive, traceMetaRepo, logger)
+	var remoteCacheSvc *service.RemoteCacheService
+	var wsDialer repository.WSLeaderDialer
+	if cfg.Cache.Remote.Enabled {
+		index, err := repository.OpenBboltCacheIndex(cfg.Cache.Remote.IndexPath)
+		if err != nil {
+			return fmt.Errorf("open remote cache index: %w", err)
+		}
+		defer func() { _ = index.Close() }()
+		bucket := cfg.Cache.Remote.Bucket
+		if bucket == "" {
+			bucket = cfg.Cache.S3.Bucket
+		}
+		store, err := repository.NewS3RemoteCacheStore(
+			cfg.Cache.S3.Endpoint, cfg.Cache.S3.Region, cfg.Cache.S3.AccessKey, cfg.Cache.S3.SecretKey, cfg.Cache.S3.UseSSL,
+			cfg.Cache.Remote.S3EngineEndpoint, bucket, cfg.Cache.Remote.Prefix, cfg.Cache.Remote.TTL,
+		)
+		if err != nil {
+			return fmt.Errorf("create remote cache store: %w", err)
+		}
+		remoteCacheSvc = service.NewRemoteCacheService(index, store, cfg.Cache.Remote.TTL, cfg.Cache.Remote.MaxBytes, metrics, logger)
+		wsDialer = repository.NewGorillaWSLeaderDialer(dynamicCA.ForwardTLSProvider())
+		if kp, ok := provider.(*repository.K8sProvider); ok {
+			token, _, err := orgsSvc.GenerateToken(ctx, domain.DefaultOrgID)
+			if err != nil {
+				logger.WithError(err).Warn("remote cache: could not mint engine token")
+			} else {
+				kp.SetRemoteCache(fmt.Sprintf("%s/v1/engine", strings.TrimSuffix(cfg.Server.InternalControlURL, "/")), token)
+			}
+		}
+	}
+	var artifactStore domain.ArtifactStore
+	if s3Client != nil && cfg.Cache.S3.Bucket != "" {
+		artifactStore = repository.NewS3ArtifactStore(s3Client, cfg.Cache.S3.Bucket, "artifacts")
+	}
+	var workflowRunner domain.WorkflowJobRunner
+	if clientset != nil {
+		workflowRunner = repository.NewK8sWorkflowRunner(clientset, cfg.Workflows.Namespace, cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL)
+	}
+	workflowSvc := service.NewWorkflowService(repository.NewWorkflowFileParser(), repository.NewWorkflowExprEvaluator("."), artifactStore, workflowRunner, secretSvc, logger)
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
+	historyPurgeSvc.SetOTLPArchive(otlpArchive)
 	statusSvc := service.NewStatusService(cfg, fleetManager, logger, raftStore)
 	connectSvc := service.NewConnectService(cfg, versionResolver, tokensSvc, logger)
 
@@ -453,20 +525,22 @@ func run(c *cli.Context) error {
 	}
 
 	server := handler.NewServer(&handler.ServerConfig{
-		ControlAddr:         cfg.Server.ControlAddr,
-		DataAddr:            cfg.Server.DataAddr,
-		DataHost:            cfg.Server.DataHost,
-		CollectorURL:        cfg.Telemetry.CollectorURL,
-		VictoriaURL:         cfg.Telemetry.VictoriaURL,
-		CertPath:            controlTLSCertPath,
-		KeyPath:             controlTLSKeyPath,
-		PipelineURL:         cfg.Server.PublicURL,
-		OTelMaxBodyBytes:    cfg.OTel.IngestMaxBodySize,
-		InternalTLSCert:     &internalTLS,
-		ControlTLSProvider:  controlTLSProvider,
-		DataTLSProvider:     dataTLSProvider,
-		InternalTLSProvider: dynamicCA.InternalTLSProvider(),
-		ForwardTLSProvider:  dynamicCA.ForwardTLSProvider(),
+		ControlAddr:          cfg.Server.ControlAddr,
+		DataAddr:             cfg.Server.DataAddr,
+		DataHost:             cfg.Server.DataHost,
+		CollectorURL:         cfg.Telemetry.CollectorURL,
+		VictoriaURL:          cfg.Telemetry.VictoriaURL,
+		CertPath:             controlTLSCertPath,
+		KeyPath:              controlTLSKeyPath,
+		PipelineURL:          cfg.Server.PublicURL,
+		OTelMaxBodyBytes:     cfg.OTel.IngestMaxBodySize,
+		OTelMaxInflightBytes: cfg.OTel.MaxInflightBytes,
+		MaxDataConns:         cfg.Server.MaxDataConns,
+		InternalTLSCert:      &internalTLS,
+		ControlTLSProvider:   controlTLSProvider,
+		DataTLSProvider:      dataTLSProvider,
+		InternalTLSProvider:  dynamicCA.InternalTLSProvider(),
+		ForwardTLSProvider:   dynamicCA.ForwardTLSProvider(),
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -483,6 +557,18 @@ func run(c *cli.Context) error {
 		Users:                usersSvc,
 		Groups:               groupsSvc,
 		Projects:             projectsSvc,
+		Orgs:                 orgsSvc,
+		DeviceAuth:           deviceAuthSvc,
+		CIOIDC:               ciOIDCSvc,
+		CloudGraphQL:         cloudGraphQL,
+		OTLPStream:           otlpStreamSvc,
+		RemoteCache:          remoteCacheSvc,
+		Checks:               checksSvc,
+		Forge:                forgeSvc,
+		Secrets:              secretSvc,
+		Workflows:            workflowSvc,
+		Artifacts:            artifactStore,
+		WSLeaderDialer:       wsDialer,
 		Tokens:               tokensSvc,
 		Quota:                quotaSvc,
 		Attribution:          attributionSvc,
@@ -518,6 +604,7 @@ func run(c *cli.Context) error {
 
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
+	go otlpStreamSvc.Start(ctx)
 
 	stopMetricsRecorder := func() {}
 	if metricsRecorder != nil {
@@ -993,6 +1080,7 @@ func runMigrateTokens(c *cli.Context) error {
 
 	userRepo := repository.NewUserRepo(raftStore)
 	groupRepo := repository.NewGroupRepo(raftStore)
+	orgRepo := repository.NewOrgRepo(raftStore)
 	tokenRepo := repository.NewTokenRepo(raftStore)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -1002,7 +1090,10 @@ func runMigrateTokens(c *cli.Context) error {
 		return fmt.Errorf("load token encryption key: %w", err)
 	}
 	tokensSvc := service.NewTokenService(tokenRepo, logger, tokenEncKey)
-
+	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger)
+	if err := orgsSvc.EnsureDefault(ctx); err != nil && !errors.Is(err, domain.ErrNotLeader) {
+		return fmt.Errorf("bootstrap default org: %w", err)
+	}
 	res, err := service.ImportTokensFile(ctx, tokensFile, usersSvc, tokensSvc, groupsSvc, logger, c.Bool("dry-run"))
 	if err != nil {
 		return err

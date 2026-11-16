@@ -21,6 +21,11 @@ type Metrics struct {
 	DataHandshakeFailuresTotal    *prometheus.CounterVec
 	SecurityIPBansTotal           *prometheus.CounterVec
 	SecurityRejectionsTotal       *prometheus.CounterVec
+	RemoteCacheLookupHits         prometheus.Counter
+	RemoteCacheLookupMisses       prometheus.Counter
+	RemoteCacheExportedBundles    prometheus.Counter
+	RemoteCacheStoredBytes        prometheus.Gauge
+	WebhookSignatureInvalid       *prometheus.CounterVec
 }
 
 // NewMetrics builds the Metrics collectors and registers them on reg when
@@ -93,6 +98,27 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_kubernetes_security_rejections_total",
 			Help: "Total number of requests rejected by the security guard, by reason",
 		}, []string{"reason"}),
+
+		RemoteCacheLookupHits: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_remote_cache_lookup_hits_total",
+			Help: "Total remote-cache lookup hits",
+		}),
+		RemoteCacheLookupMisses: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_remote_cache_lookup_misses_total",
+			Help: "Total remote-cache lookup misses",
+		}),
+		RemoteCacheExportedBundles: prometheus.NewCounter(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_remote_cache_exported_bundles_total",
+			Help: "Total remote-cache bundles exported",
+		}),
+		RemoteCacheStoredBytes: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "dagger_kubernetes_remote_cache_stored_bytes",
+			Help: "Total bytes stored in the remote cache index",
+		}),
+		WebhookSignatureInvalid: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_webhook_signature_invalid_total",
+			Help: "Total webhook requests rejected for an invalid signature, by provider",
+		}, []string{"provider"}),
 	}
 
 	if reg != nil {
@@ -110,6 +136,11 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.DataHandshakeFailuresTotal,
 			m.SecurityIPBansTotal,
 			m.SecurityRejectionsTotal,
+			m.RemoteCacheLookupHits,
+			m.RemoteCacheLookupMisses,
+			m.RemoteCacheExportedBundles,
+			m.RemoteCacheStoredBytes,
+			m.WebhookSignatureInvalid,
 		)
 	}
 

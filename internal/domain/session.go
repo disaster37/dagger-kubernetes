@@ -7,6 +7,7 @@ import (
 
 type Lease struct {
 	CertFP       string
+	OrgID        string
 	Version      string
 	ReplicaPod   string
 	InstanceID   string

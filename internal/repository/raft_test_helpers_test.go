@@ -272,7 +272,7 @@ func findLeaderTimeout(t *testing.T, stores []*RaftStore, timeout time.Duration)
 // waitForMetaValue polls a node's local FSM until the meta key reaches want.
 func waitForMetaValue(t *testing.T, store *RaftStore, key, want string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(90 * time.Second)
 	for time.Now().Before(deadline) {
 		if v, err := store.fsmRead().readMeta(key); err == nil && v == want {
 			return

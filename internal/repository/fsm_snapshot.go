@@ -16,15 +16,27 @@ type membershipEdge struct {
 	UserID  string `json:"user_id"`
 }
 
+// orgMembershipEdge is one (orgID, userID, role) direct membership in a
+// snapshot.
+type orgMembershipEdge struct {
+	OrgID  string         `json:"org_id"`
+	UserID string         `json:"user_id"`
+	Role   domain.OrgRole `json:"role"`
+}
+
 // fsmSnapshotPayload is the JSON document persisted into a Raft snapshot.
 type fsmSnapshotPayload struct {
-	Users       []*cmdUser          `json:"users"`
-	Groups      []*domain.Group     `json:"groups"`
-	Memberships []membershipEdge    `json:"memberships"`
-	Tokens      []*cmdToken         `json:"tokens"`
-	Projects    []*domain.Project   `json:"projects"`
-	Traces      []*domain.TraceMeta `json:"traces"`
-	Meta        map[string]string   `json:"meta"`
+	Users        []*cmdUser            `json:"users"`
+	Groups       []*domain.Group       `json:"groups"`
+	Memberships  []membershipEdge      `json:"memberships"`
+	Tokens       []*cmdToken           `json:"tokens"`
+	Projects     []*domain.Project     `json:"projects"`
+	Orgs         []*domain.Org         `json:"orgs"`
+	OrgMembers   []orgMembershipEdge   `json:"org_members"`
+	Secrets      []*domain.Secret      `json:"secrets"`
+	ForgeSources []*domain.ForgeSource `json:"forge_sources"`
+	Traces       []*domain.TraceMeta   `json:"traces"`
+	Meta         map[string]string     `json:"meta"`
 }
 
 // fsmSnapshot is a point-in-time snapshot of the FSM state.
@@ -67,12 +79,15 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	defer f.state.mu.RUnlock()
 
 	payload := fsmSnapshotPayload{
-		Meta:     make(map[string]string, len(f.state.meta)),
-		Users:    make([]*cmdUser, 0, len(f.state.users)),
-		Tokens:   make([]*cmdToken, 0, len(f.state.tokens)),
-		Groups:   copySlice(f.state.groups),
-		Projects: copySlice(f.state.projects),
-		Traces:   copySlice(f.state.traces),
+		Meta:         make(map[string]string, len(f.state.meta)),
+		Users:        make([]*cmdUser, 0, len(f.state.users)),
+		Tokens:       make([]*cmdToken, 0, len(f.state.tokens)),
+		Groups:       copySlice(f.state.groups),
+		Projects:     copySlice(f.state.projects),
+		Orgs:         copySlice(f.state.orgs),
+		Secrets:      copySlice(f.state.secrets),
+		ForgeSources: copySlice(f.state.forgeSources),
+		Traces:       copySlice(f.state.traces),
 	}
 	for k, v := range f.state.meta {
 		payload.Meta[k] = v
@@ -88,12 +103,19 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 			payload.Memberships = append(payload.Memberships, membershipEdge{GroupID: gid, UserID: uid})
 		}
 	}
+	for oid, members := range f.state.orgMembers {
+		for uid, role := range members {
+			payload.OrgMembers = append(payload.OrgMembers, orgMembershipEdge{OrgID: oid, UserID: uid, Role: role})
+		}
+	}
 	return &fsmSnapshot{payload: payload}, nil
 }
 
 // Restore JSON-decodes a snapshot and replaces the entire state under the
 // write lock (never merges). Raft guarantees Restore is not concurrent with
 // Apply.
+//
+//nolint:gocyclo // snapshot restore is a linear decode of every entity type
 func (f *FSM) Restore(rc io.ReadCloser) error {
 	defer func() { _ = rc.Close() }()
 	var payload fsmSnapshotPayload
@@ -126,6 +148,26 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 		}
 		s.storeProject(p)
 	}
+	for _, o := range payload.Orgs {
+		if o == nil {
+			continue
+		}
+		s.storeOrg(o)
+	}
+	for _, sec := range payload.Secrets {
+		if sec == nil {
+			continue
+		}
+		cp := *sec
+		s.secrets[secretKey(sec.Scope, sec.ScopeID, sec.Name)] = &cp
+	}
+	for _, src := range payload.ForgeSources {
+		if src == nil {
+			continue
+		}
+		cp := *src
+		s.forgeSources[src.ID] = &cp
+	}
 	for _, m := range payload.Traces {
 		if m == nil {
 			continue
@@ -139,6 +181,17 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 	for _, edge := range payload.Memberships {
 		s.addMembership(edge.GroupID, edge.UserID)
 	}
+	for _, edge := range payload.OrgMembers {
+		if s.orgMembers[edge.OrgID] == nil {
+			s.orgMembers[edge.OrgID] = make(map[string]domain.OrgRole)
+		}
+		s.orgMembers[edge.OrgID][edge.UserID] = edge.Role
+		if s.orgMembersByUser[edge.UserID] == nil {
+			s.orgMembersByUser[edge.UserID] = make(map[string]struct{})
+		}
+		s.orgMembersByUser[edge.UserID][edge.OrgID] = struct{}{}
+	}
+	s.ensureDefaultOrg()
 
 	// Swap the decoded maps into the live state under its write lock instead of
 	// replacing the fsmState pointer. Read helpers dereference f.state without
@@ -174,6 +227,12 @@ func (s *fsmState) adopt(other *fsmState) {
 	s.tokensByUser = other.tokensByUser
 	s.projects = other.projects
 	s.projectsByName = other.projectsByName
+	s.orgs = other.orgs
+	s.orgsByName = other.orgsByName
+	s.orgMembers = other.orgMembers
+	s.orgMembersByUser = other.orgMembersByUser
+	s.secrets = other.secrets
+	s.forgeSources = other.forgeSources
 	s.traces = other.traces
 	s.meta = other.meta
 }

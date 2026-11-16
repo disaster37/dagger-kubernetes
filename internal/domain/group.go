@@ -8,6 +8,7 @@ import (
 // Group is a collection of users sharing quota and project visibility.
 type Group struct {
 	ID                string    `json:"id"`
+	OrgID             string    `json:"org_id"`
 	Name              string    `json:"name"`
 	Description       string    `json:"description"`
 	MaxRunnerSessions int       `json:"max_runner_sessions"` // 0 = unlimited

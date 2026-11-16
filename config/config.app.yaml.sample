@@ -31,6 +31,9 @@ server:
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
   public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI and is the base for pipeline-view links: /pipelines/<traceID>).
+  max_data_conns: 2048                    # concurrent data-plane tunnels (default 2048).
+  internal_control_url: ""                # in-cluster control URL injected into engine/runner pods, e.g. https://<release>-control.<namespace>.svc:8080.
+  internal_data_host: ""                  # in-cluster data host returned to in-cluster callers, e.g. <release>-data.<namespace>.svc:8443.
 
 # --- Authentication ----------------------------------------------------------
 auth:
@@ -61,6 +64,11 @@ auth:
   # so DB compromise alone does not yield token plaintexts.
   token:
     encryption_key: ""
+
+  # RFC 8628 device authorization (dagger login).
+  device:
+    code_ttl: "10m"
+    poll_interval: "5s"
 
   # Optional OAuth for human/UI login. Single active provider per deployment
   # (selected by `provider`); simultaneous multi-provider is not supported.
@@ -255,6 +263,16 @@ telemetry:
 # (cli.enabled). Engines keep their BuildKit local cache on their per-pod PVC;
 # the worker-cache sync and the remote-cache registry proxy were removed.
 cache:
+  # Read-through remote cache (GET /v1/engine, ADR-055).
+  remote:
+    enabled: false
+    bucket: ""                            # empty = cache.s3.bucket
+    prefix: "remote-cache"
+    s3_engine_endpoint: ""                # endpoint used to sign presigned URLs handed to engine pods
+    index_path: "/var/cache/dagger-kubernetes/remotecache.db"
+    ttl: "720h"
+    max_bytes: 107374182400               # 100 GiB
+    workers: 16
   s3:                                # shared S3 client for the CLI cache (cli.s3_bucket).
     bucket: ""                       # default CLI-cache bucket. Empty + cli.enabled = config load error.
     region: "us-east-1"              # S3 region (required by AWS S3; ignored by MinIO).
@@ -361,6 +379,9 @@ ca:
 # across pods via ca.minting_ca_secret (ordinal 0 generates it, others poll).
 # `provider` only decides where the server certificate comes from:
 supervisor:
+  cache_scratch:
+    size_limit: "8Gi"                     # dedicated emptyDir for the rebuildable remote-cache index
+  gomemlimit: ""                          # optional GOMEMLIMIT for the supervisor container
   dataplane:
     tls:
       provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external" (custom/operator keypair).
@@ -463,9 +484,35 @@ log_format: "json"   # json | text — the supervisor's own log format.
 
 # --- Outgoing OTLP -----------------------------------------------------------
 otel:
+  max_inflight_bytes: 268435456           # 256 MiB weighted OTLP memory gate
   otlp_endpoint: ""  # if set, the Supervisor exports its own OTLP here; empty disables.
   # OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). This
   # is separate from the 4 MiB control-API cap: OTLP log/trace batches are
   # legitimately large. Keep the ingress `proxy-body-size` annotation and the
   # collector's `max_request_body_size` at least this large.
   ingest_max_body_size: 67108864  # 64 MiB.
+
+# --- Cloud Checks (ADR-056) --------------------------------------------------
+checks:
+  enabled: false
+  namespace: ""                           # empty = fleet.namespace
+  job_image: "ghcr.io/dagger/dagger:latest"
+  timeout: "30m"
+  github_oidc_issuer: "https://token.actions.githubusercontent.com"
+  gitlab_oidc_issuer: "https://gitlab.com"
+  oidc_audience: "dagger-kubernetes"
+
+# --- Dagger-native workflows (ADR-057) --------------------------------------
+workflows:
+  enabled: false
+  namespace: ""                           # empty = fleet.namespace
+  job_image: "ghcr.io/dagger/dagger:latest"
+  default_timeout: "30m"
+  max_parallel: 8
+
+# --- Forge integrations (ADR-056) -------------------------------------------
+forge:
+  github_api_url: "https://api.github.com"
+  gitlab_api_url: "https://gitlab.com/api/v4"
+  gitea_api_url: ""
+  webhook_secret: ""                      # fallback HMAC secret; prefer per-source secrets

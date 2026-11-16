@@ -87,6 +87,11 @@ func leaderPinnedRoute(method, path string) bool {
 	if strings.HasPrefix(path, "/api/v1/auth/oauth/") && strings.HasSuffix(path, "/callback") {
 		return true
 	}
+	for _, signal := range []string{"/v1/traces/", "/v1/logs/", "/v1/metrics/"} {
+		if strings.HasPrefix(path, signal) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -144,6 +149,11 @@ func (s *Server) getOrBuildForwarder() (*httpext.Forwarder, bool) {
 func (s *Server) leaderForward() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		marker := string(c.Request.Header.Peek(leaderForwardedHeader))
+		if string(c.Path()) == "/v1/engine" && s.leaderInfo != nil && !s.leaderInfo.IsLeader() && marker == "" {
+			s.relayRemoteCacheWS(ctx, c)
+			c.Abort()
+			return
+		}
 		if s.leaderInfo == nil ||
 			s.leaderInfo.IsLeader() ||
 			!leaderPinnedRoute(string(c.Method()), string(c.Path())) ||
@@ -203,7 +213,7 @@ func (s *Server) leaderForward() app.HandlerFunc {
 			}
 		}
 		c.SetStatusCode(resp.StatusCode)
-		if strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream") {
+		if ct := resp.Header.Get("Content-Type"); strings.HasPrefix(ct, "text/event-stream") || strings.HasPrefix(ct, "application/vnd.dagger.otlp.stream") {
 			c.Response.ImmediateHeaderFlush = true
 		}
 		// Hand the upstream body to Hertz. Do NOT defer resp.Body.Close():
