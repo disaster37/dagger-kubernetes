@@ -282,3 +282,25 @@ func TestWorkflowServiceDispatchValidation(t *testing.T) {
 		t.Fatalf("dispatch: %v", err)
 	}
 }
+
+func TestWorkflowServiceOnArtifactPublished(t *testing.T) {
+	wf := &domain.Workflow{
+		Name: "publish",
+		On:   domain.WorkflowTriggers{Artifact: []string{"report"}},
+		Jobs: map[string]domain.WorkflowJob{"build": {Call: "build"}},
+	}
+	runner := &fakeWorkflowRunner{}
+	svc, repo := newWorkflowServiceForTest(t, wf, runner, &fakeEnvRepo{envs: map[string]*domain.Environment{}})
+	repo.defs["acme/p1/publish"] = &domain.WorkflowDef{OrgID: "acme", ProjectID: "p1", Workflow: *wf}
+	if err := svc.OnArtifactPublished(context.Background(), "acme", "p1", "run-1", "report", "artifacts/acme/p1/run-1/report"); err != nil {
+		t.Fatal(err)
+	}
+	if len(repo.runs) != 1 {
+		t.Fatalf("runs = %d", len(repo.runs))
+	}
+	for _, run := range repo.runs {
+		if run.TriggerArtifact == nil || run.TriggerArtifact.Name != "report" {
+			t.Fatalf("trigger artifact = %+v", run.TriggerArtifact)
+		}
+	}
+}

@@ -1025,3 +1025,40 @@ func (s *WorkflowService) CompleteJob(ctx context.Context, runID, jobName string
 	}
 	return run, nil
 }
+
+// OnArtifactPublished starts workflows whose on: artifact trigger matches the
+// published artifact name.
+func (s *WorkflowService) OnArtifactPublished(ctx context.Context, orgID, projectID, runID, name, key string) error {
+	if s.repo == nil {
+		return nil
+	}
+	defs, err := s.repo.ListDefs(ctx, orgID, projectID)
+	if err != nil {
+		return err
+	}
+	for i := range defs {
+		def := defs[i]
+		matched := false
+		for _, trigger := range def.Workflow.On.Artifact {
+			if trigger == name || trigger == "*" {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			continue
+		}
+		wf := def.Workflow
+		if _, err := s.Start(ctx, StartWorkflowInput{
+			Workflow: &wf, OrgID: orgID, ProjectID: projectID, Repo: def.Repo,
+			SHA: def.DefaultSHA, Ref: def.DefaultRef, DefaultBranch: def.DefaultRef,
+			ContextFiles: def.ContextFiles,
+			TriggerArtifact: &domain.WorkflowArtifactRef{
+				Name: name, Key: key, RunID: runID, ProjectID: projectID,
+			},
+		}); err != nil {
+			s.logger.WithError(err).WithField("workflow", def.Workflow.Name).Warn("artifact workflow start failed")
+		}
+	}
+	return nil
+}

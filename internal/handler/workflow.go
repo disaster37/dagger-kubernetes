@@ -315,5 +315,10 @@ func (s *Server) handleArtifactUpload(ctx context.Context, c *app.RequestContext
 		s.writeServiceError(c, err)
 		return
 	}
+	if s.workflows != nil {
+		if err := s.workflows.OnArtifactPublished(ctx, req.Org, req.ProjectID, req.RunID, req.Name, key); err != nil {
+			s.logger.WithError(err).Warn("artifact workflow trigger failed")
+		}
+	}
 	c.JSON(consts.StatusCreated, map[string]string{"key": key})
 }

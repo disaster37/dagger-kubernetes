@@ -1028,3 +1028,17 @@ helm uninstall dagger-kubernetes -n dagger-stack
 # PVCs and PVs are NOT deleted by default. Clean up manually if needed:
 kubectl delete pvc -n dagger-stack -l app.kubernetes.io/instance=dagger-kubernetes
 ```
+
+### Cloud parity residual-risk values
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `supervisor.config.cache.remote.packMaxMemberBytes` | int | `4194304` | Largest blob packed into a `dagger-pack v1` object (4 MiB). |
+| `supervisor.config.cache.remote.gcInterval` | string | `"5m"` | Remote-cache GC + S3 index checkpoint cadence. |
+| `supervisor.config.graphql.introspectionEnabled` | bool | `false` | Enable GraphQL introspection (disabled by default). |
+| `supervisor.config.graphql.maxDepth` | int | `15` | Maximum GraphQL query depth. |
+| `supervisor.config.graphql.maxSelections` | int | `250` | Maximum expanded selection count. |
+| `supervisor.config.graphql.maxQueryBytes` | int | `65536` | Maximum query length in bytes. |
+| `supervisor.config.graphql.maxParallelism` | int | `10` | Maximum resolver parallelism. |
+| `supervisor.config.fleet.isolation` | string | `"per_org"` | Engine/cache namespace isolation (`per_org` or `shared`). |
+| `supervisor.config.cli.includePrereleases` | bool | `false` | Include `vX.Y.Z-beta.*` in `latest` CLI resolution. |
