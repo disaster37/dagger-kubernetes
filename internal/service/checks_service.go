@@ -75,9 +75,19 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 	}
 	if ev.IsFork {
 		// Fork PRs hold for approval and never receive org/project secrets.
+		// The hold is enforced here: the check-run Job is NOT created until an
+		// org member/admin explicitly approves the run (CWE-862/863).
 		spec.Environment = "waiting_approval"
 	}
 	if s.runner != nil {
+		if spec.Environment == "waiting_approval" {
+			s.logger.WithFields(logrus.Fields{
+				"source_id": src.ID,
+				"sha":       ev.SHA,
+				"pr":        ev.PRNumber,
+			}).Info("fork PR check run held for approval")
+			return ev, nil
+		}
 		if err := s.runner.CancelSuperseded(ctx, proj.ID, ev.Ref); err != nil {
 			s.logger.WithError(err).Warn("cancel superseded check runs failed")
 		}

@@ -59,7 +59,18 @@ func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
 		writeError(c, consts.StatusNotFound, "device flow disabled")
 		return
 	}
-	params := oauthTokenParams(c)
+	// Bound the body up front: /oauth/token is a public endpoint and c.Body()
+	// would otherwise buffer an unbounded stream (CWE-400/CWE-770).
+	body, err := readBoundedBody(c, maxControlBody)
+	if err != nil {
+		if errors.Is(err, errBodyTooLarge) {
+			writeError(c, consts.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
+		writeError(c, consts.StatusBadRequest, "invalid body")
+		return
+	}
+	params := oauthTokenParams(c, body)
 	switch params.Get("grant_type") {
 	case "urn:ietf:params:oauth:grant-type:device_code":
 		res, err := s.deviceAuth.ExchangeDeviceCode(ctx, params.Get("device_code"))
@@ -93,9 +104,9 @@ func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
 	}
 }
 
-// oauthTokenParams parses form-encoded or JSON token request parameters.
-func oauthTokenParams(c *app.RequestContext) url.Values {
-	body, _ := c.Body()
+// oauthTokenParams parses form-encoded or JSON token request parameters from an
+// already-bounded body.
+func oauthTokenParams(c *app.RequestContext, body []byte) url.Values {
 	ct := string(c.Request.Header.ContentType())
 	if strings.Contains(ct, "application/json") {
 		var m map[string]string

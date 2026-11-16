@@ -241,8 +241,18 @@ type (
 		At     time.Time      `json:"at"`
 	}
 
+	// cmdSecret is the snapshot-safe secret payload. domain.Secret hides
+	// Ciphertext with json:"-", so the command and snapshot payloads carry it
+	// explicitly to avoid silently dropping sealed values on Raft replay or
+	// snapshot restore (CWE-311).
 	cmdSecret struct {
-		Secret domain.Secret `json:"secret"`
+		ID         string             `json:"id"`
+		Scope      domain.SecretScope `json:"scope"`
+		ScopeID    string             `json:"scope_id"`
+		Name       string             `json:"name"`
+		Ciphertext string             `json:"ciphertext"`
+		CreatedAt  time.Time          `json:"created_at"`
+		UpdatedAt  time.Time          `json:"updated_at"`
 	}
 
 	cmdDeleteSecret struct {
@@ -251,10 +261,102 @@ type (
 		Name    string             `json:"name"`
 	}
 
+	// cmdForgeSource is the snapshot-safe forge-source payload. It preserves
+	// the sealed credential fields that domain.ForgeSource hides with json:"-".
 	cmdForgeSource struct {
-		Source domain.ForgeSource `json:"source"`
+		ID                      string           `json:"id"`
+		OrgID                   string           `json:"org_id"`
+		ProjectID               string           `json:"project_id,omitempty"`
+		Provider                domain.ForgeKind `json:"provider"`
+		BaseURL                 string           `json:"base_url"`
+		Repo                    string           `json:"repo"`
+		TokenCiphertext         string           `json:"token_ciphertext"`
+		WebhookSecretCiphertext string           `json:"webhook_secret_ciphertext"`
+		AppID                   string           `json:"app_id,omitempty"`
+		InstallationID          string           `json:"installation_id,omitempty"`
+		PrivateKeyCiphertext    string           `json:"private_key_ciphertext"`
+		CreatedAt               time.Time        `json:"created_at"`
+		UpdatedAt               time.Time        `json:"updated_at"`
 	}
 )
+
+// cmdSecretFrom converts a domain.Secret into its snapshot-safe command form.
+func cmdSecretFrom(s *domain.Secret) *cmdSecret {
+	if s == nil {
+		return nil
+	}
+	return &cmdSecret{
+		ID:         s.ID,
+		Scope:      s.Scope,
+		ScopeID:    s.ScopeID,
+		Name:       s.Name,
+		Ciphertext: s.Ciphertext,
+		CreatedAt:  s.CreatedAt,
+		UpdatedAt:  s.UpdatedAt,
+	}
+}
+
+// toDomain converts a command secret payload back into a domain.Secret.
+func (c *cmdSecret) toDomain() *domain.Secret {
+	if c == nil {
+		return nil
+	}
+	return &domain.Secret{
+		ID:         c.ID,
+		Scope:      c.Scope,
+		ScopeID:    c.ScopeID,
+		Name:       c.Name,
+		Ciphertext: c.Ciphertext,
+		CreatedAt:  c.CreatedAt,
+		UpdatedAt:  c.UpdatedAt,
+	}
+}
+
+// cmdForgeSourceFrom converts a domain.ForgeSource into its snapshot-safe
+// command form.
+func cmdForgeSourceFrom(s *domain.ForgeSource) *cmdForgeSource {
+	if s == nil {
+		return nil
+	}
+	return &cmdForgeSource{
+		ID:                      s.ID,
+		OrgID:                   s.OrgID,
+		ProjectID:               s.ProjectID,
+		Provider:                s.Provider,
+		BaseURL:                 s.BaseURL,
+		Repo:                    s.Repo,
+		TokenCiphertext:         s.TokenCiphertext,
+		WebhookSecretCiphertext: s.WebhookSecretCiphertext,
+		AppID:                   s.AppID,
+		InstallationID:          s.InstallationID,
+		PrivateKeyCiphertext:    s.PrivateKeyCiphertext,
+		CreatedAt:               s.CreatedAt,
+		UpdatedAt:               s.UpdatedAt,
+	}
+}
+
+// toDomain converts a command forge-source payload back into a
+// domain.ForgeSource.
+func (c *cmdForgeSource) toDomain() *domain.ForgeSource {
+	if c == nil {
+		return nil
+	}
+	return &domain.ForgeSource{
+		ID:                      c.ID,
+		OrgID:                   c.OrgID,
+		ProjectID:               c.ProjectID,
+		Provider:                c.Provider,
+		BaseURL:                 c.BaseURL,
+		Repo:                    c.Repo,
+		TokenCiphertext:         c.TokenCiphertext,
+		WebhookSecretCiphertext: c.WebhookSecretCiphertext,
+		AppID:                   c.AppID,
+		InstallationID:          c.InstallationID,
+		PrivateKeyCiphertext:    c.PrivateKeyCiphertext,
+		CreatedAt:               c.CreatedAt,
+		UpdatedAt:               c.UpdatedAt,
+	}
+}
 
 // toDomain converts a command user payload into a domain.User.
 func (c *cmdUser) toDomain() *domain.User {
@@ -556,7 +658,7 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		}), true
 	case kindUpsertSecret:
 		return nil, applyPayload(cmd, "secret", func(p cmdSecret) error {
-			return s.upsertSecret(&p.Secret)
+			return s.upsertSecret(p.toDomain())
 		}), true
 	case kindDeleteSecret:
 		return nil, applyPayload(cmd, "delete secret", func(p cmdDeleteSecret) error {
@@ -565,11 +667,11 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		}), true
 	case kindUpsertForgeSource:
 		return nil, applyPayload(cmd, "forge source", func(p cmdForgeSource) error {
-			return s.upsertForgeSource(&p.Source)
+			return s.upsertForgeSource(p.toDomain())
 		}), true
 	case kindDeleteForgeSource:
 		return nil, applyPayload(cmd, "delete forge source", func(p cmdForgeSource) error {
-			delete(s.forgeSources, p.Source.ID)
+			delete(s.forgeSources, p.ID)
 			return nil
 		}), true
 	case kindUpsertGroup:
@@ -921,6 +1023,9 @@ func (s *fsmState) deleteOrg(id string) error {
 		}
 	}
 	delete(s.orgMembers, id)
+	// Cascade the org-scoped token so a deleted org cannot keep a live
+	// dag_<org>_ credential.
+	s.deleteToken(fmt.Sprintf("org:%s", id))
 	delete(s.orgs, id)
 	delete(s.orgsByName, strings.ToLower(o.Name))
 	return nil
@@ -1490,14 +1595,24 @@ func (s *fsmState) deleteProject(id string) error {
 // --- tokens -----------------------------------------------------------------
 
 func (s *fsmState) upsertToken(t *domain.APIToken) error {
-	// The owning user must exist and not be blocked before any old token is
-	// removed or replaced. A blocked owner yields no token side effect.
-	owner, ok := s.users[t.UserID]
-	if !ok {
-		return fmt.Errorf("api token owner %s: %w", t.UserID, domain.ErrNotFound)
-	}
-	if owner.DeletedAt != nil || owner.DisabledAt != nil {
-		return fmt.Errorf("api token owner %s: %w", t.UserID, domain.ErrAccountBlocked)
+	// Org-scoped dag_<org>_ tokens use a synthetic "org:<orgID>" subject that
+	// has no users-table row. Validate the org exists instead of requiring a
+	// real user owner.
+	if strings.HasPrefix(t.UserID, "org:") {
+		orgID := strings.TrimPrefix(t.UserID, "org:")
+		if _, ok := s.orgs[orgID]; !ok {
+			return fmt.Errorf("api token org %s: %w", orgID, domain.ErrNotFound)
+		}
+	} else {
+		// The owning user must exist and not be blocked before any old token is
+		// removed or replaced. A blocked owner yields no token side effect.
+		owner, ok := s.users[t.UserID]
+		if !ok {
+			return fmt.Errorf("api token owner %s: %w", t.UserID, domain.ErrNotFound)
+		}
+		if owner.DeletedAt != nil || owner.DisabledAt != nil {
+			return fmt.Errorf("api token owner %s: %w", t.UserID, domain.ErrAccountBlocked)
+		}
 	}
 	if existingID, ok := s.tokensByUser[t.UserID]; ok {
 		// One token per user: replace the existing one.

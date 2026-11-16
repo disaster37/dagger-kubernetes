@@ -21,7 +21,7 @@ func (r *ForgeSourceRepo) Upsert(ctx context.Context, s *domain.ForgeSource) err
 		s.CreatedAt = time.Now().UTC()
 	}
 	s.UpdatedAt = time.Now().UTC()
-	return r.store.applyCtx(ctx, kindUpsertForgeSource, cmdForgeSource{Source: *s})
+	return r.store.applyCtx(ctx, kindUpsertForgeSource, cmdForgeSourceFrom(s))
 }
 
 func (r *ForgeSourceRepo) Get(ctx context.Context, id string) (*domain.ForgeSource, error) {
@@ -33,7 +33,7 @@ func (r *ForgeSourceRepo) ListByOrg(ctx context.Context, orgID string) ([]*domai
 }
 
 func (r *ForgeSourceRepo) Delete(ctx context.Context, id string) error {
-	return r.store.applyCtx(ctx, kindDeleteForgeSource, cmdForgeSource{Source: domain.ForgeSource{ID: id}})
+	return r.store.applyCtx(ctx, kindDeleteForgeSource, cmdForgeSource{ID: id})
 }
 
 func (f *FSM) readForgeSource(id string) (*domain.ForgeSource, error) {

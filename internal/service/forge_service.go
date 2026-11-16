@@ -71,7 +71,7 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 		return nil, err
 	}
 	callback := fmt.Sprintf("%s/v1/webhooks/%s/%s", s.publicURL, in.Provider, id)
-	if _, err := s.providers[in.Provider].RegisterWebhook(ctx, src, callback, in.WebhookSecret); err != nil {
+	if _, err := s.providers[in.Provider].RegisterWebhook(ctx, src, in.Token, callback, in.WebhookSecret); err != nil {
 		s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook registration failed")
 	}
 	return src, nil

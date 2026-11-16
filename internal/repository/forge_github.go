@@ -27,7 +27,7 @@ func NewGitHubForge(apiURL string) *GitHubForge {
 
 func (g *GitHubForge) Kind() domain.ForgeKind { return domain.ForgeGitHub }
 
-func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, callbackURL, secret string) (string, error) {
+func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, token, callbackURL, secret string) (string, error) {
 	body, err := jsonBody(map[string]any{
 		"name":   "web",
 		"active": true,
@@ -37,7 +37,7 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	if err != nil {
 		return "", err
 	}
-	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiURL, source.Repo), "Authorization", "Bearer "+source.TokenCiphertext, body, "application/json")
+	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiURL, source.Repo), "Authorization", "Bearer "+token, body, "application/json")
 	if err != nil {
 		return "", err
 	}
@@ -48,8 +48,8 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	return fmt.Sprintf("%d", out.ID), nil
 }
 
-func (g *GitHubForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiURL, source.Repo, webhookID), "Authorization", "Bearer "+source.TokenCiphertext, nil, "")
+func (g *GitHubForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
+	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiURL, source.Repo, webhookID), "Authorization", "Bearer "+token, nil, "")
 	return err
 }
 

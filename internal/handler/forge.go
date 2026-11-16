@@ -20,13 +20,18 @@ type forgeSourceRequest struct {
 	WebhookSecret string `json:"webhook_secret"`
 }
 
-// handleForgeSourcesList lists an org's forge integrations.
+// handleForgeSourcesList lists an org's forge integrations (member/admin only).
 func (s *Server) handleForgeSourcesList(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.forges == nil {
 		writeJSON(c, []*domain.ForgeSource{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	sources, err := s.forges.List(ctx, c.Param("org"))
@@ -116,13 +121,18 @@ type secretRequest struct {
 	Value string `json:"value"`
 }
 
-// handleOrgSecretsList lists org secret metadata.
+// handleOrgSecretsList lists org secret metadata (member/admin only).
 func (s *Server) handleOrgSecretsList(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.secrets == nil {
 		writeJSON(c, []*domain.Secret{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	secrets, err := s.secrets.List(ctx, domain.SecretScopeOrg, c.Param("org"))
@@ -170,9 +180,10 @@ func (s *Server) handleOrgSecretDelete(ctx context.Context, c *app.RequestContex
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
-// handleProjectSecretsList lists project secret metadata.
+// handleProjectSecretsList lists project secret metadata (admin only, matching
+// the PUT/DELETE endpoints).
 func (s *Server) handleProjectSecretsList(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	if _, ok := s.requireAdmin(ctx, c); !ok {
 		return
 	}
 	if s.secrets == nil {

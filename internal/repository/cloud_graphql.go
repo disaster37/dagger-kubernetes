@@ -124,9 +124,13 @@ func (r *graphqlRoot) User(ctx context.Context) (*graphqlUser, error) {
 }
 
 func (r *graphqlRoot) Org(ctx context.Context, args struct{ Name string }) (*graphqlOrg, error) {
+	id := graphqlIdentity(ctx)
 	o, err := r.orgs.GetByName(ctx, args.Name)
 	if err != nil {
 		return nil, err
+	}
+	if !r.canAccessOrg(ctx, id, o.ID) {
+		return nil, fmt.Errorf("forbidden")
 	}
 	return &graphqlOrg{root: r, org: o}, nil
 }
@@ -135,11 +139,40 @@ func (r *graphqlRoot) Trace(ctx context.Context, args struct {
 	ID  string
 	Org *string
 }) (*graphqlTrace, error) {
+	id := graphqlIdentity(ctx)
 	m, err := r.traces.Get(ctx, args.ID)
 	if err != nil {
 		return nil, err
 	}
+	orgID := m.OrgID
+	if orgID == "" {
+		orgID = domain.DefaultOrgID
+	}
+	if !r.canAccessOrg(ctx, id, orgID) {
+		return nil, fmt.Errorf("forbidden")
+	}
 	return &graphqlTrace{meta: m}, nil
+}
+
+// canAccessOrg reports whether the caller may read orgID: the caller's own
+// org-scoped token, a global admin, or a direct org membership (CWE-862).
+func (r *graphqlRoot) canAccessOrg(ctx context.Context, id GraphQLIdentity, orgID string) bool {
+	if id.OrgID == orgID {
+		return true
+	}
+	if u, err := r.users.Get(ctx, id.UserID); err == nil && u.Role == domain.RoleAdmin {
+		return true
+	}
+	orgs, err := r.orgs.OrgsForUser(ctx, id.UserID)
+	if err != nil {
+		return false
+	}
+	for _, o := range orgs {
+		if o.ID == orgID {
+			return true
+		}
+	}
+	return false
 }
 
 type graphqlUser struct {
@@ -152,7 +185,8 @@ func (u *graphqlUser) Nickname() string { return u.user.Username }
 func (u *graphqlUser) Email() string    { return "" }
 
 func (u *graphqlUser) Orgs(ctx context.Context) ([]*graphqlOrg, error) {
-	orgs, err := u.root.orgs.List(ctx)
+	id := graphqlIdentity(ctx)
+	orgs, err := u.root.orgs.OrgsForUser(ctx, id.UserID)
 	if err != nil {
 		return nil, err
 	}

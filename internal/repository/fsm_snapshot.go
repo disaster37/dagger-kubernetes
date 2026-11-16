@@ -26,17 +26,17 @@ type orgMembershipEdge struct {
 
 // fsmSnapshotPayload is the JSON document persisted into a Raft snapshot.
 type fsmSnapshotPayload struct {
-	Users        []*cmdUser            `json:"users"`
-	Groups       []*domain.Group       `json:"groups"`
-	Memberships  []membershipEdge      `json:"memberships"`
-	Tokens       []*cmdToken           `json:"tokens"`
-	Projects     []*domain.Project     `json:"projects"`
-	Orgs         []*domain.Org         `json:"orgs"`
-	OrgMembers   []orgMembershipEdge   `json:"org_members"`
-	Secrets      []*domain.Secret      `json:"secrets"`
-	ForgeSources []*domain.ForgeSource `json:"forge_sources"`
-	Traces       []*domain.TraceMeta   `json:"traces"`
-	Meta         map[string]string     `json:"meta"`
+	Users        []*cmdUser          `json:"users"`
+	Groups       []*domain.Group     `json:"groups"`
+	Memberships  []membershipEdge    `json:"memberships"`
+	Tokens       []*cmdToken         `json:"tokens"`
+	Projects     []*domain.Project   `json:"projects"`
+	Orgs         []*domain.Org       `json:"orgs"`
+	OrgMembers   []orgMembershipEdge `json:"org_members"`
+	Secrets      []*cmdSecret        `json:"secrets"`
+	ForgeSources []*cmdForgeSource   `json:"forge_sources"`
+	Traces       []*domain.TraceMeta `json:"traces"`
+	Meta         map[string]string   `json:"meta"`
 }
 
 // fsmSnapshot is a point-in-time snapshot of the FSM state.
@@ -85,8 +85,8 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 		Groups:       copySlice(f.state.groups),
 		Projects:     copySlice(f.state.projects),
 		Orgs:         copySlice(f.state.orgs),
-		Secrets:      copySlice(f.state.secrets),
-		ForgeSources: copySlice(f.state.forgeSources),
+		Secrets:      make([]*cmdSecret, 0, len(f.state.secrets)),
+		ForgeSources: make([]*cmdForgeSource, 0, len(f.state.forgeSources)),
 		Traces:       copySlice(f.state.traces),
 	}
 	for k, v := range f.state.meta {
@@ -97,6 +97,12 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	}
 	for _, t := range f.state.tokens {
 		payload.Tokens = append(payload.Tokens, cmdTokenFrom(t))
+	}
+	for _, sec := range f.state.secrets {
+		payload.Secrets = append(payload.Secrets, cmdSecretFrom(sec))
+	}
+	for _, src := range f.state.forgeSources {
+		payload.ForgeSources = append(payload.ForgeSources, cmdForgeSourceFrom(src))
 	}
 	for gid, set := range f.state.memberships {
 		for uid := range set {
@@ -158,15 +164,17 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 		if sec == nil {
 			continue
 		}
-		cp := *sec
-		s.secrets[secretKey(sec.Scope, sec.ScopeID, sec.Name)] = &cp
+		if d := sec.toDomain(); d != nil {
+			s.secrets[secretKey(d.Scope, d.ScopeID, d.Name)] = d
+		}
 	}
 	for _, src := range payload.ForgeSources {
 		if src == nil {
 			continue
 		}
-		cp := *src
-		s.forgeSources[src.ID] = &cp
+		if d := src.toDomain(); d != nil {
+			s.forgeSources[d.ID] = d
+		}
 	}
 	for _, m := range payload.Traces {
 		if m == nil {

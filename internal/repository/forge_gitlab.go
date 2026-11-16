@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"crypto/hmac"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -32,7 +33,7 @@ func (g *GitLabForge) projectPath(repo string) string {
 	return url.PathEscape(repo)
 }
 
-func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, callbackURL, secret string) (string, error) {
+func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, token, callbackURL, secret string) (string, error) {
 	form := url.Values{}
 	form.Set("url", callbackURL)
 	form.Set("token", secret)
@@ -40,7 +41,7 @@ func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	form.Set("tag_push_events", "true")
 	form.Set("merge_requests_events", "true")
 	form.Set("releases_events", "true")
-	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/projects/%s/hooks", g.apiURL, g.projectPath(source.Repo)), "PRIVATE-TOKEN", source.TokenCiphertext, []byte(form.Encode()), "application/x-www-form-urlencoded")
+	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/projects/%s/hooks", g.apiURL, g.projectPath(source.Repo)), "PRIVATE-TOKEN", token, []byte(form.Encode()), "application/x-www-form-urlencoded")
 	if err != nil {
 		return "", err
 	}
@@ -51,13 +52,15 @@ func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	return fmt.Sprintf("%d", out.ID), nil
 }
 
-func (g *GitLabForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/projects/%s/hooks/%s", g.apiURL, g.projectPath(source.Repo), webhookID), "PRIVATE-TOKEN", source.TokenCiphertext, nil, "")
+func (g *GitLabForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
+	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/projects/%s/hooks/%s", g.apiURL, g.projectPath(source.Repo), webhookID), "PRIVATE-TOKEN", token, nil, "")
 	return err
 }
 
 func (g *GitLabForge) VerifyWebhook(_ *domain.ForgeSource, secret string, headers map[string]string, _ []byte) bool {
-	return secret != "" && headers["X-Gitlab-Token"] == secret
+	// Constant-time compare: the GitLab webhook token is a shared secret and
+	// must not leak via a timing side channel (CWE-208).
+	return secret != "" && hmac.Equal([]byte(secret), []byte(headers["X-Gitlab-Token"]))
 }
 
 func (g *GitLabForge) SetCommitStatus(ctx context.Context, source *domain.ForgeSource, token string, run *domain.CheckRun) error {

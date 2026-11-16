@@ -9,9 +9,11 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
-// handleRemoteCacheStats returns index statistics for a namespace.
+// handleRemoteCacheStats returns index statistics for a namespace, scoped to
+// the caller's org (CWE-862).
 func (s *Server) handleRemoteCacheStats(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.remoteCache == nil {
@@ -21,6 +23,10 @@ func (s *Server) handleRemoteCacheStats(ctx context.Context, c *app.RequestConte
 	namespace := c.Query("namespace")
 	if namespace == "" {
 		namespace = domain.DefaultOrgID
+	}
+	if !s.orgAllowed(ctx, id, namespace) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
 	}
 	count, bytes, err := s.remoteCache.Stats(namespace)
 	if err != nil {

@@ -92,14 +92,16 @@ func (s *DeviceAuthService) ExchangeDeviceCode(ctx context.Context, deviceCode s
 	if err != nil {
 		return nil, err
 	}
-	if a.Consumed {
-		return nil, fmt.Errorf("%w: device code already used", domain.ErrUnauthenticated)
-	}
 	if time.Now().UTC().After(a.ExpiresAt) {
 		return nil, fmt.Errorf("%w: device code expired", domain.ErrUnauthenticated)
 	}
 	if !a.Approved || a.UserID == "" {
 		return nil, fmt.Errorf("%w: authorization_pending", domain.ErrUnauthenticated)
+	}
+	// Atomically consume before issuing tokens so a concurrent exchange cannot
+	// mint a second token pair for the same device code (CWE-362).
+	if err := s.store.Consume(deviceCode); err != nil {
+		return nil, err
 	}
 	u, err := s.users.Get(ctx, a.UserID)
 	if err != nil {
@@ -111,9 +113,6 @@ func (s *DeviceAuthService) ExchangeDeviceCode(ctx context.Context, deviceCode s
 	}
 	access, refresh, err := s.jwt.IssuePair(u, groupIDs(gids))
 	if err != nil {
-		return nil, err
-	}
-	if err := s.store.Consume(deviceCode); err != nil {
 		return nil, err
 	}
 	return &TokenResult{AccessToken: access, RefreshToken: refresh, TokenType: "Bearer", ExpiresIn: int(s.jwt.AccessTTL().Seconds())}, nil
@@ -216,6 +215,9 @@ func (m *MemoryDeviceAuthStore) Consume(deviceCode string) error {
 	a, ok := m.byCode[deviceCode]
 	if !ok {
 		return domain.ErrNotFound
+	}
+	if a.Consumed {
+		return fmt.Errorf("%w: device code already used", domain.ErrUnauthenticated)
 	}
 	a.Consumed = true
 	return nil

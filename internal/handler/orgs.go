@@ -22,16 +22,26 @@ type orgMemberRequest struct {
 	Role   string `json:"role"`
 }
 
-// handleOrgsList lists organizations (authenticated).
+// handleOrgsList lists organizations the caller can access (all for admins).
 func (s *Server) handleOrgsList(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.orgs == nil {
 		writeJSON(c, []*domain.Org{})
 		return
 	}
-	orgs, err := s.orgs.List(ctx)
+	if id.Role == domain.RoleAdmin {
+		orgs, err := s.orgs.List(ctx)
+		if err != nil {
+			s.writeServiceError(c, err)
+			return
+		}
+		writeJSON(c, orgs)
+		return
+	}
+	orgs, err := s.orgs.OrgsForUser(ctx, id.UserID)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -39,13 +49,18 @@ func (s *Server) handleOrgsList(ctx context.Context, c *app.RequestContext) {
 	writeJSON(c, orgs)
 }
 
-// handleOrgGet returns one organization by id or slug.
+// handleOrgGet returns one organization by id or slug (member/admin only).
 func (s *Server) handleOrgGet(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.orgs == nil {
 		writeError(c, consts.StatusNotFound, "org not found")
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	o, err := s.orgs.Get(ctx, c.Param("org"))
@@ -114,13 +129,18 @@ func (s *Server) handleOrgDelete(ctx context.Context, c *app.RequestContext) {
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
-// handleOrgMembers lists direct org memberships.
+// handleOrgMembers lists direct org memberships (member/admin only).
 func (s *Server) handleOrgMembers(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.orgs == nil {
 		writeJSON(c, []*domain.OrgMembership{})
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	members, err := s.orgs.Members(ctx, c.Param("org"))
@@ -167,13 +187,18 @@ func (s *Server) handleOrgRemoveMember(ctx context.Context, c *app.RequestContex
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
-// handleOrgTokenMeta returns the masked org token metadata.
+// handleOrgTokenMeta returns the masked org token metadata (member/admin only).
 func (s *Server) handleOrgTokenMeta(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
 	if s.orgs == nil {
 		writeError(c, consts.StatusNotFound, "org not found")
+		return
+	}
+	if !s.orgAllowed(ctx, id, c.Param("org")) {
+		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	t, err := s.orgs.TokenMeta(ctx, c.Param("org"))

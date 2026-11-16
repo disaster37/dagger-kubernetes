@@ -76,10 +76,13 @@ type CheckRun struct {
 }
 
 // ForgeProvider is the outbound forge API adapter (implemented in repository).
+// RegisterWebhook/DeleteWebhook/SetCommitStatus/CreateCheckRun receive the
+// PLAINTEXT credential (token) — never the sealed ciphertext stored on
+// ForgeSource.
 type ForgeProvider interface {
 	Kind() ForgeKind
-	RegisterWebhook(ctx context.Context, source *ForgeSource, callbackURL, secret string) (string, error)
-	DeleteWebhook(ctx context.Context, source *ForgeSource, webhookID string) error
+	RegisterWebhook(ctx context.Context, source *ForgeSource, token, callbackURL, secret string) (string, error)
+	DeleteWebhook(ctx context.Context, source *ForgeSource, token, webhookID string) error
 	VerifyWebhook(source *ForgeSource, secret string, headers map[string]string, body []byte) bool
 	SetCommitStatus(ctx context.Context, source *ForgeSource, token string, run *CheckRun) error
 	CreateCheckRun(ctx context.Context, source *ForgeSource, token string, run *CheckRun) error

@@ -66,7 +66,9 @@ func (s *OTLPStreamService) Ingest(ctx context.Context, traceID, signal string, 
 	}
 }
 
-// flush writes buffered chunks to the archive.
+// flush writes buffered chunks to the archive. Successfully appended chunks
+// are removed from the buffer; on a transient archive failure the un-appended
+// suffix is re-queued so read-back data is not silently dropped.
 func (s *OTLPStreamService) flush(ctx context.Context, traceID, signal string) {
 	key := otlpKey(traceID, signal)
 	s.mu.Lock()
@@ -80,15 +82,33 @@ func (s *OTLPStreamService) flush(ctx context.Context, traceID, signal string) {
 	buf.bytes = 0
 	buf.lastFlush = time.Now()
 	startSeq := buf.seq
-	buf.seq += uint64(len(chunks))
 	s.mu.Unlock()
 
+	appended := 0
 	for i, chunk := range chunks {
 		if err := s.archive.Append(ctx, traceID, signal, startSeq+uint64(i), chunk); err != nil {
 			s.logger.WithError(err).WithFields(logrus.Fields{"trace_id": traceID, "signal": signal}).Warn("otlp archive append failed")
-			return
+			break
+		}
+		appended = i + 1
+	}
+
+	s.mu.Lock()
+	buf = s.buffers[key]
+	if buf == nil {
+		s.mu.Unlock()
+		return
+	}
+	buf.seq = startSeq + uint64(appended)
+	if appended < len(chunks) {
+		remaining := make([][]byte, len(chunks)-appended, len(chunks)-appended+len(buf.chunks))
+		copy(remaining, chunks[appended:])
+		buf.chunks = append(remaining, buf.chunks...)
+		for _, c := range remaining {
+			buf.bytes += len(c)
 		}
 	}
+	s.mu.Unlock()
 }
 
 // Chunks returns all archived chunks plus any still-buffered live chunks.

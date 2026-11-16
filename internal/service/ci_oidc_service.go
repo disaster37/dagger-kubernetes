@@ -116,11 +116,20 @@ func oidcClaimString(claims map[string]any, keys ...string) string {
 }
 
 // repoMatches reports whether the OIDC repository claim matches the canonical
-// project slug (which includes the forge host).
+// project slug (which includes the forge host). The claim is compared against
+// the exact path component after the host — never an arbitrary suffix — so a
+// token for a same-named repo in a different org cannot match (CWE-863).
 func repoMatches(claim, project string) bool {
-	claim = strings.TrimPrefix(claim, "/")
+	claim = strings.Trim(claim, "/")
+	if claim == "" {
+		return false
+	}
 	if claim == project {
 		return true
 	}
-	return strings.HasSuffix(project, "/"+claim)
+	idx := strings.Index(project, "/")
+	if idx < 0 {
+		return false
+	}
+	return project[idx+1:] == claim
 }

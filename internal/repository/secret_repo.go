@@ -21,7 +21,7 @@ func (r *SecretRepo) Upsert(ctx context.Context, s *domain.Secret) error {
 		s.CreatedAt = time.Now().UTC()
 	}
 	s.UpdatedAt = time.Now().UTC()
-	return r.store.applyCtx(ctx, kindUpsertSecret, cmdSecret{Secret: *s})
+	return r.store.applyCtx(ctx, kindUpsertSecret, cmdSecretFrom(s))
 }
 
 func (r *SecretRepo) Get(ctx context.Context, scope domain.SecretScope, scopeID, name string) (*domain.Secret, error) {
