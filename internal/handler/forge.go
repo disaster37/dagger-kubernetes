@@ -343,9 +343,17 @@ func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext)
 // runTokenHeader carries the per-run callback credential.
 const runTokenHeader = "X-Dagger-Run-Token" //nolint:gosec // header name, not a credential value
 
-// runTokenAllowed verifies the per-run callback token against the stored hash.
-func runTokenAllowed(c *app.RequestContext, hash string) bool {
-	return service.VerifyRunToken(hash, string(c.Request.Header.Peek(runTokenHeader)))
+// runTokenAllowed verifies the per-run callback token against any of the
+// stored hashes (the current hash and, for workflow runs, the previous hash
+// retained across a leader-restart re-mint).
+func runTokenAllowed(c *app.RequestContext, hashes ...string) bool {
+	token := string(c.Request.Header.Peek(runTokenHeader))
+	for _, hash := range hashes {
+		if service.VerifyRunToken(hash, token) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleCheckRunLoad records the check-runner load phase.

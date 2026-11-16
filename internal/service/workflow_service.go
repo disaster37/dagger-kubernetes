@@ -59,6 +59,7 @@ type WorkflowService struct {
 	logger    *logrus.Logger
 
 	mu        sync.Mutex
+	tokenMu   sync.Mutex
 	runs      map[string]*domain.WorkflowRun
 	runTokens map[string]string
 	lastCron  map[string]string
@@ -746,21 +747,24 @@ func (s *WorkflowService) persist(ctx context.Context, run *domain.WorkflowRun) 
 // persisting a new hash when the in-memory token is unavailable (e.g. after a
 // leader restart). Only the hash is replicated; the plaintext lives in memory
 // for the lifetime of the process.
+//
+// When a re-mint is required, the previous hash is retained in
+// PreviousRunTokenHash so in-flight Jobs dispatched before the restart can
+// still report completion. Minting is serialized with tokenMu to prevent two
+// concurrent dispatches from minting different tokens for the same run.
 func (s *WorkflowService) ensureRunToken(ctx context.Context, run *domain.WorkflowRun) (string, error) {
-	s.mu.Lock()
-	token := s.runTokens[run.ID]
-	s.mu.Unlock()
-	if token != "" {
+	s.tokenMu.Lock()
+	defer s.tokenMu.Unlock()
+	if token := s.runTokens[run.ID]; token != "" {
 		return token, nil
 	}
 	token, hash := newRunToken()
+	run.PreviousRunTokenHash = run.RunTokenHash
 	run.RunTokenHash = hash
 	if err := s.persist(ctx, run); err != nil {
 		return "", fmt.Errorf("persist workflow run token: %w", err)
 	}
-	s.mu.Lock()
 	s.runTokens[run.ID] = token
-	s.mu.Unlock()
 	return token, nil
 }
 

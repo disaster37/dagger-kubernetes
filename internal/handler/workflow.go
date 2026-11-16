@@ -272,7 +272,7 @@ func (s *Server) handleWorkflowJobComplete(ctx context.Context, c *app.RequestCo
 		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
-	if !runTokenAllowed(c, run.RunTokenHash) {
+	if !runTokenAllowed(c, run.RunTokenHash, run.PreviousRunTokenHash) {
 		writeError(c, consts.StatusForbidden, "invalid run token")
 		return
 	}

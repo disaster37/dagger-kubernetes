@@ -131,8 +131,12 @@ type WorkflowRun struct {
 	TriggeredBy     string                    `json:"triggered_by,omitempty"`
 	IsFork          bool                      `json:"is_fork,omitempty"`
 	RunTokenHash    string                    `json:"-"` // SHA-256 of the per-run callback token; never exposed via API
-	CreatedAt       time.Time                 `json:"created_at"`
-	UpdatedAt       time.Time                 `json:"updated_at"`
+	// PreviousRunTokenHash keeps the prior token hash valid after a leader
+	// restart forces a re-mint, so in-flight Jobs dispatched before the restart
+	// can still report completion. Never exposed via API.
+	PreviousRunTokenHash string    `json:"-"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 // WorkflowJobRun is the state of one job in a run.

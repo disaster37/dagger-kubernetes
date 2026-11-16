@@ -45,3 +45,9 @@ hatch.
   header in addition to the org bearer token. Only the token's SHA-256 hash is
   replicated on `WorkflowRun`; the plaintext is injected as
   `DAGGER_RUN_TOKEN` into the Job's ephemeral Secret.
+- The plaintext token lives only in leader memory. After a leader restart the
+  plaintext is lost, so the next Job dispatch re-mints a token and persists its
+  hash; the previous hash is retained in `WorkflowRun.PreviousRunTokenHash` so
+  in-flight Jobs dispatched before the restart can still report completion.
+  Minting is serialized to avoid two concurrent dispatches minting different
+  tokens for the same run.

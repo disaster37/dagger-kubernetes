@@ -175,6 +175,41 @@ func TestWorkflowServiceStart(t *testing.T) {
 	}
 }
 
+func TestEnsureRunTokenReMintPreservesPreviousHash(t *testing.T) {
+	svc := NewWorkflowService(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, WorkflowServiceConfig{}, logrus.New())
+	oldToken, oldHash := newRunToken()
+	run := &domain.WorkflowRun{ID: "run-1", RunTokenHash: oldHash}
+
+	token, err := svc.ensureRunToken(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token == "" || token == oldToken {
+		t.Fatal("re-mint must produce a fresh token")
+	}
+	if run.PreviousRunTokenHash != oldHash {
+		t.Fatalf("previous hash = %q, want %q", run.PreviousRunTokenHash, oldHash)
+	}
+	if !VerifyRunToken(run.RunTokenHash, token) {
+		t.Fatal("new hash must match the new token")
+	}
+	if !VerifyRunToken(run.PreviousRunTokenHash, oldToken) {
+		t.Fatal("previous hash must still match the old token")
+	}
+
+	// A second call must return the cached token without re-minting.
+	again, err := svc.ensureRunToken(context.Background(), run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again != token {
+		t.Fatal("second call must return the cached token")
+	}
+	if run.PreviousRunTokenHash != oldHash {
+		t.Fatal("previous hash must not change on a cached hit")
+	}
+}
+
 func TestWorkflowServiceApproveResumesDownstream(t *testing.T) {
 	wf := &domain.Workflow{
 		Name: "release",

@@ -315,12 +315,13 @@ type (
 	}
 
 	// cmdWorkflowRun is the snapshot-safe workflow-run payload. It preserves
-	// ContextFiles and RunTokenHash, which domain.WorkflowRun hides with
-	// json:"-".
+	// ContextFiles, RunTokenHash, and PreviousRunTokenHash, which
+	// domain.WorkflowRun hides with json:"-".
 	cmdWorkflowRun struct {
-		Run          domain.WorkflowRun `json:"run"`
-		ContextFiles map[string][]byte  `json:"context_files,omitempty"`
-		RunTokenHash string             `json:"run_token_hash,omitempty"`
+		Run                  domain.WorkflowRun `json:"run"`
+		ContextFiles         map[string][]byte  `json:"context_files,omitempty"`
+		RunTokenHash         string             `json:"run_token_hash,omitempty"`
+		PreviousRunTokenHash string             `json:"previous_run_token_hash,omitempty"`
 	}
 
 	cmdDeleteWorkflowRun struct {
@@ -359,7 +360,8 @@ func cmdWorkflowRunFrom(run *domain.WorkflowRun) *cmdWorkflowRun {
 	cp := *run
 	cp.ContextFiles = nil
 	cp.RunTokenHash = ""
-	return &cmdWorkflowRun{Run: cp, ContextFiles: run.ContextFiles, RunTokenHash: run.RunTokenHash}
+	cp.PreviousRunTokenHash = ""
+	return &cmdWorkflowRun{Run: cp, ContextFiles: run.ContextFiles, RunTokenHash: run.RunTokenHash, PreviousRunTokenHash: run.PreviousRunTokenHash}
 }
 
 // toDomain converts a command workflow-run payload back into a
@@ -371,6 +373,7 @@ func (c *cmdWorkflowRun) toDomain() *domain.WorkflowRun {
 	cp := c.Run
 	cp.ContextFiles = c.ContextFiles
 	cp.RunTokenHash = c.RunTokenHash
+	cp.PreviousRunTokenHash = c.PreviousRunTokenHash
 	return &cp
 }
 

@@ -57,10 +57,13 @@ func TestRunTokenCallbackAuthorization(t *testing.T) {
 	workflowRepo := repository.NewWorkflowRepo(srv.store)
 	workflowToken := "workflow-run-token"
 	otherWorkflowToken := "other-workflow-run-token"
+	prevWorkflowToken := "previous-workflow-run-token"
+	currWorkflowToken := "current-workflow-run-token"
 	for _, run := range []*domain.WorkflowRun{
 		{ID: "run-token-1", OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "running"}}, RunTokenHash: runTokenHash(workflowToken), CreatedAt: now, UpdatedAt: now},
 		{ID: "run-token-2", OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "running"}}, RunTokenHash: runTokenHash(otherWorkflowToken), CreatedAt: now, UpdatedAt: now},
 		{ID: "run-token-empty", OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "running"}}, CreatedAt: now, UpdatedAt: now},
+		{ID: "run-token-prev", OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "running"}}, RunTokenHash: runTokenHash(currWorkflowToken), PreviousRunTokenHash: runTokenHash(prevWorkflowToken), CreatedAt: now, UpdatedAt: now},
 	} {
 		if err := workflowRepo.UpsertRun(ctx, run); err != nil {
 			t.Fatal(err)
@@ -83,6 +86,18 @@ func TestRunTokenCallbackAuthorization(t *testing.T) {
 	}
 	if resp, _ := srv.doWithRunToken(t, "/api/v1/workflows/runs/run-token-empty/jobs/build/complete", completeBody, workflowToken); resp.StatusCode != http.StatusForbidden { //nolint:bodyclose // doWithRunToken closes the body
 		t.Fatalf("empty-hash workflow token status = %d", resp.StatusCode)
+	}
+	// A run that re-minted after a leader restart must accept both the current
+	// and the previous token, and reject anything else.
+	prevPath := "/api/v1/workflows/runs/run-token-prev/jobs/build/complete"
+	if resp, body := srv.doWithRunToken(t, prevPath, completeBody, currWorkflowToken); resp.StatusCode != http.StatusOK { //nolint:bodyclose // doWithRunToken closes the body
+		t.Fatalf("current token after re-mint status = %d body=%s", resp.StatusCode, body)
+	}
+	if resp, body := srv.doWithRunToken(t, prevPath, completeBody, prevWorkflowToken); resp.StatusCode != http.StatusOK { //nolint:bodyclose // doWithRunToken closes the body
+		t.Fatalf("previous token after re-mint status = %d body=%s", resp.StatusCode, body)
+	}
+	if resp, _ := srv.doWithRunToken(t, prevPath, completeBody, "wrong-token"); resp.StatusCode != http.StatusForbidden { //nolint:bodyclose // doWithRunToken closes the body
+		t.Fatalf("wrong token after re-mint status = %d", resp.StatusCode)
 	}
 
 	// The hash must never leak through the API.
