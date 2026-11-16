@@ -79,14 +79,21 @@ func (g *GitHubForge) SetCommitStatus(ctx context.Context, source *domain.ForgeS
 }
 
 func (g *GitHubForge) CreateCheckRun(ctx context.Context, source *domain.ForgeSource, token string, run *domain.CheckRun) error {
-	body, err := jsonBody(map[string]any{
+	payload := map[string]any{
 		"name":        run.Name,
 		"head_sha":    run.HeadSHA,
-		"status":      "completed",
-		"conclusion":  githubConclusion(run.State),
 		"output":      map[string]string{"title": run.Title, "summary": run.Summary},
 		"details_url": run.DetailsURL,
-	})
+	}
+	if run.State == domain.CheckPending {
+		// A pending check must be reported as in_progress without a conclusion;
+		// sending "completed" would prematurely close the check run (CWE-636).
+		payload["status"] = "in_progress"
+	} else {
+		payload["status"] = "completed"
+		payload["conclusion"] = githubConclusion(run.State)
+	}
+	body, err := jsonBody(payload)
 	if err != nil {
 		return err
 	}

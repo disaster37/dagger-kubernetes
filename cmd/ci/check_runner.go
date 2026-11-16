@@ -223,8 +223,8 @@ func cloneRepo(ctx context.Context, url, sha, ref, dir string) error {
 	}
 	defer cleanup()
 	args := []string{"clone", "--depth", "1"}
-	if ref != "" {
-		args = append(args, "--branch", ref)
+	if branch := cloneBranch(ref); branch != "" {
+		args = append(args, "--branch", branch)
 	}
 	args = append(args, url, dir)
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -253,6 +253,20 @@ func cloneRepo(ctx context.Context, url, sha, ref, dir string) error {
 		}
 	}
 	return nil
+}
+
+// cloneBranch maps a full git ref to a --branch-able name. PR/merge-request
+// refs (refs/pull/..., refs/merge-requests/...) are not clonable by name and
+// return "" so the SHA checkout below handles them.
+func cloneBranch(ref string) string {
+	switch {
+	case strings.HasPrefix(ref, "refs/heads/"):
+		return strings.TrimPrefix(ref, "refs/heads/")
+	case strings.HasPrefix(ref, "refs/tags/"):
+		return strings.TrimPrefix(ref, "refs/tags/")
+	default:
+		return ""
+	}
 }
 
 // gitAuthEnv builds the git environment with a temporary GIT_ASKPASS helper

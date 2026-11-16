@@ -50,6 +50,28 @@ type PackMemberPayload struct {
 	Data   []byte
 }
 
+// PackMemberSpec is one member's digest and payload size. It is used when the
+// payload bytes are not available locally (e.g. presigning an engine-side pack
+// upload) but the absolute byte offsets must still be derived.
+type PackMemberSpec struct {
+	Digest string
+	Size   int64
+}
+
+// PackHeaderLen returns the byte length of the dagger-pack v1 header for the
+// given pack ID and members, so absolute member offsets can be derived without
+// the payload bytes. It must stay byte-for-byte identical to EncodePack.
+func PackHeaderLen(id domain.PackID, members []PackMemberSpec) int64 {
+	n := int64(len(fmt.Sprintf("%s %s\n", id.Version, id.Digest)))
+	n += int64(len(fmt.Sprintf("%d\n", len(members))))
+	var rel int64
+	for _, m := range members {
+		n += int64(len(fmt.Sprintf("%s %d %d\n", m.Digest, rel, m.Size)))
+		rel += m.Size
+	}
+	return n + 1 // trailing blank line
+}
+
 // EncodePack assembles a dagger-pack v1 object and its manifest. Absolute byte
 // offsets are computed so any member is directly addressable via HTTP Range.
 func EncodePack(members []PackMemberPayload) ([]byte, domain.PackManifest, error) {

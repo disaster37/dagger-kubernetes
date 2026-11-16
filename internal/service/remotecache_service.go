@@ -177,11 +177,11 @@ func (s *RemoteCacheService) handleUpload(ctx context.Context, namespace string,
 	}
 	s.mu.Unlock()
 
-	var packMembers []PackMemberPayload
+	var packMembers []PackMemberSpec
 	var packDigests []string
 	for _, blob := range upload.Blobs {
 		if blob.Size > 0 && blob.Size <= s.packMaxMemberBytes {
-			packMembers = append(packMembers, PackMemberPayload{Digest: blob.Digest})
+			packMembers = append(packMembers, PackMemberSpec{Digest: blob.Digest, Size: blob.Size})
 			packDigests = append(packDigests, blob.Digest)
 			continue
 		}
@@ -217,9 +217,20 @@ func (s *RemoteCacheService) handleUpload(ctx context.Context, namespace string,
 		if err != nil {
 			return s.errorEnvelope(err.Error())
 		}
+		packKey := s.store.PackKey(namespace, id.Digest)
+		headerLen := PackHeaderLen(id, packMembers)
 		members := make([]domain.PackMember, 0, len(packMembers))
+		var rel int64
 		for _, m := range packMembers {
-			members = append(members, domain.PackMember{Digest: m.Digest})
+			abs := headerLen + rel
+			members = append(members, domain.PackMember{Digest: m.Digest, Offset: abs, Size: m.Size})
+			// Pre-record the member descriptor so a later Merge/Renew can serve
+			// the exact member slice via a signed HTTP Range (206) URL.
+			_ = s.index.Put(namespace, &repository.CacheIndexEntry{
+				Digest: m.Digest, PackDigest: id.Digest, PackKey: packKey,
+				PackOffset: abs, Size: m.Size,
+			})
+			rel += m.Size
 		}
 		packs = append(packs, domain.UploadPack{PackID: id, URL: u, Members: members})
 	}

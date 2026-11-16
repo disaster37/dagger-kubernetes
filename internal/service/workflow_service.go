@@ -313,8 +313,16 @@ func (s *WorkflowService) executeJob(ctx context.Context, run *domain.WorkflowRu
 	}
 	s.mu.Lock()
 	jr := run.Jobs[name]
-	jr.Status = "success"
-	jr.Outputs = captured
+	// The runner dispatches the job asynchronously (K8sWorkflowRunner returns
+	// immediately after creating the Job); completion is reported back via
+	// CompleteJob, which resumes the DAG. Marking "running" here keeps
+	// downstream jobs blocked until the runner reports back, so
+	// needs.<job>.outputs.* is populated from the real result rather than an
+	// empty map.
+	jr.Status = "running"
+	if len(captured) > 0 {
+		jr.Outputs = captured
+	}
 	if len(outputs) > 0 {
 		if jr.Outputs == nil {
 			jr.Outputs = make(map[string]string, len(outputs))
@@ -638,19 +646,23 @@ func (s *WorkflowService) sweepApprovals(ctx context.Context) {
 	now := time.Now().UTC()
 	for i := range runs {
 		run := runs[i]
-		changed := false
+		var timedOut []string
 		for name, jr := range run.Jobs { //nolint:gocritic // map values are not addressable
 			if jr.Status == "waiting_approval" && jr.ApprovalDeadline != nil && now.After(*jr.ApprovalDeadline) {
 				jr.Status = "failed"
 				jr.Error = "approval timed out"
 				run.Jobs[name] = jr
-				changed = true
+				timedOut = append(timedOut, name)
 			}
 		}
-		if changed {
-			s.finishRun(run)
-			_ = s.persist(ctx, run)
+		if len(timedOut) == 0 {
+			continue
 		}
+		for _, name := range timedOut {
+			s.skipDependents(run, name)
+		}
+		s.finishRun(run)
+		_ = s.persist(ctx, run)
 	}
 }
 
@@ -1049,7 +1061,12 @@ func (s *WorkflowService) CompleteJob(ctx context.Context, runID, jobName string
 		jr.Error = errMsg
 	} else {
 		jr.Status = "success"
-		jr.Outputs = outputs
+		if jr.Outputs == nil {
+			jr.Outputs = make(map[string]string, len(outputs))
+		}
+		for k, v := range outputs {
+			jr.Outputs[k] = v
+		}
 		jr.Artifacts = artifacts
 	}
 	s.updateJob(run, jobName, &jr)

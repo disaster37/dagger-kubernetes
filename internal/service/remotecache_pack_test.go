@@ -44,3 +44,30 @@ func TestEncodeDecodePack(t *testing.T) {
 		}
 	}
 }
+
+func TestPackHeaderLenMatchesEncodePack(t *testing.T) {
+	members := []PackMemberPayload{
+		{Digest: "sha256:aaa", Data: []byte("hello")},
+		{Digest: "sha256:bbb", Data: []byte("world!")},
+	}
+	_, manifest, err := EncodePack(members)
+	if err != nil {
+		t.Fatal(err)
+	}
+	specs := make([]PackMemberSpec, 0, len(members))
+	for _, m := range members {
+		specs = append(specs, PackMemberSpec{Digest: m.Digest, Size: int64(len(m.Data))})
+	}
+	headerLen := PackHeaderLen(manifest.ID, specs)
+	if headerLen != manifest.Members[0].Offset {
+		t.Fatalf("headerLen = %d, first member offset = %d", headerLen, manifest.Members[0].Offset)
+	}
+	var rel int64
+	for i, m := range members {
+		want := headerLen + rel
+		if manifest.Members[i].Offset != want {
+			t.Fatalf("member %d offset = %d, want %d", i, manifest.Members[i].Offset, want)
+		}
+		rel += int64(len(m.Data))
+	}
+}

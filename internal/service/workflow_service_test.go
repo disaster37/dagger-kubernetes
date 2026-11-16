@@ -147,7 +147,7 @@ func TestWorkflowServiceStart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.Jobs["build"].Status != "success" {
+	if run.Jobs["build"].Status != "running" {
 		t.Fatalf("build = %+v", run.Jobs["build"])
 	}
 	if run.Jobs["deploy"].Status != "waiting_approval" {
@@ -155,6 +155,13 @@ func TestWorkflowServiceStart(t *testing.T) {
 	}
 	if runner.calls != 1 {
 		t.Fatalf("calls = %d", runner.calls)
+	}
+	completed, err := svc.CompleteJob(context.Background(), run.ID, "build", map[string]string{"out": "ok"}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed.Jobs["build"].Status != "success" {
+		t.Fatalf("build after complete = %+v", completed.Jobs["build"])
 	}
 }
 
@@ -175,12 +182,30 @@ func TestWorkflowServiceApproveResumesDownstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	run, err = svc.CompleteJob(context.Background(), run.ID, "build", map[string]string{"out": "ok"}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Jobs["deploy"].Status != "waiting_approval" {
+		t.Fatalf("deploy = %+v", run.Jobs["deploy"])
+	}
 	approved, err := svc.Approve(context.Background(), run.ID, "deploy", &domain.Identity{UserID: "admin", Role: domain.RoleAdmin})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if approved.Jobs["deploy"].Status != "success" || approved.Jobs["notify"].Status != "success" {
-		t.Fatalf("jobs = %+v", approved.Jobs)
+	if approved.Jobs["deploy"].Status != "running" {
+		t.Fatalf("deploy after approve = %+v", approved.Jobs["deploy"])
+	}
+	approved, err = svc.CompleteJob(context.Background(), run.ID, "deploy", map[string]string{"out": "ok"}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if approved.Jobs["notify"].Status != "running" {
+		t.Fatalf("notify after deploy = %+v", approved.Jobs["notify"])
+	}
+	approved, err = svc.CompleteJob(context.Background(), run.ID, "notify", map[string]string{"out": "ok"}, nil, "")
+	if err != nil {
+		t.Fatal(err)
 	}
 	if approved.Status != "success" {
 		t.Fatalf("status = %s", approved.Status)
@@ -263,7 +288,11 @@ func TestWorkflowServiceNeedsOutputs(t *testing.T) {
 	if run.Jobs["build"].Outputs["tag"] != "v1" {
 		t.Fatalf("outputs = %+v", run.Jobs["build"].Outputs)
 	}
-	if run.Jobs["deploy"].Status != "success" {
+	run, err = svc.CompleteJob(context.Background(), run.ID, "build", map[string]string{"out": "ok"}, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.Jobs["deploy"].Status != "running" {
 		t.Fatalf("deploy = %+v", run.Jobs["deploy"])
 	}
 }

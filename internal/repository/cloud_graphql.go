@@ -300,6 +300,9 @@ func (o *graphqlOrg) Checks(ctx context.Context, args struct{ First *int32 }) ([
 	if args.First != nil && *args.First > 0 {
 		limit = int(*args.First)
 	}
+	if limit > domain.MaxTraceLimit {
+		limit = domain.MaxTraceLimit
+	}
 	records, err := o.root.checks.List(ctx, &domain.CheckRunFilter{OrgID: o.org.ID, Limit: limit})
 	if err != nil {
 		return nil, err

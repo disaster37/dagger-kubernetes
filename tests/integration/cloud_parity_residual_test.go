@@ -520,13 +520,26 @@ jobs:
 		t.Fatalf("complete = %s", body)
 	}
 
-	// The workflow run pauses on deploy-prod.
+	// The workflow run dispatches build and pauses deploy-prod on its
+	// environment gate once build completes.
 	_, body = srv.do(t, http.MethodGet, "/api/v1/orgs/acme/workflows/runs", nil) //nolint:bodyclose // srv.do closes the body
 	var runs []*domain.WorkflowRun
 	if err := json.Unmarshal(body, &runs); err != nil || len(runs) == 0 {
 		t.Fatalf("workflow runs = %s err=%v", body, err)
 	}
 	run := runs[0]
+	if run.Jobs["build"].Status != "running" {
+		t.Fatalf("build status = %+v", run.Jobs["build"])
+	}
+	if _, body := srv.do(t, http.MethodPost, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/build/complete", run.ID), map[string]any{ //nolint:bodyclose // srv.do closes the body
+		"outputs": map[string]string{"tag": "v1.2.3"},
+	}); !bytes.Contains(body, []byte(`"waiting_approval"`)) {
+		t.Fatalf("build complete = %s", body)
+	}
+	_, body = srv.do(t, http.MethodGet, fmt.Sprintf("/api/v1/workflows/runs/%s", run.ID), nil) //nolint:bodyclose // srv.do closes the body
+	if err := json.Unmarshal(body, &run); err != nil {
+		t.Fatalf("get run = %s err=%v", body, err)
+	}
 	if run.Jobs["deploy-prod"].Status != "waiting_approval" {
 		t.Fatalf("deploy status = %+v", run.Jobs["deploy-prod"])
 	}
@@ -557,7 +570,7 @@ jobs:
 	if err := json.Unmarshal(approvedBody, &approved); err != nil {
 		t.Fatal(err)
 	}
-	if approved.Jobs["deploy-prod"].Status != "success" {
+	if approved.Jobs["deploy-prod"].Status != "running" {
 		t.Fatalf("deploy = %+v", approved.Jobs["deploy-prod"])
 	}
 	foundSecret := false
@@ -568,5 +581,11 @@ jobs:
 	}
 	if !foundSecret {
 		t.Fatalf("deploy did not receive the environment secret: %+v", flowRunner.snapshot())
+	}
+	// Complete deploy-prod so the run finishes.
+	if _, body := srv.do(t, http.MethodPost, fmt.Sprintf("/api/v1/workflows/runs/%s/jobs/deploy-prod/complete", run.ID), map[string]any{ //nolint:bodyclose // srv.do closes the body
+		"outputs": map[string]string{},
+	}); !bytes.Contains(body, []byte(`"success"`)) {
+		t.Fatalf("deploy complete = %s", body)
 	}
 }
