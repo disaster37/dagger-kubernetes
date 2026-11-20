@@ -387,10 +387,10 @@ supervisor:
 ## @param supervisor.config.leaseTtl Engine session lease TTL.
     leaseTtl: "2m"
 ## @param supervisor.config.version.floor Minimum supported Dagger engine version.
-## @param supervisor.config.version.allowlist [array] Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor).
+## @param supervisor.config.version.allowlist [array] Allowed Dagger versions. A `MAJOR.MINOR` entry (e.g. "1.0") admits the whole minor series including pre-releases; a full `MAJOR.MINOR.PATCH` admits that exact version; a dot-less pre-release full version (e.g. "1.0.0-beta") admits only that pre-release track. Empty = admit all versions >= floor.
     version:
       floor: "v0.19.0"
-      allowlist: ["0.19", "0.20", "0.21"]
+      allowlist: ["0.19", "0.20", "0.21", "1.0"]
 ## @param supervisor.config.cli.enabled Enable on-the-fly Dagger CLI provisioning addon.
 ## @param supervisor.config.cli.releaseListTtl Upstream release-list cache TTL.
 ## @param supervisor.config.cli.downloadTimeout Outbound upstream fetch timeout.
@@ -410,13 +410,38 @@ supervisor:
         downloadBase: "https://github.com/dagger/dagger/releases/download"
         githubToken: ""
       includePrereleases: false
-## @param supervisor.config.attribution.projectMappings [array] Ordered list of {pattern, group} mapping a project name (CI repo slug; Go regexp, case-sensitive) to a supervisor group name. First-match-wins; no match falls through to per-group auto_assign_pattern; empty = disabled. Target groups must already exist.
+## @param supervisor.config.attribution.projectMappings [array] Ordered list of {pattern, group, org} mapping a project name (CI repo slug; Go regexp, case-sensitive) to a supervisor group name. First-match-wins; no match falls through to per-group auto_assign_pattern; empty = disabled. Target groups must already exist. org optionally restricts the rule to one org slug/ID (empty = the trace's resolved org).
     attribution:
       projectMappings: []
       # projectMappings example (regex → supervisor group name):
       # projectMappings:
       #   - pattern: '^github\.com/acme/.*'
       #     group: 'acme'
+## @param supervisor.config.org.default.displayName Display name of the bootstrap organization (its slug is always "default" and its storage UID is generated). Max 128 chars.
+## @param supervisor.config.org.defaultQuotas.maxGroups.soft Soft group-count warning threshold (0 = unlimited).
+## @param supervisor.config.org.defaultQuotas.maxGroups.hard Hard group-count cap (0 = unlimited, binds every role including admins).
+## @param supervisor.config.org.defaultQuotas.maxProjects.soft Soft project-count warning threshold.
+## @param supervisor.config.org.defaultQuotas.maxProjects.hard Hard project-count cap.
+## @param supervisor.config.org.defaultQuotas.maxMembers.soft Soft distinct-member warning threshold.
+## @param supervisor.config.org.defaultQuotas.maxMembers.hard Hard distinct-member cap.
+## @param supervisor.config.org.defaultQuotas.maxConcurrentSessions.soft Soft concurrent engine-session warning threshold.
+## @param supervisor.config.org.defaultQuotas.maxConcurrentSessions.hard Hard concurrent engine-session cap.
+## @param supervisor.config.org.defaultQuotas.maxEngines.soft Soft engine-pod warning threshold.
+## @param supervisor.config.org.defaultQuotas.maxEngines.hard Hard engine-pod cap across all versions in one org.
+## @param supervisor.config.org.defaultQuotas.maxCacheBytes.soft Soft remote-cache byte warning threshold.
+## @param supervisor.config.org.defaultQuotas.maxCacheBytes.hard Hard remote-cache byte cap.
+## @param supervisor.config.org.defaultQuotas.maxPipelineRetention Per-org trace retention (0s inherits history.gc.maxAge).
+    org:
+      default:
+        displayName: "Default"
+      defaultQuotas:
+        maxGroups: { soft: 0, hard: 0 }
+        maxProjects: { soft: 0, hard: 0 }
+        maxMembers: { soft: 0, hard: 0 }
+        maxConcurrentSessions: { soft: 0, hard: 0 }
+        maxEngines: { soft: 0, hard: 0 }
+        maxCacheBytes: { soft: 0, hard: 0 }
+        maxPipelineRetention: "0s"
 ## @param supervisor.config.logLevel Supervisor log level.
     logLevel: "info"
 ## @param supervisor.config.logFormat Supervisor log format (json, text).
@@ -652,7 +677,7 @@ imageCache:
 ## @param auth.oauth.allowedOrgs [array] Allowed OAuth organizations (github: org membership; oidc: deprecated alias for allowedGroups).
 ## @param auth.oauth.allowedTeams [array] (github) Allowed "org/team" slugs; when set with allowedOrgs, both must be satisfied.
 ## @param auth.oauth.allowedGroups [array] (oidc) Allowed provider group names (groups-claim allowlist; union with allowedOrgs).
-## @param auth.oauth.groupMappings [array] Regex group mapping: list of {pattern, replacement} mapping provider groups to supervisor group names (first-match-wins; no match drops the group).
+## @param auth.oauth.groupMappings [array] Regex group mapping: list of {pattern, replacement, org} mapping provider groups to supervisor group names (first-match-wins; no match drops the group). org is an optional target organization slug/ID (empty = bootstrap organization); auto-created groups land in that org and an unknown org fails closed.
 ## @param auth.oauth.defaultGroup Default group for OAuth users.
 ## @param auth.oauth.cookieSecure Force the Secure flag on the oauth_state cookie (set true when TLS terminates in front of the supervisor).
 ## @param auth.oauth.issuerUrl (oidc) OIDC issuer URL (e.g. https://dex.example.com).
@@ -840,6 +865,14 @@ dataIngress:
   host: "data.supv.example.com"
   className: ""
   annotations: {}
+  ## How the TLS passthrough is implemented, depending on the ingress controller:
+  ##   annotation      - kubernetes/ingress-nginx (community, EOL): creates an
+  ##                     Ingress with nginx.ingress.kubernetes.io/ssl-passthrough: "true"
+  ##   transportServer - F5 NGINX Ingress Controller: creates a TransportServer
+  ##                     (k8s.nginx.org) instead of an Ingress. Requires
+  ##                     controller.enableTLSPassthrough=true on the controller.
+  ##                     The host must NOT be claimed by any other Ingress.
+  passthroughVia: "annotation"
   tls:
     secretName: ""
 

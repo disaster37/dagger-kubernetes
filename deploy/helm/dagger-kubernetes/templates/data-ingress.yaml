@@ -1,4 +1,4 @@
-{{- if .Values.dataIngress.enabled }}
+{{- if and .Values.dataIngress.enabled (ne .Values.dataIngress.passthroughVia "transportServer") }}
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:

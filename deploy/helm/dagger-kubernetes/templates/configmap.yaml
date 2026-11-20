@@ -23,8 +23,8 @@ data:
       data_hostname: {{ include "dagger-kubernetes.dataHostname" . | quote }}
       public_url: {{ include "dagger-kubernetes.publicUrl" . | quote }}
       max_data_conns: 2048
-      internal_control_url: {{ printf "https://%s-control.%s.svc:8080" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) | quote }}
-      internal_data_host: {{ printf "%s-data.%s.svc:8443" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) | quote }}
+      internal_control_url: {{ printf "https://%s-control.%s.svc:%v" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) .Values.service.control.port | quote }}
+      internal_data_host: {{ printf "%s-data.%s.svc:%v" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) .Values.service.data.port | quote }}
     auth:
       internal:
         enabled: true
@@ -74,6 +74,29 @@ data:
     attribution:
       project_mappings:
 {{ toYaml .Values.supervisor.config.attribution.projectMappings | indent 8 }}
+    org:
+      default:
+        display_name: {{ .Values.supervisor.config.org.default.displayName | quote }}
+      default_quotas:
+        max_groups:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxGroups.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxGroups.hard }}
+        max_projects:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxProjects.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxProjects.hard }}
+        max_members:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxMembers.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxMembers.hard }}
+        max_concurrent_sessions:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxConcurrentSessions.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxConcurrentSessions.hard }}
+        max_engines:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxEngines.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxEngines.hard }}
+        max_cache_bytes:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxCacheBytes.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxCacheBytes.hard }}
+        max_pipeline_retention: {{ .Values.supervisor.config.org.defaultQuotas.maxPipelineRetention | quote }}
     database:
       dir: "/var/lib/dagger-kubernetes"
     raft:
