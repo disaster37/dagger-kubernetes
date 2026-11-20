@@ -24,6 +24,13 @@ import (
 // when it lands on a follower (e.g. a stale leader address mid-election).
 const leaderForwardedHeader = "X-Dagger-Kubernetes-Leader-Forwarded"
 
+// forwardedHostHeader carries the original request Host across the
+// follower->leader forward hop. The forwarder rewrites Host to the leader's
+// internal address, which would defeat host-based in-cluster discrimination in
+// handlers like POST /v1/engines. It is honored only on the internal listener
+// (see effectiveHost), the same spoof-proof pattern as forwardedClientIPHeader.
+const forwardedHostHeader = "X-Dagger-Kubernetes-Forwarded-Host"
+
 // leaderInfo is the subset of the Raft store the forward middleware needs.
 // *repository.RaftStore implements it.
 type leaderInfo interface {
@@ -140,6 +147,23 @@ func (s *Server) getOrBuildForwarder() (*httpext.Forwarder, bool) {
 	return s.forwarder, true
 }
 
+// shouldRelayRemoteCacheWS reports whether this is a remote-cache WebSocket
+// request that must be relayed to the leader by a follower (loop-prevention
+// marker absent).
+func (s *Server) shouldRelayRemoteCacheWS(c *app.RequestContext, marker string) bool {
+	return string(c.Path()) == "/v1/engine" && s.leaderInfo != nil && !s.leaderInfo.IsLeader() && marker == ""
+}
+
+// serveLocally reports whether the request must be served by this pod rather
+// than forwarded: no leader info, this pod is the leader, the route is not
+// leader-pinned, or the request already carries the loop-prevention marker.
+func (s *Server) serveLocally(c *app.RequestContext, marker string) bool {
+	return s.leaderInfo == nil ||
+		s.leaderInfo.IsLeader() ||
+		!leaderPinnedRoute(string(c.Method()), string(c.Path())) ||
+		marker != ""
+}
+
 // leaderForward is the global middleware that forwards leader-pinned requests
 // to the current Raft leader via go-raft's httpext.Forwarder. It is a no-op on
 // the leader, when no leader info is injected, for follower-safe routes, and
@@ -149,15 +173,12 @@ func (s *Server) getOrBuildForwarder() (*httpext.Forwarder, bool) {
 func (s *Server) leaderForward() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		marker := string(c.Request.Header.Peek(leaderForwardedHeader))
-		if string(c.Path()) == "/v1/engine" && s.leaderInfo != nil && !s.leaderInfo.IsLeader() && marker == "" {
+		if s.shouldRelayRemoteCacheWS(c, marker) {
 			s.relayRemoteCacheWS(ctx, c)
 			c.Abort()
 			return
 		}
-		if s.leaderInfo == nil ||
-			s.leaderInfo.IsLeader() ||
-			!leaderPinnedRoute(string(c.Method()), string(c.Path())) ||
-			marker != "" {
+		if s.serveLocally(c, marker) {
 			c.Request.Header.Del(leaderForwardedHeader)
 			c.Next(ctx)
 			return
@@ -179,6 +200,11 @@ func (s *Server) leaderForward() app.HandlerFunc {
 			hdr[name] = append(hdr[name], string(v))
 		})
 		hdr[forwardedClientIPHeader] = []string{s.clientIP(c)}
+		// Preserve the original Host across the hop (set once, so a chained
+		// forward keeps the client's Host rather than the leader's).
+		if _, ok := hdr[forwardedHostHeader]; !ok {
+			hdr[forwardedHostHeader] = []string{string(c.Host())}
+		}
 
 		var bodyReader io.Reader
 		if c.Request.IsBodyStream() {

@@ -305,7 +305,7 @@ func TestOIDCCompleteDefaultGroupAutoJoin(t *testing.T) {
 	}))
 	ctx := context.Background()
 
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -631,8 +631,8 @@ func TestOIDCCompleteGroupMapping(t *testing.T) {
 	}))
 	ctx := context.Background()
 
-	dev, _ := gsvc.Create(ctx, GroupInput{Name: "dev-mapped", AgentAvailable: true})
-	platform, _ := gsvc.Create(ctx, GroupInput{Name: "platform-mapped", AgentAvailable: true})
+	dev, _ := gsvc.Create(ctx, "", GroupInput{Name: "dev-mapped", AgentAvailable: true})
+	platform, _ := gsvc.Create(ctx, "", GroupInput{Name: "platform-mapped", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -682,7 +682,7 @@ func TestOIDCCompleteNoGroupMappingsNoSync(t *testing.T) {
 	ctx := context.Background()
 
 	// A group named exactly like the claim must NOT be joined: no mapping rules.
-	gsvc.Create(ctx, GroupInput{Name: "devs", AgentAvailable: true})
+	gsvc.Create(ctx, "", GroupInput{Name: "devs", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {

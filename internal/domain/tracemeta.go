@@ -79,7 +79,7 @@ type TraceFilter struct {
 
 // TraceMetaRepository is the persistence interface for trace metadata.
 type TraceMetaRepository interface {
-	UpsertProvision(ctx context.Context, traceID, userID, version string) error
+	UpsertProvision(ctx context.Context, orgID, traceID, userID, version string) error
 	UpsertIngest(ctx context.Context, m *TraceMeta) error
 	Get(ctx context.Context, traceID string) (*TraceMeta, error)
 	List(ctx context.Context, f *TraceFilter) ([]*TraceListResult, error)
@@ -107,5 +107,5 @@ type TraceMetaRepository interface {
 
 	// Stats returns the total trace count and the oldest COALESCE(started_at,
 	// updated_at) timestamp (zero time when no traces exist). Cheap FSM read.
-	Stats(ctx context.Context) (count int, oldest time.Time, err error)
+	Stats(ctx context.Context, orgID string) (count int, oldest time.Time, err error)
 }

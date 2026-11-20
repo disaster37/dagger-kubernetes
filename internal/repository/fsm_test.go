@@ -335,13 +335,13 @@ func TestFSMTraceListTextFilters(t *testing.T) {
 	ingest := func(id, userID, ciRepo, project string) {
 		t.Helper()
 		applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{
-			TraceID: id, UserID: userID, CIRepo: ciRepo, ProjectName: project,
+			TraceID: id, OrgID: "", UserID: userID, CIRepo: ciRepo, ProjectName: project,
 			StartedAt: base, UpdatedAt: base,
 		})
 	}
 	ingest("t1", "u1", "github.com/org/repo", "org-project")
 	ingest("t2", "u2", "gitlab.com/other/thing", "other-project")
-	ingest("t3", "", "", "bare-project")
+	ingest("t3", "", "bare-project", "")
 
 	cases := []struct {
 		name   string
@@ -500,7 +500,7 @@ func TestFSMTraceStats(t *testing.T) {
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "old", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "no-time"})
 
-	count, oldest := f.traceStats()
+	count, oldest := f.traceStats("")
 	if count != 3 {
 		t.Fatalf("count = %d, want 3", count)
 	}
@@ -510,7 +510,7 @@ func TestFSMTraceStats(t *testing.T) {
 
 	// Empty FSM: zero count and zero oldest.
 	empty := NewFSM()
-	count, oldest = empty.traceStats()
+	count, oldest = empty.traceStats("")
 	if count != 0 || !oldest.IsZero() {
 		t.Fatalf("empty stats = (%d, %v), want (0, zero)", count, oldest)
 	}

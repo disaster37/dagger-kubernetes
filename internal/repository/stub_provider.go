@@ -3,6 +3,7 @@ package repository
 import (
 	"fmt"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -10,7 +11,8 @@ import (
 )
 
 type StubProvider struct {
-	mu       sync.Mutex
+	mu       *sync.Mutex
+	scope    string
 	versions map[string]*stubSTS
 }
 
@@ -21,20 +23,65 @@ type stubSTS struct {
 	pvcs      map[string]bool // PVC names that exist (retained on scale-down)
 }
 
-var _ domain.FleetProvider = (*StubProvider)(nil)
+var (
+	_ domain.FleetProvider       = (*StubProvider)(nil)
+	_ domain.ScopedFleetProvider = (*StubProvider)(nil)
+)
 
 func NewStubProvider() *StubProvider {
 	return &StubProvider{
+		mu:       &sync.Mutex{},
 		versions: make(map[string]*stubSTS),
 	}
 }
+
+// WithScope returns a scoped copy of the stub. Org-scoped instances key their
+// fleets separately so per_org behavior (distinct STS names, scopes) is
+// exercised identically to the K8s provider in tests. The scoped copy shares
+// the backing map AND its mutex so scoped/unscoped instances never guard the
+// same map with different locks.
+func (p *StubProvider) WithScope(orgSlug string) domain.FleetProvider {
+	cp := &StubProvider{
+		mu:       p.mu,
+		scope:    orgSlug,
+		versions: p.versions, // share the backing map so scoped copies see each other
+	}
+	return cp
+}
+
+// stubKey is the internal map key for a (scope, version) pair.
+func (p *StubProvider) stubKey(version string) string {
+	return p.scope + "\x00" + version
+}
+
+// AllScopes returns the deployed (org, version) scopes.
+func (p *StubProvider) AllScopes() ([]domain.FleetScope, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	out := make([]domain.FleetScope, 0, len(p.versions))
+	for k := range p.versions {
+		org, version, _ := strings.Cut(k, "\x00")
+		out = append(out, domain.FleetScope{OrgID: org, Version: version})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].OrgID != out[j].OrgID {
+			return out[i].OrgID < out[j].OrgID
+		}
+		return out[i].Version < out[j].Version
+	})
+	return out, nil
+}
+
+// Lookup through the shared map by (scope, version). Callers own p.mu.
 
 func (p *StubProvider) EnsureStatefulSet(version, image string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if _, ok := p.versions[version]; !ok {
-		p.versions[version] = &stubSTS{
+	key := p.stubKey(version)
+	if _, ok := p.versions[key]; !ok {
+		p.versions[key] = &stubSTS{
 			replicasM: make(map[string]*domain.Replica),
 			pvcs:      make(map[string]bool),
 		}
@@ -45,7 +92,7 @@ func (p *StubProvider) EnsureStatefulSet(version, image string) error {
 func (p *StubProvider) DeleteStatefulSet(version string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	delete(p.versions, version)
+	delete(p.versions, p.stubKey(version))
 	return nil
 }
 
@@ -61,7 +108,7 @@ func (p *StubProvider) GetReplicas(version string) ([]domain.Replica, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok {
 		return nil, nil
 	}
@@ -80,14 +127,14 @@ func (p *StubProvider) ScaleUp(version string, targetReplicas int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok {
 		return fmt.Errorf("statefulset not found for version %s", version)
 	}
 
 	for len(sts.replicasM) < targetReplicas {
 		ordinal := len(sts.replicasM)
-		podName := domain.PodName(version, ordinal)
+		podName := domain.EnginePodName(p.scope, version, ordinal)
 		ip := fmt.Sprintf("10.0.0.%d", (sts.nextIP%254)+1)
 		sts.nextIP++
 
@@ -99,7 +146,7 @@ func (p *StubProvider) ScaleUp(version string, targetReplicas int) error {
 			Ready:     true,
 			StartedAt: time.Now(),
 		}
-		sts.pvcs[enginePVCName(version, ordinal)] = true
+		sts.pvcs[engineScopedPVCName(p.scope, version, ordinal)] = true
 	}
 	return nil
 }
@@ -108,12 +155,12 @@ func (p *StubProvider) ScaleDown(version string, ordinal int) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok {
 		return fmt.Errorf("statefulset not found for version %s", version)
 	}
 
-	podName := domain.PodName(version, ordinal)
+	podName := domain.EnginePodName(p.scope, version, ordinal)
 	delete(sts.replicasM, podName)
 	return nil
 }
@@ -122,7 +169,7 @@ func (p *StubProvider) GetReadyReplicaIP(version, podName string) (string, error
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok {
 		return "", fmt.Errorf("statefulset not found for version %s", version)
 	}
@@ -148,8 +195,11 @@ func (p *StubProvider) AllVersions() ([]string, error) {
 	defer p.mu.Unlock()
 
 	versions := make([]string, 0, len(p.versions))
-	for v := range p.versions {
-		versions = append(versions, v)
+	for k := range p.versions {
+		org, version, _ := strings.Cut(k, "\x00")
+		if org == p.scope {
+			versions = append(versions, version)
+		}
 	}
 	return versions, nil
 }
@@ -158,7 +208,7 @@ func (p *StubProvider) VersionIdleSince(version string) (time.Time, bool, error)
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok || sts.idleSince.IsZero() {
 		return time.Time{}, false, nil
 	}
@@ -169,7 +219,7 @@ func (p *StubProvider) SetVersionIdleSince(version string, idleSince time.Time) 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok {
 		return nil // version already gone
 	}
@@ -179,19 +229,19 @@ func (p *StubProvider) SetVersionIdleSince(version string, idleSince time.Time) 
 
 // ListPVCs returns the stub's per-pod PVCs for the version, sorted by
 // ordinal. The stub only ever creates convention-compliant names
-// (enginePVCName), so every entry parses.
+// (engineScopedPVCName), so every entry parses.
 func (p *StubProvider) ListPVCs(version string) ([]domain.PVCInfo, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	sts, ok := p.versions[p.stubKey(version)]
 	if !ok {
 		return nil, nil
 	}
 
 	out := make([]domain.PVCInfo, 0, len(sts.pvcs))
 	for name := range sts.pvcs {
-		out = append(out, domain.PVCInfo{Name: name, Ordinal: extractPVCOrdinal(name, version)})
+		out = append(out, domain.PVCInfo{Name: name, Ordinal: extractScopedPVCOrdinal(name, domain.EngineStsName(p.scope, version))})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Ordinal < out[j].Ordinal })
 	return out, nil
@@ -215,19 +265,26 @@ func (p *StubProvider) AddPVC(version string, ordinal int) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	sts, ok := p.versions[version]
+	key := p.stubKey(version)
+	sts, ok := p.versions[key]
 	if !ok {
 		sts = &stubSTS{
 			replicasM: make(map[string]*domain.Replica),
 			pvcs:      make(map[string]bool),
 		}
-		p.versions[version] = sts
+		p.versions[key] = sts
 	}
-	sts.pvcs[enginePVCName(version, ordinal)] = true
+	sts.pvcs[engineScopedPVCName(p.scope, version, ordinal)] = true
 }
 
-// enginePVCName is the StatefulSet PVC naming convention
-// (<volume-claim-template>-<stsName>-<ordinal>).
+// enginePVCName is the StatefulSet PVC naming convention for the shared
+// (unscoped) fleet (<volume-claim-template>-<stsName>-<ordinal>).
 func enginePVCName(version string, ordinal int) string {
-	return fmt.Sprintf("%s-%s-%d", volumeDaggerKubernetes, domain.StsName(version), ordinal)
+	return engineScopedPVCName("", version, ordinal)
+}
+
+// engineScopedPVCName is the StatefulSet PVC naming convention for an engine
+// fleet (<volume-claim-template>-<stsName>-<ordinal>).
+func engineScopedPVCName(orgSlug, version string, ordinal int) string {
+	return fmt.Sprintf("%s-%s-%d", volumeDaggerKubernetes, domain.EngineStsName(orgSlug, version), ordinal)
 }

@@ -10,6 +10,7 @@ import (
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
+	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
 // pvcName returns the StatefulSet PVC name of the test version
@@ -235,26 +236,26 @@ func TestStatusReflectsLastResult(t *testing.T) {
 	}
 	svc := newPurgeService(provider, &fakeEnginePruner{})
 
-	if _, ok := svc.Status("v0.19.0"); ok {
+	if _, ok := svc.StatusForOrg("", "v0.19.0"); ok {
 		t.Fatal("status before purge should be absent")
 	}
 	if _, err := svc.Purge(context.Background(), "v0.19.0"); err != nil {
 		t.Fatalf("Purge: %v", err)
 	}
-	got, ok := svc.Status("v0.19.0")
+	got, ok := svc.StatusForOrg("", "v0.19.0")
 	if !ok || got.State != purgeStateCompleted {
 		t.Fatalf("status = %+v/%v, want completed/true", got, ok)
 	}
 	// Status returns a copy: mutating it must not affect the stored result.
 	got.Pods[0].Pruned = false
-	again, _ := svc.Status("v0.19.0")
+	again, _ := svc.StatusForOrg("", "v0.19.0")
 	if !again.Pods[0].Pruned {
 		t.Fatal("Status must return a copy of the stored result")
 	}
 	if again.PVCs == nil {
 		t.Fatal("status pvcs must be [] (not null) so the JSON shape matches the documented type")
 	}
-	if _, ok := svc.Status("v0.20.0"); ok {
+	if _, ok := svc.StatusForOrg("", "v0.20.0"); ok {
 		t.Fatal("unknown version should be absent")
 	}
 }
@@ -552,5 +553,55 @@ func TestPurgeSkipsUnparseablePVCOrdinal(t *testing.T) {
 	}
 	if len(result.PVCs) != 0 {
 		t.Fatalf("pvcs = %+v, want the unparseable PVC skipped", result.PVCs)
+	}
+}
+
+// TestPurgePerOrgScopesNoDuplicates proves providersForVersion addresses each
+// per_org scope exactly once via AllScopes (not double-counting through the
+// unscoped AllVersions), and that the unscoped provider is included only when a
+// shared (OrgSlug == "") scope exists.
+func TestPurgePerOrgScopesNoDuplicates(t *testing.T) {
+	provider := repository.NewStubProvider()
+	// Two org-scoped fleets of the same version, no shared fleet.
+	for _, org := range []string{"default", "acme"} {
+		scoped := provider.WithScope(org)
+		if err := scoped.EnsureStatefulSet("v0.19.0", ""); err != nil {
+			t.Fatalf("EnsureStatefulSet %s: %v", org, err)
+		}
+		if err := scoped.ScaleUp("v0.19.0", 2); err != nil {
+			t.Fatalf("ScaleUp %s: %v", org, err)
+		}
+	}
+
+	pruner := &fakeEnginePruner{}
+	svc := newPurgeService(provider, pruner)
+
+	result, err := svc.Purge(context.Background(), "v0.19.0")
+	if err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+	// 2 orgs x 2 replicas, each counted once (no duplicate unscoped provider).
+	if result.Replicas != 4 {
+		t.Fatalf("replicas = %d, want 4 (2 orgs x 2, no duplicates)", result.Replicas)
+	}
+	if len(result.Pods) != 4 {
+		t.Fatalf("pods = %d, want 4", len(result.Pods))
+	}
+
+	// A shared fleet makes the unscoped provider the sole entry for its scope.
+	shared := repository.NewStubProvider()
+	if err := shared.EnsureStatefulSet("v0.20.0", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet shared: %v", err)
+	}
+	if err := shared.ScaleUp("v0.20.0", 1); err != nil {
+		t.Fatalf("ScaleUp shared: %v", err)
+	}
+	svcShared := newPurgeService(shared, &fakeEnginePruner{})
+	resShared, err := svcShared.Purge(context.Background(), "v0.20.0")
+	if err != nil {
+		t.Fatalf("Purge shared: %v", err)
+	}
+	if resShared.Replicas != 1 {
+		t.Fatalf("shared replicas = %d, want 1 (no duplicate)", resShared.Replicas)
 	}
 }

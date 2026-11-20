@@ -22,6 +22,12 @@ func (s *Server) handleOTLPStream(signal string) app.HandlerFunc {
 		if !ok {
 			return
 		}
+		orgID := ""
+		if s.traceMeta != nil {
+			if m, err := s.traceMeta.Get(ctx, traceID); err == nil {
+				orgID = m.OrgID
+			}
+		}
 		if s.otlpStream == nil {
 			writeError(c, consts.StatusNotFound, "otlp stream disabled")
 			return
@@ -44,13 +50,13 @@ func (s *Server) handleOTLPStream(signal string) app.HandlerFunc {
 		pr, pw := io.Pipe()
 		c.SetBodyStream(pr, -1)
 		listen := c.Query("listen") != "false"
-		go s.streamOTLPFrames(ctx, pw, traceID, signal, nextSeq, listen)
+		go s.streamOTLPFrames(ctx, pw, orgID, traceID, signal, nextSeq, listen)
 	}
 }
 
 // streamOTLPFrames writes archived chunks, then live chunks/heartbeats until
 // the trace is terminal or the client disconnects.
-func (s *Server) streamOTLPFrames(ctx context.Context, w io.WriteCloser, traceID, signal string, nextSeq uint64, listen bool) {
+func (s *Server) streamOTLPFrames(ctx context.Context, w io.WriteCloser, orgID, traceID, signal string, nextSeq uint64, listen bool) {
 	defer func() { _ = w.Close() }()
 	heartbeat := time.NewTicker(otlpHeartbeatInterval)
 	defer heartbeat.Stop()
@@ -58,7 +64,7 @@ func (s *Server) streamOTLPFrames(ctx context.Context, w io.WriteCloser, traceID
 	defer poll.Stop()
 
 	writeNew := func() (bool, <-chan struct{}) {
-		chunks, notify, err := s.otlpStream.ChunksFrom(ctx, traceID, signal, nextSeq)
+		chunks, notify, err := s.otlpStream.ChunksFrom(ctx, orgID, traceID, signal, nextSeq)
 		if err != nil {
 			_ = domain.WriteOTLPFrame(w, domain.OTLPFrame{Type: domain.FrameError, Payload: []byte(err.Error())})
 			return false, nil

@@ -16,6 +16,13 @@ const (
 	// Synthetic variant of dagCallWithEnvVariable with a secret-ish name and a
 	// value, to prove defense-in-depth redaction.
 	dagCallWithTokenVariable = "ChV4eGgzOmI0M2Q2MWM2YWI0YTE5NDkSDQoJQ29udGFpbmVyGAEaD3dpdGhFbnZWYXJpYWJsZSITCgRuYW1lEgs6CUFQSV9UT0tFTiIRCgV2YWx1ZRIIOgZsZWFrZWRKFXh4aDM6ZDE1YjFjYTJiYWZjNDhmMA=="
+
+	// Verbatim dagger.io/dag.call captures emitted by the 1.0-beta.28 engine
+	// CLI, extracted from live E2E traces (base64 callpbv1.Call protobufs).
+	dagCallBetaFromAlpine    = "ChV4eGgzOmZkZDQ3ZjRmZGFlYTAxNTgSDQoJQ29udGFpbmVyGAEaBGZyb20iGAoHYWRkcmVzcxINOgthbHBpbmU6My4yMEoVeHhoMzo4MTIzZWFiNTRjNjJkM2JlekYKEGZyb21TZWNzc2lvblNjb3BlEjIwQjNPVlRMRU5OVk0yWVhaVkVDTkxYSFZRWEc6eHhoMzo4YmNmZjdkZGQzYjhiYmE0"
+	dagCallBetaWithWorkdir   = "ChV4eGgzOjRmOTZmYzEyNTAwMmNiZjkSDQoJQ29udGFpbmVyGAEaC3dpdGhXb3JrZGlyIg4KBHBhdGgSBjoEL3NyY0oVeHhoMzo5M2U0MGI1OGI4NmFkZmZl"
+	dagCallBetaWithExecExit3 = "ChV4eGgzOmVmY2I1YmFlOTMxYTIwZjYSDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIiAKBGFyZ3MSGEIWCgQ6AnNoCgQ6Ai1jCgg6BmV4aXQgM0oVeHhoMzpjMDA5NDhjOTI3M2Q2YTkzUg52MS4wLjAtYmV0YS4yOA=="
+	dagCallBetaWithExecEnv   = "ChV4eGgzOmVlYWZlZjFlY2I1Y2Y2MzESDQoJQ29udGFpbmVyGAEaCHdpdGhFeGVjIjAKBGFyZ3MSKEImCgQ6AnNoCgQ6Ai1jChg6FmVjaG8gRk9PPSRGT08gQkFaPSRCQVpKFXh4aDM6NDFlYTA4OThkN2E3MjAxZlIOdjEuMC4wLWJldGEuMjg="
 )
 
 func TestParseArgv(t *testing.T) {
@@ -357,6 +364,79 @@ func TestExecFromSpan(t *testing.T) {
 				Kind: "env",
 			},
 		},
+		{
+			// 1.0-beta: dagger.io/cache.type = "Container" must NOT be read as an
+			// op kind, so the withExec call is classified as exec from its argv.
+			name: "beta cache.type container withExec",
+			node: &domain.SpanNode{
+				Name: "Container.withExec",
+				Attributes: map[string]string{
+					"dagger.io/cache.type": "Container",
+					"dagger.io/dag.call":   dagCallBetaWithExecEnv,
+				},
+			},
+			want: &domain.ExecInfo{
+				Command: "sh",
+				Args:    []string{"sh", "-c", "echo FOO=$FOO BAZ=$BAZ"},
+				Kind:    "exec",
+			},
+		},
+		{
+			name: "beta from",
+			node: &domain.SpanNode{
+				Name: "Container.from",
+				Attributes: map[string]string{
+					"dagger.io/cache.type": "Container",
+					"dagger.io/dag.call":   dagCallBetaFromAlpine,
+				},
+			},
+			want: &domain.ExecInfo{
+				Command: "from",
+				Args:    []string{"from", "alpine:3.20"},
+				Kind:    "image",
+			},
+		},
+		{
+			name: "beta withWorkdir",
+			node: &domain.SpanNode{
+				Name:       "Container.withWorkdir",
+				Attributes: map[string]string{"dagger.io/dag.call": dagCallBetaWithWorkdir},
+			},
+			want: &domain.ExecInfo{Cwd: "/src", Kind: "config"},
+		},
+		{
+			name: "withUser call",
+			node: &domain.SpanNode{
+				Name:       "Container.withUser",
+				Attributes: map[string]string{"dagger.io/dag.call": encodeDagCall(t, "withUser", "name", "root")},
+			},
+			want: &domain.ExecInfo{User: "root", Kind: "config"},
+		},
+		{
+			// dagql.publishResult with wcprof.op.kind=internal and no argv/env/exit
+			// must NOT fabricate an empty ExecInfo.
+			name: "beta internal bookkeeping suppressed",
+			node: &domain.SpanNode{
+				Name: "dagql.publishResult",
+				Attributes: map[string]string{
+					"dagger.io/ui.internal":    "true",
+					"dagger.io/ui.passthrough": "true",
+					"wcprof.op.kind":           "internal",
+				},
+			},
+			want: nil,
+		},
+		{
+			name: "beta exec.containerStart suppressed",
+			node: &domain.SpanNode{
+				Name: "exec.containerStart",
+				Attributes: map[string]string{
+					"dagger.io/ui.passthrough": "true",
+					"wcprof.op.kind":           "internal",
+				},
+			},
+			want: nil,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -411,6 +491,133 @@ func TestDeriveExec(t *testing.T) {
 	}
 	if DeriveExec(nil) != nil {
 		t.Fatal("DeriveExec(nil) should be nil")
+	}
+}
+
+// TestDeriveExecMergesProcessRun covers the 1.0-beta exec.run -> exec.processRun
+// split: the argv lives on the child while the exit code lives on the parent.
+func TestDeriveExecMergesProcessRun(t *testing.T) {
+	code := 3
+	run := &domain.SpanNode{
+		Name: "exec.run",
+		Attributes: map[string]string{
+			"dagger.io/ui.passthrough": "true",
+			"wcprof.op.kind":           "exec",
+		},
+		Events: []domain.SpanEvent{
+			{Name: "Container exited", Attributes: map[string]string{"exit.code": "3"}},
+		},
+	}
+	processRun := &domain.SpanNode{
+		Name: "exec.processRun",
+		Attributes: map[string]string{
+			"dagger.io/ui.passthrough": "true",
+			"wcprof.exec.argv":         `["sh","-c","exit 3"]`,
+			"wcprof.op.kind":           "exec_phase",
+		},
+	}
+	run.Children = []*domain.SpanNode{processRun}
+	// Mirror the real trace nesting: E2E.fail -> exec.run -> exec.processRun.
+	scope := &domain.SpanNode{Name: "E2E.fail", Attributes: map[string]string{"dagger.io/cache.type": "Container"}, Children: []*domain.SpanNode{run}}
+
+	DeriveExec(scope)
+
+	if run.Exec == nil {
+		t.Fatal("exec.run Exec = nil, want merged exec")
+	}
+	if len(run.Exec.Args) != 3 || run.Exec.Args[2] != "exit 3" {
+		t.Fatalf("exec.run args = %v, want [sh -c exit 3]", run.Exec.Args)
+	}
+	if run.Exec.Command != "sh" {
+		t.Fatalf("exec.run command = %q, want sh", run.Exec.Command)
+	}
+	if run.Exec.ExitCode == nil || *run.Exec.ExitCode != code {
+		t.Fatalf("exec.run exit = %v, want %d", run.Exec.ExitCode, code)
+	}
+	// The processRun child keeps its own args so the UI can dedupe it.
+	if processRun.Exec == nil || len(processRun.Exec.Args) != 3 {
+		t.Fatalf("exec.processRun args = %+v, want kept", processRun.Exec)
+	}
+	// The wrapping E2E.fail span must not fabricate an exec from cache.type.
+	if scope.Exec != nil {
+		t.Fatalf("scope exec = %+v, want nil", scope.Exec)
+	}
+}
+
+// TestDeriveExecPropagatesExitCode covers the 0.21 sibling split: a lazy
+// Container.withExec definition plus a resolved exec.run sibling.
+func TestDeriveExecPropagatesExitCode(t *testing.T) {
+	withExec := &domain.SpanNode{
+		Name: "Container.withExec",
+		Attributes: map[string]string{
+			"dagger.io/cache.type": "Container",
+			"dagger.io/dag.call":   dagCallBetaWithExecExit3,
+		},
+	}
+	execRun := &domain.SpanNode{
+		Name: "resume withExec",
+		Attributes: map[string]string{
+			"dagger.io/ui.passthrough": "true",
+			"wcprof.op.kind":           "exec",
+		},
+		Events: []domain.SpanEvent{
+			{Name: "Container exited", Attributes: map[string]string{"exit.code": "3"}},
+		},
+	}
+	scope := &domain.SpanNode{Name: "E2E.fail", Children: []*domain.SpanNode{withExec, execRun}}
+
+	DeriveExec(scope)
+
+	if withExec.Exec == nil || withExec.Exec.ExitCode == nil {
+		t.Fatalf("withExec exit = %+v, want propagated 3", withExec.Exec)
+	}
+	if *withExec.Exec.ExitCode != 3 {
+		t.Fatalf("withExec exit = %d, want 3", *withExec.Exec.ExitCode)
+	}
+	// The resolved exec keeps its own exit code and args.
+	if execRun.Exec == nil || execRun.Exec.ExitCode == nil || *execRun.Exec.ExitCode != 3 {
+		t.Fatalf("execRun exit = %+v, want 3", execRun.Exec)
+	}
+}
+
+// TestDeriveExecNoPropagationWhenAmbiguous ensures the exit code is not copied
+// when a scope holds more than one withExec or more than one resolved exec.
+func TestDeriveExecNoPropagationWhenAmbiguous(t *testing.T) {
+	def := func() *domain.SpanNode {
+		return &domain.SpanNode{Name: "Container.withExec", Attributes: map[string]string{"dagger.io/exec.args": `["sh"]`}}
+	}
+	execRun := func() *domain.SpanNode {
+		return &domain.SpanNode{
+			Name:       "exec.run",
+			Attributes: map[string]string{"wcprof.op.kind": "exec"},
+			Events:     []domain.SpanEvent{{Name: "Container exited", Attributes: map[string]string{"exit.code": "3"}}},
+		}
+	}
+	scope := &domain.SpanNode{Name: "E2E", Children: []*domain.SpanNode{def(), def(), execRun()}}
+	DeriveExec(scope)
+	for i, c := range scope.Children {
+		if i < 2 && c.Exec.ExitCode != nil {
+			t.Fatalf("ambiguous withExec[%d] exit = %v, want nil", i, c.Exec.ExitCode)
+		}
+	}
+}
+
+// TestDeriveExecOlderTracesUnchanged ensures traces with no exec signal keep
+// exec nil (backward compatibility).
+func TestDeriveExecOlderTracesUnchanged(t *testing.T) {
+	root := &domain.SpanNode{
+		Name: "build",
+		Children: []*domain.SpanNode{
+			{Name: "compile", Attributes: map[string]string{"process.command_args": `["go","build"]`}},
+			{Name: "test", Attributes: map[string]string{"service.name": "x"}},
+		},
+	}
+	DeriveExec(root)
+	if root.Children[0].Exec == nil || root.Children[0].Exec.Command != "go" {
+		t.Fatalf("compile exec = %+v, want go", root.Children[0].Exec)
+	}
+	if root.Children[1].Exec != nil {
+		t.Fatalf("test exec = %+v, want nil", root.Children[1].Exec)
 	}
 }
 
@@ -502,12 +709,16 @@ func TestClassifyExecKind(t *testing.T) {
 	}{
 		{"nil", nil, ""},
 		{"op kind exec", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "exec"}}, "exec"},
-		{"op kind call_exec", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "call_exec"}}, "exec"},
+		{"op kind call_exec", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "call_exec"}}, "other"},
 		{"op kind service_start", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "service_start"}}, "service_start"},
 		{"op kind io", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "io"}}, "io"},
 		{"op kind call", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "call"}}, "call"},
 		{"op kind unknown", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "weird"}}, "other"},
-		{"cache type", &domain.SpanNode{Attributes: map[string]string{"dagger.io/cache.type": "exec"}}, "exec"},
+		{"op kind internal", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "internal"}}, "other"},
+		{"op kind lazy", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "lazy"}}, "other"},
+		{"op kind exec_phase", &domain.SpanNode{Attributes: map[string]string{"wcprof.op.kind": "exec_phase"}}, "other"},
+		// dagger.io/cache.type is a GraphQL return type, never an op kind.
+		{"cache type ignored", &domain.SpanNode{Attributes: map[string]string{"dagger.io/cache.type": "Container"}}, "other"},
 		{"name publish", &domain.SpanNode{Name: "Container.publish"}, "io"},
 		{"name push", &domain.SpanNode{Name: "docker push"}, "io"},
 		{"name export", &domain.SpanNode{Name: "Export"}, "io"},

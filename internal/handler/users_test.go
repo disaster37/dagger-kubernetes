@@ -172,7 +172,7 @@ func TestUserGroups(t *testing.T) {
 
 	bearer := env.loginAsAdmin(t)
 	u, _ := env.users.Create(ctx, "alice", "password123", domain.RoleUser)
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
 
 	body := `{"group_ids":["` + g.ID + `"]}`
 	resp := ut.PerformRequest(e, "PUT", "/api/v1/users/"+u.ID+"/groups", &ut.Body{Body: strings.NewReader(body), Len: len(body)},

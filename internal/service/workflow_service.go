@@ -357,7 +357,7 @@ func (s *WorkflowService) executeTriggerJob(ctx context.Context, run *domain.Wor
 		s.setJobStatus(run, name, "failed", "cross-repo trigger unavailable")
 		return
 	}
-	targetProj, err := s.projects.GetOrCreateByName(ctx, job.Trigger.Repo)
+	targetProj, err := s.projects.GetOrCreateByName(ctx, run.OrgID, job.Trigger.Repo)
 	if err != nil {
 		s.setJobStatus(run, name, "failed", err.Error())
 		return

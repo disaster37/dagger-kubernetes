@@ -23,6 +23,7 @@ type Config struct {
 	Raft        RaftConfig        `mapstructure:"raft"`
 	CLI         CLIConfig         `mapstructure:"cli"`
 	Attribution AttributionConfig `mapstructure:"attribution"`
+	Org         OrgConfig         `mapstructure:"org"`
 	Checks      ChecksConfig      `mapstructure:"checks"`
 	Workflows   WorkflowConfig    `mapstructure:"workflows"`
 	Forge       ForgeConfig       `mapstructure:"forge"`
@@ -206,6 +207,9 @@ type OAuthConfig struct {
 type GroupMappingRule struct {
 	Pattern     string `mapstructure:"pattern"`
 	Replacement string `mapstructure:"replacement"`
+	// Org targets the organization slug or "org-<16hex>" ID. Empty selects the
+	// bootstrap organization.
+	Org string `mapstructure:"org"`
 }
 
 // AttributionConfig governs project → group attribution at OTLP ingest.
@@ -222,6 +226,22 @@ type AttributionConfig struct {
 type ProjectMappingRule struct {
 	Pattern string `mapstructure:"pattern"`
 	Group   string `mapstructure:"group"`
+	// Org optionally restricts the rule to one organization slug or ID. Empty
+	// applies to the trace's resolved organization.
+	Org string `mapstructure:"org"`
+}
+
+// OrgConfig configures organization-level defaults. The bootstrap
+// organization's storage ID is generated; only its presentation title and the
+// cluster-wide quota defaults are configurable.
+type OrgConfig struct {
+	Default       DefaultOrgConfig `mapstructure:"default"`
+	DefaultQuotas OrgQuotas        `mapstructure:"default_quotas"`
+}
+
+// DefaultOrgConfig configures the bootstrap organization's presentation.
+type DefaultOrgConfig struct {
+	DisplayName string `mapstructure:"display_name"`
 }
 
 // DatabaseConfig configures the Raft data directory backing the multi-user

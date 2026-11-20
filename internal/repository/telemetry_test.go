@@ -1187,3 +1187,45 @@ func TestDeleteTraceLogsUnconfigured(t *testing.T) {
 		t.Fatalf("err = %v, want loki URL not configured", err)
 	}
 }
+
+// TestMapToSpanNodeEndTimeStatus proves the end-timestamp guard and the
+// UNSET-with-valid-end promotion: a span that ended (end > start) with an
+// UNSET/absent status is "success"; a start-only record (end 0/absent) stays
+// "running" with a zero duration; a zero end is never treated as an end.
+func TestMapToSpanNodeEndTimeStatus(t *testing.T) {
+	cases := []struct {
+		name         string
+		status       interface{}
+		endNano      string
+		wantStatus   string
+		wantDuration int64
+	}{
+		{name: "unset with valid end is success", status: "STATUS_CODE_UNSET", endNano: "5000000000", wantStatus: "success", wantDuration: 4000000000},
+		{name: "unset with zero end stays running", status: "STATUS_CODE_UNSET", endNano: "0", wantStatus: "running", wantDuration: 0},
+		{name: "unset without end stays running", status: "STATUS_CODE_UNSET", endNano: "", wantStatus: "running", wantDuration: 0},
+		{name: "error with valid end stays failed", status: "STATUS_CODE_ERROR", endNano: "5000000000", wantStatus: "failed", wantDuration: 4000000000},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := map[string]interface{}{
+				"spanId":            "abc123",
+				"startTimeUnixNano": "1000000000",
+				"status":            map[string]interface{}{"code": tc.status},
+			}
+			if tc.endNano != "" {
+				m["endTimeUnixNano"] = tc.endNano
+			}
+			node := mapToSpanNode(m)
+			if node == nil {
+				t.Fatal("nil node")
+			}
+			if node.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", node.Status, tc.wantStatus)
+			}
+			if node.Duration != time.Duration(tc.wantDuration) {
+				t.Fatalf("duration = %v, want %v", node.Duration, time.Duration(tc.wantDuration))
+			}
+		})
+	}
+}

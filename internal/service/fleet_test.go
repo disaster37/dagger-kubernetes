@@ -45,7 +45,7 @@ func TestAcquireLeastPinned(t *testing.T) {
 	provider.EnsureStatefulSet("v0.21.4", "registry.dagger.io/engine:v0.21.4")
 	provider.ScaleUp("v0.21.4", 2)
 
-	sessions.Register("fp1", "v0.21.4", "dagger-engine-v0-21-4-0", "inst-1", "trace-1", "")
+	sessions.Register("", "fp1", "v0.21.4", "dagger-engine-v0-21-4-0", "inst-1", "trace-1", "")
 
 	result, err := m.Acquire(context.Background(), "v0.21.4")
 	if err != nil {
@@ -68,8 +68,8 @@ func TestAcquireAtCapacity(t *testing.T) {
 
 	provider.EnsureStatefulSet("v0.21.4", "")
 	provider.ScaleUp("v0.21.4", 2)
-	sessions.Register("fp1", "v0.21.4", "dagger-engine-v0-21-4-0", "inst-1", "trace-1", "")
-	sessions.Register("fp2", "v0.21.4", "dagger-engine-v0-21-4-1", "inst-2", "trace-2", "")
+	sessions.Register("", "fp1", "v0.21.4", "dagger-engine-v0-21-4-0", "inst-1", "trace-1", "")
+	sessions.Register("", "fp2", "v0.21.4", "dagger-engine-v0-21-4-1", "inst-2", "trace-2", "")
 
 	_, err := m.Acquire(context.Background(), "v0.21.4")
 	if err == nil {
@@ -116,7 +116,7 @@ func TestAcquireMultipleVersions(t *testing.T) {
 
 	// Fill up sessions on v0.21.4 pod-0 to max (maxSessionsPerReplica=8)
 	for i := 0; i < 8; i++ {
-		sessions.Register(fmt.Sprintf("fp-fill-%d", i), "v0.21.4", "dagger-engine-v0-21-4-0", fmt.Sprintf("inst-fill-%d", i), fmt.Sprintf("trace-fill-%d", i), "")
+		sessions.Register("", fmt.Sprintf("fp-fill-%d", i), "v0.21.4", "dagger-engine-v0-21-4-0", fmt.Sprintf("inst-fill-%d", i), fmt.Sprintf("trace-fill-%d", i), "")
 	}
 
 	// Next acquire should scale up a new replica (pod-1)
@@ -130,7 +130,7 @@ func TestAcquireMultipleVersions(t *testing.T) {
 
 	// Fill pod-1 too
 	for i := 0; i < 8; i++ {
-		sessions.Register(fmt.Sprintf("fp-fill2-%d", i), "v0.21.4", "dagger-engine-v0-21-4-1", fmt.Sprintf("inst-fill2-%d", i), fmt.Sprintf("trace-fill2-%d", i), "")
+		sessions.Register("", fmt.Sprintf("fp-fill2-%d", i), "v0.21.4", "dagger-engine-v0-21-4-1", fmt.Sprintf("inst-fill2-%d", i), fmt.Sprintf("trace-fill2-%d", i), "")
 	}
 
 	// Next acquire should scale up pod-2
@@ -431,7 +431,7 @@ func TestSweepGCSkipsWhenPinnedSessionsExist(t *testing.T) {
 	if err := provider.SetVersionIdleSince("v0.21.4", time.Now().Add(-time.Hour)); err != nil {
 		t.Fatalf("SetVersionIdleSince: %v", err)
 	}
-	sessions.Register("fp", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	sessions.Register("", "fp", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	if err := m.Sweep(context.Background()); err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -545,6 +545,144 @@ func (p *recordingProvider) DeleteStatefulSet(version string) error {
 	return p.StubProvider.DeleteStatefulSet(version)
 }
 
+// newPerOrgManager builds a Manager in per_org isolation mode.
+func newPerOrgManager(t *testing.T, provider domain.FleetProvider, sessions *Store, retention time.Duration) *Manager {
+	t.Helper()
+	return NewManager(provider, sessions, ManagerConfig{
+		MaxReplicasPerVersion: 3,
+		MaxSessionsPerReplica: 8,
+		ReplicaIdleTTL:        0,
+		VersionRetention:      retention,
+		Isolation:             "per_org",
+	}, observ.NewTestLogger(), observ.NewMetrics(nil))
+}
+
+// TestPerOrgAcquireNames verifies per_org provisioning creates the org-scoped
+// StatefulSet/pod names.
+func TestPerOrgAcquireNames(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+	m := newPerOrgManager(t, provider, sessions, 0)
+
+	result, err := m.AcquireForOrg(context.Background(), "default", "v0.21.8")
+	if err != nil {
+		t.Fatalf("AcquireForOrg: %v", err)
+	}
+	if result.PodName != "dagger-engine-default-v0-21-8-0" {
+		t.Fatalf("pod = %q, want dagger-engine-default-v0-21-8-0", result.PodName)
+	}
+	infos, err := m.AllFleetInfo()
+	if err != nil {
+		t.Fatalf("AllFleetInfo: %v", err)
+	}
+	if len(infos) != 1 {
+		t.Fatalf("infos = %d, want 1", len(infos))
+	}
+	if infos[0].STSName != "dagger-engine-default-v0-21-8" || infos[0].Org != "default" {
+		t.Fatalf("info = %+v, want org-scoped STS name", infos[0])
+	}
+}
+
+// TestPerOrgSweepScalesDownScopedFleet mirrors the exact cmd/api/main.go call
+// path (unscoped Sweep) and asserts the per-org StatefulSet is addressed by its
+// real name, not the unscoped one.
+func TestPerOrgSweepScalesDownScopedFleet(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+	m := newPerOrgManager(t, provider, sessions, 0)
+
+	if _, err := m.AcquireForOrg(context.Background(), "default", "v0.21.8"); err != nil {
+		t.Fatalf("AcquireForOrg: %v", err)
+	}
+	// Scale up a second replica so the sweep has something to remove.
+	scoped := provider.WithScope("default")
+	if err := scoped.ScaleUp("v0.21.8", 2); err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	replicas, _ := scoped.GetReplicas("v0.21.8")
+	if len(replicas) != 1 {
+		t.Fatalf("scoped replicas = %d, want 1 after one sweep", len(replicas))
+	}
+	// The unscoped provider must see nothing (no shared fleet for this version).
+	unscoped, _ := provider.GetReplicas("v0.21.8")
+	if len(unscoped) != 0 {
+		t.Fatalf("unscoped replicas = %d, want 0 (no shared fleet)", len(unscoped))
+	}
+}
+
+// TestPerOrgSweepGCDeletesScopedFleet verifies idle GC deletes the org-scoped
+// fleet once version_retention elapses.
+func TestPerOrgSweepGCDeletesScopedFleet(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+	m := newPerOrgManager(t, provider, sessions, 30*time.Minute)
+	scoped := provider.WithScope("default")
+
+	if err := scoped.EnsureStatefulSet("v0.21.8", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	// First sweep stamps idle-since; backdate past retention; second deletes.
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep 1: %v", err)
+	}
+	if _, ok, _ := scoped.VersionIdleSince("v0.21.8"); !ok {
+		t.Fatal("idle-since should be stamped on first idle sweep")
+	}
+	if err := scoped.SetVersionIdleSince("v0.21.8", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep 2: %v", err)
+	}
+	versions, _ := scoped.AllVersions()
+	if len(versions) != 0 {
+		t.Fatalf("scoped versions = %v, want empty after GC", versions)
+	}
+}
+
+// TestPerOrgSweepMultiOrgPinnedOnlyBlocksItsOwnOrg verifies an active session in
+// one org does not block idle GC of another org's fleet.
+func TestPerOrgSweepMultiOrgPinnedOnlyBlocksItsOwnOrg(t *testing.T) {
+	provider := repository.NewStubProvider()
+	sessions := NewStore(5 * time.Minute)
+	m := newPerOrgManager(t, provider, sessions, time.Hour)
+
+	defaultScoped := provider.WithScope("default")
+	acmeScoped := provider.WithScope("acme")
+	if err := defaultScoped.EnsureStatefulSet("v0.21.8", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet default: %v", err)
+	}
+	if err := acmeScoped.EnsureStatefulSet("v0.21.8", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet acme: %v", err)
+	}
+
+	// Pin a session in acme; default stays idle.
+	sessions.Register("", "fp-acme", "v0.21.8", "dagger-engine-acme-v0-21-8-0", "inst", "trace", "")
+
+	// Stamp default idle beyond retention, then sweep.
+	if err := defaultScoped.SetVersionIdleSince("v0.21.8", time.Now().Add(-2*time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince default: %v", err)
+	}
+	if err := m.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	// default has no pinned sessions -> GC'd.
+	defaultVersions, _ := defaultScoped.AllVersions()
+	if len(defaultVersions) != 0 {
+		t.Fatalf("default versions = %v, want empty (idle, no pinned sessions)", defaultVersions)
+	}
+	// acme is pinned -> retained.
+	acmeVersions, _ := acmeScoped.AllVersions()
+	if len(acmeVersions) != 1 {
+		t.Fatalf("acme versions = %v, want 1 (pinned session protects)", acmeVersions)
+	}
+}
+
 func TestSweepGCDeletesServiceThenStatefulSet(t *testing.T) {
 	provider := &recordingProvider{StubProvider: repository.NewStubProvider()}
 	sessions := NewStore(5 * time.Minute)
@@ -564,5 +702,37 @@ func TestSweepGCDeletesServiceThenStatefulSet(t *testing.T) {
 
 	if len(provider.calls) != 2 || provider.calls[0] != "DeleteService" || provider.calls[1] != "DeleteStatefulSet" {
 		t.Fatalf("calls = %v, want [DeleteService DeleteStatefulSet]", provider.calls)
+	}
+}
+
+// TestSweepForOrgAggregatesErrors verifies per-version sweep failures are
+// logged and returned as a joined error instead of being swallowed.
+func TestSweepForOrgAggregatesErrors(t *testing.T) {
+	boomA := errors.New("boom-a")
+	boomB := errors.New("boom-b")
+	provider := &stubFleetProvider{
+		versions:    []string{"v0.21.4", "v0.22.0", "v0.23.0"},
+		replicasErr: map[string]error{"v0.21.4": boomA, "v0.22.0": boomB},
+	}
+	m := NewManager(provider, NewStore(5*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
+
+	err := m.SweepForOrg(context.Background(), "")
+	if err == nil {
+		t.Fatal("SweepForOrg = nil error, want joined error")
+	}
+	if !errors.Is(err, boomA) || !errors.Is(err, boomB) {
+		t.Fatalf("SweepForOrg error = %v, want it to wrap both boom-a and boom-b", err)
+	}
+}
+
+// TestSweepForOrgNoErrorsReturnsNil verifies a clean sweep still returns nil.
+func TestSweepForOrgNoErrorsReturnsNil(t *testing.T) {
+	provider := &stubFleetProvider{
+		versions: []string{"v0.21.4"},
+		replicas: map[string][]domain.Replica{"v0.21.4": {}},
+	}
+	m := NewManager(provider, NewStore(5*time.Minute), ManagerConfig{}, observ.NewTestLogger(), observ.NewMetrics(nil))
+	if err := m.SweepForOrg(context.Background(), ""); err != nil {
+		t.Fatalf("SweepForOrg = %v, want nil", err)
 	}
 }

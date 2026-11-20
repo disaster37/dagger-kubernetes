@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -53,6 +54,55 @@ func (r *OrgRepo) Update(ctx context.Context, o *domain.Org) error {
 
 func (r *OrgRepo) Delete(ctx context.Context, id string) error {
 	return r.store.applyCtx(ctx, kindDeleteOrg, id)
+}
+
+// Bootstrap idempotently commits the bootstrap organization.
+func (r *OrgRepo) Bootstrap(ctx context.Context, o *domain.Org, defaultGroupID, displayNameMeta string) (*domain.Org, error) {
+	if o == nil || o.ID == "" {
+		return nil, fmt.Errorf("bootstrap org: %w", domain.ErrValidation)
+	}
+	if o.CreatedAt.IsZero() {
+		o.CreatedAt = time.Now().UTC()
+	}
+	if o.UpdatedAt.IsZero() {
+		o.UpdatedAt = o.CreatedAt
+	}
+	resp, err := r.store.applyCtxResponse(ctx, kindBootstrapOrg, cmdBootstrapOrg{
+		Org:             *o,
+		DefaultGroupID:  defaultGroupID,
+		DisplayNameMeta: displayNameMeta,
+	})
+	if err != nil {
+		return nil, err
+	}
+	out, _ := resp.(*domain.Org)
+	return out, nil
+}
+
+// BootstrapOrgID returns the committed bootstrap organization UID.
+func (r *OrgRepo) BootstrapOrgID(ctx context.Context) (string, error) {
+	return r.store.fsmRead().BootstrapOrgID()
+}
+
+// GetBootstrap returns the committed bootstrap organization.
+func (r *OrgRepo) GetBootstrap(ctx context.Context) (*domain.Org, error) {
+	return r.store.fsmRead().bootstrapOrg()
+}
+
+// DeleteCascade removes an organization and all of its child entities.
+func (r *OrgRepo) DeleteCascade(ctx context.Context, id string) error {
+	return r.store.applyCtx(ctx, kindDeleteOrgCascade, id)
+}
+
+// GetMemberRole returns the direct membership role for (orgID, userID).
+func (r *OrgRepo) GetMemberRole(ctx context.Context, orgID, userID string) (domain.OrgRole, bool, error) {
+	role, ok := r.store.fsmRead().memberRole(orgID, userID)
+	return role, ok, nil
+}
+
+// DistinctMemberCount counts distinct users in orgID.
+func (r *OrgRepo) DistinctMemberCount(ctx context.Context, orgID string) (int, error) {
+	return r.store.fsmRead().distinctMemberCount(orgID), nil
 }
 
 func (r *OrgRepo) SetMember(ctx context.Context, orgID, userID string, role domain.OrgRole) error {
@@ -120,7 +170,7 @@ func (f *FSM) orgMemberships(orgID string) []*domain.OrgMembership {
 	members := s.orgMembers[orgID]
 	out := make([]*domain.OrgMembership, 0, len(members))
 	for uid, role := range members {
-		out = append(out, &domain.OrgMembership{OrgID: orgID, UserID: uid, Role: role})
+		out = append(out, &domain.OrgMembership{OrgID: orgID, UserID: uid, Role: role, CreatedAt: s.orgMemberSince[orgID][uid]})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].UserID < out[j].UserID })
 	return out
@@ -147,7 +197,7 @@ func (f *FSM) allOrgMemberships() map[string][]*domain.OrgMembership {
 	out := make(map[string][]*domain.OrgMembership, len(s.orgMembers))
 	for oid, members := range s.orgMembers {
 		for uid, role := range members {
-			out[oid] = append(out[oid], &domain.OrgMembership{OrgID: oid, UserID: uid, Role: role})
+			out[oid] = append(out[oid], &domain.OrgMembership{OrgID: oid, UserID: uid, Role: role, CreatedAt: s.orgMemberSince[oid][uid]})
 		}
 	}
 	return out

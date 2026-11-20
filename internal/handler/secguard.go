@@ -84,6 +84,21 @@ func (s *Server) onInternalListener(c *app.RequestContext) bool {
 	return port == strconv.Itoa(s.internalControlPort)
 }
 
+// effectiveHost returns the effective request host for in-cluster
+// discrimination. On the internal-only listener the original Host carried by a
+// follower->leader forward hop (forwardedHostHeader) is trusted, because the
+// hop rewrites Host to the leader pod's internal address; everywhere else the
+// live request Host is used (spoof-proof: an external client cannot set the
+// forwarded header and have it honored).
+func (s *Server) effectiveHost(c *app.RequestContext) string {
+	if s.onInternalListener(c) {
+		if fwd := strings.TrimSpace(string(c.Request.Header.Peek(forwardedHostHeader))); fwd != "" {
+			return fwd
+		}
+	}
+	return string(c.Host())
+}
+
 // publicURLOrigin returns the scheme://host origin of server.public_url, or ""
 // when it is unset/unparseable.
 func (s *Server) publicURLOrigin() string {

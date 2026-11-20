@@ -78,6 +78,8 @@ type OAuthRevalidator struct {
 	mappedGroupMaxRunnerSessions int
 	users                        *UserService
 	groups                       domain.GroupRepository
+	orgs                         domain.OrgRepository
+	quota                        *QuotaService
 	logger                       *logrus.Logger
 	cfg                          OAuthRevalidatorConfig
 	clock                        func() time.Time
@@ -89,6 +91,12 @@ type OAuthRevalidator struct {
 // NewOAuthRevalidator returns an OAuthRevalidator. Pass nil for any field that
 // should be skipped. API-token revocation is performed atomically by the
 // OAuthRevocationCommit FSM command, so no TokenService dependency is needed.
+// SetOrgRepository wires organization lookups for group auto-creation.
+func (r *OAuthRevalidator) SetOrgRepository(orgs domain.OrgRepository) { r.orgs = orgs }
+
+// SetQuotaService wires org-quota enforcement into group auto-creation.
+func (r *OAuthRevalidator) SetQuotaService(q *QuotaService) { r.quota = q }
+
 func NewOAuthRevalidator(
 	provider OAuthProvider,
 	mapper *GroupMapper,
@@ -388,8 +396,8 @@ func (r *OAuthRevalidator) refresh(ctx context.Context, u *domain.User, entry *r
 	// a private copy, then persist state+memberships in ONE revision-checked
 	// commit. The credential source may already have advanced u.Revision during
 	// Revalidate, so the final mutation uses the latest revision.
-	mapped := r.mapper.mapIfActive(groups)
-	managedIDs, gerr := resolveOAuthGroupIDs(ctx, r.groups, r.logger, mapped, r.mappedGroupMaxRunnerSessions)
+	mapped := r.mapper.mapIfActiveTargets(groups)
+	managedIDs, gerr := resolveOAuthGroupIDs(ctx, r.groups, r.quota, r.orgs, r.logger, mapped, r.mappedGroupMaxRunnerSessions)
 	if gerr != nil {
 		r.logger.WithError(gerr).WithField("user_id", u.ID).Warn("oauth: prepare membership failed during revalidation")
 		entry.state = stateUnavailable

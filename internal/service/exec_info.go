@@ -43,8 +43,11 @@ var execAttrKeys = struct {
 	env:       []string{"dagger.io/exec.env"},
 	secretEnv: []string{"dagger.io/exec.secret.env"},
 	exitCode:  []string{"dagger.io/exec.exitCode", "exit.code"},
-	opKind:    []string{"dagger.io/cache.type", "wcprof.op.kind"},
-	// The real engine (v0.21.8) carries the operation and its arguments in a
+	// Only wcprof.op.kind names an operation kind. dagger.io/cache.type is the
+	// GraphQL return type ("Container", "Directory", "String", ...) in the
+	// 1.0-beta CLI, not an op kind, so it must never be classified here.
+	opKind: []string{"wcprof.op.kind"},
+	// The real engine (v0.21.8+) carries the operation and its arguments in a
 	// base64 callpbv1.Call protobuf, not in the argv keys above.
 	call: []string{"dagger.io/dag.call"},
 }
@@ -55,17 +58,112 @@ var execNameMarkers = []string{"exec", "publish", "push", "export", "import", "p
 
 // DeriveExec walks the span tree rooted at node and sets node.Exec (and
 // recursively its children) from the span's flattened attributes + events.
+// After the per-span derivation it rolls up execution facts that Dagger splits
+// across parent/child spans:
+//   - a child exec.processRun's command/args onto a parent exec.run that has
+//     none (the 1.0-beta CLI nests the argv one level down);
+//   - a container's exit code from a "resume withExec"/exec.run span onto the
+//     related Container.withExec span when the pairing is unambiguous.
+//
 // It is a pure transform; safe to call on every GET trace detail. Returns the
 // same node for chaining.
 func DeriveExec(node *domain.SpanNode) *domain.SpanNode {
+	deriveExecTree(node)
+	propagateExecExitCodes(node)
+	return node
+}
+
+// deriveExecTree sets node.Exec (and recursively its children) from the span's
+// flattened attributes + events, then merges process-run argv upward.
+func deriveExecTree(node *domain.SpanNode) {
 	if node == nil {
-		return nil
+		return
 	}
 	node.Exec = execFromSpan(node)
 	for _, child := range node.Children {
-		DeriveExec(child)
+		deriveExecTree(child)
 	}
-	return node
+	mergeProcessRunArgs(node)
+}
+
+// propagateExecExitCodes finds a scope (a subtree) in which a container's
+// withExec definition and its actual execution are separate sibling/descendant
+// spans, and copies the exit code onto the definition span when the pairing is
+// unambiguous (exactly one withExec and one resolved exec result in the scope).
+// Older traces without such a split are left untouched.
+func propagateExecExitCodes(node *domain.SpanNode) {
+	if node == nil {
+		return
+	}
+	var defs []*domain.SpanNode
+	var execs []*domain.SpanNode
+	collectExecSpans(node, &defs, &execs)
+	if len(defs) == 1 && len(execs) == 1 && defs[0].Exec != nil && execs[0].Exec != nil {
+		if defs[0].Exec.ExitCode == nil && execs[0].Exec.ExitCode != nil {
+			defs[0].Exec.ExitCode = execs[0].Exec.ExitCode
+		}
+	}
+	for _, child := range node.Children {
+		propagateExecExitCodes(child)
+	}
+}
+
+// collectExecSpans gathers the withExec definition spans and the resolved
+// execution spans in a subtree: defs are "Container.withExec" spans, execs are
+// the spans that actually ran (exec.run / resume withExec) carrying an exit
+// code.
+func collectExecSpans(node *domain.SpanNode, defs, execs *[]*domain.SpanNode) {
+	if node.Exec != nil {
+		lower := strings.ToLower(node.Name)
+		switch {
+		case strings.Contains(lower, "exec.run") || strings.Contains(lower, "resume withexec"):
+			if node.Exec.ExitCode != nil {
+				*execs = append(*execs, node)
+			}
+		case strings.Contains(lower, "withexec"):
+			*defs = append(*defs, node)
+		}
+	}
+	for _, child := range node.Children {
+		collectExecSpans(child, defs, execs)
+	}
+}
+
+// mergeProcessRunArgs copies a sole child exec.processRun's command/args onto a
+// parent span (exec.run) that carries no argv of its own but is an exec op.
+// The child keeps its own Exec so it can be deduplicated by the UI.
+func mergeProcessRunArgs(node *domain.SpanNode) {
+	if node.Exec == nil || len(node.Exec.Args) > 0 || node.Exec.Kind != "exec" {
+		return
+	}
+	for _, child := range node.Children {
+		if !isProcessRunSpan(child) || child.Exec == nil || len(child.Exec.Args) == 0 {
+			continue
+		}
+		node.Exec.Command = child.Exec.Args[0]
+		node.Exec.Args = child.Exec.Args
+		if node.Exec.ExitCode == nil {
+			node.Exec.ExitCode = child.Exec.ExitCode
+		}
+		return
+	}
+}
+
+// isProcessRunSpan reports whether a span is Dagger's inner process-run record
+// (name "exec.processRun" in the 1.0-beta CLI).
+func isProcessRunSpan(node *domain.SpanNode) bool {
+	return strings.Contains(strings.ToLower(node.Name), "processrun")
+}
+
+// execSignals is the per-span exec signal gathered from attributes, dag.calls,
+// and events before the nil/suppression decision.
+type execSignals struct {
+	argv []string
+	cwd  string
+	user string
+	env  []domain.ExecEnvVar
+	kind string
+	exit *int
 }
 
 // execFromSpan builds the ExecInfo for a single span, or nil when the span
@@ -74,39 +172,96 @@ func execFromSpan(node *domain.SpanNode) *domain.ExecInfo {
 	if node == nil {
 		return nil
 	}
-	argv := parseArgv(node.Attributes)
-	if len(argv) == 0 {
-		argv = ioOperationArgv(node.Attributes)
-	}
-	cwd := firstAttr(node.Attributes, execAttrKeys.cwd)
-	env := parseEnv(node.Attributes)
-	kind := classifyExecKind(node)
-	if len(env) == 0 {
-		if callEnvVars := callEnv(node.Attributes); len(callEnvVars) > 0 {
-			env = callEnvVars
-			if kind == "other" {
-				kind = "env"
-			}
-		}
-	}
-	exit := parseExitCode(node)
-
-	if len(argv) == 0 && cwd == "" && len(env) == 0 && exit == nil && !isExecLikeName(node.Name) {
+	sig := gatherExecSignals(node)
+	if suppressExecInfo(node, &sig) {
 		return nil
 	}
-
 	info := &domain.ExecInfo{
-		Cwd:      cwd,
-		User:     firstAttr(node.Attributes, execAttrKeys.user),
-		Env:      env,
-		ExitCode: exit,
-		Kind:     kind,
+		Cwd:      sig.cwd,
+		User:     sig.user,
+		Env:      sig.env,
+		ExitCode: sig.exit,
+		Kind:     sig.kind,
 	}
-	if len(argv) > 0 {
-		info.Command = argv[0]
-		info.Args = argv
+	if len(sig.argv) > 0 {
+		info.Command = sig.argv[0]
+		info.Args = sig.argv
 	}
 	return info
+}
+
+// gatherExecSignals collects the exec facts for a span from its OTLP attributes
+// and its dagger.io/dag.call, refining the coarse kind when a call supplies the
+// real signal (env, container setup, or image source).
+func gatherExecSignals(node *domain.SpanNode) execSignals {
+	sig := execSignals{
+		argv: parseArgv(node.Attributes),
+		cwd:  firstAttr(node.Attributes, execAttrKeys.cwd),
+		user: firstAttr(node.Attributes, execAttrKeys.user),
+		env:  parseEnv(node.Attributes),
+		kind: classifyExecKind(node),
+	}
+	if len(sig.argv) == 0 {
+		sig.argv = ioOperationArgv(node.Attributes)
+	}
+	sig.applyCallEnv(node.Attributes)
+	sig.applyCallSetup(node.Attributes)
+	if len(sig.argv) == 0 {
+		if imgArgv := imageSourceArgv(node.Attributes); len(imgArgv) > 0 {
+			sig.argv = imgArgv
+			sig.refineKind("image")
+		}
+	}
+	sig.exit = parseExitCode(node)
+	return sig
+}
+
+// applyCallEnv fills env from a withEnvVariable/withSecretVariable call when the
+// span emits no dagger.io/exec.env attribute.
+func (s *execSignals) applyCallEnv(attrs map[string]string) {
+	if len(s.env) > 0 {
+		return
+	}
+	if callEnvVars := callEnv(attrs); len(callEnvVars) > 0 {
+		s.env = callEnvVars
+		s.refineKind("env")
+	}
+}
+
+// applyCallSetup fills cwd/user from a withWorkdir/withUser call.
+func (s *execSignals) applyCallSetup(attrs map[string]string) {
+	if s.cwd != "" && s.user != "" {
+		return
+	}
+	callCwd, callUser, ok := callContainerSetup(attrs)
+	if !ok {
+		return
+	}
+	if s.cwd == "" {
+		s.cwd = callCwd
+	}
+	if s.user == "" {
+		s.user = callUser
+	}
+	s.refineKind("config")
+}
+
+// refineKind promotes an unresolved kind ("other") to kind.
+func (s *execSignals) refineKind(kind string) {
+	if s.kind == "other" {
+		s.kind = kind
+	}
+}
+
+// suppressExecInfo reports whether a span should get no ExecInfo: it carries no
+// exec facts and either its name is not exec-like, or its only signal is a
+// non-exec op kind (internal/lazy/exec_phase — engine bookkeeping spans such as
+// dagql.publishResult or exec.containerStart).
+func suppressExecInfo(node *domain.SpanNode, sig *execSignals) bool {
+	if len(sig.argv) > 0 || sig.cwd != "" || sig.user != "" || len(sig.env) > 0 || sig.exit != nil {
+		return false
+	}
+	return !isExecLikeName(node.Name) || sig.kind == "other"
 }
 
 // parseArgv extracts the argv slice from a span's attributes, trying the
@@ -157,6 +312,48 @@ func ioOperationArgv(attrs map[string]string) []string {
 		return capArgv(append([]string{field}, args["address"]...))
 	}
 	return nil
+}
+
+// imageSourceArgv synthesizes a command line for a container image source
+// (from) from its dagger.io/dag.call, e.g. ["from","alpine:3.20"]. Returns nil
+// when the span carries no image-source call.
+func imageSourceArgv(attrs map[string]string) []string {
+	for _, key := range execAttrKeys.call {
+		raw := attrs[key]
+		if raw == "" {
+			continue
+		}
+		field, args, ok := parseDagCall(raw)
+		if !ok || !isImageSourceField(field) {
+			continue
+		}
+		return capArgv(append([]string{field}, args["address"]...))
+	}
+	return nil
+}
+
+// callContainerSetup derives the workdir (withWorkdir path) and user (withUser
+// name) from a dagger.io/dag.call. It returns ok=true when the call is one of
+// those setup fields, with the corresponding value (empty when the other field
+// was set).
+func callContainerSetup(attrs map[string]string) (cwd, user string, ok bool) {
+	for _, key := range execAttrKeys.call {
+		raw := attrs[key]
+		if raw == "" {
+			continue
+		}
+		field, args, parsed := parseDagCall(raw)
+		if !parsed {
+			continue
+		}
+		switch {
+		case isWorkdirCallField(field):
+			return firstString(args["path"]), "", true
+		case isUserCallField(field):
+			return "", firstString(args["name"]), true
+		}
+	}
+	return "", "", false
 }
 
 // decodeArgv decodes a JSON string array (the flattening rule for OTLP string
@@ -391,10 +588,13 @@ func classifyExecKind(node *domain.SpanNode) string {
 	}
 }
 
-// normalizeKind maps a raw op-kind attribute value to a coarse kind label.
+// normalizeKind maps a raw op-kind attribute value to a coarse kind label. Only
+// wcprof.op.kind values describe an operation; engine bookkeeping values
+// ("internal", "lazy", "exec_phase", "call_exec") map to "other" so a span
+// carrying only one of them is not reported as an exec operation.
 func normalizeKind(v string) string {
 	switch strings.ToLower(v) {
-	case "exec", "call_exec":
+	case "exec":
 		return "exec"
 	case "service_start":
 		return "service_start"

@@ -27,6 +27,7 @@ type rbacEnv struct {
 	groups     *service.GroupService
 	tokens     *service.TokenService
 	projects   *service.ProjectService
+	orgID      string
 	adminToken string // plaintext admin API token
 }
 
@@ -45,6 +46,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
+	orgsSvc, bootOrgID := newIntegrationOrgService(t, store, groupRepo, tokensSvc, logger)
 	jwtSvc := service.NewJWTService([]byte("rbac-integration-secret-32-bytes!"), 15*time.Minute, 168*time.Hour)
 
 	// Bootstrap admin + API token.
@@ -52,6 +54,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 	adminToken, _, _ := tokensSvc.Generate(context.Background(), admin.ID)
 
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	authSvc.SetOrgRepository(repository.NewOrgRepo(store))
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
 	sessions := service.NewStore(2 * time.Minute)
@@ -81,7 +84,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc,
-		Groups: groupsSvc, Projects: projectsSvc, Tokens: tokensSvc,
+		Groups: groupsSvc, Projects: projectsSvc, Orgs: orgsSvc, Tokens: tokensSvc,
 		Quota: quotaSvc, Attribution: attributionSvc, TraceMeta: traceMetaRepo,
 		Traces: traces, Logs: logsClient, JWT: jwtSvc,
 	})
@@ -107,6 +110,7 @@ func newRBACEnv(t *testing.T) *rbacEnv {
 		groups:     groupsSvc,
 		tokens:     tokensSvc,
 		projects:   projectsSvc,
+		orgID:      bootOrgID,
 		adminToken: adminToken,
 	}
 }
@@ -125,7 +129,7 @@ func TestRBACQuotaAndVisibility(t *testing.T) {
 	ctx := context.Background()
 
 	// Admin creates a group with max_runner_sessions=1, agent_available=true.
-	g1, err := env.groups.Create(ctx, service.GroupInput{
+	g1, err := env.groups.Create(ctx, env.orgID, service.GroupInput{
 		Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1,
 	})
 	if err != nil {
@@ -137,7 +141,7 @@ func TestRBACQuotaAndVisibility(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if err := env.groups.SetUserGroups(ctx, u.ID, []string{g1.ID}); err != nil {
+	if err := env.groups.SetUserGroupsInOrg(ctx, env.orgID, u.ID, []string{g1.ID}); err != nil {
 		t.Fatalf("set user groups: %v", err)
 	}
 
@@ -159,13 +163,13 @@ func TestRBACQuotaAndVisibility(t *testing.T) {
 	}
 
 	// Add a second group with capacity; admission should succeed via the new group.
-	g2, err := env.groups.Create(ctx, service.GroupInput{
+	g2, err := env.groups.Create(ctx, env.orgID, service.GroupInput{
 		Name: "G2", AgentAvailable: true, MaxRunnerSessions: 8,
 	})
 	if err != nil {
 		t.Fatalf("create g2: %v", err)
 	}
-	if err := env.groups.SetUserGroups(ctx, u.ID, []string{g1.ID, g2.ID}); err != nil {
+	if err := env.groups.SetUserGroupsInOrg(ctx, env.orgID, u.ID, []string{g1.ID, g2.ID}); err != nil {
 		t.Fatalf("add g2 membership: %v", err)
 	}
 	if code := postEngines(t, env.baseURL, bearer, "trace-rbac-3"); code != http.StatusCreated {
@@ -173,7 +177,7 @@ func TestRBACQuotaAndVisibility(t *testing.T) {
 	}
 
 	// Attribute a trace to the user (simulating OTLP ingest).
-	env.traceMeta.UpsertProvision(ctx, "trace-attr", u.ID, "v0.21.4")
+	env.traceMeta.UpsertProvision(ctx, "", "trace-attr", u.ID, "v0.21.4")
 	env.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{
 		TraceID: "trace-attr", UserID: u.ID, CIRepo: "github.com/acme/api",
 	})
@@ -244,7 +248,7 @@ func TestTraceDetailIncludesUser(t *testing.T) {
 	env := newRBACEnv(t)
 	ctx := context.Background()
 
-	g, err := env.groups.Create(ctx, service.GroupInput{
+	g, err := env.groups.Create(ctx, env.orgID, service.GroupInput{
 		Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1,
 	})
 	if err != nil {
@@ -254,7 +258,7 @@ func TestTraceDetailIncludesUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create user: %v", err)
 	}
-	if err := env.groups.SetUserGroups(ctx, u.ID, []string{g.ID}); err != nil {
+	if err := env.groups.SetUserGroupsInOrg(ctx, env.orgID, u.ID, []string{g.ID}); err != nil {
 		t.Fatalf("set user groups: %v", err)
 	}
 	token, _, err := env.tokens.Generate(ctx, u.ID)
@@ -302,6 +306,7 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 	traceMetaRepo := repository.NewTraceMetaRepo(store)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
+	orgsSvc, _ := newIntegrationOrgService(t, store, groupRepo, tokensSvc, logger)
 	jwtSvc := service.NewJWTService([]byte("legacy-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
 	legacyValidator := service.NewTokenValidator(tokensPath, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -332,7 +337,7 @@ func TestRBACLegacyTokenCompat(t *testing.T) {
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
-		Projects: projectsSvc, Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
+		Projects: projectsSvc, Orgs: orgsSvc, Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
 		TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
 	})
 

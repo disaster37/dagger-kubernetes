@@ -43,3 +43,13 @@ disposable and never written to Raft.
 - The bbolt index is checkpointed to S3 and GC runs every
   `cache.remote.gc_interval` (5m) on the leader.
 - Revoked tokens close the WebSocket with code `4001`.
+
+
+## Extended by ADR-058
+
+- Group and project names are unique per `(OrgID, lower(Name))`, not globally.
+- Every organization (including the bootstrap `"default"` slug) uses a generated
+  `org-<16hex>` storage UID recorded at `meta["bootstrap_org_id"]`; `Org.Name`
+  is immutable.
+- Engine tokens are per organization (`Secret/dagger-engine-token-<orgID>`)
+  and injected via `SecretKeyRef`; no shared plaintext token is injected.

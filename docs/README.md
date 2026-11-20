@@ -485,7 +485,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `reload_poll_interval`                    | `5s`                                                     | `cert-manager`/`external` mode: poll cadence for hot-reloading renewed server certs.                                                          |
 |                 | `lease_ttl`                               | `2m`                                                     | Lease TTL; clients renew before expiry.                                                                                                       |
 | `version`       | `floor`                                   | `v0.19.0`                                                | Minimum engine version.                                                                                                                       |
-|                 | `allowlist`                               | —                                                        | `major.minor` prefixes to admit.                                                                                                              |
+|                 | `allowlist`                               | —                                                        | Admitted versions. Entries may be a minor series (`0.21`, `1.0`), a pre-release track (`1.0.0-beta`), or an exact version (`v1.0.0-beta.28`). Empty = allow all `>= floor`. |
 | `ci.github`     | `job_summary` / `check_runs`              | `true` / `true`                                          | CI niceties.                                                                                                                                  |
 | `ci.jenkins`    | `dynamic_stages`                          | `true`                                                   | Dynamic-stages mode; gates the `steps_*` validation.                                                                                             |
 |                 | `steps_poll_interval`                     | `2s`                                                     | How often the CI wrapper polls the supervisor for new steps/logs.                                                                                |
@@ -507,6 +507,75 @@ inline comments. The sections below summarise the most important ones.
 Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 
 ---
+
+## Organizations & multi-tenancy
+
+`Organization` is the root namespace: every group, project, secret, trace,
+workflow, check, and runner fleet belongs to exactly one organization. A
+deployment bootstraps one protected organization with the immutable slug
+`default` and a generated storage UID (`org-<16hex>`); single-tenant installs
+need no configuration and all quotas default to `0` (unlimited).
+
+- **Creating tenants.** Only a global `RoleAdmin` may create organizations
+  (`POST /api/v1/orgs`, `/admin/orgs`, or GraphQL `createQuickstartOrg`). A user
+  with no membership sees "No organization access" until an administrator adds
+  them (`PUT /api/v1/orgs/:org/members`) or an OAuth `group_mappings[].org`
+  rule assigns them.
+- **Selecting a tenant.** Every request resolves an organization from the
+  org-scoped `dag_<slug>_` token, the `:org` path segment, the `X-Dagger-Org`
+  header, or `?org=`. Without a selector, a single accessible organization is
+  auto-selected; two or more return `400 ambiguous organization`, zero returns
+  `403`. The UI stores the active slug in
+  `localStorage["dagger_kubernetes_active_org"]` and falls back to the first
+  accessible organization alphabetically.
+- **CI tokens.** Org tokens (`dag_<slug>_…`) are self-identifying and
+  recommended for CI. Personal tokens (`dct_…`) need `DAGGER_ORG=<slug>` (or
+  `X-Dagger-Org`) when the user belongs to more than one organization:
+  ```bash
+  export DAGGER_CLOUD_TOKEN='dag_default_...'
+  export DAGGER_ENGINE='cloud'
+  export DAGGER_CLOUD_URL='https://supv.example.com'
+  export _EXPERIMENTAL_DAGGER_RUNNER_HOST='dagger-cloud://self'
+  ```
+- **Quotas.** `org.default_quotas` sets cluster-wide soft/hard defaults;
+  `PUT /api/v1/orgs/:org/quotas` overrides them per organization (audited at
+  info level). Soft limits emit `X-Dagger-Quota-Warning`; hard limits return
+  `429` for every role, including administrators. Resources: groups, projects,
+  members, concurrent sessions, engines, cache bytes, and pipeline retention.
+  The `cache_bytes` check on a remote-cache *upload* is an **estimate**: it sums
+  the declared blob sizes and pack totals in the upload message. Opaque digests
+  that arrive without a declared size (or only in `digests`) are not counted
+  there, so such an upload can exceed the hard cap; the single-bundle `Export`
+  path is instead enforced on the exact bundle length and is hard-capped. The
+  periodic `GC` still evicts down to the hard cap using the sizes recorded in
+  the cache index.
+- **Storage layout.** Tenant objects use
+  `orgs/<org_id>/<remote.prefix>/…`, `orgs/<org_id>/artifacts/…`, and
+  `orgs/<org_id>/otlp-archive/…` in the shared bucket. The CLI tarball cache and
+  the Zot image mirror stay cluster-global.
+- **NetworkPolicy.** Engine pods carry `app: dagger-engine` and
+  `dagger-kubernetes.io/org: org-<16hex>`, so cross-tenant pod traffic can be
+  denied while supervisor ingress on `:9999` is allowed:
+  ```yaml
+  apiVersion: networking.k8s.io/v1
+  kind: NetworkPolicy
+  metadata:
+    name: engine-tenant-isolation
+  spec:
+    podSelector:
+      matchLabels:
+        app: dagger-engine
+    policyTypes: [Ingress]
+    ingress:
+      - from:
+          - podSelector:
+              matchLabels:
+                app.kubernetes.io/name: dagger-kubernetes
+        ports:
+          - port: 9999
+  ```
+  For strict cross-tenant denial, use a Cilium policy that matches
+  `dagger-kubernetes.io/org` on both ends.
 
 ## Running the Supervisor
 
@@ -943,21 +1012,48 @@ and restores the raw upstream configuration.
 The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
 
 - **SemVer pre-releases & tenancy.** `v1.0.0-beta.*` engines are accepted
-  explicitly. `cli.include_prereleases` (default `false`) controls `latest`;
-  `?prerelease=true` overrides per request. Organizations are managed under
+  explicitly. Each `version.allowlist` entry may be a minor series (`"1.0"`
+  admits `v1.0.0-beta.*` and `v1.0.x`), a pre-release track (`"1.0.0-beta"`
+  admits `v1.0.0-beta.*`), or an exact version (`"v1.0.0-beta.28"`); all remain
+  subject to `version.floor`. `cli.include_prereleases` (default `false`)
+  controls `latest`; `?prerelease=true` overrides per request, while explicit
+  version downloads and engine provisioning honour `version.allowlist`
+  regardless. Organizations are managed under
   `/api/v1/orgs` with `org_admin`/`member` memberships and org-scoped
   `dag_<org>_` tokens. `fleet.isolation` is `per_org` (default) or `shared`.
 - **CLI login & CI auth.** `dagger login` uses RFC 8628
   (`POST /oauth/device/code`, `/api/v1/auth/device/approve`, `/oauth/token`).
   CI can exchange GitHub/GitLab OIDC ID tokens at `POST /v1/oidc`.
 - **Cloud GraphQL.** `POST /query` serves the Cloud-compatible schema
-  (`user`, `org`, `trace`, cursor-paginated traces, per-org checks). Query
+  (`user`, `org`, `trace`, cursor-paginated traces, per-org checks). To
+  bootstrap `dagger cloud login`, a freshly authenticated user with no org
+  memberships may call the `createQuickstartOrg(name: String!): Org!` mutation,
+  which creates (or idempotently returns) an org and grants the caller
+  `org_admin`. `Org.cliNotice` is a `CLINotice { level, title, body }` object
+  (null when none) queried by subsequent CLI commands. Query
   complexity is bounded by `graphql.max_depth`, `graphql.max_selections`,
   `graphql.max_query_bytes`, and `graphql.max_parallelism`; introspection is
   disabled unless `graphql.introspection_enabled: true`.
 - **OTLP read-back.** `GET /v1/{traces,logs,metrics}/:traceID` streams framed
   binary `application/vnd.dagger.otlp.stream` data for `dagger trace` and
   `dagger agent -r`.
+- **Host-based data host & internal TLS.** `POST /v1/engines` selects the
+  **internal** data host (`server.internal_data_host`) only when the effective
+  request `Host` matches `server.internal_control_url`'s hostname (the
+  in-cluster `-control` Service host); public clients, including in-cluster
+  clients that dial the public ingress host, always receive the public
+  `server.data_hostname`. The follower→leader forward hop preserves the original
+  `Host` via an internal-listener-only header. The control (`:8080`) and data
+  (`:8443`) listeners serve the minting-CA leaf (SANs derived from the internal
+  control/data hosts) only for SNIs matching the exact configured internal
+  control/data host forms; every other SNI (including arbitrary `.svc` names
+  and the public host) keeps the public cert-manager/external leaf.
+- **Fleet naming.** With `fleet.isolation: per_org`, a version's engine
+  StatefulSet is `dagger-engine-<org>-<version>` (e.g.
+  `dagger-engine-default-v0-21-8`) with pods `…-<ordinal>`; `shared` mode uses
+  `dagger-engine-<version>`. The idle sweeper, cache purge, and engine/fleet
+  metrics are scope-aware, so every org's fleet is discovered and reclaimed by
+  its actual name.
 - **Remote cache.** `GET /v1/engine` is a read-through cache WebSocket backed
   by S3 presigned URLs and a rebuildable `bbolt` index. Small blobs are packed
   into `dagger-pack v1` objects and served as HTTP `206 Partial Content` via
@@ -2212,8 +2308,9 @@ Features:
   detail view, matching the list view's `@username · org/repo` identity.
 - **Executed commands** — the focused-step header shows the command that ran:
   the full argv (program + args, click to copy), `cwd`, `user`, the exit code
-  (green `0` / red non-zero / muted "running" while unknown), and the operation
-  kind (`exec`, `service_start`, `io`, `call`, `other`). A collapsible
+  (green `0` / red non-zero / muted "running" only while the span is genuinely
+  still running with no exit code), and the operation
+  kind (`exec`, `service_start`, `io`, `call`, `config`, `image`, `other`). A collapsible
   **Environment** list shows each variable; secret entries render as
   `<secret>` and secret-ish names as `<redacted>`. The data is derived
   server-side from the OTLP span attributes + events (argv arrays, cwd, env,
@@ -2221,12 +2318,31 @@ Features:
   `GET /api/v1/traces/:id` response, so it refreshes live with the rest of the
   trace. On current engines the operation and its arguments arrive in the
   `dagger.io/dag.call` attribute (a base64 `callpbv1.Call` protobuf), so a
-  `withExec` shows its argv and a publish/export/import/push shows a synthesized
-  command line such as `publish ghcr.io/org/image:tag`. The same attribute
-  carries `withEnvVariable`/`withEnvironmentVariable` (name + value) and
+  `withExec` shows its argv, `Container.from` shows `from <address>`, and a
+  publish/export/import/push shows a synthesized command line such as
+  `publish ghcr.io/org/image:tag`. The same attribute
+  carries `withEnvVariable`/`withEnvironmentVariable` (name + value),
   `withSecretVariable` (name only, rendered `<secret>`; the secret id is never
-  surfaced), so those spans show their environment even though they emit no
-  `dagger.io/exec.env` attribute. See
+  surfaced), and `withWorkdir`/`withUser` (workdir path / user name), so those
+  spans show their environment and container setup even though they emit no
+  `dagger.io/exec.env` attribute. `dagger.io/cache.type` (the GraphQL return
+  type, e.g. `Container`/`String`) is **not** treated as an operation kind, and
+  engine bookkeeping spans (`wcprof.op.kind` `internal`/`lazy`/`exec_phase`,
+  such as `dagql.publishResult`/`exec.containerStart`) never fabricate an empty
+  exec. The derivation also rolls up facts Dagger splits across spans: a child
+  `exec.processRun`'s argv is merged onto its parent `exec.run`, and a
+  `resume withExec`/`exec.run` exit code is copied onto the related
+  `Container.withExec` when the pairing is unambiguous.
+
+  **Inline call details** — the step rows and their expanded sub-spans render
+  the command line (or an `NAME=value` env summary, or `cwd`/`user`) inline,
+  shell-quoting multi-word argv entries, plus an exit-code badge (green `exit 0`
+  / red `exit N`). Sub-span rows are clickable and zoom the breadcrumb to that
+  span, and top-level rows containing a meaningful exec sub-span auto-expand on
+  first load (manual collapse is preserved across live refreshes). Rows with
+  more than 20 children stay collapsed. A passthrough exec leaf is kept visible
+  when it carries a meaningful command/exit code unless a visible child already
+  shows the same argv. See
   [ADR-047](design/ADR-047-pipeline-exec-view.md).
 - **Aggregated logs per level** — the step tree shows a log panel for the
   currently focused level, aggregating the logs of that node **and all its

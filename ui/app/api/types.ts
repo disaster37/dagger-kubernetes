@@ -1,17 +1,48 @@
 export type Role = 'admin' | 'user'
 
-export interface GroupSummary { id: string; name: string }
+export interface GroupSummary { id: string; org_id?: string; name: string }
+
+export interface OrgSummary {
+  id: string
+  name: string
+  display_name: string
+  role: 'admin' | 'org_admin' | 'member'
+}
+
+export interface QuotaThreshold { soft: number; hard: number }
+
+export interface OrgQuotas {
+  max_groups: QuotaThreshold
+  max_projects: QuotaThreshold
+  max_members: QuotaThreshold
+  max_concurrent_sessions: QuotaThreshold
+  max_engines: QuotaThreshold
+  max_cache_bytes: QuotaThreshold
+  max_pipeline_retention: number
+}
+
+export interface OrgQuotaUsage {
+  groups: number
+  projects: number
+  members: number
+  concurrent_sessions: number
+  engines: number
+  cache_bytes: number
+  effective: OrgQuotas
+}
 
 export interface AuthUser {
   id: string
   username: string
   role: Role
   groups: GroupSummary[]
+  orgs: OrgSummary[]
   oauth_provider?: string
   oauth_groups?: string[]
 }
 
 export interface Group extends GroupSummary {
+  org_id: string
   description: string
   max_runner_sessions: number
   agent_available: boolean
@@ -44,6 +75,7 @@ export interface UserRow {
 
 export interface Project {
   id: string
+  org_id?: string
   name: string
   group_id: string
   group_name?: string
@@ -68,6 +100,7 @@ export interface TraceFilterParams {
   groupId?: string // group id, or the 'unassigned' sentinel
   ciRepo?: string // substring
   user?: string // substring
+  org?: string // org slug, or 'all' for admin cross-org view
 }
 
 export interface ExecEnvVar {
@@ -218,6 +251,8 @@ export interface FleetReplica {
 export interface FleetInfo {
   version: string
   stsName: string
+  org?: string
+  org_slug?: string
   replicas: number
   readyReplicas: number
   ordinals: FleetReplica[]
@@ -410,7 +445,17 @@ export interface Org {
   name: string
   display_name: string
   features: string[]
+  quotas?: OrgQuotas
   created_at: string
+}
+
+export interface OrgMemberRow {
+  org_id: string
+  user_id: string
+  username?: string
+  role: 'org_admin' | 'member'
+  groups?: GroupSummary[]
+  created_at?: string
 }
 
 export interface OrgMember {
@@ -553,4 +598,6 @@ export interface RemoteCacheStats {
   namespace?: string
   entries?: number
   bytes?: number
+  soft_limit_bytes?: number
+  hard_limit_bytes?: number
 }

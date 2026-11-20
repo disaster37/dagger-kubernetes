@@ -81,6 +81,8 @@ type OIDCOAuthService struct {
 	mappedGroupMaxRunnerSessions int
 	users                        *UserService
 	groups                       domain.GroupRepository
+	orgs                         domain.OrgRepository
+	quota                        *QuotaService
 	jwt                          *JWTService
 	logger                       *logrus.Logger
 	mapper                       *GroupMapper
@@ -185,6 +187,12 @@ func NewOIDCOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *Us
 // leader reports whether this pod may refresh the upstream credential. A nil
 // isLeader defaults to true so single-node deployments and tests that do not
 // care about leadership keep refreshing.
+// SetOrgRepository wires organization lookups for OAuth group auto-creation.
+func (s *OIDCOAuthService) SetOrgRepository(orgs domain.OrgRepository) { s.orgs = orgs }
+
+// SetQuotaService wires org-quota enforcement into OAuth group auto-creation.
+func (s *OIDCOAuthService) SetQuotaService(q *QuotaService) { s.quota = q }
+
 func (s *OIDCOAuthService) leader() bool {
 	return s.isLeader == nil || s.isLeader()
 }
@@ -332,7 +340,7 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 		return "", "", nil, domain.ErrForbidden
 	}
 
-	mappedGroups := s.mapper.mapIfActive(groups)
+	mappedGroups := s.mapper.mapIfActiveTargets(groups)
 
 	cred := &goauthoauth.Credential{
 		Provider:     "oidc",
@@ -340,7 +348,7 @@ func (s *OIDCOAuthService) Complete(ctx context.Context, code string) (access, r
 		RefreshToken: tok.RefreshToken,
 		ExpiresAt:    tok.Expiry,
 	}
-	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "oidc", sub, username, s.defaultGroup, s.adminGroups, groups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.quota, s.jwt, s.logger, s.encKey, s.orgs, "oidc", sub, username, s.defaultGroup, s.adminGroups, groups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("oidc oauth: %w", err)
 	}

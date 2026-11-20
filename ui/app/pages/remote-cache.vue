@@ -5,8 +5,8 @@
     <UAlert v-if="stats && !stats.enabled" color="neutral" variant="soft" description="Remote cache is disabled (cache.remote.enabled: false)." class="mb-4" />
     <UCard>
       <div class="mb-4 flex flex-wrap items-end gap-3">
-        <UFormField label="Namespace">
-          <USelect v-model="namespace" :items="namespaceOptions" @update:model-value="load" />
+        <UFormField label="Organization">
+          <span class="text-sm font-medium">{{ org.activeOrg?.display_name || org.activeSlug || 'none' }}</span>
         </UFormField>
         <UButton @click="load">Refresh</UButton>
         <UButton v-if="auth.isAdmin" color="error" variant="soft" @click="showPurge = true">Purge cache</UButton>
@@ -32,17 +32,17 @@
 </template>
 
 <script setup lang="ts">
-import { fetchRemoteCacheStats, listOrgs, purgeRemoteCache } from '~/api/client'
-import type { Org, RemoteCacheStats } from '~/api/types'
+import { fetchRemoteCacheStats, purgeRemoteCache } from '~/api/client'
+import type { RemoteCacheStats } from '~/api/types'
 import { useAuthStore } from '~/stores/auth'
+import { useOrgStore } from '~/stores/org'
 
 const auth = useAuthStore()
-const orgs = ref<Org[]>([])
-const namespace = ref('_shared')
+const org = useOrgStore()
+const namespace = ref('')
 const stats = ref<RemoteCacheStats | null>(null)
 const error = ref('')
 const showPurge = ref(false)
-const namespaceOptions = computed(() => ['_shared', ...orgs.value.map(o => o.id)])
 
 function formatBytes(bytes: number) {
   if (bytes < 1024) return `${bytes} B`
@@ -52,6 +52,11 @@ function formatBytes(bytes: number) {
 }
 async function load() {
   error.value = ''
+  namespace.value = org.activeSlug
+  if (!namespace.value) {
+    stats.value = null
+    return
+  }
   try {
     stats.value = await fetchRemoteCacheStats(namespace.value)
   } catch (e: any) {
@@ -64,12 +69,5 @@ async function purge() {
   await load()
 }
 
-onMounted(async () => {
-  try {
-    orgs.value = await listOrgs()
-  } catch {
-    orgs.value = []
-  }
-  await load()
-})
+onMounted(load)
 </script>

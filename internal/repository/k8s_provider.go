@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -76,7 +77,8 @@ type K8sProviderConfig struct {
 	MirrorHTTP          []string                       // engine.toml: [registry."<mirror>"] http = true
 	ImageCacheMirrors   []domain.ImageCacheMirror      // engine-image routing through TLS image-cache mirrors
 	RemoteCacheURL      string                         // engine.toml [remoteCache] url
-	RemoteCacheToken    string                         // DAGGER_CLOUD_TOKEN injected into engine pods
+	RemoteCacheToken    string                         // legacy shared DAGGER_CLOUD_TOKEN (single-org shared mode)
+	OrgTokenProvider    func(ctx context.Context, orgID string) (string, error)
 }
 
 type K8sProvider struct {
@@ -129,11 +131,16 @@ func NewK8sProvider(clientset kubernetes.Interface, cfg K8sProviderConfig) *K8sP
 	}
 }
 
-// SetRemoteCache configures the engine.toml [remoteCache] URL and the
-// DAGGER_CLOUD_TOKEN injected into engine pods.
+// SetRemoteCache configures the engine.toml [remoteCache] URL and the legacy
+// shared DAGGER_CLOUD_TOKEN injected into unscoped engine pods.
 func (p *K8sProvider) SetRemoteCache(url, token string) {
 	p.cfg.RemoteCacheURL = url
 	p.cfg.RemoteCacheToken = token
+}
+
+// SetOrgTokenProvider wires on-demand per-org engine token minting.
+func (p *K8sProvider) SetOrgTokenProvider(fn func(ctx context.Context, orgID string) (string, error)) {
+	p.cfg.OrgTokenProvider = fn
 }
 
 // WithScope returns a shallow copy of the provider scoped to orgSlug. An empty
@@ -182,6 +189,10 @@ func (p *K8sProvider) EnsureStatefulSet(version, image string) error {
 	daggerTOML := p.renderEngineTOML()
 	if err := p.ensureEngineConfigMap(ctx, daggerTOML); err != nil {
 		return fmt.Errorf("ensure engine config map: %w", err)
+	}
+
+	if err := p.ensureEngineTokenSecret(ctx); err != nil {
+		return fmt.Errorf("ensure engine token secret: %w", err)
 	}
 
 	name := p.stsName(version)
@@ -328,7 +339,18 @@ func (p *K8sProvider) buildStatefulSet(name, version, image string, labelMap map
 // specs).
 func (p *K8sProvider) engineEnv() []corev1.EnvVar {
 	env := make([]corev1.EnvVar, 0, len(p.cfg.ExtraEnv)+len(p.cfg.ExtraEnvFrom)+1)
-	if p.cfg.RemoteCacheToken != "" {
+	switch {
+	case p.scope != "" && p.cfg.OrgTokenProvider != nil:
+		env = append(env, corev1.EnvVar{
+			Name: "DAGGER_CLOUD_TOKEN",
+			ValueFrom: &corev1.EnvVarSource{
+				SecretKeyRef: &corev1.SecretKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: engineTokenSecretName(p.scope)},
+					Key:                  "token",
+				},
+			},
+		})
+	case p.cfg.RemoteCacheToken != "":
 		env = append(env, corev1.EnvVar{Name: "DAGGER_CLOUD_TOKEN", Value: p.cfg.RemoteCacheToken})
 	}
 	for _, name := range sortedKeys(p.cfg.ExtraEnv) {
@@ -481,6 +503,91 @@ func sortedKeys[V any](m map[string]V) []string {
 // ensureEngineConfigMap creates or updates the fleet-wide ConfigMap holding
 // engine.toml. When the rendered config is empty, a stale ConfigMap is
 // deleted best-effort so pods are not pinned to a removed volume source.
+// engineTokenSecretName returns the per-org engine token Secret name.
+func engineTokenSecretName(orgID string) string {
+	return fmt.Sprintf("dagger-engine-token-%s", orgID)
+}
+
+// ensureEngineTokenSecret mints (or refreshes) the org's engine token and
+// writes it to Secret/dagger-engine-token-<orgID>.
+func (p *K8sProvider) ensureEngineTokenSecret(ctx context.Context) error {
+	if p.scope == "" || p.cfg.OrgTokenProvider == nil {
+		return nil
+	}
+	token, err := p.cfg.OrgTokenProvider(ctx, p.scope)
+	if err != nil {
+		return err
+	}
+	return p.EnsureOrgTokenSecret(ctx, p.scope, token)
+}
+
+// EnsureOrgTokenSecret creates or updates the per-org engine token Secret.
+func (p *K8sProvider) EnsureOrgTokenSecret(ctx context.Context, orgID, token string) error {
+	if orgID == "" || token == "" {
+		return nil
+	}
+	secLabels := map[string]string{
+		engineLabelApp: engineLabelValue,
+		engineLabelOrg: orgID,
+	}
+	sec := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      engineTokenSecretName(orgID),
+			Namespace: p.cfg.Namespace,
+			Labels:    secLabels,
+		},
+		Type:       corev1.SecretTypeOpaque,
+		StringData: map[string]string{"token": token},
+	}
+	_, err := p.clientset.CoreV1().Secrets(p.cfg.Namespace).Create(ctx, sec, metav1.CreateOptions{})
+	if err != nil && apierrors.IsAlreadyExists(err) {
+		existing, getErr := p.clientset.CoreV1().Secrets(p.cfg.Namespace).Get(ctx, sec.Name, metav1.GetOptions{})
+		if getErr != nil {
+			return fmt.Errorf("get existing secret %s: %w", sec.Name, getErr)
+		}
+		sec.ResourceVersion = existing.ResourceVersion
+		_, err = p.clientset.CoreV1().Secrets(p.cfg.Namespace).Update(ctx, sec, metav1.UpdateOptions{})
+	}
+	if err != nil {
+		return fmt.Errorf("create/update secret %s: %w", sec.Name, err)
+	}
+	return nil
+}
+
+// DeleteOrgTokenSecret removes the per-org engine token Secret.
+func (p *K8sProvider) DeleteOrgTokenSecret(ctx context.Context, orgID string) error {
+	err := p.clientset.CoreV1().Secrets(p.cfg.Namespace).Delete(ctx, engineTokenSecretName(orgID), metav1.DeleteOptions{})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete secret: %w", err)
+	}
+	return nil
+}
+
+// DeleteOrgFleets deletes every engine StatefulSet, Service, retained PVC, and
+// token Secret belonging to orgID.
+func (p *K8sProvider) DeleteOrgFleets(ctx context.Context, orgID string) error {
+	scoped, ok := p.WithScope(orgID).(*K8sProvider)
+	if !ok {
+		return fmt.Errorf("delete org fleets: provider is not a K8sProvider")
+	}
+	versions, err := scoped.AllVersions()
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, version := range versions {
+		if pvcs, err := scoped.ListPVCs(version); err == nil {
+			for _, pvc := range pvcs {
+				_ = scoped.DeletePVC(pvc.Name)
+			}
+		}
+		_ = scoped.DeleteStatefulSet(version)
+		_ = scoped.DeleteService(version)
+	}
+	_ = p.clientset.CoreV1().Secrets(p.cfg.Namespace).Delete(ctx, engineTokenSecretName(orgID), metav1.DeleteOptions{})
+	return errors.Join(errs...)
+}
+
 func (p *K8sProvider) ensureEngineConfigMap(ctx context.Context, daggerTOML string) error {
 	if daggerTOML == "" {
 		err := p.clientset.CoreV1().ConfigMaps(p.cfg.Namespace).Delete(ctx, engineConfigMapName, metav1.DeleteOptions{})
@@ -766,6 +873,41 @@ func (p *K8sProvider) WaitForReady(version, podName string) error {
 func (p *K8sProvider) GetEngineImage(version string) string {
 	registry := domain.EngineImageRegistryViaMirror(p.cfg.ImageRegistry, p.cfg.ImageCacheMirrors)
 	return fmt.Sprintf("%s:%s", registry, version)
+}
+
+// AllScopes returns one FleetScope per deployed engine StatefulSet, reading the
+// org and version from the StatefulSet labels. Unlike AllVersions it preserves
+// the org label so the sweeper can address each per-org fleet by its real name.
+// The listing is constrained to the provider's scope when set.
+func (p *K8sProvider) AllScopes() ([]domain.FleetScope, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	selectorMap := map[string]string{engineLabelApp: engineLabelValue}
+	if p.scope != "" {
+		selectorMap[engineLabelOrg] = p.scope
+	}
+	selector := labels.SelectorFromSet(selectorMap).String()
+
+	stsList, err := p.clientset.AppsV1().StatefulSets(p.cfg.Namespace).List(ctx, metav1.ListOptions{
+		LabelSelector: selector,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("list statefulsets: %w", err)
+	}
+
+	scopes := make([]domain.FleetScope, 0, len(stsList.Items))
+	for i := range stsList.Items {
+		version, ok := stsList.Items[i].Labels[engineLabelVersion]
+		if !ok {
+			continue
+		}
+		scopes = append(scopes, domain.FleetScope{
+			OrgID:   stsList.Items[i].Labels[engineLabelOrg],
+			Version: version,
+		})
+	}
+	return scopes, nil
 }
 
 func (p *K8sProvider) AllVersions() ([]string, error) {

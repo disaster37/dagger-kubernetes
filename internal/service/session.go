@@ -45,12 +45,13 @@ func (s *Store) ApplySessionTouched(certFP string, at time.Time) {
 	}
 }
 
-func (s *Store) Register(certFP, version, replicaPod, instanceID, traceID, userID string) *domain.Lease {
+func (s *Store) Register(orgID, certFP, version, replicaPod, instanceID, traceID, userID string) *domain.Lease {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	lease := &domain.Lease{
 		CertFP:       certFP,
+		OrgID:        orgID,
 		Version:      version,
 		ReplicaPod:   replicaPod,
 		InstanceID:   instanceID,
@@ -148,6 +149,71 @@ func (s *Store) PinnedSessionsOnReplica(podName string) int {
 		}
 	}
 	return count
+}
+
+// CountByOrg returns the number of active leases in orgID.
+func (s *Store) CountByOrg(orgID string) int {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	count := 0
+	for _, l := range s.leases {
+		if l.OrgID == orgID {
+			count++
+		}
+	}
+	return count
+}
+
+// RemoveByUserAndOrg evicts userID's leases in orgID.
+func (s *Store) RemoveByUserAndOrg(userID, orgID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var removed []string
+	for fp, l := range s.leases {
+		if l.UserID == userID && l.OrgID == orgID {
+			removed = append(removed, fp)
+			delete(s.leases, fp)
+		}
+	}
+	return removed
+}
+
+// RemoveByOrg evicts every lease in orgID.
+func (s *Store) RemoveByOrg(orgID string) []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var removed []string
+	for fp, l := range s.leases {
+		if l.OrgID == orgID {
+			removed = append(removed, fp)
+			delete(s.leases, fp)
+		}
+	}
+	return removed
+}
+
+// ApplyBootstrapOrg backfills the org ID on legacy leases.
+func (s *Store) ApplyBootstrapOrg(bootstrapOrgID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, l := range s.leases {
+		if l.OrgID == "" {
+			l.OrgID = bootstrapOrgID
+		}
+	}
+}
+
+// ApplyUserOrgRevoked evicts userID's leases in orgID.
+func (s *Store) ApplyUserOrgRevoked(orgID, userID string) {
+	s.RemoveByUserAndOrg(userID, orgID)
+}
+
+// ApplyOrgDeleted evicts every lease in orgID.
+func (s *Store) ApplyOrgDeleted(orgID string) {
+	s.RemoveByOrg(orgID)
 }
 
 // CountByUser returns the number of active leases owned by the user. Used by

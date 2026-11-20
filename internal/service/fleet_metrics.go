@@ -70,6 +70,12 @@ func (s *FleetMetricsService) rateString() string {
 // used only for the storage-capacity fallback. Per-query failures are logged
 // and skipped; the last error is returned only when every metric query failed.
 func (s *FleetMetricsService) FleetMetrics(ctx context.Context, version string, replicas int) (*domain.FleetMetrics, error) {
+	return s.FleetMetricsForOrg(ctx, "", version, replicas)
+}
+
+// FleetMetricsForOrg builds metrics scoped to one organization's fleet. An
+// empty orgID matches every org (single-org/shared deployments).
+func (s *FleetMetricsService) FleetMetricsForOrg(ctx context.Context, orgID, version string, replicas int) (*domain.FleetMetrics, error) {
 	result := &domain.FleetMetrics{
 		Version:     version,
 		StepSeconds: int64(s.step.Seconds()),
@@ -92,7 +98,11 @@ func (s *FleetMetricsService) FleetMetrics(ctx context.Context, version string, 
 	result.EndTime = end
 
 	ns := escapePromQLLabelValue(s.namespace)
-	pod := escapePromQLLabelValue(domain.StsName(version))
+	podRegex := domain.EnginePodRegex(version)
+	if orgID != "" {
+		podRegex = domain.EngineOrgPodRegex(orgID, version)
+	}
+	pod := escapePromQLLabelValue(podRegex)
 	var lastErr error
 	for _, q := range defaultMetricQueries {
 		promql := buildPromQL(q.promql, ns, pod, s.rateString())

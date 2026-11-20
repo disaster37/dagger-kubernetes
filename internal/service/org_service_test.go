@@ -94,14 +94,53 @@ func (f *fakeOrgRepo) AllMemberships(context.Context) (map[string][]*domain.OrgM
 	return nil, nil
 }
 
+func (f *fakeOrgRepo) Bootstrap(ctx context.Context, o *domain.Org, _, _ string) (*domain.Org, error) {
+	if err := f.Create(ctx, o); err != nil {
+		return nil, err
+	}
+	return o, nil
+}
+
+func (f *fakeOrgRepo) BootstrapOrgID(context.Context) (string, error) {
+	for id, o := range f.orgs {
+		if o.Name == domain.DefaultOrgName {
+			return id, nil
+		}
+	}
+	return "", domain.ErrBootstrapNotReady
+}
+
+func (f *fakeOrgRepo) GetBootstrap(ctx context.Context) (*domain.Org, error) {
+	id, err := f.BootstrapOrgID(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return f.Get(ctx, id)
+}
+
+func (f *fakeOrgRepo) DeleteCascade(ctx context.Context, id string) error { return f.Delete(ctx, id) }
+
+func (f *fakeOrgRepo) GetMemberRole(_ context.Context, orgID, userID string) (domain.OrgRole, bool, error) {
+	role, ok := f.members[orgID][userID]
+	return role, ok, nil
+}
+
+func (f *fakeOrgRepo) DistinctMemberCount(_ context.Context, orgID string) (int, error) {
+	return len(f.members[orgID]), nil
+}
+
 type fakeGroupRepo struct{ groups map[string]*domain.Group }
 
 func (f *fakeGroupRepo) Create(context.Context, *domain.Group) error { return nil }
 func (f *fakeGroupRepo) Get(context.Context, string) (*domain.Group, error) {
 	return nil, domain.ErrNotFound
 }
-func (f *fakeGroupRepo) GetByName(context.Context, string) (*domain.Group, error) {
+func (f *fakeGroupRepo) GetByName(context.Context, string, string) (*domain.Group, error) {
 	return nil, domain.ErrNotFound
+}
+func (f *fakeGroupRepo) ListByOrg(context.Context, string) ([]*domain.Group, error) { return nil, nil }
+func (f *fakeGroupRepo) GroupsForUserInOrg(context.Context, string, string) ([]*domain.Group, error) {
+	return nil, nil
 }
 func (f *fakeGroupRepo) List(context.Context) ([]*domain.Group, error) { return nil, nil }
 func (f *fakeGroupRepo) Update(context.Context, *domain.Group) error   { return nil }
@@ -130,7 +169,7 @@ func TestOrgServiceCreateAndMembers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if o.Name != "acme" || o.ID != "acme" {
+	if o.Name != "acme" || !generatedOrgIDRe.MatchString(o.ID) {
 		t.Fatalf("org = %+v", o)
 	}
 	if err := svc.SetMember(context.Background(), o.ID, "u1", domain.OrgAdmin); err != nil {

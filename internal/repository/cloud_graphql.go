@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/graph-gophers/graphql-go"
@@ -33,12 +35,16 @@ func graphqlIdentity(ctx context.Context) GraphQLIdentity {
 }
 
 const cloudGraphQLSchema = `
-schema { query: Query }
+schema { query: Query mutation: Mutation }
 
 type Query {
   user: User!
   org(name: String!): Org
   trace(id: ID!, org: String): Trace
+}
+
+type Mutation {
+  createQuickstartOrg(name: String!): Org!
 }
 
 type User {
@@ -48,13 +54,19 @@ type User {
   orgs: [Org!]!
 }
 
+type CLINotice {
+  level: String!
+  title: String!
+  body: String!
+}
+
 type Org {
   id: ID!
   name: String!
   createdAt: String!
   subscription: Subscription!
   features: [String!]!
-  cliNotice: String
+  cliNotice: CLINotice
   lastUserTrace: Trace
   traces(filter: String, sort: String, first: Int, after: String): TraceConnection!
   checks(first: Int): [CheckRun!]!
@@ -98,12 +110,27 @@ type PageInfo {
 
 // CloudGraphQL is the Cloud-compatible GraphQL schema and resolver root.
 type CloudGraphQL struct {
-	schema *graphql.Schema
+	schema     *graphql.Schema
+	root       *graphqlRoot
+	orgCreator OrgCreator
 }
 
-// NewCloudGraphQL builds the schema over the supplied repositories.
-func NewCloudGraphQL(users domain.UserRepository, orgs domain.OrgRepository, traces domain.TraceMetaRepository, checks domain.CheckRunRepository, cfg domain.GraphQLConfig) *CloudGraphQL {
-	root := &graphqlRoot{users: users, orgs: orgs, traces: traces, checks: checks}
+// OrgCreator provisions a new organization (generated org-<16hex> ID and
+// bootstrap default group). It is wired from cmd/api to the service layer to
+// keep repository → service imports cycle-free.
+type OrgCreator func(ctx context.Context, name, displayName string) (*domain.Org, error)
+
+// WithOrgCreator installs the org provisioner used by CreateQuickstartOrg.
+func (g *CloudGraphQL) WithOrgCreator(fn OrgCreator) *CloudGraphQL {
+	g.orgCreator = fn
+	g.root.orgCreator = fn
+	return g
+}
+
+// NewCloudGraphQL builds the schema over the supplied repositories. groups is
+// used to derive org visibility from a user's group memberships.
+func NewCloudGraphQL(users domain.UserRepository, orgs domain.OrgRepository, groups domain.GroupRepository, traces domain.TraceMetaRepository, checks domain.CheckRunRepository, cfg domain.GraphQLConfig) *CloudGraphQL {
+	root := &graphqlRoot{users: users, orgs: orgs, groups: groups, traces: traces, checks: checks}
 	opts := []graphql.SchemaOpt{
 		graphql.MaxDepth(cfg.MaxDepth),
 		graphql.MaxSelections(cfg.MaxSelections),
@@ -113,7 +140,7 @@ func NewCloudGraphQL(users domain.UserRepository, orgs domain.OrgRepository, tra
 	if !cfg.IntrospectionEnabled {
 		opts = append(opts, graphql.RestrictIntrospection(func(context.Context) bool { return false }))
 	}
-	return &CloudGraphQL{schema: graphql.MustParseSchema(cloudGraphQLSchema, root, opts...)}
+	return &CloudGraphQL{schema: graphql.MustParseSchema(cloudGraphQLSchema, root, opts...), root: root}
 }
 
 // Exec executes a GraphQL query and returns the JSON response body.
@@ -127,10 +154,12 @@ func (g *CloudGraphQL) Exec(ctx context.Context, query, operationName string, va
 }
 
 type graphqlRoot struct {
-	users  domain.UserRepository
-	orgs   domain.OrgRepository
-	traces domain.TraceMetaRepository
-	checks domain.CheckRunRepository
+	users      domain.UserRepository
+	orgs       domain.OrgRepository
+	groups     domain.GroupRepository
+	traces     domain.TraceMetaRepository
+	checks     domain.CheckRunRepository
+	orgCreator OrgCreator
 }
 
 func (r *graphqlRoot) User(ctx context.Context) (*graphqlUser, error) {
@@ -157,6 +186,74 @@ func (r *graphqlRoot) Org(ctx context.Context, args struct{ Name string }) (*gra
 	return &graphqlOrg{root: r, org: o}, nil
 }
 
+// CreateQuickstartOrg creates an organization for a platform administrator.
+// Non-admin callers are rejected: organization creation is never
+// self-service.
+func (r *graphqlRoot) CreateQuickstartOrg(ctx context.Context, args struct{ Name string }) (*graphqlOrg, error) {
+	id := graphqlIdentity(ctx)
+	// Require an authenticated human user (reject org-scoped synthetic tokens).
+	if id.UserID == "" {
+		return nil, fmt.Errorf("unauthenticated")
+	}
+	u, err := r.users.Get(ctx, id.UserID)
+	if err != nil {
+		return nil, fmt.Errorf("unauthenticated")
+	}
+	if u.DisabledAt != nil || u.DeletedAt != nil {
+		return nil, fmt.Errorf("unauthenticated")
+	}
+	if u.Role != domain.RoleAdmin {
+		return nil, fmt.Errorf("forbidden: organization creation requires a platform administrator")
+	}
+
+	base := sanitizeQuickstartOrgSlug(args.Name)
+	if existing, err := r.orgs.GetByName(ctx, base); err == nil {
+		return &graphqlOrg{root: r, org: existing}, nil
+	} else if !errors.Is(err, domain.ErrNotFound) {
+		return nil, fmt.Errorf("lookup org %q: %w", base, err)
+	}
+	if r.orgCreator == nil {
+		return nil, fmt.Errorf("organization provisioning unavailable")
+	}
+	org, err := r.orgCreator(ctx, base, base)
+	if err != nil {
+		return nil, err
+	}
+	if err := r.orgs.SetMember(ctx, org.ID, id.UserID, domain.OrgAdmin); err != nil {
+		return nil, err
+	}
+	return &graphqlOrg{root: r, org: org}, nil
+}
+
+// sanitizeQuickstartOrgSlug normalizes a requested quickstart org name into a
+// DNS-safe slug: lowercase ASCII [a-z0-9-], runs of [-_. ] collapse to "-",
+// leading/trailing "-" trimmed, truncated to 55 chars (so a "-<suffix>" fits a
+// 63-char DNS label), falling back to "org" when empty.
+func sanitizeQuickstartOrgSlug(raw string) string {
+	var b strings.Builder
+	lastDash := false
+	for _, c := range strings.ToLower(raw) {
+		switch {
+		case c >= 'a' && c <= 'z', c >= '0' && c <= '9':
+			b.WriteRune(c)
+			lastDash = false
+		case c == '-' || c == '_' || c == '.' || c == ' ':
+			if !lastDash && b.Len() > 0 {
+				b.WriteByte('-')
+				lastDash = true
+			}
+		}
+	}
+	slug := strings.Trim(b.String(), "-")
+	if len(slug) > 55 {
+		slug = strings.Trim(slug[:55], "-")
+	}
+	if slug == "" {
+		return "org"
+	}
+	return slug
+}
+
 func (r *graphqlRoot) Trace(ctx context.Context, args struct {
 	ID  string
 	Org *string
@@ -168,7 +265,7 @@ func (r *graphqlRoot) Trace(ctx context.Context, args struct {
 	}
 	orgID := m.OrgID
 	if orgID == "" {
-		orgID = domain.DefaultOrgID
+		return nil, fmt.Errorf("forbidden")
 	}
 	if !r.canAccessOrg(ctx, id, orgID) {
 		return nil, fmt.Errorf("forbidden")
@@ -177,7 +274,8 @@ func (r *graphqlRoot) Trace(ctx context.Context, args struct {
 }
 
 // canAccessOrg reports whether the caller may read orgID: the caller's own
-// org-scoped token, a global admin, or a direct org membership (CWE-862).
+// org-scoped token, a global admin, or a direct/group-derived org membership
+// (CWE-862).
 func (r *graphqlRoot) canAccessOrg(ctx context.Context, id GraphQLIdentity, orgID string) bool {
 	if id.OrgID == orgID {
 		return true
@@ -185,7 +283,7 @@ func (r *graphqlRoot) canAccessOrg(ctx context.Context, id GraphQLIdentity, orgI
 	if u, err := r.users.Get(ctx, id.UserID); err == nil && u.Role == domain.RoleAdmin {
 		return true
 	}
-	orgs, err := r.orgs.OrgsForUser(ctx, id.UserID)
+	orgs, err := r.userOrgs(ctx, id.UserID)
 	if err != nil {
 		return false
 	}
@@ -195,6 +293,41 @@ func (r *graphqlRoot) canAccessOrg(ctx context.Context, id GraphQLIdentity, orgI
 		}
 	}
 	return false
+}
+
+// userOrgs returns the union of direct org memberships and orgs derived from
+// the user's active group memberships (mirrors OrgService.OrgsForUser), so a
+// user assigned to an org-scoped group via OIDC/Admin UI sees that org without
+// a redundant quickstart org.
+func (r *graphqlRoot) userOrgs(ctx context.Context, userID string) ([]*domain.Org, error) {
+	direct, err := r.orgs.OrgsForUser(ctx, userID)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool, len(direct))
+	out := make([]*domain.Org, 0, len(direct))
+	for _, o := range direct {
+		seen[o.ID] = true
+		out = append(out, o)
+	}
+	if r.groups != nil {
+		groups, err := r.groups.GroupsForUser(ctx, userID)
+		if err != nil {
+			return nil, err
+		}
+		for _, g := range groups {
+			if g.OrgID == "" || seen[g.OrgID] {
+				continue
+			}
+			o, err := r.orgs.Get(ctx, g.OrgID)
+			if err != nil {
+				continue
+			}
+			seen[o.ID] = true
+			out = append(out, o)
+		}
+	}
+	return out, nil
 }
 
 type graphqlUser struct {
@@ -208,7 +341,7 @@ func (u *graphqlUser) Email() string    { return "" }
 
 func (u *graphqlUser) Orgs(ctx context.Context) ([]*graphqlOrg, error) {
 	id := graphqlIdentity(ctx)
-	orgs, err := u.root.orgs.OrgsForUser(ctx, id.UserID)
+	orgs, err := u.root.userOrgs(ctx, id.UserID)
 	if err != nil {
 		return nil, err
 	}
@@ -228,7 +361,22 @@ func (o *graphqlOrg) ID() graphql.ID     { return graphql.ID(o.org.ID) }
 func (o *graphqlOrg) Name() string       { return o.org.Name }
 func (o *graphqlOrg) CreatedAt() string  { return o.org.CreatedAt.UTC().Format(time.RFC3339) }
 func (o *graphqlOrg) Features() []string { return o.org.Features }
-func (o *graphqlOrg) CliNotice() *string { return nil }
+func (o *graphqlOrg) CliNotice() *graphqlCLINotice {
+	// No CLI notice is configured for self-hosted orgs; returning nil (JSON
+	// null) satisfies the CLI's `cliNotice { level title body }` query.
+	return nil
+}
+
+// graphqlCLINotice is the CLINotice GraphQL object type.
+type graphqlCLINotice struct {
+	level string
+	title string
+	body  string
+}
+
+func (n *graphqlCLINotice) Level() string { return n.level }
+func (n *graphqlCLINotice) Title() string { return n.title }
+func (n *graphqlCLINotice) Body() string  { return n.body }
 
 func (o *graphqlOrg) Subscription() *graphqlSubscription {
 	return &graphqlSubscription{}

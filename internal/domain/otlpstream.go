@@ -88,8 +88,8 @@ type OTLPChunk struct {
 
 // OTLPArchive persists raw OTLP protobuf chunks per (traceID, signal).
 type OTLPArchive interface {
-	Append(ctx context.Context, traceID, signal string, seq uint64, payload []byte) error
+	Append(ctx context.Context, orgID, traceID, signal string, seq uint64, payload []byte) error
 	// ChunksAfter returns archived chunks with Seq >= fromSeq in ascending order.
-	ChunksAfter(ctx context.Context, traceID, signal string, fromSeq uint64) ([]OTLPChunk, error)
-	DeleteTrace(ctx context.Context, traceID string) error
+	ChunksAfter(ctx context.Context, orgID, traceID, signal string, fromSeq uint64) ([]OTLPChunk, error)
+	DeleteTrace(ctx context.Context, orgID, traceID string) error
 }

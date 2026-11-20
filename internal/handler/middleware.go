@@ -147,6 +147,90 @@ func (s *Server) authorizeTrace(ctx context.Context, c *app.RequestContext, trac
 	return false
 }
 
+// canonicalOrgID maps an org ID or slug to the canonical org-<16hex> ID used
+// for scoped storage. Unknown refs are returned unchanged so the caller's
+// authorization check still fails closed.
+func (s *Server) canonicalOrgID(ctx context.Context, orgRef string) string {
+	if s.orgs == nil || orgRef == "" {
+		return orgRef
+	}
+	o, err := s.orgs.Resolve(ctx, orgRef)
+	if err != nil {
+		return orgRef
+	}
+	return o.ID
+}
+
+// resolveRequestOrg resolves the request organization from :org, the
+// X-Dagger-Org header, or ?org= and returns the canonical *domain.Org plus the
+// caller identity. It writes the mapped error response and returns ok=false on
+// any failure.
+func (s *Server) resolveRequestOrg(ctx context.Context, c *app.RequestContext) (*domain.Org, *domain.Identity, bool) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
+		return nil, nil, false
+	}
+	if s.orgs == nil {
+		writeError(c, consts.StatusServiceUnavailable, "organization service unavailable")
+		return nil, nil, false
+	}
+	explicit := c.Param("org")
+	if explicit == "" {
+		explicit = string(c.Request.Header.Peek(orgHeaderName))
+	}
+	if explicit == "" {
+		explicit = c.Query("org")
+	}
+	org, err := s.orgs.ResolveForIdentity(ctx, id, explicit)
+	if err != nil {
+		s.writeServiceError(c, err)
+		return nil, nil, false
+	}
+	return org, id, true
+}
+
+// requireOrgMember resolves the request org and requires membership (or global
+// admin).
+func (s *Server) requireOrgMember(ctx context.Context, c *app.RequestContext) (*domain.Org, *domain.Identity, bool) {
+	org, id, ok := s.resolveRequestOrg(ctx, c)
+	if !ok {
+		return nil, nil, false
+	}
+	if !id.IsAdmin() {
+		member, err := s.orgs.IsOrgMember(ctx, org.ID, id.UserID)
+		if err != nil {
+			s.writeServiceError(c, err)
+			return nil, nil, false
+		}
+		if !member {
+			writeError(c, consts.StatusForbidden, "forbidden")
+			return nil, nil, false
+		}
+	}
+	return org, id, true
+}
+
+// requireOrgAdminResolved resolves the request org and requires org_admin (or
+// global admin).
+func (s *Server) requireOrgAdminResolved(ctx context.Context, c *app.RequestContext) (*domain.Org, *domain.Identity, bool) {
+	org, id, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return nil, nil, false
+	}
+	if !id.IsAdmin() {
+		role, found, err := s.orgs.MemberRole(ctx, org.ID, id.UserID)
+		if err != nil {
+			s.writeServiceError(c, err)
+			return nil, nil, false
+		}
+		if !found || role != domain.OrgAdmin {
+			writeError(c, consts.StatusForbidden, "forbidden")
+			return nil, nil, false
+		}
+	}
+	return org, id, true
+}
+
 // attributionUserID returns the user id recorded in trace attribution, or ""
 // for synthetic identities (legacy) that have no users-table row. Writing
 // those ids would violate the trace_meta user_id foreign key.
@@ -159,6 +243,8 @@ func attributionUserID(id *domain.Identity) string {
 
 // writeServiceError maps a domain sentinel error to the appropriate HTTP
 // status and writes it. Unknown errors yield 500 (logged).
+//
+//nolint:gocyclo // exhaustive sentinel-to-status mapping
 func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
@@ -187,6 +273,19 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusForbidden, "engines not available for any of the user's groups")
 	case errors.Is(err, domain.ErrQuotaExhausted):
 		writeError(c, consts.StatusTooManyRequests, "group runner session quota exhausted")
+	case errors.Is(err, domain.ErrOrgQuotaExceeded):
+		c.Response.Header.Set("Retry-After", "30")
+		writeError(c, consts.StatusTooManyRequests, err.Error())
+	case errors.Is(err, domain.ErrAmbiguousOrg):
+		writeError(c, consts.StatusBadRequest, "ambiguous organization: set X-Dagger-Org or use an org-scoped token")
+	case errors.Is(err, domain.ErrNoOrgMembership):
+		writeError(c, consts.StatusForbidden, "user is not a member of any organization")
+	case errors.Is(err, domain.ErrOrgNotEmpty):
+		writeError(c, consts.StatusConflict, "organization still contains groups or projects; delete them first or pass ?force=true")
+	case errors.Is(err, domain.ErrSharedFleetMultiOrg):
+		writeError(c, consts.StatusConflict, "cannot create additional organizations when fleet.isolation is \"shared\"")
+	case errors.Is(err, domain.ErrBootstrapNotReady):
+		writeError(c, consts.StatusServiceUnavailable, "organization bootstrap in progress")
 	case errors.Is(err, domain.ErrUnauthenticated):
 		writeError(c, consts.StatusUnauthorized, "unauthorized")
 	case errors.Is(err, domain.ErrSessionRevoked):

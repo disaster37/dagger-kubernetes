@@ -31,11 +31,11 @@ func (s *Server) handleForgeSourcesList(ctx context.Context, c *app.RequestConte
 		writeJSON(c, []*domain.ForgeSource{})
 		return
 	}
-	if !s.orgAllowed(ctx, id, c.Param("org")) {
+	if !s.orgAllowed(ctx, id, s.canonicalOrgID(ctx, c.Param("org"))) {
 		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
-	sources, err := s.forges.List(ctx, c.Param("org"))
+	sources, err := s.forges.List(ctx, s.canonicalOrgID(ctx, c.Param("org")))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -45,7 +45,7 @@ func (s *Server) handleForgeSourcesList(ctx context.Context, c *app.RequestConte
 
 // handleForgeSourceCreate creates a forge integration (admin only).
 func (s *Server) handleForgeSourceCreate(ctx context.Context, c *app.RequestContext) {
-	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+	if !s.requireOrgAdmin(ctx, c, s.canonicalOrgID(ctx, c.Param("org"))) {
 		return
 	}
 	if s.forges == nil {
@@ -57,7 +57,7 @@ func (s *Server) handleForgeSourceCreate(ctx context.Context, c *app.RequestCont
 		return
 	}
 	src, err := s.forges.CreateSource(ctx, &service.ForgeSourceInput{
-		ID: req.ID, OrgID: c.Param("org"), Provider: domain.ForgeKind(req.Provider),
+		ID: req.ID, OrgID: s.canonicalOrgID(ctx, c.Param("org")), Provider: domain.ForgeKind(req.Provider),
 		BaseURL: req.BaseURL, Repo: req.Repo, Token: req.Token, WebhookSecret: req.WebhookSecret,
 	})
 	if err != nil {
@@ -69,7 +69,7 @@ func (s *Server) handleForgeSourceCreate(ctx context.Context, c *app.RequestCont
 
 // handleForgeSourceDelete deletes a forge integration (admin only).
 func (s *Server) handleForgeSourceDelete(ctx context.Context, c *app.RequestContext) {
-	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+	if !s.requireOrgAdmin(ctx, c, s.canonicalOrgID(ctx, c.Param("org"))) {
 		return
 	}
 	if s.forges == nil {
@@ -132,11 +132,11 @@ func (s *Server) handleOrgSecretsList(ctx context.Context, c *app.RequestContext
 		writeJSON(c, []*domain.Secret{})
 		return
 	}
-	if !s.orgAllowed(ctx, id, c.Param("org")) {
+	if !s.orgAllowed(ctx, id, s.canonicalOrgID(ctx, c.Param("org"))) {
 		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
-	secrets, err := s.secrets.List(ctx, domain.SecretScopeOrg, c.Param("org"))
+	secrets, err := s.secrets.List(ctx, domain.SecretScopeOrg, s.canonicalOrgID(ctx, c.Param("org")))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -146,7 +146,7 @@ func (s *Server) handleOrgSecretsList(ctx context.Context, c *app.RequestContext
 
 // handleOrgSecretPut stores an org secret (admin only).
 func (s *Server) handleOrgSecretPut(ctx context.Context, c *app.RequestContext) {
-	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+	if !s.requireOrgAdmin(ctx, c, s.canonicalOrgID(ctx, c.Param("org"))) {
 		return
 	}
 	if s.secrets == nil {
@@ -157,7 +157,7 @@ func (s *Server) handleOrgSecretPut(ctx context.Context, c *app.RequestContext) 
 	if !decodeBody(c, &req) {
 		return
 	}
-	sec, err := s.secrets.Put(ctx, domain.SecretScopeOrg, c.Param("org"), req.Name, req.Value)
+	sec, err := s.secrets.Put(ctx, domain.SecretScopeOrg, s.canonicalOrgID(ctx, c.Param("org")), req.Name, req.Value)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -167,14 +167,14 @@ func (s *Server) handleOrgSecretPut(ctx context.Context, c *app.RequestContext) 
 
 // handleOrgSecretDelete deletes an org secret (admin only).
 func (s *Server) handleOrgSecretDelete(ctx context.Context, c *app.RequestContext) {
-	if !s.requireOrgAdmin(ctx, c, c.Param("org")) {
+	if !s.requireOrgAdmin(ctx, c, s.canonicalOrgID(ctx, c.Param("org"))) {
 		return
 	}
 	if s.secrets == nil {
 		writeError(c, consts.StatusServiceUnavailable, "secret service unavailable")
 		return
 	}
-	if err := s.secrets.Delete(ctx, domain.SecretScopeOrg, c.Param("org"), c.Param("name")); err != nil {
+	if err := s.secrets.Delete(ctx, domain.SecretScopeOrg, s.canonicalOrgID(ctx, c.Param("org")), c.Param("name")); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
@@ -184,7 +184,12 @@ func (s *Server) handleOrgSecretDelete(ctx context.Context, c *app.RequestContex
 // handleProjectSecretsList lists project secret metadata (admin only, matching
 // the PUT/DELETE endpoints).
 func (s *Server) handleProjectSecretsList(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAdmin(ctx, c) {
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
+	if _, err := s.projects.GetInOrg(ctx, org.ID, c.Param("id")); err != nil {
+		s.writeServiceError(c, err)
 		return
 	}
 	if s.secrets == nil {
@@ -201,7 +206,12 @@ func (s *Server) handleProjectSecretsList(ctx context.Context, c *app.RequestCon
 
 // handleProjectSecretPut stores a project secret (admin only).
 func (s *Server) handleProjectSecretPut(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAdmin(ctx, c) {
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
+	if _, err := s.projects.GetInOrg(ctx, org.ID, c.Param("id")); err != nil {
+		s.writeServiceError(c, err)
 		return
 	}
 	if s.secrets == nil {
@@ -222,7 +232,12 @@ func (s *Server) handleProjectSecretPut(ctx context.Context, c *app.RequestConte
 
 // handleProjectSecretDelete deletes a project secret (admin only).
 func (s *Server) handleProjectSecretDelete(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAdmin(ctx, c) {
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
+	if _, err := s.projects.GetInOrg(ctx, org.ID, c.Param("id")); err != nil {
+		s.writeServiceError(c, err)
 		return
 	}
 	if s.secrets == nil {
@@ -279,12 +294,12 @@ func (s *Server) handleOrgChecksList(ctx context.Context, c *app.RequestContext)
 		writeJSON(c, []*domain.CheckRunRecord{})
 		return
 	}
-	if !s.orgAllowed(ctx, id, c.Param("org")) {
+	if !s.orgAllowed(ctx, id, s.canonicalOrgID(ctx, c.Param("org"))) {
 		writeError(c, consts.StatusForbidden, "forbidden")
 		return
 	}
 	records, err := s.checks.List(ctx, &domain.CheckRunFilter{
-		OrgID: c.Param("org"), Status: c.Query("status"), Repo: c.Query("repo"), Limit: queryLimit(c),
+		OrgID: s.canonicalOrgID(ctx, c.Param("org")), Status: c.Query("status"), Repo: c.Query("repo"), Limit: queryLimit(c),
 	})
 	if err != nil {
 		s.writeServiceError(c, err)

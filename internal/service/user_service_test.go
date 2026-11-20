@@ -216,7 +216,7 @@ func TestUserServiceCreateAutoAssignDefault(t *testing.T) {
 	ctx := context.Background()
 
 	// Create the "default" group first.
-	g, err := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	g, err := gsvc.Create(ctx, "", GroupInput{Name: "default", AgentAvailable: true})
 	if err != nil {
 		t.Fatalf("create default group: %v", err)
 	}

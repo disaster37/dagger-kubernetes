@@ -8,6 +8,7 @@ import (
 // EngineCachePurgeResult is the response/status of a per-version local-cache
 // purge. State is "running" | "completed" | "failed".
 type EngineCachePurgeResult struct {
+	Org        string                  `json:"org,omitempty"`
 	Version    string                  `json:"version"`
 	State      string                  `json:"state"`
 	StartedAt  string                  `json:"started_at"`            // RFC3339 UTC
@@ -50,8 +51,8 @@ type EnginePruner interface {
 // EngineCachePurger purges the local cache of every engine pod in a version's
 // StatefulSet (concurrently).
 type EngineCachePurger interface {
-	Purge(ctx context.Context, version string) (*EngineCachePurgeResult, error)
-	Status(version string) (*EngineCachePurgeResult, bool)
+	PurgeForOrg(ctx context.Context, orgID, version string) (*EngineCachePurgeResult, error)
+	StatusForOrg(orgID, version string) (*EngineCachePurgeResult, bool)
 }
 
 // Sentinel errors mapped by the handler to HTTP responses.

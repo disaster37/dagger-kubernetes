@@ -212,22 +212,21 @@ func (s *Server) orgAllowed(ctx context.Context, id *domain.Identity, org string
 	if id.Role == domain.RoleAdmin {
 		return true
 	}
-	if org == "" {
-		org = domain.DefaultOrgID
+	if org == "" || s.orgs == nil {
+		return false
+	}
+	o, err := s.orgs.Resolve(ctx, org)
+	if err != nil {
+		return false
 	}
 	if id.OrgID != "" {
-		return org == id.OrgID
+		return o.ID == id.OrgID
 	}
-	if s.orgs != nil && id.UserID != "" {
-		if orgs, err := s.orgs.OrgsForUser(ctx, id.UserID); err == nil {
-			for _, o := range orgs {
-				if o.Name == org || o.ID == org {
-					return true
-				}
-			}
-		}
+	if id.UserID == "" {
+		return false
 	}
-	return org == domain.DefaultOrgID
+	member, err := s.orgs.IsOrgMember(ctx, o.ID, id.UserID)
+	return err == nil && member
 }
 
 // artifactKeyAllowed reports whether the caller may read an artifact key.
@@ -241,10 +240,12 @@ func (s *Server) artifactKeyAllowed(ctx context.Context, id *domain.Identity, ke
 		return true
 	}
 	parts := strings.Split(key, "/")
-	if len(parts) < 2 || parts[0] != "artifacts" {
-		return false
+	for i := 0; i+2 < len(parts); i++ {
+		if parts[i] == "orgs" && parts[i+2] == "artifacts" {
+			return s.orgAllowed(ctx, id, parts[i+1])
+		}
 	}
-	return s.orgAllowed(ctx, id, parts[1])
+	return false
 }
 
 type completeWorkflowJobRequest struct {

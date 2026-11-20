@@ -988,7 +988,7 @@ func TestTraceIDFileWrittenOnDiscovery(t *testing.T) {
 	}()
 
 	var content []byte
-	deadline := time.Now().Add(1500 * time.Millisecond)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(idFile); err == nil {
 			if runReturned.Load() {

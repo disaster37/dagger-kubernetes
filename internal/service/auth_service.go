@@ -16,6 +16,7 @@ import (
 type AuthService struct {
 	users       *UserService
 	groups      domain.GroupRepository
+	orgs        domain.OrgRepository
 	tokens      *TokenService
 	jwt         *JWTService
 	legacy      domain.TokenValidator // nil when no tokens_file
@@ -43,6 +44,9 @@ func NewAuthService(
 	}
 }
 
+// SetOrgRepository wires organization lookups for org-scoped tokens.
+func (a *AuthService) SetOrgRepository(orgs domain.OrgRepository) { a.orgs = orgs }
+
 // SetOAuthRevalidator wires the OAuth membership revalidator. nil (default)
 // disables revalidation; only wired when OAuth is the configured provider.
 func (a *AuthService) SetOAuthRevalidator(r *OAuthRevalidator) { a.revalidator = r }
@@ -67,18 +71,26 @@ func (a *AuthService) Resolve(ctx context.Context, bearer string) (*domain.Ident
 		return a.identityForUser(ctx, tok.UserID, domain.AuthAPIToken, 0)
 	}
 
-	if orgName, ok := ParseOrgToken(bearer); ok {
+	if _, ok := ParseOrgToken(bearer); ok {
 		tok, err := a.tokens.Validate(ctx, bearer)
 		if err != nil {
 			a.logger.WithError(err).Debug("org token validate failed")
 			return nil, domain.ErrUnauthenticated
 		}
+		orgID, found := strings.CutPrefix(tok.UserID, "org:")
+		if !found || orgID == "" || a.orgs == nil {
+			return nil, domain.ErrUnauthenticated
+		}
+		org, err := a.orgs.Get(ctx, orgID)
+		if err != nil {
+			return nil, domain.ErrUnauthenticated
+		}
 		return &domain.Identity{
 			UserID:   tok.UserID,
-			Username: orgName,
+			Username: org.Name,
 			Role:     domain.RoleUser,
 			Method:   domain.AuthAPIToken,
-			OrgID:    orgName,
+			OrgID:    org.ID,
 		}, nil
 	}
 

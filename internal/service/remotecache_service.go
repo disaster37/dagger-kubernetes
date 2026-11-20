@@ -28,6 +28,7 @@ type RemoteCacheService struct {
 	packMaxMemberBytes int64
 	gcInterval         time.Duration
 	exportSem          *semaphore.Weighted
+	quota              *QuotaService // nil = per-org cache_bytes quota not enforced
 
 	mu       sync.Mutex
 	inflight map[string]time.Time
@@ -52,6 +53,37 @@ func NewRemoteCacheService(index *repository.BboltCacheIndex, store *repository.
 	}
 }
 
+// WithCacheQuota wires per-org cache_bytes quota enforcement into the remote
+// cache write path and GC. A nil quota service disables per-org enforcement
+// (the configured global maximum still applies via GC).
+func (s *RemoteCacheService) WithCacheQuota(q *QuotaService) *RemoteCacheService {
+	s.quota = q
+	return s
+}
+
+// cacheQuota resolves the effective soft/hard cache_bytes threshold for a
+// namespace. When the namespace is not a resolvable org (e.g. "_shared" in
+// deprecated single-org shared mode) or the org has no hard cap, Hard falls
+// back to the configured global remote-cache maximum.
+func (s *RemoteCacheService) cacheQuota(ctx context.Context, namespace string) domain.QuotaThreshold {
+	th := domain.QuotaThreshold{}
+	if s.quota != nil {
+		if eff, err := s.quota.EffectiveQuotas(ctx, namespace); err == nil {
+			th = eff.MaxCacheBytes
+		}
+	}
+	if th.Hard <= 0 {
+		th.Hard = s.maxBytes
+	}
+	return th
+}
+
+// cacheBytes returns the total bytes currently indexed for namespace.
+func (s *RemoteCacheService) cacheBytes(namespace string) (int64, error) {
+	_, size, err := s.index.Stats(namespace)
+	return size, err
+}
+
 // Handle processes one protocol message and returns the response envelope.
 //
 //nolint:gocyclo // protocol message dispatch
@@ -64,7 +96,7 @@ func (s *RemoteCacheService) Handle(ctx context.Context, namespace string, readO
 	case domain.RCTypeHello:
 		var hello domain.Hello
 		_ = json.Unmarshal(env.Data, &hello)
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeWelcome, domain.Welcome{Namespace: namespace, MaxBytes: s.maxBytes})
+		return domain.NewRemoteCacheEnvelope(domain.RCTypeWelcome, domain.Welcome{Namespace: namespace, MaxBytes: s.cacheQuota(ctx, namespace).Hard})
 	case domain.RCTypeOpen:
 		var open domain.Open
 		_ = json.Unmarshal(env.Data, &open)
@@ -119,6 +151,9 @@ func (s *RemoteCacheService) handleExport(ctx context.Context, namespace string,
 		return s.errorEnvelope("export saturated")
 	}
 	defer s.exportSem.Release(1)
+	if err := s.enforceCacheWriteQuota(ctx, namespace, int64(len(export.Bundle))); err != nil {
+		return s.errorEnvelope(err.Error())
+	}
 	key, err := s.store.PutBundle(ctx, namespace, export.Digest, export.Bundle)
 	if err != nil {
 		return s.errorEnvelope(err.Error())
@@ -139,8 +174,8 @@ func (s *RemoteCacheService) handleExport(ctx context.Context, namespace string,
 		_ = s.index.Put(namespace, &aliasEntry)
 	}
 	if s.metrics != nil {
-		s.metrics.RemoteCacheExportedBundles.Inc()
-		s.metrics.RemoteCacheStoredBytes.Set(float64(entry.Size))
+		s.metrics.RemoteCacheExportedBundles.WithLabelValues(namespace).Inc()
+		s.metrics.RemoteCacheStoredBytes.WithLabelValues(namespace).Set(float64(entry.Size))
 	}
 	return domain.NewRemoteCacheEnvelope(domain.RCTypeExported, domain.Exported{Root: export.Root, Key: key})
 }
@@ -169,6 +204,9 @@ func bundleAliases(b *domain.ValueBundle) []string {
 }
 
 func (s *RemoteCacheService) handleUpload(ctx context.Context, namespace string, upload *domain.Upload) ([]byte, error) {
+	if err := s.enforceCacheWriteQuota(ctx, namespace, uploadDelta(upload)); err != nil {
+		return s.errorEnvelope(err.Error())
+	}
 	urls := make(map[string]string, len(upload.Digests))
 	now := time.Now().UTC()
 	s.mu.Lock()
@@ -237,6 +275,57 @@ func (s *RemoteCacheService) handleUpload(ctx context.Context, namespace string,
 	return domain.NewRemoteCacheEnvelope(domain.RCTypeUploaded, domain.Uploaded{URLs: urls, Packs: packs})
 }
 
+// uploadDelta estimates the bytes a cache upload will add to the namespace. It
+// sums the declared blob sizes and pack totals only; opaque digests without a
+// declared size are not counted, and a digest that only appears in
+// upload.Digests contributes nothing. The result is a deliberately cheap
+// estimate that can under-count an upload, unlike the single-bundle Export path
+// which is enforced on the exact bundle length.
+func uploadDelta(upload *domain.Upload) int64 {
+	var delta int64
+	for _, b := range upload.Blobs {
+		delta += b.Size
+	}
+	for _, p := range upload.Packs {
+		delta += p.Total
+	}
+	return delta
+}
+
+// enforceCacheWriteQuota blocks a cache write that would push the namespace
+// past its cache_bytes hard cap, after one synchronous GC to make room. Reads
+// (Lookup/Merge/Renew) are never blocked. Soft-limit breaches admit the write
+// and increment the org-quota soft-exceeded metric; a hard breach that survives
+// GC is rejected with the standard quota error envelope.
+func (s *RemoteCacheService) enforceCacheWriteQuota(ctx context.Context, namespace string, delta int64) error {
+	th := s.cacheQuota(ctx, namespace)
+	if th.Hard <= 0 {
+		return nil
+	}
+	usage, err := s.cacheBytes(namespace)
+	if err != nil {
+		return err
+	}
+	if th.Hard > 0 && usage+delta > th.Hard {
+		// One synchronous GC to make room, then re-read usage.
+		if gcErr := s.GC(ctx, namespace); gcErr != nil {
+			s.logger.WithError(gcErr).WithField("namespace", namespace).Warn("remote cache quota GC failed")
+		}
+		usage, err = s.cacheBytes(namespace)
+		if err != nil {
+			return err
+		}
+	}
+	if s.quota != nil {
+		_, evalErr := s.quota.evaluate(&domain.Identity{}, namespace, domain.QuotaCacheBytes, usage, delta, th)
+		return evalErr
+	}
+	if th.Hard > 0 && usage+delta > th.Hard {
+		return fmt.Errorf("organization quota exceeded: cache_bytes limit (%d) reached", th.Hard)
+	}
+	return nil
+}
+
 func (s *RemoteCacheService) handleLookup(namespace string, lookup *domain.Lookup) ([]byte, error) {
 	status := make(map[string]string, len(lookup.Digests))
 	now := time.Now().UTC()
@@ -245,7 +334,7 @@ func (s *RemoteCacheService) handleLookup(namespace string, lookup *domain.Looku
 			status[digest] = "stored"
 			_ = s.index.Touch(namespace, digest, now)
 			if s.metrics != nil {
-				s.metrics.RemoteCacheLookupHits.Inc()
+				s.metrics.RemoteCacheLookupHits.WithLabelValues(namespace).Inc()
 			}
 			continue
 		}
@@ -258,7 +347,7 @@ func (s *RemoteCacheService) handleLookup(namespace string, lookup *domain.Looku
 		}
 		status[digest] = "notStored"
 		if s.metrics != nil {
-			s.metrics.RemoteCacheLookupMisses.Inc()
+			s.metrics.RemoteCacheLookupMisses.WithLabelValues(namespace).Inc()
 		}
 	}
 	return domain.NewRemoteCacheEnvelope(domain.RCTypeLookedUp, domain.LookedUp{Status: status})
@@ -313,7 +402,7 @@ func (s *RemoteCacheService) IngestCacheEvents(ctx context.Context, namespace st
 		}
 		_ = s.index.Touch(namespace, ev.Key, now)
 		if s.metrics != nil {
-			s.metrics.RemoteCacheLookupHits.Inc()
+			s.metrics.RemoteCacheLookupHits.WithLabelValues(namespace).Inc()
 		}
 	}
 }
@@ -335,9 +424,11 @@ func (s *RemoteCacheService) Purge(ctx context.Context, namespace string) error 
 	return s.index.DeleteNamespace(namespace)
 }
 
-// GC evicts expired/oversized entries and their S3 bundles.
+// GC evicts expired/oversized entries and their S3 bundles. The oversized
+// threshold is the namespace's effective cache_bytes hard cap (org quota,
+// falling back to the configured global maximum).
 func (s *RemoteCacheService) GC(ctx context.Context, namespace string) error {
-	evicted, err := s.index.GC(namespace, s.ttl, s.maxBytes, time.Now().UTC())
+	evicted, err := s.index.GC(namespace, s.ttl, s.cacheQuota(ctx, namespace).Hard, time.Now().UTC())
 	if err != nil {
 		return err
 	}
@@ -353,9 +444,13 @@ func (s *RemoteCacheService) GC(ctx context.Context, namespace string) error {
 // Start hydrates the index from the S3 checkpoint and runs periodic GC.
 func (s *RemoteCacheService) Start(ctx context.Context, isLeader func() bool) {
 	if namespaces, err := s.index.Namespaces(); err == nil && len(namespaces) == 0 {
-		if data, err := s.store.GetIndexCheckpoint(ctx); err == nil && len(data) > 0 {
-			if err := s.index.ImportSnapshot("", data); err != nil {
-				s.logger.WithError(err).Warn("remote cache index checkpoint import failed")
+		if orgs, oErr := s.store.ListOrgPrefixes(ctx); oErr == nil {
+			for _, orgID := range orgs {
+				if data, gErr := s.store.GetIndexCheckpoint(ctx, orgID); gErr == nil && len(data) > 0 {
+					if iErr := s.index.ImportSnapshot(orgID, data); iErr != nil {
+						s.logger.WithError(iErr).WithField("org", orgID).Warn("remote cache index checkpoint import failed")
+					}
+				}
 			}
 		}
 	}
@@ -384,10 +479,12 @@ func (s *RemoteCacheService) runGC(ctx context.Context) {
 			s.logger.WithError(err).WithField("namespace", namespace).Warn("remote cache GC failed")
 		}
 	}
-	var buf bytes.Buffer
-	if err := s.index.ExportSnapshot(&buf); err == nil {
-		if err := s.store.PutIndexCheckpoint(ctx, buf.Bytes()); err != nil {
-			s.logger.WithError(err).Warn("remote cache index checkpoint upload failed")
+	for _, namespace := range namespaces {
+		var buf bytes.Buffer
+		if err := s.index.ExportSnapshot(&buf); err == nil {
+			if err := s.store.PutIndexCheckpoint(ctx, namespace, buf.Bytes()); err != nil {
+				s.logger.WithError(err).WithField("namespace", namespace).Warn("remote cache index checkpoint upload failed")
+			}
 		}
 	}
 }

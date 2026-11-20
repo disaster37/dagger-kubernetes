@@ -77,7 +77,7 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 	if ev.Repo == "" {
 		ev.Repo = src.Repo
 	}
-	proj, err := s.projects.GetOrCreateByName(ctx, ev.Repo)
+	proj, err := s.projects.GetOrCreateByName(ctx, src.OrgID, ev.Repo)
 	if err != nil {
 		return nil, err
 	}

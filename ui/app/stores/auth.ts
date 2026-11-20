@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { fetchMe, loginRequest, logoutRequest, refreshRequest } from '~/api/client'
 import type { AuthUser } from '~/api/types'
+import { useOrgStore } from '~/stores/org'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<AuthUser | null>(null)
@@ -24,6 +25,7 @@ export const useAuthStore = defineStore('auth', () => {
     refreshInFlightEpoch = -1
     user.value = null
     isAuthenticated.value = false
+    useOrgStore().clear()
   }
 
   async function login(username: string, password: string): Promise<void> {
@@ -33,6 +35,7 @@ export const useAuthStore = defineStore('auth', () => {
     if (epoch !== authEpoch.value) return
     user.value = u
     isAuthenticated.value = true
+    useOrgStore().hydrate(u.orgs ?? [])
   }
 
   // loadUser restores the session from the cookie. `callback: true` is used by
@@ -47,6 +50,7 @@ export const useAuthStore = defineStore('auth', () => {
       if (epoch !== authEpoch.value) return isAuthenticated.value
       user.value = u
       isAuthenticated.value = true
+      useOrgStore().hydrate(u.orgs ?? [])
       return true
     } catch {
       if (epoch !== authEpoch.value) return isAuthenticated.value

@@ -16,25 +16,44 @@ import (
 
 // K8sWorkflowRunner executes workflow call: jobs as batch/v1 Jobs.
 type K8sWorkflowRunner struct {
-	clientset kubernetes.Interface
-	namespace string
-	image     string
-	timeout   time.Duration
-	serverURL string
-	caSecret  string
+	clientset          kubernetes.Interface
+	namespace          string
+	image              string
+	timeout            time.Duration
+	serverURL          string
+	internalControlURL string
+	caSecret           string
 }
 
 var _ domain.WorkflowJobRunner = (*K8sWorkflowRunner)(nil)
 
 // NewK8sWorkflowRunner returns a K8sWorkflowRunner.
-func NewK8sWorkflowRunner(clientset kubernetes.Interface, namespace, image string, timeout time.Duration, serverURL, caSecret string) *K8sWorkflowRunner {
+func NewK8sWorkflowRunner(clientset kubernetes.Interface, namespace, image string, timeout time.Duration, serverURL, internalControlURL, caSecret string) *K8sWorkflowRunner {
 	if namespace == "" {
 		namespace = "dagger-kubernetes"
 	}
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
 	}
-	return &K8sWorkflowRunner{clientset: clientset, namespace: namespace, image: image, timeout: timeout, serverURL: serverURL, caSecret: caSecret}
+	return &K8sWorkflowRunner{
+		clientset:          clientset,
+		namespace:          namespace,
+		image:              image,
+		timeout:            timeout,
+		serverURL:          serverURL,
+		internalControlURL: internalControlURL,
+		caSecret:           caSecret,
+	}
+}
+
+// controlURL returns the in-cluster supervisor URL when configured, so jobs
+// dial the internal control service (and its Minting-CA-signed cert) rather
+// than the public ingress.
+func (r *K8sWorkflowRunner) controlURL() string {
+	if r.internalControlURL != "" {
+		return r.internalControlURL
+	}
+	return r.serverURL
 }
 
 // RunCall creates a workflow Job and returns immediately (outputs are captured
@@ -80,7 +99,7 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 		"--repo", spec.Repo,
 		"--sha", spec.SHA,
 		"--ref", spec.Ref,
-		"--server", r.serverURL,
+		"--server", r.controlURL(),
 	)
 	args = append(args, spec.Flags...)
 	job := &batchv1.Job{
@@ -115,7 +134,10 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 			Name: "minting-ca", MountPath: "/etc/dagger-kubernetes/ca", ReadOnly: true,
 		}}
 		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env,
-			corev1.EnvVar{Name: "SSL_CERT_FILE", Value: "/etc/dagger-kubernetes/ca/ca.crt"})
+			// Keep the system CA bundle (for `git clone https://…`) and add the
+			// mounted Minting CA (for internal supervisor control/data TLS).
+			// SSL_CERT_FILE would REPLACE the system bundle.
+			corev1.EnvVar{Name: "SSL_CERT_DIR", Value: "/etc/ssl/certs:/etc/dagger-kubernetes/ca"})
 	}
 	created, err := r.clientset.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {

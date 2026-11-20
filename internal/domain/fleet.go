@@ -1,7 +1,11 @@
 package domain
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 )
 
@@ -18,6 +22,8 @@ type Replica struct {
 type FleetInfo struct {
 	Version       string    `json:"version"`
 	STSName       string    `json:"stsName"`
+	Org           string    `json:"org,omitempty"`      // org.ID
+	OrgSlug       string    `json:"org_slug,omitempty"` // org.Name (display)
 	Replicas      int       `json:"replicas"`
 	ReadyReplicas int       `json:"readyReplicas"`
 	Ordinals      []Replica `json:"ordinals"`
@@ -66,41 +72,101 @@ type FleetProvider interface {
 	DeletePVC(name string) error
 }
 
+// FleetScope identifies one deployed engine fleet: a version scoped to an org
+// (orgSlug == "" for shared/unscoped fleets when fleet.isolation=shared).
+type FleetScope struct {
+	OrgID   string
+	Version string
+}
+
+// maxEngineStsNameLen keeps the pod label controller-revision-hash
+// (<stsName>-<10charHash>) within Kubernetes's 63-char label limit.
+const maxEngineStsNameLen = 52
+
+// EngineStsName returns the canonical StatefulSet name for an engine fleet.
+// org is the organization storage ID ("org-<16hex>"; "" for a shared fleet).
+// Build-metadata versions that would exceed maxEngineStsNameLen are compacted
+// deterministically with a SHA-256 suffix over (org, version) so neither orgs
+// nor build-metadata versions can collide.
+func EngineStsName(org, version string) string {
+	suffix := VersionSlug(version)
+	if org != "" {
+		suffix = fmt.Sprintf("%s-%s", VersionSlug(org), suffix)
+	}
+	const prefix = "dagger-engine-"
+	if len(prefix)+len(suffix) <= maxEngineStsNameLen {
+		return fmt.Sprintf("%s%s", prefix, suffix)
+	}
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%s", org, version)))
+	budget := maxEngineStsNameLen - len(prefix) - 1 - 8
+	trimmed := strings.TrimRight(suffix[:budget], "-")
+	return fmt.Sprintf("%s%s-%s", prefix, trimmed, hex.EncodeToString(sum[:])[:8])
+}
+
+// EnginePodName returns the ordinal pod name for an engine fleet.
+func EnginePodName(org, version string, ordinal int) string {
+	return fmt.Sprintf("%s-%d", EngineStsName(org, version), ordinal)
+}
+
+// EngineServiceName returns the headless service name for an engine fleet,
+// which by design matches the StatefulSet name.
+func EngineServiceName(org, version string) string {
+	return EngineStsName(org, version)
+}
+
+// EnginePodRegex returns a PromQL-safe regex matching the pod names of a
+// version's engine fleet in either isolation mode: the shared
+// "dagger-engine-<vslug>-N" and the per-org "dagger-engine-<orgslug>-<vslug>-N".
+// The version slug contains only [A-Za-z0-9_-] (no regex metacharacters), so
+// the result is safe to interpolate into a {pod=~"..."} matcher.
+func EnginePodRegex(version string) string {
+	return fmt.Sprintf("dagger-engine-(?:[a-z0-9-]+-)?%s", VersionSlug(version))
+}
+
+// EngineOrgPodRegex returns a PromQL-safe regex matching only the pods of an
+// org-scoped engine fleet ("dagger-engine-<orgslug>-<vslug>-N"). The engine
+// metric templates append the "-.*" ordinal suffix, so this returns just the
+// org-scoped StatefulSet name pattern. The org slug is server-assigned, but it
+// is still QuoteMeta-escaped so a hostile value cannot inject regex
+// metacharacters; the caller additionally escapes the PromQL label value.
+func EngineOrgPodRegex(org, version string) string {
+	return regexp.QuoteMeta(EngineStsName(org, version))
+}
+
+// StsName returns the shared (unscoped) StatefulSet name for a version.
 func StsName(version string) string {
-	return fmt.Sprintf("dagger-engine-%s", VersionSlug(version))
+	return EngineStsName("", version)
 }
 
 // OrgStsName returns the per-org StatefulSet name used when
 // fleet.isolation=per_org.
-func OrgStsName(orgSlug, version string) string {
-	if orgSlug == "" {
-		return StsName(version)
-	}
-	return fmt.Sprintf("dagger-engine-%s-%s", VersionSlug(orgSlug), VersionSlug(version))
+func OrgStsName(org, version string) string {
+	return EngineStsName(org, version)
 }
 
+// PodName returns the shared (unscoped) ordinal pod name for a version.
 func PodName(version string, ordinal int) string {
-	return fmt.Sprintf("dagger-engine-%s-%d", VersionSlug(version), ordinal)
+	return EnginePodName("", version, ordinal)
 }
 
-// OrgPodName returns the per-org pod name used when fleet.isolation=per_org.
-func OrgPodName(orgSlug, version string, ordinal int) string {
-	return fmt.Sprintf("%s-%d", OrgStsName(orgSlug, version), ordinal)
-}
-
-// ServiceName returns the headless service name, which by design matches the
-// StatefulSet name.
+// ServiceName returns the shared (unscoped) headless service name, which by
+// design matches the StatefulSet name.
 func ServiceName(version string) string {
-	return StsName(version)
+	return EngineServiceName("", version)
 }
 
 // OrgServiceName returns the per-org headless service name.
-func OrgServiceName(orgSlug, version string) string {
-	return OrgStsName(orgSlug, version)
+func OrgServiceName(org, version string) string {
+	return EngineServiceName(org, version)
 }
 
 // ScopedFleetProvider is implemented by providers that can scope their
-// StatefulSets/Services/PVCs to an organization (fleet.isolation=per_org).
+// StatefulSets/Services/PVCs to an organization (fleet.isolation=per_org) and
+// enumerate the actually-deployed scopes.
 type ScopedFleetProvider interface {
-	WithScope(orgSlug string) FleetProvider
+	WithScope(orgID string) FleetProvider
+	// AllScopes returns one FleetScope per deployed engine StatefulSet so the
+	// sweeper can clean up every org's fleet (including leftovers from config
+	// toggles or orgs since removed from Raft).
+	AllScopes() ([]FleetScope, error)
 }

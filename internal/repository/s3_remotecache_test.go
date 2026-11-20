@@ -82,7 +82,7 @@ func TestPresignGetRangeRejectsInvalid(t *testing.T) {
 func TestPackKeyFormat(t *testing.T) {
 	store := &S3RemoteCacheStore{prefix: "remote-cache"}
 	got := store.packKey("acme", "abc")
-	want := "remote-cache/acme/packs/abc.pack"
+	want := "orgs/acme/remote-cache/packs/abc.pack"
 	if got != want {
 		t.Fatalf("packKey = %q, want %q", got, want)
 	}

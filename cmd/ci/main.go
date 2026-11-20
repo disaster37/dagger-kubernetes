@@ -91,6 +91,7 @@ func ciFlags() []cli.Flag {
 		// the process list (ps / /proc/<pid>/cmdline) to every local user on
 		// shared CI agents (CWE-214/CWE-532), so env is the preferred source.
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN"}, Usage: "Dagger Cloud token (required; prefer the DAGGER_KUBERNETES_TOKEN env var to keep it out of process argv)"},
+		&cli.StringFlag{Name: "org", EnvVars: []string{"DAGGER_ORG", "DAGGER_KUBERNETES_ORG"}, Usage: "organization slug or ID (sent as X-Dagger-Org; required when the token belongs to multiple organizations)"},
 		&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
 		&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
@@ -181,6 +182,7 @@ func run(c *cli.Context) error {
 		cmdCtx, cmdCancel = context.WithTimeout(rootCtx, timeout)
 	}
 	defer cmdCancel()
+	org := c.String("org")
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
@@ -193,13 +195,17 @@ func run(c *cli.Context) error {
 		cmd.Stdout = os.Stdout
 	}
 
+	cmd.Env = os.Environ()
+	if org != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("DAGGER_ORG=%s", org))
+	}
 	if c.Bool("cli") {
 		binDir, cleanup, err := provisionCLI(rootCtx, serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
 		if err != nil {
 			return fmt.Errorf("provision dagger cli: %w", err)
 		}
 		defer cleanup()
-		cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+		cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
 	}
 
 	var logBuf strings.Builder
@@ -233,7 +239,7 @@ func run(c *cli.Context) error {
 
 	ctx, cancel := context.WithCancel(rootCtx)
 	stepsCancel = cancel
-	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout)
+	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout).WithOrg(org)
 
 	if steps {
 		stepsBuilder = service.NewStepEventBuilder(maxDepth)

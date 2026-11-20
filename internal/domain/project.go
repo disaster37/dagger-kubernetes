@@ -19,8 +19,12 @@ type Project struct {
 type ProjectRepository interface {
 	Create(ctx context.Context, p *Project) error
 	Get(ctx context.Context, id string) (*Project, error)
-	GetByName(ctx context.Context, name string) (*Project, error)
-	List(ctx context.Context) ([]*Project, error)
+	GetByName(ctx context.Context, orgID, name string) (*Project, error)
+	ListByOrg(ctx context.Context, orgID string) ([]*Project, error)
+	// ListByNameAcrossOrgs supports secretless CI OIDC lookups when the org
+	// selector is omitted.
+	ListByNameAcrossOrgs(ctx context.Context, name string) ([]*Project, error)
+	List(ctx context.Context) ([]*Project, error) // internal cross-org reads only
 	Update(ctx context.Context, p *Project) error
 	Delete(ctx context.Context, id string) error
 }

@@ -169,19 +169,23 @@ func (s *Server) handleUserResetPassword(ctx context.Context, c *app.RequestCont
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
-// handleUserGroups replaces a user's group memberships.
+// handleUserGroups replaces a user's group memberships inside the request
+// organization.
 func (s *Server) handleUserGroups(ctx context.Context, c *app.RequestContext) {
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
 	id := c.Param("id")
 	var req setUserGroupsRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	if err := s.groups.SetUserGroups(ctx, id, req.GroupIDs); err != nil {
+	if err := s.groups.SetUserGroupsInOrg(ctx, org.ID, id, req.GroupIDs); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	// Return the new memberships as group summaries.
-	gs, _ := s.groups.GroupsForUser(ctx, id)
+	gs, _ := s.groups.GroupsForUserInOrg(ctx, org.ID, id)
 	c.JSON(consts.StatusOK, toGroupSummaries(gs))
 }
 
@@ -257,7 +261,7 @@ func requireJSONContentType(c *app.RequestContext) bool {
 func toGroupSummaries(gs []*domain.Group) []groupSummary {
 	out := make([]groupSummary, 0, len(gs))
 	for _, g := range gs {
-		out = append(out, groupSummary{ID: g.ID, Name: g.Name})
+		out = append(out, groupSummary{ID: g.ID, OrgID: g.OrgID, Name: g.Name})
 	}
 	return out
 }

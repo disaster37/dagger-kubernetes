@@ -18,14 +18,14 @@ func newQuotaForTest(t *testing.T, groups []*domain.Group, memberships map[strin
 
 func TestQuotaAdminBypass(t *testing.T) {
 	q := newQuotaForTest(t, nil, nil, &stubSessionStore{})
-	if err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "a", Role: domain.RoleAdmin}); err != nil {
+	if _, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "a", Role: domain.RoleAdmin}); err != nil {
 		t.Fatalf("admin bypass: %v", err)
 	}
 }
 
 func TestQuotaNoGroups(t *testing.T) {
 	q := newQuotaForTest(t, nil, nil, &stubSessionStore{})
-	err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser})
+	_, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser})
 	if err != domain.ErrNoGroups {
 		t.Fatalf("no groups: %v, want ErrNoGroups", err)
 	}
@@ -34,7 +34,7 @@ func TestQuotaNoGroups(t *testing.T) {
 func TestQuotaAgentUnavailable(t *testing.T) {
 	g := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: false}
 	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, &stubSessionStore{})
-	err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}})
+	_, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}})
 	if err != domain.ErrAgentUnavailable {
 		t.Fatalf("agent unavailable: %v, want ErrAgentUnavailable", err)
 	}
@@ -45,10 +45,10 @@ func TestQuotaUnlimited(t *testing.T) {
 	sessions := &stubSessionStore{}
 	// Many existing sessions for this user — still admitted (0 = unlimited).
 	for i := 0; i < 100; i++ {
-		sessions.Register("fp", "v", "pod", "inst", "trace", "u")
+		sessions.Register("", "fp", "v", "pod", "inst", "trace", "u")
 	}
 	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, sessions)
-	if err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}}); err != nil {
+	if _, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}}); err != nil {
 		t.Fatalf("unlimited: %v", err)
 	}
 }
@@ -56,10 +56,10 @@ func TestQuotaUnlimited(t *testing.T) {
 func TestQuotaExhausted(t *testing.T) {
 	g := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 2}
 	sessions := &stubSessionStore{}
-	sessions.Register("fp1", "v", "pod", "inst", "trace", "u")
-	sessions.Register("fp2", "v", "pod", "inst", "trace", "u")
+	sessions.Register("acme", "fp1", "v", "pod", "inst", "trace", "u")
+	sessions.Register("", "fp2", "v", "pod", "inst", "trace", "u")
 	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, sessions)
-	err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}})
+	_, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}})
 	if err != domain.ErrQuotaExhausted {
 		t.Fatalf("exhausted: %v, want ErrQuotaExhausted", err)
 	}
@@ -68,9 +68,9 @@ func TestQuotaExhausted(t *testing.T) {
 func TestQuotaAdmittedUnderLimit(t *testing.T) {
 	g := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 8}
 	sessions := &stubSessionStore{}
-	sessions.Register("fp1", "v", "pod", "inst", "trace", "u")
+	sessions.Register("acme", "fp1", "v", "pod", "inst", "trace", "u")
 	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, sessions)
-	if err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}}); err != nil {
+	if _, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1"}}); err != nil {
 		t.Fatalf("under limit: %v", err)
 	}
 }
@@ -80,10 +80,10 @@ func TestQuotaMultiGroupDoubleCount(t *testing.T) {
 	g1 := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1}
 	g2 := &domain.Group{ID: "g2", Name: "G2", AgentAvailable: true, MaxRunnerSessions: 1}
 	sessions := &stubSessionStore{}
-	sessions.Register("fp1", "v", "pod", "inst", "trace", "u")
+	sessions.Register("acme", "fp1", "v", "pod", "inst", "trace", "u")
 	q := newQuotaForTest(t, []*domain.Group{g1, g2}, map[string][]string{"g1": {"u"}, "g2": {"u"}}, sessions)
 	// One lease fills both groups (each max 1) -> exhausted.
-	err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1", "g2"}})
+	_, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1", "g2"}})
 	if err != domain.ErrQuotaExhausted {
 		t.Fatalf("multi-group double-count: %v, want ErrQuotaExhausted", err)
 	}
@@ -94,9 +94,9 @@ func TestQuotaAnyAvailableGroupAdmits(t *testing.T) {
 	g1 := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1}
 	g2 := &domain.Group{ID: "g2", Name: "G2", AgentAvailable: true, MaxRunnerSessions: 5}
 	sessions := &stubSessionStore{}
-	sessions.Register("fp1", "v", "pod", "inst", "trace", "u")
+	sessions.Register("acme", "fp1", "v", "pod", "inst", "trace", "u")
 	q := newQuotaForTest(t, []*domain.Group{g1, g2}, map[string][]string{"g1": {"u"}, "g2": {"u"}}, sessions)
-	if err := q.CheckEngineAccess(context.Background(), &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1", "g2"}}); err != nil {
+	if _, err := q.CheckEngineAccess(context.Background(), "", &domain.Identity{UserID: "u", Role: domain.RoleUser, GroupIDs: []string{"g1", "g2"}}); err != nil {
 		t.Fatalf("any-available: %v", err)
 	}
 }
@@ -105,9 +105,9 @@ func TestQuotaUsageByGroup(t *testing.T) {
 	g1 := &domain.Group{ID: "g1", Name: "G1", AgentAvailable: true}
 	g2 := &domain.Group{ID: "g2", Name: "G2", AgentAvailable: true}
 	sessions := &stubSessionStore{}
-	sessions.Register("fp1", "v", "pod", "inst", "trace", "u1")
-	sessions.Register("fp2", "v", "pod", "inst", "trace", "u1")
-	sessions.Register("fp3", "v", "pod", "inst", "trace", "u2")
+	sessions.Register("", "fp1", "v", "pod", "inst", "trace", "u1")
+	sessions.Register("", "fp2", "v", "pod", "inst", "trace", "u1")
+	sessions.Register("", "fp3", "v", "pod", "inst", "trace", "u2")
 	q := newQuotaForTest(t, []*domain.Group{g1, g2}, map[string][]string{
 		"g1": {"u1", "u2"},
 		"g2": {"u1"},
@@ -129,7 +129,7 @@ func TestQuotaOrgTokenAdmitted(t *testing.T) {
 	g := &domain.Group{ID: "g1", OrgID: "acme", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 8}
 	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, &stubSessionStore{})
 	id := &domain.Identity{UserID: "org:acme", OrgID: "acme", Role: domain.RoleUser}
-	if err := q.CheckEngineAccess(context.Background(), id); err != nil {
+	if _, err := q.CheckEngineAccess(context.Background(), "", id); err != nil {
 		t.Fatalf("org token: %v", err)
 	}
 }
@@ -137,7 +137,7 @@ func TestQuotaOrgTokenAdmitted(t *testing.T) {
 func TestQuotaOrgTokenFreshOrgAdmitted(t *testing.T) {
 	q := newQuotaForTest(t, nil, nil, &stubSessionStore{})
 	id := &domain.Identity{UserID: "org:acme", OrgID: "acme", Role: domain.RoleUser}
-	if err := q.CheckEngineAccess(context.Background(), id); err != nil {
+	if _, err := q.CheckEngineAccess(context.Background(), "", id); err != nil {
 		t.Fatalf("fresh org: %v", err)
 	}
 }
@@ -145,10 +145,10 @@ func TestQuotaOrgTokenFreshOrgAdmitted(t *testing.T) {
 func TestQuotaOrgTokenExhausted(t *testing.T) {
 	g := &domain.Group{ID: "g1", OrgID: "acme", Name: "G1", AgentAvailable: true, MaxRunnerSessions: 1}
 	sessions := &stubSessionStore{}
-	sessions.Register("fp1", "v", "pod", "inst", "trace", "u")
+	sessions.Register("acme", "fp1", "v", "pod", "inst", "trace", "u")
 	q := newQuotaForTest(t, []*domain.Group{g}, map[string][]string{"g1": {"u"}}, sessions)
 	id := &domain.Identity{UserID: "org:acme", OrgID: "acme", Role: domain.RoleUser}
-	if err := q.CheckEngineAccess(ctxBackground(), id); err != domain.ErrQuotaExhausted {
+	if _, err := q.CheckEngineAccess(ctxBackground(), "", id); err != domain.ErrQuotaExhausted {
 		t.Fatalf("exhausted: %v", err)
 	}
 }

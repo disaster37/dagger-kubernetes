@@ -21,6 +21,10 @@ func (r *sessionSinkRecorder) ApplySessionRegistered(lease *domain.Lease) {
 	r.registered = append(r.registered, &cp)
 }
 
+func (r *sessionSinkRecorder) ApplyBootstrapOrg(string)           {}
+func (r *sessionSinkRecorder) ApplyUserOrgRevoked(string, string) {}
+func (r *sessionSinkRecorder) ApplyOrgDeleted(string)             {}
+
 func (r *sessionSinkRecorder) ApplySessionTouched(certFP string, at time.Time) {
 	r.touches = append(r.touches, struct {
 		fp string

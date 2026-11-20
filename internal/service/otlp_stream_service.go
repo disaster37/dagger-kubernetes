@@ -46,17 +46,17 @@ func NewOTLPStreamService(archive domain.OTLPArchive, traceMeta domain.TraceMeta
 	return &OTLPStreamService{archive: archive, traceMeta: traceMeta, logger: logger, buffers: make(map[string]*otlpBuffer)}
 }
 
-func otlpKey(traceID, signal string) string {
-	return fmt.Sprintf("%s/%s", traceID, signal)
+func otlpKey(orgID, traceID, signal string) string {
+	return fmt.Sprintf("%s/%s/%s", orgID, traceID, signal)
 }
 
 // Ingest buffers one raw OTLP payload for traceID/signal and flushes when the
 // size threshold is reached.
-func (s *OTLPStreamService) Ingest(ctx context.Context, traceID, signal string, payload []byte) {
+func (s *OTLPStreamService) Ingest(ctx context.Context, orgID, traceID, signal string, payload []byte) {
 	if s.archive == nil || traceID == "" || len(payload) == 0 {
 		return
 	}
-	key := otlpKey(traceID, signal)
+	key := otlpKey(orgID, traceID, signal)
 	s.mu.Lock()
 	buf := s.buffers[key]
 	if buf == nil {
@@ -77,7 +77,7 @@ func (s *OTLPStreamService) Ingest(ctx context.Context, traceID, signal string, 
 	flush := buf.pendingBytes >= otlpFlushBytes
 	s.mu.Unlock()
 	if flush {
-		s.flush(ctx, traceID, signal)
+		s.flush(ctx, orgID, traceID, signal)
 	}
 }
 
@@ -93,8 +93,8 @@ func ringBytes(ring []domain.OTLPChunk) int {
 // are removed from the buffer; on a transient archive failure the un-appended
 // suffix retains its original sequence numbers so the next tick retries the
 // exact same (Seq, Payload) idempotently.
-func (s *OTLPStreamService) flush(ctx context.Context, traceID, signal string) {
-	key := otlpKey(traceID, signal)
+func (s *OTLPStreamService) flush(ctx context.Context, orgID, traceID, signal string) {
+	key := otlpKey(orgID, traceID, signal)
 	s.mu.Lock()
 	buf := s.buffers[key]
 	if buf == nil || len(buf.pending) == 0 {
@@ -107,7 +107,7 @@ func (s *OTLPStreamService) flush(ctx context.Context, traceID, signal string) {
 
 	appended := 0
 	for i, chunk := range pending {
-		if err := s.archive.Append(ctx, traceID, signal, chunk.Seq, chunk.Payload); err != nil {
+		if err := s.archive.Append(ctx, orgID, traceID, signal, chunk.Seq, chunk.Payload); err != nil {
 			s.logger.WithError(err).WithFields(logrus.Fields{"trace_id": traceID, "signal": signal}).Warn("otlp archive append failed")
 			break
 		}
@@ -139,8 +139,8 @@ func (s *OTLPStreamService) flush(ctx context.Context, traceID, signal string) {
 
 // ChunksFrom returns archived chunks with Seq >= fromSeq plus any still-buffered
 // live chunks. It never forces an S3 flush on reader polls.
-func (s *OTLPStreamService) ChunksFrom(ctx context.Context, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, <-chan struct{}, error) {
-	key := otlpKey(traceID, signal)
+func (s *OTLPStreamService) ChunksFrom(ctx context.Context, orgID, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, <-chan struct{}, error) {
+	key := otlpKey(orgID, traceID, signal)
 	s.mu.Lock()
 	buf := s.buffers[key]
 	var notify <-chan struct{}
@@ -156,7 +156,7 @@ func (s *OTLPStreamService) ChunksFrom(ctx context.Context, traceID, signal stri
 	if s.archive == nil {
 		return nil, notify, nil
 	}
-	archived, err := s.archive.ChunksAfter(ctx, traceID, signal, fromSeq)
+	archived, err := s.archive.ChunksAfter(ctx, orgID, traceID, signal, fromSeq)
 	if err != nil {
 		return nil, notify, err
 	}
@@ -244,11 +244,11 @@ func (s *OTLPStreamService) flushAll(ctx context.Context) {
 	}
 	s.mu.Unlock()
 	for _, key := range keys {
-		idx := strings.LastIndex(key, "/")
-		if idx <= 0 || idx == len(key)-1 {
+		parts := strings.SplitN(key, "/", 3)
+		if len(parts) != 3 {
 			continue
 		}
-		s.flush(ctx, key[:idx], key[idx+1:])
+		s.flush(ctx, parts[0], parts[1], parts[2])
 	}
 	s.evictIdle(ctx)
 }

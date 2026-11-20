@@ -59,6 +59,7 @@ type HistoryPurgeResult struct {
 // HistoryStatsProvider reports history stats + GC rules.
 type HistoryStatsProvider interface {
 	Stats(ctx context.Context) (*HistoryStats, error)
+	StatsForOrg(ctx context.Context, orgID string) (*HistoryStats, error)
 	GCRules() HistoryGCRules
 }
 

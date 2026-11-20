@@ -24,5 +24,7 @@ type ConnectEnvSnapshot struct {
 	AllowedVersions []string         `json:"allowed_versions"`
 	SelectedVersion string           `json:"selected_version,omitempty"`
 	Token           ConnectTokenMeta `json:"token"`
+	OrgName         string           `json:"org_name,omitempty"`
+	TokenType       string           `json:"token_type,omitempty"`
 	EnvVars         []ConnectEnvVar  `json:"env_vars"`
 }

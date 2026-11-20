@@ -161,15 +161,27 @@ func summariesFromSpans(spans []spanWithResource) []TraceIngestSummary {
 	// trace root: a batch that carries only a subtree must not be allowed to
 	// drive trace_meta status/duration, otherwise a finished child span would
 	// mark the whole trace finished (success/failed) while it is still
-	// running. First root per trace wins.
+	// running. When a batch carries both the root start record and the root
+	// finish record, prefer the finish record (terminal status or a non-zero
+	// end time) so the trace is not left "running".
 	byTrace := make(map[string]*spanWithResource)
 	for i := range spans {
 		s := &spans[i]
-		if isRootSpan(s.span.GetParentSpanId()) {
-			tid := string(s.span.GetTraceId())
-			if _, ok := byTrace[tid]; !ok {
-				byTrace[tid] = s
+		if !isRootSpan(s.span.GetParentSpanId()) {
+			continue
+		}
+		tid := string(s.span.GetTraceId())
+		existing, ok := byTrace[tid]
+		if !ok {
+			byTrace[tid] = s
+			continue
+		}
+		if preferRootRecord(s, existing) {
+			// Preserve the start time if the finish record lacks one.
+			if s.span.GetStartTimeUnixNano() == 0 && existing.span.GetStartTimeUnixNano() != 0 {
+				s.span.StartTimeUnixNano = existing.span.StartTimeUnixNano
 			}
+			byTrace[tid] = s
 		}
 	}
 
@@ -191,6 +203,30 @@ func isRootSpan(parent []byte) bool {
 		}
 	}
 	return true
+}
+
+// preferRootRecord reports whether candidate is a better root record for a
+// trace than current: a terminal status (OK/ERROR) or a non-zero end time wins
+// over a start-only record, so a batch carrying both the root start and root
+// finish records keeps the finish record.
+func preferRootRecord(candidate, current *spanWithResource) bool {
+	if spanHasTerminalStatus(candidate.span) {
+		return true
+	}
+	if spanHasTerminalStatus(current.span) {
+		return false
+	}
+	return candidate.span.GetEndTimeUnixNano() > 0 && current.span.GetEndTimeUnixNano() == 0
+}
+
+// spanHasTerminalStatus reports whether a span carries a terminal OTLP status.
+func spanHasTerminalStatus(s *tracepb.Span) bool {
+	switch s.GetStatus().GetCode() {
+	case tracepb.Status_STATUS_CODE_OK, tracepb.Status_STATUS_CODE_ERROR:
+		return true
+	default:
+		return false
+	}
 }
 
 // stringAttrs extracts string-valued attributes from OTLP KeyValue pairs.

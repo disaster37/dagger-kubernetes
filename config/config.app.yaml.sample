@@ -84,6 +84,7 @@ auth:
     group_mappings: []                 # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
       # - pattern: '^github\.com/acme-(.*)$'   # Go regexp vs incoming provider group name (case-sensitive; (?i) for insensitive).
       #   replacement: 'acme-$1'               # target supervisor group name; $1/${name} capture substitution, $$ = literal $.
+      #   org: 'acme'                          # optional target org slug or org-<16hex> ID (empty = bootstrap org; unknown org fails closed).
     # NOTE: group_mappings assigns GROUP MEMBERSHIP only, never the admin ROLE.
     # Mapped target groups are AUTO-CREATED when missing, with
     # mapped_group_max_runner_sessions and agent_available=true; a group that
@@ -428,7 +429,12 @@ pipeline:
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
   floor: "v0.19.0"                          # minimum engine version admitted.
-  allowlist: ["0.19", "0.20", "0.21"]       # major.minor prefixes admitted (empty = admit all >= floor).
+  # allowlist entries may be, in any mix:
+  #   - a minor series      ("1.0"      admits v1.0.0-beta.* and v1.0.x),
+  #   - a pre-release track ("1.0.0-beta" admits v1.0.0-beta.*),
+  #   - an exact version    ("v1.0.0-beta.28" admits only that version).
+  # All entries remain subject to floor; empty = admit all >= floor.
+  allowlist: ["0.19", "0.20", "0.21", "1.0"]
 
 # --- CI integration feature flags -------------------------------------------
 # These toggle optional niceties; safe to leave at defaults.
@@ -478,9 +484,28 @@ cli:
 # skipped with a WARN, never auto-created. An empty list (the default) disables
 # the feature and leaves auto_assign_pattern behavior unchanged.
 attribution:
-  project_mappings: []               # ordered list of {pattern, group}; empty = disabled.
+  project_mappings: []               # ordered list of {pattern, group, org}; empty = disabled.
     # - pattern: '^github\.com/acme/.*'   # Go regexp vs project name (case-sensitive; (?i) opt-in).
     #   group: 'acme'                      # literal target supervisor group name (must exist).
+    #   org: 'acme'                        # optional: restrict the rule to one org slug/ID (empty = trace's resolved org).
+
+# --- Organizations & multi-tenant quotas -------------------------------------
+# Organization is the root namespace (Org -> Group -> Project). Every deployment
+# bootstraps a single protected organization with a generated "org-<16hex>" UID
+# and the fixed immutable slug "default"; only its display name is configurable
+# here. Additional organizations can only be created by a global admin via the
+# API/UI. Self-hosted deployments leave all default_quotas at 0 (unlimited).
+org:
+  default:
+    display_name: "Default"           # Human-readable title shown in the UI switcher (max 128 chars).
+  default_quotas:
+    max_groups:              { soft: 0, hard: 0 } # 0 = unlimited
+    max_projects:            { soft: 0, hard: 0 }
+    max_members:             { soft: 0, hard: 0 }
+    max_concurrent_sessions: { soft: 0, hard: 0 }
+    max_engines:             { soft: 0, hard: 0 } # total engine pods across all versions in one org
+    max_cache_bytes:         { soft: 0, hard: 0 } # remote cache bytes per org
+    max_pipeline_retention: "0s"                  # 0s = inherit history.gc.max_age
 
 # --- Logging -----------------------------------------------------------------
 log_level: "info"    # debug | info | warn | error

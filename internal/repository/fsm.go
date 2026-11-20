@@ -72,6 +72,9 @@ const (
 	kindCreateWorkflowRun
 	kindUpsertWorkflowRun
 	kindDeleteWorkflowRun
+	// Organization root-namespace commands (appended after every existing kind).
+	kindBootstrapOrg     // 45
+	kindDeleteOrgCascade // 46
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -162,8 +165,9 @@ type (
 	}
 
 	cmdSetMembers struct {
-		GroupID string   `json:"group_id"`
-		UserIDs []string `json:"user_ids"`
+		GroupID string    `json:"group_id"`
+		UserIDs []string  `json:"user_ids"`
+		At      time.Time `json:"at"`
 	}
 
 	cmdDeleteToken struct {
@@ -177,9 +181,18 @@ type (
 
 	cmdUpsertTraceProvision struct {
 		TraceID   string    `json:"trace_id"`
+		OrgID     string    `json:"org_id,omitempty"`
 		UserID    string    `json:"user_id"`
 		Version   string    `json:"version"`
 		UpdatedAt time.Time `json:"updated_at"`
+	}
+
+	// cmdBootstrapOrg atomically commits the cluster's bootstrap organization
+	// UID and normalizes legacy rows into it. It is idempotent.
+	cmdBootstrapOrg struct {
+		Org             domain.Org `json:"org"`
+		DefaultGroupID  string     `json:"default_group_id"`
+		DisplayNameMeta string     `json:"display_name_meta"`
 	}
 
 	cmdMarkTraceFailed struct {
@@ -543,7 +556,7 @@ type fsmState struct {
 	usersByOAuth map[string]string
 
 	groups            map[string]*domain.Group
-	groupsByName      map[string]string
+	groupsByOrgName   map[string]string
 	memberships       map[string]map[string]struct{} // groupID -> set(userID)
 	membershipsByUser map[string]map[string]struct{} // userID -> set(groupID)
 
@@ -551,13 +564,17 @@ type fsmState struct {
 	tokensByHash map[string]string
 	tokensByUser map[string]string
 
-	projects       map[string]*domain.Project
-	projectsByName map[string]string
+	projects          map[string]*domain.Project
+	projectsByOrgName map[string]string
 
 	orgs             map[string]*domain.Org
 	orgsByName       map[string]string
 	orgMembers       map[string]map[string]domain.OrgRole // orgID -> userID -> role
 	orgMembersByUser map[string]map[string]struct{}       // userID -> set(orgID)
+	// orgMemberSince records each direct membership's creation time. It is
+	// kept parallel to orgMembers so snapshots stay backward compatible (the
+	// org_members role strings never change shape).
+	orgMemberSince map[string]map[string]time.Time // orgID -> userID -> created_at
 
 	secrets      map[string]*domain.Secret // key = scope|scopeID|name
 	forgeSources map[string]*domain.ForgeSource
@@ -575,6 +592,11 @@ type fsmState struct {
 	// sessionSink receives replicated session-lease state (domain.SessionStateSink,
 	// usually the pod-local *service.Store). Nil until wired by NewRaftStore.
 	sessionSink domain.SessionStateSink
+	// quotaDefaults carries the cluster-wide org quota defaults so FSM-side
+	// guards are deterministic on every peer.
+	quotaDefaults domain.OrgQuotas
+	// metaHook observes replicated meta writes (bootstrap org UID, CA keyring).
+	metaHook func(key, value string)
 }
 
 func newState() *fsmState {
@@ -583,18 +605,19 @@ func newState() *fsmState {
 		usersByName:       make(map[string]string),
 		usersByOAuth:      make(map[string]string),
 		groups:            make(map[string]*domain.Group),
-		groupsByName:      make(map[string]string),
+		groupsByOrgName:   make(map[string]string),
 		memberships:       make(map[string]map[string]struct{}),
 		membershipsByUser: make(map[string]map[string]struct{}),
 		tokens:            make(map[string]*domain.APIToken),
 		tokensByHash:      make(map[string]string),
 		tokensByUser:      make(map[string]string),
 		projects:          make(map[string]*domain.Project),
-		projectsByName:    make(map[string]string),
+		projectsByOrgName: make(map[string]string),
 		orgs:              make(map[string]*domain.Org),
 		orgsByName:        make(map[string]string),
 		orgMembers:        make(map[string]map[string]domain.OrgRole),
 		orgMembersByUser:  make(map[string]map[string]struct{}),
+		orgMemberSince:    make(map[string]map[string]time.Time),
 		secrets:           make(map[string]*domain.Secret),
 		forgeSources:      make(map[string]*domain.ForgeSource),
 		environments:      make(map[string]*domain.Environment),
@@ -605,40 +628,7 @@ func newState() *fsmState {
 		traces:            make(map[string]*domain.TraceMeta),
 		meta:              make(map[string]string),
 	}
-	st.ensureDefaultOrg()
 	return st
-}
-
-// ensureDefaultOrg installs the deterministic bootstrap organization and
-// migrates legacy rows with an empty OrgID into it. It is idempotent and is
-// called on fresh state and after snapshot restore.
-func (s *fsmState) ensureDefaultOrg() {
-	if _, ok := s.orgs[domain.DefaultOrgID]; !ok {
-		now := time.Unix(0, 0).UTC()
-		s.storeOrg(&domain.Org{
-			ID:          domain.DefaultOrgID,
-			Name:        domain.DefaultOrgID,
-			DisplayName: "Default",
-			Features:    append([]string(nil), domain.DefaultOrgFeatures...),
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		})
-	}
-	for _, g := range s.groups {
-		if g.OrgID == "" {
-			g.OrgID = domain.DefaultOrgID
-		}
-	}
-	for _, p := range s.projects {
-		if p.OrgID == "" {
-			p.OrgID = domain.DefaultOrgID
-		}
-	}
-	for _, t := range s.traces {
-		if t.OrgID == "" {
-			t.OrgID = domain.DefaultOrgID
-		}
-	}
 }
 
 // FSM is the Raft finite state machine. All reads are served from the local
@@ -660,6 +650,76 @@ func NewFSM() *FSM {
 // FSM starts applying (i.e. before NewRaftStore returns).
 func (f *FSM) SetMetaHook(hook func(key, value string)) {
 	f.onMeta = hook
+	f.state.metaHook = hook
+}
+
+// SetOrgQuotaDefaults installs the cluster-wide default quotas so FSM-side
+// hard-cap guards match the service layer on every peer.
+//
+//nolint:gocritic // quota structs are value-semantic
+func (f *FSM) SetOrgQuotaDefaults(q domain.OrgQuotas) {
+	f.state.mu.Lock()
+	defer f.state.mu.Unlock()
+	f.state.quotaDefaults = q
+}
+
+// BootstrapOrgID returns the committed bootstrap organization UID.
+func (f *FSM) BootstrapOrgID() (string, error) {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	id := f.state.meta[domain.BootstrapOrgMetaKey]
+	if id == "" {
+		return "", domain.ErrBootstrapNotReady
+	}
+	return id, nil
+}
+
+// bootstrapOrg returns the committed bootstrap organization.
+func (f *FSM) bootstrapOrg() (*domain.Org, error) {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	id := f.state.meta[domain.BootstrapOrgMetaKey]
+	if id == "" {
+		return nil, domain.ErrBootstrapNotReady
+	}
+	o, ok := f.state.orgs[id]
+	if !ok {
+		return nil, domain.ErrBootstrapNotReady
+	}
+	return copyOrg(o), nil
+}
+
+// memberRole returns (orgID,userID)'s direct role.
+func (f *FSM) memberRole(orgID, userID string) (domain.OrgRole, bool) {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	role, ok := f.state.orgMembers[orgID][userID]
+	return role, ok
+}
+
+// distinctMemberCountLocked counts distinct members in orgID. Caller holds mu.
+func (s *fsmState) distinctMemberCountLocked(orgID string) int {
+	seen := make(map[string]struct{}, len(s.orgMembers[orgID]))
+	for uid := range s.orgMembers[orgID] {
+		seen[uid] = struct{}{}
+	}
+	for gid, set := range s.memberships {
+		g, ok := s.groups[gid]
+		if !ok || g.OrgID != orgID {
+			continue
+		}
+		for uid := range set {
+			seen[uid] = struct{}{}
+		}
+	}
+	return len(seen)
+}
+
+// distinctMemberCount is the locked read variant used by the org repository.
+func (f *FSM) distinctMemberCount(orgID string) int {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	return f.state.distinctMemberCountLocked(orgID)
 }
 
 var _ raft.FSM = (*FSM)(nil)
@@ -764,6 +824,16 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		return nil, applyPayload(cmd, "remove org member", func(p cmdOrgMember) error {
 			return s.removeOrgMember(p.OrgID, p.UserID)
 		}), true
+	case kindBootstrapOrg:
+		var out *domain.Org
+		err := applyPayload(cmd, "bootstrap org", func(p cmdBootstrapOrg) error {
+			o, err := s.applyBootstrapOrg(&p)
+			out = o
+			return err
+		})
+		return out, err, true
+	case kindDeleteOrgCascade:
+		return nil, applyPayload(cmd, "delete org cascade", s.deleteOrgCascade), true
 	case kindUpsertSecret:
 		return nil, applyPayload(cmd, "secret", func(p cmdSecret) error {
 			return s.upsertSecret(p.toDomain())
@@ -829,7 +899,7 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		return nil, applyPayload(cmd, "delete group", s.deleteGroup), true
 	case kindSetMembers:
 		return nil, applyPayload(cmd, "set members", func(p cmdSetMembers) error {
-			return s.setMembers(p.GroupID, p.UserIDs)
+			return s.setMembers(p.GroupID, p.UserIDs, p.At)
 		}), true
 	case kindUpsertProject:
 		return nil, applyPayload(cmd, "project", func(p cmdProject) error {
@@ -1073,20 +1143,19 @@ func isActiveAdmin(u *domain.User) bool {
 
 func (s *fsmState) storeGroup(g *domain.Group) {
 	cp := *g
-	if cp.OrgID == "" {
-		cp.OrgID = domain.DefaultOrgID
-	}
 	s.groups[g.ID] = &cp
-	s.groupsByName[strings.ToLower(g.Name)] = g.ID
+	s.groupsByOrgName[orgEntityNameKey(g.OrgID, g.Name)] = g.ID
 }
 
 func (s *fsmState) storeProject(p *domain.Project) {
 	cp := *p
-	if cp.OrgID == "" {
-		cp.OrgID = domain.DefaultOrgID
-	}
 	s.projects[p.ID] = &cp
-	s.projectsByName[strings.ToLower(p.Name)] = p.ID
+	s.projectsByOrgName[orgEntityNameKey(p.OrgID, p.Name)] = p.ID
+}
+
+// orgEntityNameKey builds the composite (orgID, lowerName) uniqueness key.
+func orgEntityNameKey(orgID, name string) string {
+	return fmt.Sprintf("%s\x00%s", orgID, strings.ToLower(name))
 }
 
 // secretKey builds the FSM key for a scoped secret.
@@ -1267,11 +1336,11 @@ func (s *fsmState) upsertOrg(o *domain.Org, create bool) error {
 		if !ok {
 			return fmt.Errorf("org %s: %w", o.ID, domain.ErrNotFound)
 		}
+		if existing.Name != o.Name {
+			return fmt.Errorf("org %s: organization name cannot be changed: %w", o.ID, domain.ErrValidation)
+		}
 		if other, ok := s.orgsByName[strings.ToLower(o.Name)]; ok && other != o.ID {
 			return fmt.Errorf("org %s: %w", o.Name, domain.ErrConflict)
-		}
-		if existing.Name != o.Name {
-			delete(s.orgsByName, strings.ToLower(existing.Name))
 		}
 	}
 	if len(o.Features) == 0 {
@@ -1281,16 +1350,112 @@ func (s *fsmState) upsertOrg(o *domain.Org, create bool) error {
 	return nil
 }
 
-// deleteOrg removes an organization and its direct memberships. Groups and
-// projects are left intact (they retain their OrgID for audit).
+// deleteOrg removes an empty organization and its direct memberships. Groups
+// and projects are left intact (they retain their OrgID for audit).
 func (s *fsmState) deleteOrg(id string) error {
 	o, ok := s.orgs[id]
 	if !ok {
 		return fmt.Errorf("org %s: %w", id, domain.ErrNotFound)
 	}
-	if id == domain.DefaultOrgID {
-		return fmt.Errorf("org %s: %w", id, domain.ErrForbidden)
+	if bootID := s.meta[domain.BootstrapOrgMetaKey]; bootID != "" && id == bootID {
+		return fmt.Errorf("org %s: cannot delete bootstrap organization: %w", id, domain.ErrForbidden)
 	}
+	for _, p := range s.projects {
+		if p.OrgID == id {
+			return fmt.Errorf("org %s: %w", id, domain.ErrOrgNotEmpty)
+		}
+	}
+	for _, g := range s.groups {
+		if g.OrgID == id && !strings.EqualFold(g.Name, domain.DefaultOrgName) {
+			return fmt.Errorf("org %s: %w", id, domain.ErrOrgNotEmpty)
+		}
+	}
+	if defGroup, ok := s.defaultGroupInOrgLocked(id); ok {
+		if err := s.deleteGroup(defGroup.ID); err != nil {
+			return err
+		}
+	}
+	s.removeOrgScopedStateLocked(id)
+	delete(s.orgs, id)
+	delete(s.orgsByName, strings.ToLower(o.Name))
+	if s.sessionSink != nil {
+		s.sessionSink.ApplyOrgDeleted(id)
+	}
+	return nil
+}
+
+// deleteOrgCascade atomically removes an organization and every child entity.
+//
+//nolint:gocyclo // cascade enumerates every org-scoped entity type
+func (s *fsmState) deleteOrgCascade(id string) error {
+	o, ok := s.orgs[id]
+	if !ok {
+		return fmt.Errorf("org %s: %w", id, domain.ErrNotFound)
+	}
+	if bootID := s.meta[domain.BootstrapOrgMetaKey]; bootID != "" && id == bootID {
+		return fmt.Errorf("org %s: cannot delete bootstrap organization: %w", id, domain.ErrForbidden)
+	}
+	for pid, p := range s.projects {
+		if p.OrgID != id {
+			continue
+		}
+		delete(s.projects, pid)
+		delete(s.projectsByOrgName, orgEntityNameKey(p.OrgID, p.Name))
+	}
+	for gid, g := range s.groups {
+		if g.OrgID != id {
+			continue
+		}
+		if err := s.deleteGroup(gid); err != nil {
+			return err
+		}
+	}
+	for tid, m := range s.traces {
+		if m.OrgID == id {
+			delete(s.traces, tid)
+		}
+	}
+	for key, run := range s.workflowRuns {
+		if run.OrgID == id {
+			delete(s.workflowRuns, key)
+		}
+	}
+	for key, def := range s.workflowDefs {
+		if def.OrgID == id {
+			delete(s.workflowDefs, key)
+		}
+	}
+	for key := range s.workflowCounters {
+		if strings.HasPrefix(key, fmt.Sprintf("%s/", id)) {
+			delete(s.workflowCounters, key)
+		}
+	}
+	for key, rec := range s.checkRuns {
+		if rec.OrgID == id {
+			delete(s.checkRuns, key)
+		}
+	}
+	for key, env := range s.environments {
+		if env.OrgID == id {
+			delete(s.environments, key)
+		}
+	}
+	for key, src := range s.forgeSources {
+		if src.OrgID == id {
+			delete(s.forgeSources, key)
+		}
+	}
+	s.removeOrgScopedStateLocked(id)
+	delete(s.orgs, id)
+	delete(s.orgsByName, strings.ToLower(o.Name))
+	if s.sessionSink != nil {
+		s.sessionSink.ApplyOrgDeleted(id)
+	}
+	return nil
+}
+
+// removeOrgScopedStateLocked removes memberships, secrets, and the org token.
+func (s *fsmState) removeOrgScopedStateLocked(id string) {
 	for uid := range s.orgMembers[id] {
 		delete(s.orgMembersByUser[uid], id)
 		if len(s.orgMembersByUser[uid]) == 0 {
@@ -1298,15 +1463,241 @@ func (s *fsmState) deleteOrg(id string) error {
 		}
 	}
 	delete(s.orgMembers, id)
-	// Cascade the org-scoped token so a deleted org cannot keep a live
-	// dag_<org>_ credential.
+	delete(s.orgMemberSince, id)
+	for key, sec := range s.secrets {
+		if sec.Scope == domain.SecretScopeOrg && sec.ScopeID == id {
+			delete(s.secrets, key)
+		}
+	}
 	s.deleteToken(fmt.Sprintf("org:%s", id))
-	delete(s.orgs, id)
-	delete(s.orgsByName, strings.ToLower(o.Name))
+}
+
+// defaultGroupInOrgLocked returns the org's "default" group.
+func (s *fsmState) defaultGroupInOrgLocked(orgID string) (*domain.Group, bool) {
+	gid, ok := s.groupsByOrgName[orgEntityNameKey(orgID, domain.DefaultOrgName)]
+	if !ok {
+		return nil, false
+	}
+	g, ok := s.groups[gid]
+	return g, ok
+}
+
+// applyBootstrapOrg atomically commits the bootstrap organization UID and
+// normalizes legacy rows. It is idempotent across duplicate proposals.
+func (s *fsmState) applyBootstrapOrg(p *cmdBootstrapOrg) (*domain.Org, error) {
+	if existingID := s.meta[domain.BootstrapOrgMetaKey]; existingID != "" {
+		if o, ok := s.orgs[existingID]; ok {
+			return copyOrg(o), nil
+		}
+		return nil, fmt.Errorf("bootstrap org %s: %w", existingID, domain.ErrNotFound)
+	}
+	if p == nil || p.Org.ID == "" || p.Org.Name != domain.DefaultOrgName {
+		return nil, fmt.Errorf("bootstrap org: %w", domain.ErrValidation)
+	}
+	s.meta[domain.BootstrapOrgMetaKey] = p.Org.ID
+	if p.DisplayNameMeta != "" {
+		s.meta[domain.DefaultOrgDisplayNameMetaKey] = p.DisplayNameMeta
+	}
+	now := p.Org.CreatedAt
+	if now.IsZero() {
+		now = p.Org.UpdatedAt
+	}
+	o := p.Org
+	o.Name = domain.DefaultOrgName
+	if o.DisplayName == "" {
+		o.DisplayName = domain.DefaultOrgDisplayName
+	}
+	if len(o.Features) == 0 {
+		o.Features = append([]string(nil), domain.DefaultOrgFeatures...)
+	}
+	s.storeOrg(&o)
+	s.normalizeLegacyRowsLocked(p.Org.ID, p.DefaultGroupID, now)
+	if s.metaHook != nil {
+		s.metaHook(domain.BootstrapOrgMetaKey, p.Org.ID)
+		if p.DisplayNameMeta != "" {
+			s.metaHook(domain.DefaultOrgDisplayNameMetaKey, p.DisplayNameMeta)
+		}
+	}
+	return copyOrg(s.orgs[p.Org.ID]), nil
+}
+
+// normalizeLegacyRowsLocked migrates every pre-bootstrap row (empty OrgID) into
+// bootstrapID, rebuilds composite indices, ensures the bootstrap "default"
+// group, and backfills org membership.
+//
+//nolint:gocyclo // linear migration of every legacy entity type
+func (s *fsmState) normalizeLegacyRowsLocked(bootstrapID, defaultGroupID string, now time.Time) {
+	if bootstrapID == "" {
+		return
+	}
+	s.groupsByOrgName = make(map[string]string, len(s.groups))
+	for id, g := range s.groups {
+		if g.OrgID == "" {
+			g.OrgID = bootstrapID
+		}
+		_ = id
+		s.groupsByOrgName[orgEntityNameKey(g.OrgID, g.Name)] = g.ID
+	}
+	s.projectsByOrgName = make(map[string]string, len(s.projects))
+	for id, p := range s.projects {
+		if p.OrgID == "" {
+			p.OrgID = bootstrapID
+		}
+		_ = id
+		s.projectsByOrgName[orgEntityNameKey(p.OrgID, p.Name)] = p.ID
+	}
+	for _, t := range s.traces {
+		if t.OrgID == "" {
+			t.OrgID = bootstrapID
+		}
+	}
+	for _, src := range s.forgeSources {
+		if src.OrgID == "" {
+			src.OrgID = bootstrapID
+		}
+	}
+	for _, rec := range s.checkRuns {
+		if rec.OrgID == "" {
+			rec.OrgID = bootstrapID
+		}
+	}
+	for _, env := range s.environments {
+		if env.OrgID == "" {
+			env.OrgID = bootstrapID
+		}
+	}
+	for key, def := range s.workflowDefs {
+		if def.OrgID == "" {
+			def.OrgID = bootstrapID
+			delete(s.workflowDefs, key)
+			s.workflowDefs[workflowDefKey(def.OrgID, def.ProjectID, def.Workflow.Name)] = def
+		}
+	}
+	for _, run := range s.workflowRuns {
+		if run.OrgID == "" {
+			run.OrgID = bootstrapID
+		}
+	}
+	for key, val := range s.workflowCounters {
+		if strings.HasPrefix(key, "/") {
+			delete(s.workflowCounters, key)
+			s.workflowCounters[fmt.Sprintf("%s%s", bootstrapID, key)] = val
+		}
+	}
+	for key, sec := range s.secrets {
+		if sec.Scope == domain.SecretScopeOrg && sec.ScopeID == "" {
+			delete(s.secrets, key)
+			sec.ScopeID = bootstrapID
+			s.secrets[secretKey(sec.Scope, sec.ScopeID, sec.Name)] = sec
+		}
+	}
+	if _, ok := s.defaultGroupInOrgLocked(bootstrapID); !ok && defaultGroupID != "" {
+		g := &domain.Group{
+			ID:             defaultGroupID,
+			OrgID:          bootstrapID,
+			Name:           domain.DefaultOrgName,
+			AgentAvailable: true,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+		}
+		s.storeGroup(g)
+	}
+	// Every group member is an org member.
+	for gid, set := range s.memberships {
+		g, ok := s.groups[gid]
+		if !ok || g.OrgID == "" {
+			continue
+		}
+		if s.orgMembers[g.OrgID] == nil {
+			s.orgMembers[g.OrgID] = make(map[string]domain.OrgRole)
+		}
+		for uid := range set {
+			if _, exists := s.orgMembers[g.OrgID][uid]; !exists {
+				s.orgMembers[g.OrgID][uid] = domain.OrgMember
+			}
+			if s.orgMembersByUser[uid] == nil {
+				s.orgMembersByUser[uid] = make(map[string]struct{})
+			}
+			s.orgMembersByUser[uid][g.OrgID] = struct{}{}
+		}
+	}
+	// Active admins with no org membership join the bootstrap org as admins.
+	for uid, u := range s.users {
+		if u.Role != domain.RoleAdmin || u.AccessBlocked() {
+			continue
+		}
+		if len(s.orgMembersByUser[uid]) > 0 {
+			continue
+		}
+		if s.orgMembers[bootstrapID] == nil {
+			s.orgMembers[bootstrapID] = make(map[string]domain.OrgRole)
+		}
+		s.orgMembers[bootstrapID][uid] = domain.OrgAdmin
+		if s.orgMembersByUser[uid] == nil {
+			s.orgMembersByUser[uid] = make(map[string]struct{})
+		}
+		s.orgMembersByUser[uid][bootstrapID] = struct{}{}
+	}
+	if s.sessionSink != nil {
+		s.sessionSink.ApplyBootstrapOrg(bootstrapID)
+	}
+	s.backfillOrgMemberSinceLocked(now)
+}
+
+// orgUsageLocked counts live usage of one quota resource.
+func (s *fsmState) orgUsageLocked(orgID string, res domain.QuotaResource) int64 {
+	switch res {
+	case domain.QuotaGroups:
+		var n int64
+		for _, g := range s.groups {
+			if g.OrgID == orgID {
+				n++
+			}
+		}
+		return n
+	case domain.QuotaProjects:
+		var n int64
+		for _, p := range s.projects {
+			if p.OrgID == orgID {
+				n++
+			}
+		}
+		return n
+	case domain.QuotaMembers:
+		return int64(s.distinctMemberCountLocked(orgID))
+	}
+	return 0
+}
+
+// checkOrgQuotaLocked enforces an org hard cap deterministically. 0 = unlimited.
+func (s *fsmState) checkOrgQuotaLocked(orgID string, res domain.QuotaResource, delta int64) error {
+	o, ok := s.orgs[orgID]
+	if !ok {
+		return nil
+	}
+	eff := o.Quotas.Effective(s.quotaDefaults)
+	var hard int64
+	switch res {
+	case domain.QuotaGroups:
+		hard = eff.MaxGroups.Hard
+	case domain.QuotaProjects:
+		hard = eff.MaxProjects.Hard
+	case domain.QuotaMembers:
+		hard = eff.MaxMembers.Hard
+	default:
+		return nil
+	}
+	if hard <= 0 {
+		return nil
+	}
+	if s.orgUsageLocked(orgID, res)+delta > hard {
+		return fmt.Errorf("%w: %s limit (%d) reached", domain.ErrOrgQuotaExceeded, res, hard)
+	}
 	return nil
 }
 
-// setOrgMember adds or updates a direct org membership.
+// setOrgMember adds or updates a direct org membership. A brand-new membership
+// records p.At as its creation time; a role change preserves the original one.
 func (s *fsmState) setOrgMember(p cmdOrgMember) error {
 	if _, ok := s.orgs[p.OrgID]; !ok {
 		return fmt.Errorf("org %s: %w", p.OrgID, domain.ErrNotFound)
@@ -1316,6 +1707,12 @@ func (s *fsmState) setOrgMember(p cmdOrgMember) error {
 	}
 	if p.Role != domain.OrgAdmin && p.Role != domain.OrgMember {
 		return fmt.Errorf("org role %q: %w", p.Role, domain.ErrValidation)
+	}
+	if _, exists := s.orgMembers[p.OrgID][p.UserID]; !exists {
+		if err := s.checkOrgQuotaLocked(p.OrgID, domain.QuotaMembers, 1); err != nil {
+			return err
+		}
+		s.setOrgMemberSinceLocked(p.OrgID, p.UserID, p.At)
 	}
 	if s.orgMembers[p.OrgID] == nil {
 		s.orgMembers[p.OrgID] = make(map[string]domain.OrgRole)
@@ -1328,15 +1725,73 @@ func (s *fsmState) setOrgMember(p cmdOrgMember) error {
 	return nil
 }
 
+// setOrgMemberSinceLocked records a membership creation time, ignoring an
+// unset timestamp (a legacy command replayed without one).
+func (s *fsmState) setOrgMemberSinceLocked(orgID, userID string, at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	if s.orgMemberSince[orgID] == nil {
+		s.orgMemberSince[orgID] = make(map[string]time.Time)
+	}
+	s.orgMemberSince[orgID][userID] = at
+}
+
+// backfillOrgMemberSinceLocked assigns the best-known lower bound (the
+// bootstrap organization's CreatedAt) to every direct membership with no
+// recorded timestamp. Called on bootstrap normalization and snapshot restore,
+// i.e. exactly when pre-org_member_since state is decoded.
+func (s *fsmState) backfillOrgMemberSinceLocked(fallback time.Time) {
+	if fallback.IsZero() {
+		if boot, ok := s.orgs[s.meta[domain.BootstrapOrgMetaKey]]; ok {
+			fallback = boot.CreatedAt
+		}
+	}
+	if fallback.IsZero() {
+		return
+	}
+	for orgID, members := range s.orgMembers {
+		for userID := range members {
+			if _, known := s.orgMemberSince[orgID][userID]; known {
+				continue
+			}
+			s.setOrgMemberSinceLocked(orgID, userID, fallback)
+		}
+	}
+}
+
 // removeOrgMember deletes a direct org membership (idempotent).
 func (s *fsmState) removeOrgMember(orgID, userID string) error {
 	delete(s.orgMembers[orgID], userID)
 	if len(s.orgMembers[orgID]) == 0 {
 		delete(s.orgMembers, orgID)
 	}
+	delete(s.orgMemberSince[orgID], userID)
+	if len(s.orgMemberSince[orgID]) == 0 {
+		delete(s.orgMemberSince, orgID)
+	}
 	delete(s.orgMembersByUser[userID], orgID)
 	if len(s.orgMembersByUser[userID]) == 0 {
 		delete(s.orgMembersByUser, userID)
+	}
+	// Cascade ONLY this org's group memberships.
+	for gid := range s.membershipsByUser[userID] {
+		g, ok := s.groups[gid]
+		if !ok || g.OrgID != orgID {
+			continue
+		}
+		delete(s.memberships[gid], userID)
+		if len(s.memberships[gid]) == 0 {
+			delete(s.memberships, gid)
+		}
+		delete(s.membershipsByUser[userID], gid)
+		s.bumpRevision(userID)
+	}
+	if len(s.membershipsByUser[userID]) == 0 {
+		delete(s.membershipsByUser, userID)
+	}
+	if s.sessionSink != nil {
+		s.sessionSink.ApplyUserOrgRevoked(orgID, userID)
 	}
 	return nil
 }
@@ -1365,12 +1820,32 @@ func (s *fsmState) deleteUser(id string) error {
 			s.traces[traceID] = m
 		}
 	}
+	s.removeUserOrgMembershipsLocked(id)
 	delete(s.users, id)
 	delete(s.usersByName, strings.ToLower(u.Username))
 	if u.OAuthID != "" {
 		delete(s.usersByOAuth, oauthKey(u.OAuthProvider, u.OAuthID))
 	}
 	return nil
+}
+
+// removeUserOrgMembershipsLocked deletes every org membership for userID and
+// evicts that user's leases in each affected org on every pod.
+func (s *fsmState) removeUserOrgMembershipsLocked(userID string) {
+	for oid := range s.orgMembersByUser[userID] {
+		delete(s.orgMembers[oid], userID)
+		if len(s.orgMembers[oid]) == 0 {
+			delete(s.orgMembers, oid)
+		}
+		delete(s.orgMemberSince[oid], userID)
+		if len(s.orgMemberSince[oid]) == 0 {
+			delete(s.orgMemberSince, oid)
+		}
+		if s.sessionSink != nil {
+			s.sessionSink.ApplyUserOrgRevoked(oid, userID)
+		}
+	}
+	delete(s.orgMembersByUser, userID)
 }
 
 // removeUserMemberships deletes every membership edge for userID in both
@@ -1459,6 +1934,7 @@ func (s *fsmState) softDeleteUser(p cmdSoftDeleteUser) error {
 	}
 	s.deleteToken(p.ID)
 	s.removeUserMemberships(p.ID)
+	s.removeUserOrgMembershipsLocked(p.ID)
 	u.DeletedAt = copyTime(&p.At)
 	u.DisabledAt = copyTime(&p.At)
 	u.PasswordHash = ""
@@ -1550,9 +2026,12 @@ func (s *fsmState) oauthLogin(existing *domain.User, p *cmdOAuthUserMutation) (*
 	u.OAuthLoginVersion++
 	u.Revision++
 	u.UpdatedAt = p.At
-	s.applyManagedMemberships(u, p.ManagedGroupIDs)
+	if err := s.enforceManagedMembershipQuota(u.ID, p.ManagedGroupIDs); err != nil {
+		return nil, err
+	}
+	s.applyManagedMemberships(u, p.ManagedGroupIDs, p.At)
 	s.storeUser(u)
-	return s.oauthResult(u, p.FallbackGroupID), nil
+	return s.oauthResult(u, p.FallbackGroupID, p.At), nil
 }
 
 func (s *fsmState) oauthMembership(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
@@ -1565,9 +2044,12 @@ func (s *fsmState) oauthMembership(existing *domain.User, p *cmdOAuthUserMutatio
 	u.OAuthGroups = normalizeIDs(p.User.OAuthGroups)
 	u.Revision++
 	u.UpdatedAt = p.At
-	s.applyManagedMemberships(u, p.ManagedGroupIDs)
+	if err := s.enforceManagedMembershipQuota(u.ID, p.ManagedGroupIDs); err != nil {
+		return nil, err
+	}
+	s.applyManagedMemberships(u, p.ManagedGroupIDs, p.At)
 	s.storeUser(u)
-	return s.oauthResult(u, ""), nil
+	return s.oauthResult(u, "", p.At), nil
 }
 
 func (s *fsmState) oauthCredential(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
@@ -1579,7 +2061,7 @@ func (s *fsmState) oauthCredential(existing *domain.User, p *cmdOAuthUserMutatio
 	u.Revision++
 	u.UpdatedAt = p.At
 	s.storeUser(u)
-	return s.oauthResult(u, ""), nil
+	return s.oauthResult(u, "", p.At), nil
 }
 
 func (s *fsmState) oauthRevoke(existing *domain.User, p *cmdOAuthUserMutation) (*domain.OAuthUserResult, error) {
@@ -1595,7 +2077,7 @@ func (s *fsmState) oauthRevoke(existing *domain.User, p *cmdOAuthUserMutation) (
 	}
 	s.deleteToken(p.User.ID)
 	s.storeUser(u)
-	return s.oauthResult(u, ""), nil
+	return s.oauthResult(u, "", p.At), nil
 }
 
 // validateGroupIDs rejects a managed-membership set referencing unknown groups.
@@ -1611,11 +2093,53 @@ func (s *fsmState) validateGroupIDs(ids []string) error {
 	return nil
 }
 
+// enforceManagedMembershipQuota rejects an OAuth membership mutation that would
+// add the user as a new distinct member of an org already at its max_members
+// hard cap. Membership in other orgs and role changes (delta == 0) are never
+// blocked.
+func (s *fsmState) enforceManagedMembershipQuota(userID string, desired []string) error {
+	newByOrg := make(map[string]struct{})
+	for _, gid := range desired {
+		g, ok := s.groups[gid]
+		if !ok || g.OrgID == "" {
+			continue
+		}
+		if s.isOrgMemberLocked(g.OrgID, userID) {
+			continue
+		}
+		newByOrg[g.OrgID] = struct{}{}
+	}
+	for orgID := range newByOrg {
+		if err := s.checkOrgQuotaLocked(orgID, domain.QuotaMembers, 1); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// isOrgMemberLocked reports whether userID is already a distinct member of
+// orgID (direct org membership or any group membership in orgID).
+func (s *fsmState) isOrgMemberLocked(orgID, userID string) bool {
+	if _, ok := s.orgMembers[orgID][userID]; ok {
+		return true
+	}
+	for gid, set := range s.memberships {
+		g, ok := s.groups[gid]
+		if !ok || g.OrgID != orgID {
+			continue
+		}
+		if _, ok := set[userID]; ok {
+			return true
+		}
+	}
+	return false
+}
+
 // applyManagedMemberships replaces only the OAuth-managed membership edges on
 // u.OAuthGroupIDs, leaving manual memberships untouched. A desired group that
 // is already a member (manual or managed) is retained; it is simply claimed as
 // OAuth-managed.
-func (s *fsmState) applyManagedMemberships(u *domain.User, desired []string) {
+func (s *fsmState) applyManagedMemberships(u *domain.User, desired []string, at time.Time) {
 	desiredSet := make(map[string]struct{}, len(desired))
 	for _, gid := range desired {
 		desiredSet[gid] = struct{}{}
@@ -1640,16 +2164,16 @@ func (s *fsmState) applyManagedMemberships(u *domain.User, desired []string) {
 		}
 	}
 	for _, gid := range desired {
-		s.addMembership(gid, u.ID)
+		s.addMembership(gid, u.ID, at)
 	}
 	u.OAuthGroupIDs = normalizeIDs(desired)
 }
 
 // oauthResult builds the committed response for an OAuth mutation, optionally
 // applying the fallback group when the effective membership is still empty.
-func (s *fsmState) oauthResult(u *domain.User, fallbackGroupID string) *domain.OAuthUserResult {
+func (s *fsmState) oauthResult(u *domain.User, fallbackGroupID string, at time.Time) *domain.OAuthUserResult {
 	if fallbackGroupID != "" && len(s.membershipsByUser[u.ID]) == 0 {
-		s.addMembership(fallbackGroupID, u.ID)
+		s.addMembership(fallbackGroupID, u.ID, at)
 	}
 	groups := s.effectiveUserGroupIDs(u.ID)
 	return &domain.OAuthUserResult{User: copyUser(s.users[u.ID]), GroupIDs: groups}
@@ -1697,27 +2221,47 @@ func normalizeIDs(ids []string) []string {
 // --- groups -----------------------------------------------------------------
 
 func (s *fsmState) upsertGroup(g *domain.Group, create bool) error {
-	lower := strings.ToLower(g.Name)
+	if g == nil {
+		return fmt.Errorf("group: %w", domain.ErrValidation)
+	}
+	bootstrapped := s.meta[domain.BootstrapOrgMetaKey] != ""
+	if bootstrapped {
+		if g.OrgID == "" {
+			return fmt.Errorf("org_id is required: %w", domain.ErrValidation)
+		}
+		if _, ok := s.orgs[g.OrgID]; !ok {
+			return fmt.Errorf("org %s: %w", g.OrgID, domain.ErrNotFound)
+		}
+	}
+	lower := orgEntityNameKey(g.OrgID, g.Name)
 	if existing, ok := s.groups[g.ID]; ok {
 		if create {
 			return fmt.Errorf("group %s: %w", g.ID, domain.ErrConflict)
 		}
-		if other, ok := s.groupsByName[lower]; ok && other != g.ID {
+		if existing.OrgID != g.OrgID {
+			return fmt.Errorf("group %s: org_id cannot be changed: %w", g.ID, domain.ErrValidation)
+		}
+		if other, ok := s.groupsByOrgName[lower]; ok && other != g.ID {
 			return fmt.Errorf("group %s: %w", g.Name, domain.ErrConflict)
 		}
 		g.CreatedAt = existing.CreatedAt
 		if g.UpdatedAt.IsZero() {
 			g.UpdatedAt = existing.UpdatedAt
 		}
-		delete(s.groupsByName, strings.ToLower(existing.Name))
+		delete(s.groupsByOrgName, orgEntityNameKey(existing.OrgID, existing.Name))
 		s.storeGroup(g)
 		return nil
 	}
 	if !create {
 		return fmt.Errorf("update group %s: %w", g.ID, domain.ErrNotFound)
 	}
-	if _, ok := s.groupsByName[lower]; ok {
+	if _, ok := s.groupsByOrgName[lower]; ok {
 		return fmt.Errorf("group %s: %w", g.Name, domain.ErrConflict)
+	}
+	if bootstrapped {
+		if err := s.checkOrgQuotaLocked(g.OrgID, domain.QuotaGroups, 1); err != nil {
+			return err
+		}
 	}
 	if g.UpdatedAt.IsZero() {
 		g.UpdatedAt = g.CreatedAt
@@ -1756,11 +2300,11 @@ func (s *fsmState) deleteGroup(id string) error {
 		}
 	}
 	delete(s.groups, id)
-	delete(s.groupsByName, strings.ToLower(g.Name))
+	delete(s.groupsByOrgName, orgEntityNameKey(g.OrgID, g.Name))
 	return nil
 }
 
-func (s *fsmState) setMembers(groupID string, userIDs []string) error {
+func (s *fsmState) setMembers(groupID string, userIDs []string, at time.Time) error {
 	if _, ok := s.groups[groupID]; !ok {
 		return fmt.Errorf("group %s: %w", groupID, domain.ErrNotFound)
 	}
@@ -1787,16 +2331,31 @@ func (s *fsmState) setMembers(groupID string, userIDs []string) error {
 		}
 	}
 	set := make(map[string]struct{}, len(userIDs))
+	newMembers := int64(0)
+	orgID := ""
+	if g, ok := s.groups[groupID]; ok {
+		orgID = g.OrgID
+	}
 	for _, uid := range userIDs {
 		set[uid] = struct{}{}
 		affected[uid] = struct{}{}
+		if orgID != "" {
+			if _, already := s.orgMembers[orgID][uid]; !already {
+				newMembers++
+			}
+		}
+	}
+	if orgID != "" && newMembers > 0 {
+		if err := s.checkOrgQuotaLocked(orgID, domain.QuotaMembers, newMembers); err != nil {
+			return err
+		}
 	}
 	if len(set) == 0 {
 		delete(s.memberships, groupID)
 	} else {
 		s.memberships[groupID] = set
 		for uid := range set {
-			s.addMembership(groupID, uid)
+			s.addMembership(groupID, uid, at)
 		}
 	}
 	for uid := range affected {
@@ -1812,8 +2371,10 @@ func (s *fsmState) bumpRevision(userID string) {
 	}
 }
 
-// addMembership records one (groupID, userID) edge in both directions.
-func (s *fsmState) addMembership(groupID, userID string) {
+// addMembership records one (groupID, userID) edge in both directions. At is
+// the command timestamp supplied by the leader; a group membership implies a
+// direct org membership, whose creation time is recorded only when new.
+func (s *fsmState) addMembership(groupID, userID string, at time.Time) {
 	if s.memberships[groupID] == nil {
 		s.memberships[groupID] = make(map[string]struct{})
 	}
@@ -1822,19 +2383,58 @@ func (s *fsmState) addMembership(groupID, userID string) {
 		s.membershipsByUser[userID] = make(map[string]struct{})
 	}
 	s.membershipsByUser[userID][groupID] = struct{}{}
+	if g, ok := s.groups[groupID]; ok && g.OrgID != "" {
+		if s.orgMembers[g.OrgID] == nil {
+			s.orgMembers[g.OrgID] = make(map[string]domain.OrgRole)
+		}
+		if _, exists := s.orgMembers[g.OrgID][userID]; !exists {
+			s.orgMembers[g.OrgID][userID] = domain.OrgMember
+			s.setOrgMemberSinceLocked(g.OrgID, userID, at)
+		}
+		if s.orgMembersByUser[userID] == nil {
+			s.orgMembersByUser[userID] = make(map[string]struct{})
+		}
+		s.orgMembersByUser[userID][g.OrgID] = struct{}{}
+	}
 }
 
 // --- projects ---------------------------------------------------------------
 
 func (s *fsmState) upsertProject(p *domain.Project, create bool) error {
-	lower := strings.ToLower(p.Name)
+	if p == nil {
+		return fmt.Errorf("project: %w", domain.ErrValidation)
+	}
+	bootstrapped := s.meta[domain.BootstrapOrgMetaKey] != ""
+	if bootstrapped {
+		if p.OrgID == "" {
+			return fmt.Errorf("org_id is required: %w", domain.ErrValidation)
+		}
+		if _, ok := s.orgs[p.OrgID]; !ok {
+			return fmt.Errorf("org %s: %w", p.OrgID, domain.ErrNotFound)
+		}
+	}
+	if p.GroupID != "" {
+		grp, ok := s.groups[p.GroupID]
+		if !ok {
+			return fmt.Errorf("group %s: %w", p.GroupID, domain.ErrNotFound)
+		}
+		if grp.OrgID != p.OrgID {
+			return fmt.Errorf("group belongs to another organization: %w", domain.ErrValidation)
+		}
+	}
+	lower := orgEntityNameKey(p.OrgID, p.Name)
 	existing, ok := s.projects[p.ID]
 	if !ok {
 		if !create {
 			return fmt.Errorf("update project %s: %w", p.ID, domain.ErrNotFound)
 		}
-		if _, dup := s.projectsByName[lower]; dup {
+		if _, dup := s.projectsByOrgName[lower]; dup {
 			return fmt.Errorf("project %s: %w", p.Name, domain.ErrConflict)
+		}
+		if bootstrapped {
+			if err := s.checkOrgQuotaLocked(p.OrgID, domain.QuotaProjects, 1); err != nil {
+				return err
+			}
 		}
 		if p.UpdatedAt.IsZero() {
 			p.UpdatedAt = p.CreatedAt
@@ -1845,14 +2445,17 @@ func (s *fsmState) upsertProject(p *domain.Project, create bool) error {
 	if create {
 		return fmt.Errorf("project %s: %w", p.ID, domain.ErrConflict)
 	}
-	if other, dup := s.projectsByName[lower]; dup && other != p.ID {
+	if existing.OrgID != p.OrgID {
+		return fmt.Errorf("project %s: org_id cannot be changed: %w", p.ID, domain.ErrValidation)
+	}
+	if other, dup := s.projectsByOrgName[lower]; dup && other != p.ID {
 		return fmt.Errorf("project %s: %w", p.Name, domain.ErrConflict)
 	}
 	p.CreatedAt = existing.CreatedAt
 	if p.UpdatedAt.IsZero() {
 		p.UpdatedAt = existing.UpdatedAt
 	}
-	delete(s.projectsByName, strings.ToLower(existing.Name))
+	delete(s.projectsByOrgName, orgEntityNameKey(existing.OrgID, existing.Name))
 	s.storeProject(p)
 	return nil
 }
@@ -1863,7 +2466,7 @@ func (s *fsmState) deleteProject(id string) error {
 		return fmt.Errorf("delete project %s: %w", id, domain.ErrNotFound)
 	}
 	delete(s.projects, id)
-	delete(s.projectsByName, strings.ToLower(p.Name))
+	delete(s.projectsByOrgName, orgEntityNameKey(p.OrgID, p.Name))
 	return nil
 }
 
@@ -1939,20 +2542,25 @@ func (s *fsmState) touchToken(id string, at time.Time) {
 
 // --- trace metadata ---------------------------------------------------------
 
+//nolint:gocritic // command payloads are value-semantic
 func (s *fsmState) upsertTraceProvision(p cmdUpsertTraceProvision) {
 	existing, ok := s.traces[p.TraceID]
 	if !ok {
 		s.traces[p.TraceID] = &domain.TraceMeta{
 			TraceID:   p.TraceID,
+			OrgID:     p.OrgID,
 			UserID:    p.UserID,
 			Version:   p.Version,
 			UpdatedAt: p.UpdatedAt,
 		}
 		return
 	}
-	// user_id: first non-empty wins; version: new non-empty wins; updated_at: now.
+	// user_id/org_id: first non-empty wins; version: new non-empty wins.
 	if existing.UserID == "" {
 		existing.UserID = p.UserID
+	}
+	if existing.OrgID == "" && p.OrgID != "" {
+		existing.OrgID = p.OrgID
 	}
 	if p.Version != "" {
 		existing.Version = p.Version
@@ -2092,16 +2700,46 @@ func (f *FSM) readGroupByID(id string) (*domain.Group, error) {
 	return &cp, nil
 }
 
-func (f *FSM) readGroupByName(name string) (*domain.Group, error) {
+func (f *FSM) readGroupByName(orgID, name string) (*domain.Group, error) {
 	f.state.mu.RLock()
 	defer f.state.mu.RUnlock()
-	id, ok := f.state.groupsByName[strings.ToLower(name)]
+	id, ok := f.state.groupsByOrgName[orgEntityNameKey(orgID, name)]
 	if !ok {
 		return nil, fmt.Errorf("group %s: %w", name, domain.ErrNotFound)
 	}
 	g := f.state.groups[id]
 	cp := *g
 	return &cp, nil
+}
+
+// listGroupsByOrg returns orgID's groups sorted by name.
+func (f *FSM) listGroupsByOrg(orgID string) []*domain.Group {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	out := make([]*domain.Group, 0)
+	for _, g := range f.state.groups {
+		if g.OrgID == orgID {
+			cp := *g
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// groupsForUserInOrg returns userID's groups inside orgID.
+func (f *FSM) groupsForUserInOrg(orgID, userID string) []*domain.Group {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	out := make([]*domain.Group, 0)
+	for gid := range f.state.membershipsByUser[userID] {
+		if g, ok := f.state.groups[gid]; ok && g.OrgID == orgID {
+			cp := *g
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	return out
 }
 
 func (f *FSM) listGroups() []*domain.Group {
@@ -2170,16 +2808,52 @@ func (f *FSM) readProjectByID(id string) (*domain.Project, error) {
 	return &cp, nil
 }
 
-func (f *FSM) readProjectByName(name string) (*domain.Project, error) {
+func (f *FSM) readProjectByName(orgID, name string) (*domain.Project, error) {
 	f.state.mu.RLock()
 	defer f.state.mu.RUnlock()
-	id, ok := f.state.projectsByName[strings.ToLower(name)]
+	id, ok := f.state.projectsByOrgName[orgEntityNameKey(orgID, name)]
 	if !ok {
 		return nil, fmt.Errorf("project %s: %w", name, domain.ErrNotFound)
 	}
 	p := f.state.projects[id]
 	cp := *p
 	return &cp, nil
+}
+
+// listProjectsByOrg returns orgID's projects.
+func (f *FSM) listProjectsByOrg(orgID string) []*domain.Project {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	out := make([]*domain.Project, 0)
+	for _, p := range f.state.projects {
+		if p.OrgID == orgID {
+			cp := *p
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// listProjectsByNameAcrossOrgs returns every project named name (case
+// insensitive) across all organizations.
+func (f *FSM) listProjectsByNameAcrossOrgs(name string) []*domain.Project {
+	f.state.mu.RLock()
+	defer f.state.mu.RUnlock()
+	out := make([]*domain.Project, 0)
+	for _, p := range f.state.projects {
+		if strings.EqualFold(p.Name, name) {
+			cp := *p
+			out = append(out, &cp)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].OrgID == out[j].OrgID {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].OrgID < out[j].OrgID
+	})
+	return out
 }
 
 func (f *FSM) listProjects() []*domain.Project {
@@ -2299,11 +2973,16 @@ func (f *FSM) listRunningTraces() []*domain.TraceMeta {
 
 // traceStats returns the total trace count and the oldest trace sort key
 // (zero time when no trace has a known age).
-func (f *FSM) traceStats() (int, time.Time) {
+func (f *FSM) traceStats(orgID string) (int, time.Time) {
 	f.state.mu.RLock()
 	defer f.state.mu.RUnlock()
 	var oldest time.Time
+	count := 0
 	for _, m := range f.state.traces {
+		if orgID != "" && m.OrgID != orgID {
+			continue
+		}
+		count++
 		k := traceSortKey(m)
 		if k.IsZero() {
 			continue // unknown age never counts as the oldest
@@ -2312,7 +2991,7 @@ func (f *FSM) traceStats() (int, time.Time) {
 			oldest = k
 		}
 	}
-	return len(f.state.traces), oldest
+	return count, oldest
 }
 
 // listTraces applies the filter, joins group/user names, sorts by

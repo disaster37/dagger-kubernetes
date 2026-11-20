@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,7 +69,7 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
 	secretSvc := service.NewSecretService(secretRepo, []byte("0123456789abcdef0123456789abcdef"), logger)
-	graphql := repository.NewCloudGraphQL(userRepo, orgRepo, traceMetaRepo, checkRunRepo, graphqlCfg)
+	graphql := repository.NewCloudGraphQL(userRepo, orgRepo, groupRepo, traceMetaRepo, checkRunRepo, graphqlCfg)
 
 	admin, err := usersSvc.Create(ctx, "admin", "password123", domain.RoleAdmin)
 	if err != nil {
@@ -78,7 +79,12 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := orgsSvc.EnsureDefault(ctx); err != nil {
+	if _, err := orgsSvc.EnsureBootstrap(ctx, ""); err != nil {
+		t.Fatal(err)
+	}
+	// Legacy-shaped tenant used by the parity fixtures (header X-Dagger-Org:
+	// acme). Production UIDs are generated, but this keeps fixture keys stable.
+	if err := orgRepo.Create(ctx, &domain.Org{ID: "acme", Name: "acme", DisplayName: "Acme"}); err != nil && !errors.Is(err, domain.ErrConflict) {
 		t.Fatal(err)
 	}
 
@@ -207,7 +213,7 @@ func TestOTLPStreamIncrementalAndFailureRecovery(t *testing.T) {
 	srv := newParityServer(t, domain.GraphQLConfig{MaxDepth: 15, MaxSelections: 250, MaxQueryBytes: 65536, MaxParallelism: 10}, otlp, nil, nil, nil)
 	traceID := "0123456789abcdef0123456789abcdef"
 	for i := 0; i < 3; i++ {
-		otlp.Ingest(context.Background(), traceID, "traces", []byte{byte(i)})
+		otlp.Ingest(context.Background(), "", traceID, "traces", []byte{byte(i)})
 	}
 	req, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/v1/traces/%s?listen=false", srv.base, traceID), http.NoBody)
 	if err != nil {
@@ -439,7 +445,7 @@ func TestEndToEndWebhookChecksAndWorkflowApproval(t *testing.T) {
 	srv := newParityServer(t, domain.GraphQLConfig{MaxDepth: 15, MaxSelections: 250, MaxQueryBytes: 65536, MaxParallelism: 10}, nil, nil, checkRunner, flowRunner)
 	ctx := context.Background()
 
-	if _, err := srv.orgs.Create(ctx, service.OrgInput{Name: "acme", DisplayName: "Acme"}); err != nil {
+	if _, err := srv.orgs.Create(ctx, service.OrgInput{Name: "acme", DisplayName: "Acme"}); err != nil && !errors.Is(err, domain.ErrConflict) {
 		t.Fatal(err)
 	}
 	groupRepo := repository.NewGroupRepo(srv.store)
@@ -476,7 +482,8 @@ func TestEndToEndWebhookChecksAndWorkflowApproval(t *testing.T) {
 	if _, err := srv.secrets.Put(ctx, domain.SecretScopeOrg, "acme", "ORG_KEY", "org-value"); err != nil {
 		t.Fatal(err)
 	}
-	proj, err := service.NewProjectService(repository.NewProjectRepo(srv.store), groupRepo, observ.NewTestLogger()).GetOrCreateByName(ctx, "acme/repo")
+	orgID, _ := repository.NewOrgRepo(srv.store).BootstrapOrgID(ctx)
+	proj, err := service.NewProjectService(repository.NewProjectRepo(srv.store), groupRepo, observ.NewTestLogger()).GetOrCreateByName(ctx, orgID, "acme/repo")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,16 +50,24 @@ func NewS3RemoteCacheStore(endpoint, region, accessKey, secretKey string, useSSL
 	return &S3RemoteCacheStore{client: client, signer: signer, bucket: bucket, prefix: strings.Trim(prefix, "/"), presignTTL: presignTTL}, nil
 }
 
+// orgPrefix is the canonical tenant prefix: orgs/<org_id>/<remote.prefix>/.
+func (s *S3RemoteCacheStore) orgPrefix(namespace string) string {
+	if s.prefix == "" {
+		return fmt.Sprintf("orgs/%s", namespace)
+	}
+	return fmt.Sprintf("orgs/%s/%s", namespace, s.prefix)
+}
+
 func (s *S3RemoteCacheStore) bundleKey(namespace, digest string) string {
-	return fmt.Sprintf("%s/%s/bundles/%s.json", s.prefix, namespace, digest)
+	return fmt.Sprintf("%s/bundles/%s.json", s.orgPrefix(namespace), digest)
 }
 
 func (s *S3RemoteCacheStore) blobKey(namespace, digest string) string {
-	return fmt.Sprintf("%s/%s/blobs/%s", s.prefix, namespace, digest)
+	return fmt.Sprintf("%s/blobs/%s", s.orgPrefix(namespace), digest)
 }
 
 func (s *S3RemoteCacheStore) packKey(namespace, packDigest string) string {
-	return fmt.Sprintf("%s/%s/packs/%s.pack", s.prefix, namespace, packDigest)
+	return fmt.Sprintf("%s/packs/%s.pack", s.orgPrefix(namespace), packDigest)
 }
 
 // PackKey returns the S3 key for a pack object.
@@ -66,8 +75,8 @@ func (s *S3RemoteCacheStore) PackKey(namespace, packDigest string) string {
 	return s.packKey(namespace, packDigest)
 }
 
-func (s *S3RemoteCacheStore) checkpointKey() string {
-	return fmt.Sprintf("%s/index/checkpoint.json", s.prefix)
+func (s *S3RemoteCacheStore) checkpointKey(namespace string) string {
+	return fmt.Sprintf("%s/index/checkpoint.json", s.orgPrefix(namespace))
 }
 
 // PutBundle stores a ValueBundle JSON document.
@@ -155,8 +164,8 @@ func (s *S3RemoteCacheStore) PresignBundleGet(ctx context.Context, namespace, di
 }
 
 // PutIndexCheckpoint stores the serialized bbolt index snapshot.
-func (s *S3RemoteCacheStore) PutIndexCheckpoint(ctx context.Context, data []byte) error {
-	_, err := s.client.PutObject(ctx, s.bucket, s.checkpointKey(), bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/json"})
+func (s *S3RemoteCacheStore) PutIndexCheckpoint(ctx context.Context, namespace string, data []byte) error {
+	_, err := s.client.PutObject(ctx, s.bucket, s.checkpointKey(namespace), bytes.NewReader(data), int64(len(data)), minio.PutObjectOptions{ContentType: "application/json"})
 	if err != nil {
 		return fmt.Errorf("put remote cache index checkpoint: %w", err)
 	}
@@ -164,8 +173,8 @@ func (s *S3RemoteCacheStore) PutIndexCheckpoint(ctx context.Context, data []byte
 }
 
 // GetIndexCheckpoint reads the serialized bbolt index snapshot.
-func (s *S3RemoteCacheStore) GetIndexCheckpoint(ctx context.Context) ([]byte, error) {
-	obj, err := s.client.GetObject(ctx, s.bucket, s.checkpointKey(), minio.GetObjectOptions{})
+func (s *S3RemoteCacheStore) GetIndexCheckpoint(ctx context.Context, namespace string) ([]byte, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, s.checkpointKey(namespace), minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("get remote cache index checkpoint: %w", err)
 	}
@@ -177,6 +186,28 @@ func (s *S3RemoteCacheStore) GetIndexCheckpoint(ctx context.Context) ([]byte, er
 	return data, nil
 }
 
+// ListOrgPrefixes returns the distinct organization IDs with objects under
+// the canonical orgs/ prefix.
+func (s *S3RemoteCacheStore) ListOrgPrefixes(ctx context.Context) ([]string, error) {
+	seen := make(map[string]struct{})
+	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: "orgs/", Recursive: true}) {
+		if obj.Err != nil {
+			return nil, fmt.Errorf("list org prefixes: %w", obj.Err)
+		}
+		rest := strings.TrimPrefix(obj.Key, "orgs/")
+		seg, _, _ := strings.Cut(rest, "/")
+		if seg != "" {
+			seen[seg] = struct{}{}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for id := range seen {
+		out = append(out, id)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
 // DeleteBundle removes a bundle object.
 func (s *S3RemoteCacheStore) DeleteBundle(ctx context.Context, namespace, digest string) error {
 	return s.client.RemoveObject(ctx, s.bucket, s.bundleKey(namespace, digest), minio.RemoveObjectOptions{})
@@ -184,7 +215,7 @@ func (s *S3RemoteCacheStore) DeleteBundle(ctx context.Context, namespace, digest
 
 // DeleteNamespace removes every object under a namespace prefix.
 func (s *S3RemoteCacheStore) DeleteNamespace(ctx context.Context, namespace string) error {
-	prefix := fmt.Sprintf("%s/%s/", s.prefix, namespace)
+	prefix := fmt.Sprintf("%s/", s.orgPrefix(namespace))
 	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if obj.Err != nil {
 			return fmt.Errorf("list remote cache namespace: %w", obj.Err)

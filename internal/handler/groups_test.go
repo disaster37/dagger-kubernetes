@@ -18,19 +18,25 @@ func TestGroupsList(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true, MaxRunnerSessions: 8})
+	env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true, MaxRunnerSessions: 8})
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/groups", nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp := ut.PerformRequest(e, "GET", env.orgPath("/groups"), nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("list: %d", resp.Result().StatusCode())
 	}
 	var rows []map[string]any
 	json.Unmarshal(resp.Result().Body(), &rows)
-	if len(rows) != 1 || rows[0]["name"] != "G1" {
+	var g1 map[string]any
+	for _, row := range rows {
+		if row["name"] == "G1" {
+			g1 = row
+		}
+	}
+	if g1 == nil {
 		t.Fatalf("rows = %v", rows)
 	}
-	if rows[0]["max_runner_sessions"] != float64(8) {
-		t.Fatalf("max = %v", rows[0]["max_runner_sessions"])
+	if g1["max_runner_sessions"] != float64(8) {
+		t.Fatalf("max = %v", g1["max_runner_sessions"])
 	}
 }
 
@@ -40,7 +46,7 @@ func TestGroupCreate(t *testing.T) {
 
 	bearer := env.loginAsAdmin(t)
 	body := `{"name":"G1","description":"team","max_runner_sessions":4,"agent_available":true,"auto_assign_pattern":"^github.*"}`
-	resp := ut.PerformRequest(e, "POST", "/api/v1/groups", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "POST", env.orgPath("/groups"), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusCreated {
@@ -54,7 +60,7 @@ func TestGroupCreateBadPattern(t *testing.T) {
 
 	bearer := env.loginAsAdmin(t)
 	body := `{"name":"G1","auto_assign_pattern":"["}`
-	resp := ut.PerformRequest(e, "POST", "/api/v1/groups", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "POST", env.orgPath("/groups"), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusBadRequest {
@@ -68,9 +74,9 @@ func TestGroupCreateDuplicate(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
+	env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
 	body := `{"name":"G1"}`
-	resp := ut.PerformRequest(e, "POST", "/api/v1/groups", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "POST", env.orgPath("/groups"), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusConflict {
@@ -84,15 +90,15 @@ func TestGroupGetUpdateDelete(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true, MaxRunnerSessions: 4})
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true, MaxRunnerSessions: 4})
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/groups/"+g.ID, nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp := ut.PerformRequest(e, "GET", env.orgPath("/groups/%s", g.ID), nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("get: %d", resp.Result().StatusCode())
 	}
 
 	body := `{"name":"G2","max_runner_sessions":8,"agent_available":false}`
-	resp = ut.PerformRequest(e, "PUT", "/api/v1/groups/"+g.ID, &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp = ut.PerformRequest(e, "PUT", env.orgPath("/groups/%s", g.ID), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusOK {
@@ -104,7 +110,7 @@ func TestGroupGetUpdateDelete(t *testing.T) {
 		t.Fatalf("group = %v", out)
 	}
 
-	resp = ut.PerformRequest(e, "DELETE", "/api/v1/groups/"+g.ID, nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp = ut.PerformRequest(e, "DELETE", env.orgPath("/groups/%s", g.ID), nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusNoContent {
 		t.Fatalf("delete: %d", resp.Result().StatusCode())
 	}
@@ -116,18 +122,18 @@ func TestGroupMembers(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
 	u, _ := env.users.Create(ctx, "alice", "password123", "user")
 
 	body := `{"user_ids":["` + u.ID + `"]}`
-	resp := ut.PerformRequest(e, "PUT", "/api/v1/groups/"+g.ID+"/members", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "PUT", env.orgPath("/groups/%s/members", g.ID), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusNoContent {
 		t.Fatalf("set members: %d", resp.Result().StatusCode())
 	}
 
-	resp = ut.PerformRequest(e, "GET", "/api/v1/groups/"+g.ID+"/members", nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp = ut.PerformRequest(e, "GET", env.orgPath("/groups/%s/members", g.ID), nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("members: %d", resp.Result().StatusCode())
 	}

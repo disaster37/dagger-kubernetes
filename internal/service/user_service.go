@@ -15,6 +15,7 @@ import (
 
 // UserService implements user CRUD and password logic.
 type UserService struct {
+	orgs   domain.OrgRepository
 	users  domain.UserRepository
 	groups domain.GroupRepository
 	logger *logrus.Logger
@@ -55,17 +56,37 @@ func (s *UserService) Create(ctx context.Context, username, password string, rol
 		"username": u.Username,
 	}).Info("user created")
 
-	// Auto-assign to the default group (best-effort, never blocks user creation).
-	if g, err := s.groups.GetByName(ctx, "default"); err == nil {
-		if err := addGroupMember(ctx, s.groups, g.ID, u.ID); err != nil {
-			s.logger.WithError(err).WithFields(logrus.Fields{
-				"user_id":  u.ID,
-				"username": u.Username,
-			}).Warn("auto-assign to default group failed")
+	// Auto-assign to the bootstrap org's default group (best-effort, never
+	// blocks user creation).
+	orgID := s.bootstrapOrgID(ctx)
+	if orgID != "" {
+		if g, err := s.groups.GetByName(ctx, orgID, "default"); err == nil {
+			if err := addGroupMember(ctx, s.groups, g.ID, u.ID); err != nil {
+				s.logger.WithError(err).WithFields(logrus.Fields{
+					"user_id":  u.ID,
+					"username": u.Username,
+				}).Warn("auto-assign to default group failed")
+			}
 		}
+	} else if g, err := s.groups.GetByName(ctx, "", "default"); err == nil {
+		_ = addGroupMember(ctx, s.groups, g.ID, u.ID)
 	}
 
 	return u, nil
+}
+
+// SetOrgRepository wires organization lookups for default-group assignment.
+func (s *UserService) SetOrgRepository(orgs domain.OrgRepository) { s.orgs = orgs }
+
+func (s *UserService) bootstrapOrgID(ctx context.Context) string {
+	if s.orgs == nil {
+		return ""
+	}
+	id, err := s.orgs.BootstrapOrgID(ctx)
+	if err != nil {
+		return ""
+	}
+	return id
 }
 
 // Authenticate validates the username/password and returns the user. It never

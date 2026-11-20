@@ -16,11 +16,12 @@ func (s *Server) handleCIOIDC(ctx context.Context, c *app.RequestContext) {
 	var req struct {
 		Token   string `json:"token"`
 		Project string `json:"project"`
+		Org     string `json:"org"`
 	}
 	if !decodeBody(c, &req) {
 		return
 	}
-	res, err := s.ciOIDC.Exchange(ctx, c.Query("provider"), req.Token, req.Project)
+	res, err := s.ciOIDC.Exchange(ctx, c.Query("provider"), req.Token, req.Org, req.Project)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return

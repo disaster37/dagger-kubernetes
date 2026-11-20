@@ -497,3 +497,96 @@ func TestExtractTraceSummariesCIProvider(t *testing.T) {
 		})
 	}
 }
+
+// TestExtractTraceSummariesPrefersFinishedRootRecord proves that when a single
+// batch carries both the root start record (UNSET, end=0) and the root finish
+// record (OK/ERROR, end>0) for the same trace, the terminal finish record wins
+// so the trace is not left "running".
+func TestExtractTraceSummariesPrefersFinishedRootRecord(t *testing.T) {
+	cases := []struct {
+		name       string
+		finishCode tracepb.Status_StatusCode
+		wantStatus string
+	}{
+		{name: "ok finish", finishCode: tracepb.Status_STATUS_CODE_OK, wantStatus: "success"},
+		{name: "error finish", finishCode: tracepb.Status_STATUS_CODE_ERROR, wantStatus: "failed"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := mustMarshalRequest(t, &tracepb.ResourceSpans{
+				ScopeSpans: []*tracepb.ScopeSpans{
+					{
+						Spans: []*tracepb.Span{
+							// Root start record: no status, no end time.
+							{
+								TraceId:           tid(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+								SpanId:            tid(t, "1111111111111111"),
+								StartTimeUnixNano: 1700000000000000000,
+							},
+							// Root finish record: terminal status + end time.
+							{
+								TraceId:           tid(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+								SpanId:            tid(t, "1111111111111111"),
+								StartTimeUnixNano: 1700000000000000000,
+								EndTimeUnixNano:   1700000001500000000,
+								Status:            &tracepb.Status{Code: tc.finishCode},
+							},
+						},
+					},
+				},
+			})
+
+			sums := ExtractTraceSummaries(body)
+			if len(sums) != 1 {
+				t.Fatalf("got %d summaries, want 1", len(sums))
+			}
+			s := sums[0]
+			if s.Status != tc.wantStatus {
+				t.Fatalf("status = %q, want %q", s.Status, tc.wantStatus)
+			}
+			if s.DurationMS != 1500 {
+				t.Fatalf("duration_ms = %d, want 1500", s.DurationMS)
+			}
+		})
+	}
+}
+
+// TestExtractTraceSummariesFinishRecordWithoutStart proves the finish record's
+// start time is preserved from the start record when the finish record omits it.
+func TestExtractTraceSummariesFinishRecordWithoutStart(t *testing.T) {
+	body := mustMarshalRequest(t, &tracepb.ResourceSpans{
+		ScopeSpans: []*tracepb.ScopeSpans{
+			{
+				Spans: []*tracepb.Span{
+					{
+						TraceId:           tid(t, "cccccccccccccccccccccccccccccccc"),
+						SpanId:            tid(t, "1111111111111111"),
+						StartTimeUnixNano: 1700000000000000000,
+					},
+					{
+						TraceId:         tid(t, "cccccccccccccccccccccccccccccccc"),
+						SpanId:          tid(t, "1111111111111111"),
+						EndTimeUnixNano: 1700000002000000000,
+						Status:          &tracepb.Status{Code: tracepb.Status_STATUS_CODE_OK},
+					},
+				},
+			},
+		},
+	})
+
+	sums := ExtractTraceSummaries(body)
+	if len(sums) != 1 {
+		t.Fatalf("got %d summaries, want 1", len(sums))
+	}
+	s := sums[0]
+	if s.Status != "success" {
+		t.Fatalf("status = %q, want success", s.Status)
+	}
+	if s.DurationMS != 2000 {
+		t.Fatalf("duration_ms = %d, want 2000", s.DurationMS)
+	}
+	if !s.StartedAt.Equal(time.Unix(0, 1700000000000000000).UTC()) {
+		t.Fatalf("started_at = %v, want preserved start", s.StartedAt)
+	}
+}

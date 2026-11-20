@@ -176,18 +176,35 @@ func TestGroupMapperActive(t *testing.T) {
 	}
 }
 
-func TestGroupMapperMapIfActive(t *testing.T) {
+func TestGroupMapperMapIfActiveTargets(t *testing.T) {
 	t.Run("inactive returns nil", func(t *testing.T) {
 		m := mustMapper(t, nil)
-		if got := m.mapIfActive([]string{"a", "b"}); got != nil {
-			t.Fatalf("mapIfActive inactive = %v, want nil", got)
+		if got := m.mapIfActiveTargets([]string{"a", "b"}); got != nil {
+			t.Fatalf("mapIfActiveTargets inactive = %v, want nil", got)
 		}
 	})
-	t.Run("active maps", func(t *testing.T) {
+	t.Run("active maps name", func(t *testing.T) {
 		m := mustMapper(t, []domain.GroupMappingRule{{Pattern: `^dev-(.*)$`, Replacement: `$1`}})
-		got := m.mapIfActive([]string{"dev-eng"})
-		if !reflect.DeepEqual(got, []string{"eng"}) {
-			t.Fatalf("mapIfActive active = %v, want [eng]", got)
+		got := m.mapIfActiveTargets([]string{"dev-eng"})
+		if len(got) != 1 || got[0].Name != "eng" || got[0].Org != "" {
+			t.Fatalf("mapIfActiveTargets active = %v, want [{eng }]", got)
+		}
+	})
+	t.Run("active maps org", func(t *testing.T) {
+		m := mustMapper(t, []domain.GroupMappingRule{{Pattern: `^dev-(.*)$`, Replacement: `$1`, Org: "acme"}})
+		got := m.mapIfActiveTargets([]string{"dev-eng"})
+		if len(got) != 1 || got[0].Name != "eng" || got[0].Org != "acme" {
+			t.Fatalf("mapIfActiveTargets org = %v, want [{eng acme}]", got)
+		}
+	})
+	t.Run("first match wins per group including org", func(t *testing.T) {
+		m := mustMapper(t, []domain.GroupMappingRule{
+			{Pattern: `^acme`, Replacement: "first", Org: "acme"},
+			{Pattern: `^acme`, Replacement: "second", Org: "globex"},
+		})
+		got := m.mapIfActiveTargets([]string{"acme-corp"})
+		if len(got) != 1 || got[0].Name != "first" || got[0].Org != "acme" {
+			t.Fatalf("mapIfActiveTargets first-match = %v, want [{first acme}]", got)
 		}
 	})
 }

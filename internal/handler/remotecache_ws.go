@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -27,11 +26,12 @@ func (s *Server) handleRemoteCacheWS(ctx context.Context, c *app.RequestContext)
 		writeError(c, consts.StatusNotFound, "remote cache disabled")
 		return
 	}
-	id, ok := s.resolveIdentity(ctx, c)
+	org, id, ok := s.resolveRequestOrg(ctx, c)
 	if !ok {
 		return
 	}
-	namespace := s.remoteCacheNamespace(c, id)
+	_ = id
+	namespace := s.remoteCacheNamespaceFor(org.ID)
 	bearer := s.bearerFromRequest(c)
 	readOnly := string(c.Request.Header.Peek("X-Dagger-Cache-Mode")) == "read-only"
 	upgrader := websocket.HertzUpgrader{CheckOrigin: func(*app.RequestContext) bool { return true }}
@@ -60,12 +60,17 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 				return
 			case <-ticker.C:
 				if bearer != "" {
-					if _, err := s.auth.Resolve(ctx, bearer); err != nil {
+					id, err := s.auth.Resolve(ctx, bearer)
+					if err != nil {
 						if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) {
 							_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(remoteCacheCloseRevoked, "token revoked"), time.Now().Add(5*time.Second))
 							_ = conn.Close()
 							return
 						}
+					} else if !s.orgAccessStillValid(ctx, id, namespace) {
+						_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(remoteCacheCloseRevoked, "org access revoked"), time.Now().Add(5*time.Second))
+						_ = conn.Close()
+						return
 					}
 				}
 				_ = conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(5*time.Second))
@@ -88,18 +93,32 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 	}
 }
 
-// remoteCacheNamespace returns the cache namespace for the caller.
-func (s *Server) remoteCacheNamespace(c *app.RequestContext, id *domain.Identity) string {
+// orgAccessStillValid re-checks the caller's organization membership on every
+// WebSocket heartbeat so a removed member's open engine connection closes.
+func (s *Server) orgAccessStillValid(ctx context.Context, id *domain.Identity, orgID string) bool {
+	if id == nil {
+		return false
+	}
+	if id.IsAdmin() {
+		return true
+	}
+	if id.OrgID != "" {
+		return id.OrgID == orgID
+	}
+	if s.orgs == nil || id.UserID == "" {
+		return false
+	}
+	member, err := s.orgs.IsOrgMember(ctx, orgID, id.UserID)
+	return err == nil && member
+}
+
+// remoteCacheNamespaceFor maps an org ID to its cache namespace. Deprecated
+// single-org shared isolation collapses every org to "_shared".
+func (s *Server) remoteCacheNamespaceFor(orgID string) string {
 	if s.cfg.FleetIsolation == "shared" {
 		return "_shared"
 	}
-	if id != nil && id.OrgID != "" {
-		return id.OrgID
-	}
-	if hdr := strings.TrimSpace(string(c.Request.Header.Peek("X-Dagger-Org"))); hdr != "" {
-		return strings.ToLower(hdr)
-	}
-	return domain.DefaultOrgID
+	return orgID
 }
 
 // relayRemoteCacheWS upgrades a follower-side /v1/engine request and relays
@@ -119,8 +138,8 @@ func (s *Server) relayRemoteCacheWS(ctx context.Context, c *app.RequestContext) 
 	if auth := string(c.Request.Header.Peek("Authorization")); auth != "" {
 		headers["Authorization"] = []string{auth}
 	}
-	if org := string(c.Request.Header.Peek("X-Dagger-Org")); org != "" {
-		headers["X-Dagger-Org"] = []string{org}
+	if org := string(c.Request.Header.Peek(orgHeaderName)); org != "" {
+		headers[orgHeaderName] = []string{org}
 	}
 	upstream, err := s.wsDialer.Dial(ctx, target, host, headers)
 	if err != nil {

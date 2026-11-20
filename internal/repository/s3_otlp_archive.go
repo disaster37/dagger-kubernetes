@@ -32,23 +32,23 @@ func NewS3OTLPArchive(client *minio.Client, bucket, prefix string, logger *logru
 	return &S3OTLPArchive{client: client, bucket: bucket, prefix: strings.Trim(prefix, "/"), logger: logger}
 }
 
-func (a *S3OTLPArchive) key(traceID, signal string, seq uint64) string {
-	return fmt.Sprintf("%s/%s/%s/%020d.bin", a.prefix, traceID, signal, seq)
+func (a *S3OTLPArchive) key(orgID, traceID, signal string, seq uint64) string {
+	return joinS3Key(a.prefix, "orgs", orgID, "otlp-archive", traceID, signal, fmt.Sprintf("%020d.bin", seq))
 }
 
-func (a *S3OTLPArchive) Append(ctx context.Context, traceID, signal string, seq uint64, payload []byte) error {
-	_, err := a.client.PutObject(ctx, a.bucket, a.key(traceID, signal, seq), bytes.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{ContentType: "application/octet-stream"})
+func (a *S3OTLPArchive) Append(ctx context.Context, orgID, traceID, signal string, seq uint64, payload []byte) error {
+	_, err := a.client.PutObject(ctx, a.bucket, a.key(orgID, traceID, signal, seq), bytes.NewReader(payload), int64(len(payload)), minio.PutObjectOptions{ContentType: "application/octet-stream"})
 	if err != nil {
 		return fmt.Errorf("archive otlp chunk: %w", err)
 	}
 	return nil
 }
 
-func (a *S3OTLPArchive) ChunksAfter(ctx context.Context, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
-	prefix := fmt.Sprintf("%s/%s/%s/", a.prefix, traceID, signal)
+func (a *S3OTLPArchive) ChunksAfter(ctx context.Context, orgID, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
+	prefix := fmt.Sprintf("%s/", joinS3Key(a.prefix, "orgs", orgID, "otlp-archive", traceID, signal))
 	opts := minio.ListObjectsOptions{Prefix: prefix, Recursive: true}
 	if fromSeq > 0 {
-		opts.StartAfter = a.key(traceID, signal, fromSeq-1)
+		opts.StartAfter = a.key(orgID, traceID, signal, fromSeq-1)
 	}
 	var keys []string
 	for obj := range a.client.ListObjects(ctx, a.bucket, opts) {
@@ -88,8 +88,8 @@ func seqFromKey(key string) (uint64, error) {
 	return strconv.ParseUint(base, 10, 64)
 }
 
-func (a *S3OTLPArchive) DeleteTrace(ctx context.Context, traceID string) error {
-	prefix := fmt.Sprintf("%s/%s/", a.prefix, traceID)
+func (a *S3OTLPArchive) DeleteTrace(ctx context.Context, orgID, traceID string) error {
+	prefix := fmt.Sprintf("%s/", joinS3Key(a.prefix, "orgs", orgID, "otlp-archive", traceID))
 	var objects []minio.ObjectInfo
 	for obj := range a.client.ListObjects(ctx, a.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if obj.Err != nil {
@@ -122,8 +122,8 @@ func NewMemoryOTLPArchive() *MemoryOTLPArchive {
 
 var _ domain.OTLPArchive = (*MemoryOTLPArchive)(nil)
 
-func (a *MemoryOTLPArchive) Append(_ context.Context, traceID, signal string, seq uint64, payload []byte) error {
-	key := fmt.Sprintf("%s/%s", traceID, signal)
+func (a *MemoryOTLPArchive) Append(_ context.Context, orgID, traceID, signal string, seq uint64, payload []byte) error {
+	key := fmt.Sprintf("%s/%s/%s", orgID, traceID, signal)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	chunks := a.chunks[key]
@@ -139,8 +139,8 @@ func (a *MemoryOTLPArchive) Append(_ context.Context, traceID, signal string, se
 	return nil
 }
 
-func (a *MemoryOTLPArchive) ChunksAfter(_ context.Context, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
-	key := fmt.Sprintf("%s/%s", traceID, signal)
+func (a *MemoryOTLPArchive) ChunksAfter(_ context.Context, orgID, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
+	key := fmt.Sprintf("%s/%s/%s", orgID, traceID, signal)
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	chunks := a.chunks[key]
@@ -152,8 +152,8 @@ func (a *MemoryOTLPArchive) ChunksAfter(_ context.Context, traceID, signal strin
 	return out, nil
 }
 
-func (a *MemoryOTLPArchive) DeleteTrace(_ context.Context, traceID string) error {
-	prefix := fmt.Sprintf("%s/", traceID)
+func (a *MemoryOTLPArchive) DeleteTrace(_ context.Context, orgID, traceID string) error {
+	prefix := fmt.Sprintf("%s/%s/", orgID, traceID)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	for key := range a.chunks {

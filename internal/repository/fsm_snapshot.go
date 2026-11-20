@@ -7,6 +7,8 @@ import (
 
 	"github.com/hashicorp/raft"
 
+	"time"
+
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
@@ -26,23 +28,26 @@ type orgMembershipEdge struct {
 
 // fsmSnapshotPayload is the JSON document persisted into a Raft snapshot.
 type fsmSnapshotPayload struct {
-	Users            []*cmdUser               `json:"users"`
-	Groups           []*domain.Group          `json:"groups"`
-	Memberships      []membershipEdge         `json:"memberships"`
-	Tokens           []*cmdToken              `json:"tokens"`
-	Projects         []*domain.Project        `json:"projects"`
-	Orgs             []*domain.Org            `json:"orgs"`
-	OrgMembers       []orgMembershipEdge      `json:"org_members"`
-	Secrets          []*cmdSecret             `json:"secrets"`
-	ForgeSources     []*cmdForgeSource        `json:"forge_sources"`
-	Environments     []*domain.Environment    `json:"environments"`
-	CheckRuns        []*domain.CheckRunRecord `json:"check_runs"`
-	CheckRunTokens   map[string]string        `json:"check_run_token_hashes,omitempty"`
-	WorkflowDefs     []*domain.WorkflowDef    `json:"workflow_defs"`
-	WorkflowRuns     []*cmdWorkflowRun        `json:"workflow_runs"`
-	WorkflowCounters map[string]int64         `json:"workflow_counters"`
-	Traces           []*domain.TraceMeta      `json:"traces"`
-	Meta             map[string]string        `json:"meta"`
+	Users       []*cmdUser          `json:"users"`
+	Groups      []*domain.Group     `json:"groups"`
+	Memberships []membershipEdge    `json:"memberships"`
+	Tokens      []*cmdToken         `json:"tokens"`
+	Projects    []*domain.Project   `json:"projects"`
+	Orgs        []*domain.Org       `json:"orgs"`
+	OrgMembers  []orgMembershipEdge `json:"org_members"`
+	// OrgMemberSince is optional: snapshots written before the membership
+	// timestamp existed decode to an empty map and are backfilled on restore.
+	OrgMemberSince   map[string]map[string]time.Time `json:"org_member_since,omitempty"`
+	Secrets          []*cmdSecret                    `json:"secrets"`
+	ForgeSources     []*cmdForgeSource               `json:"forge_sources"`
+	Environments     []*domain.Environment           `json:"environments"`
+	CheckRuns        []*domain.CheckRunRecord        `json:"check_runs"`
+	CheckRunTokens   map[string]string               `json:"check_run_token_hashes,omitempty"`
+	WorkflowDefs     []*domain.WorkflowDef           `json:"workflow_defs"`
+	WorkflowRuns     []*cmdWorkflowRun               `json:"workflow_runs"`
+	WorkflowCounters map[string]int64                `json:"workflow_counters"`
+	Traces           []*domain.TraceMeta             `json:"traces"`
+	Meta             map[string]string               `json:"meta"`
 }
 
 // fsmSnapshot is a point-in-time snapshot of the FSM state.
@@ -163,6 +168,16 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 			payload.OrgMembers = append(payload.OrgMembers, orgMembershipEdge{OrgID: oid, UserID: uid, Role: role})
 		}
 	}
+	if len(f.state.orgMemberSince) > 0 {
+		payload.OrgMemberSince = make(map[string]map[string]time.Time, len(f.state.orgMemberSince))
+		for oid, members := range f.state.orgMemberSince {
+			cp := make(map[string]time.Time, len(members))
+			for uid, at := range members {
+				cp[uid] = at
+			}
+			payload.OrgMemberSince[oid] = cp
+		}
+	}
 	return &fsmSnapshot{payload: payload}, nil
 }
 
@@ -268,7 +283,7 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 		s.meta[k] = v
 	}
 	for _, edge := range payload.Memberships {
-		s.addMembership(edge.GroupID, edge.UserID)
+		s.addMembership(edge.GroupID, edge.UserID, time.Time{})
 	}
 	for _, edge := range payload.OrgMembers {
 		if s.orgMembers[edge.OrgID] == nil {
@@ -280,13 +295,31 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 		}
 		s.orgMembersByUser[edge.UserID][edge.OrgID] = struct{}{}
 	}
-	s.ensureDefaultOrg()
+	for oid, members := range payload.OrgMemberSince {
+		for uid, at := range members {
+			// Never materialize a timestamp without its membership edge.
+			if _, ok := s.orgMembers[oid][uid]; !ok {
+				continue
+			}
+			s.setOrgMemberSinceLocked(oid, uid, at)
+		}
+	}
+	// Pre-org_member_since snapshots (Raft revision <= 128) carry memberships
+	// but no timestamps. Backfill them with the bootstrap org CreatedAt, the
+	// best-known lower bound, so they never surface as year 1.
+	s.backfillOrgMemberSinceLocked(time.Time{})
+	if bootID := s.meta[domain.BootstrapOrgMetaKey]; bootID != "" {
+		s.normalizeLegacyRowsLocked(bootID, "", time.Time{})
+	}
 
 	// Swap the decoded maps into the live state under its write lock instead of
 	// replacing the fsmState pointer. Read helpers dereference f.state without
 	// synchronizing on the pointer itself, so reassigning it here would race
 	// with concurrent reads (snapshot installs can happen on a live node).
 	f.state.adopt(s)
+	if bootID := f.state.meta[domain.BootstrapOrgMetaKey]; bootID != "" && f.state.sessionSink != nil {
+		f.state.sessionSink.ApplyBootstrapOrg(bootID)
+	}
 
 	// Notify the meta hook for every restored meta key so the Minting CA
 	// rotator observes the replicated keyring after a snapshot install.
@@ -308,18 +341,19 @@ func (s *fsmState) adopt(other *fsmState) {
 	s.usersByName = other.usersByName
 	s.usersByOAuth = other.usersByOAuth
 	s.groups = other.groups
-	s.groupsByName = other.groupsByName
+	s.groupsByOrgName = other.groupsByOrgName
 	s.memberships = other.memberships
 	s.membershipsByUser = other.membershipsByUser
 	s.tokens = other.tokens
 	s.tokensByHash = other.tokensByHash
 	s.tokensByUser = other.tokensByUser
 	s.projects = other.projects
-	s.projectsByName = other.projectsByName
+	s.projectsByOrgName = other.projectsByOrgName
 	s.orgs = other.orgs
 	s.orgsByName = other.orgsByName
 	s.orgMembers = other.orgMembers
 	s.orgMembersByUser = other.orgMembersByUser
+	s.orgMemberSince = other.orgMemberSince
 	s.secrets = other.secrets
 	s.forgeSources = other.forgeSources
 	s.environments = other.environments

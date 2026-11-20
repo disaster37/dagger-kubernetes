@@ -22,7 +22,7 @@ func newFakeOTLPArchive() *fakeOTLPArchive {
 	return &fakeOTLPArchive{chunks: map[string][]domain.OTLPChunk{}}
 }
 
-func (a *fakeOTLPArchive) Append(_ context.Context, traceID, signal string, seq uint64, payload []byte) error {
+func (a *fakeOTLPArchive) Append(_ context.Context, orgID, traceID, signal string, seq uint64, payload []byte) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.failNext > 0 {
@@ -34,7 +34,7 @@ func (a *fakeOTLPArchive) Append(_ context.Context, traceID, signal string, seq 
 	return nil
 }
 
-func (a *fakeOTLPArchive) ChunksAfter(_ context.Context, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
+func (a *fakeOTLPArchive) ChunksAfter(_ context.Context, orgID, traceID, signal string, fromSeq uint64) ([]domain.OTLPChunk, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.reads++
@@ -47,16 +47,16 @@ func (a *fakeOTLPArchive) ChunksAfter(_ context.Context, traceID, signal string,
 	return out, nil
 }
 
-func (a *fakeOTLPArchive) DeleteTrace(context.Context, string) error { return nil }
+func (a *fakeOTLPArchive) DeleteTrace(context.Context, string, string) error { return nil }
 
 func TestOTLPStreamLiveReadsAvoidArchive(t *testing.T) {
 	archive := newFakeOTLPArchive()
 	svc := NewOTLPStreamService(archive, nil, logrus.New())
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		svc.Ingest(ctx, "trace", "traces", []byte{byte(i)})
+		svc.Ingest(ctx, "", "trace", "traces", []byte{byte(i)})
 	}
-	chunks, _, err := svc.ChunksFrom(ctx, "trace", "traces", 0)
+	chunks, _, err := svc.ChunksFrom(ctx, "", "trace", "traces", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -79,12 +79,12 @@ func TestOTLPStreamFailureRecoveryKeepsSequence(t *testing.T) {
 	svc := NewOTLPStreamService(archive, nil, logrus.New())
 	ctx := context.Background()
 	for i := 0; i < 3; i++ {
-		svc.Ingest(ctx, "trace", "traces", []byte{byte(i)})
+		svc.Ingest(ctx, "", "trace", "traces", []byte{byte(i)})
 	}
 	// Force a flush; the first append fails and the pending suffix is retained.
-	svc.flush(ctx, "trace", "traces")
-	svc.flush(ctx, "trace", "traces")
-	chunks, _, err := svc.ChunksFrom(ctx, "trace", "traces", 0)
+	svc.flush(ctx, "", "trace", "traces")
+	svc.flush(ctx, "", "trace", "traces")
+	chunks, _, err := svc.ChunksFrom(ctx, "", "trace", "traces", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,13 +102,13 @@ func TestOTLPStreamColdReadUsesArchive(t *testing.T) {
 	archive := newFakeOTLPArchive()
 	svc := NewOTLPStreamService(archive, nil, logrus.New())
 	ctx := context.Background()
-	svc.Ingest(ctx, "trace", "traces", []byte("a"))
-	svc.flush(ctx, "trace", "traces")
+	svc.Ingest(ctx, "", "trace", "traces", []byte("a"))
+	svc.flush(ctx, "", "trace", "traces")
 	// Evict the live buffer to force a cold read.
 	svc.mu.Lock()
-	delete(svc.buffers, otlpKey("trace", "traces"))
+	delete(svc.buffers, otlpKey("", "trace", "traces"))
 	svc.mu.Unlock()
-	chunks, _, err := svc.ChunksFrom(ctx, "trace", "traces", 0)
+	chunks, _, err := svc.ChunksFrom(ctx, "", "trace", "traces", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

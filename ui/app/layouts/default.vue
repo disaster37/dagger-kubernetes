@@ -9,6 +9,7 @@
     <UNavigationMenu :items="navItems" orientation="horizontal" />
 
     <template #right>
+      <OrgSwitcher />
       <StatusIndicator v-if="auth.isAuthenticated" />
       <UDropdownMenu v-if="auth.isAuthenticated && auth.user" :items="userMenuItems">
         <UButton color="neutral" variant="ghost" size="sm" trailing-icon="i-lucide-chevron-down">
@@ -55,43 +56,68 @@
 import { onUnmounted, watch } from 'vue'
 import { useAuthStore } from '~/stores/auth'
 import { useStatusStore } from '~/stores/status'
+import { useOrgStore } from '~/stores/org'
 
 const auth = useAuthStore()
 const status = useStatusStore()
+const org = useOrgStore()
 const router = useRouter()
+const route = useRoute()
 
 const config = useRuntimeConfig()
 const appVersion = computed(() => String((config.public as { appVersion?: unknown }).appVersion || 'unknown'))
 
 const navItems = computed(() => {
-  const items: { label: string; to: string }[] = [
+  const items: { label: string; to?: string; children?: { label: string; to: string }[] }[] = [
     { label: 'Pipelines', to: '/pipelines' },
-    { label: 'History', to: '/history' },
-    { label: 'Organizations', to: '/orgs' },
     { label: 'Checks', to: '/checks' },
     { label: 'Workflows', to: '/workflows' },
     { label: 'Artifacts', to: '/artifacts' },
-    { label: 'Remote cache', to: '/remote-cache' },
   ]
-  if (auth.isAdmin) items.push({ label: 'Image cache', to: '/image-cache' })
-  items.push(
+  const infra = [
     { label: 'Runners', to: '/fleet' },
+    { label: 'Remote Cache', to: '/remote-cache' },
+    { label: 'History', to: '/history' },
     { label: 'Services', to: '/services' },
-    { label: 'Settings', to: '/settings' },
-    { label: 'Connect', to: '/connect' },
-  )
+  ]
+  if (auth.isAdmin) infra.push({ label: 'Image Cache', to: '/image-cache' })
+  items.push({ label: 'Infrastructure', children: infra })
+  if (org.activeSlug) {
+    const base = `/orgs/${org.activeSlug}`
+    items.push({
+      label: 'Organization',
+      children: [
+        { label: 'Overview & Settings', to: base },
+        { label: 'Groups', to: `${base}/groups` },
+        { label: 'Projects', to: `${base}/projects` },
+        { label: 'Members', to: `${base}/members` },
+      ],
+    })
+  }
   if (auth.isAdmin) {
-    items.push(
-      { label: 'Users', to: '/admin/users' },
-      { label: 'Groups', to: '/admin/groups' },
-      { label: 'Projects', to: '/admin/projects' },
-    )
+    items.push({
+      label: 'Admin',
+      children: [
+        { label: 'Organizations & Quotas', to: '/admin/orgs' },
+        { label: 'Users', to: '/admin/users' },
+      ],
+    })
   }
   return items
 })
 
 const userMenuItems = computed(() => [
   [
+    {
+      label: 'Connect CLI',
+      icon: 'i-lucide-terminal',
+      to: '/connect',
+    },
+    {
+      label: 'Account Settings',
+      icon: 'i-lucide-settings',
+      to: '/settings',
+    },
     {
       label: 'Logout',
       icon: 'i-lucide-log-out',
@@ -109,6 +135,12 @@ watch(
     if (authed) status.start()
     else status.stop()
   },
+  { immediate: true },
+)
+
+watch(
+  () => route.fullPath,
+  () => org.syncFromRoute(route),
   { immediate: true },
 )
 

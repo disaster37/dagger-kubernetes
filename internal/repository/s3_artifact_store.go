@@ -16,7 +16,7 @@ import (
 
 // S3ArtifactStore stores workflow artifacts with SHA-256 verification.
 type S3ArtifactStore struct {
-	client *minio.Client
+	client s3ObjectAPI
 	bucket string
 	prefix string
 }
@@ -25,11 +25,22 @@ var _ domain.ArtifactStore = (*S3ArtifactStore)(nil)
 
 // NewS3ArtifactStore returns an S3-backed artifact store.
 func NewS3ArtifactStore(client *minio.Client, bucket, prefix string) *S3ArtifactStore {
-	return &S3ArtifactStore{client: client, bucket: bucket, prefix: strings.Trim(prefix, "/")}
+	return &S3ArtifactStore{client: minioS3API{client}, bucket: bucket, prefix: strings.Trim(prefix, "/")}
 }
 
 func (s *S3ArtifactStore) key(orgID, projectID, runID, name string) string {
-	return fmt.Sprintf("%s/%s/%s/%s/%s", s.prefix, orgID, projectID, runID, name)
+	return joinS3Key(s.prefix, "orgs", orgID, "artifacts", projectID, runID, name)
+}
+
+// joinS3Key joins non-empty path segments with "/".
+func joinS3Key(parts ...string) string {
+	segments := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p != "" {
+			segments = append(segments, strings.Trim(p, "/"))
+		}
+	}
+	return strings.Join(segments, "/")
 }
 
 // Put stores data and returns its key. The SHA-256 is stored as object
@@ -49,15 +60,15 @@ func (s *S3ArtifactStore) Put(ctx context.Context, orgID, projectID, runID, name
 
 // Get reads and verifies an artifact.
 func (s *S3ArtifactStore) Get(ctx context.Context, key string) ([]byte, error) {
+	info, err := s.client.StatObject(ctx, s.bucket, key, minio.StatObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("stat artifact: %w", err)
+	}
 	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("get artifact: %w", err)
 	}
 	defer func() { _ = obj.Close() }()
-	info, err := obj.Stat()
-	if err != nil {
-		return nil, fmt.Errorf("stat artifact: %w", err)
-	}
 	data, err := io.ReadAll(obj)
 	if err != nil {
 		return nil, fmt.Errorf("read artifact: %w", err)
@@ -71,9 +82,26 @@ func (s *S3ArtifactStore) Get(ctx context.Context, key string) ([]byte, error) {
 	return data, nil
 }
 
-// List returns artifact keys for a run.
+// List returns artifact keys for a run. Any of orgID/projectID/runID may be
+// empty to widen the listing (e.g. every artifact in an org); empty segments
+// are omitted so the S3 prefix never contains an empty path component, which
+// MinIO rejects as an unsupported object name.
 func (s *S3ArtifactStore) List(ctx context.Context, orgID, projectID, runID string) ([]string, error) {
-	prefix := fmt.Sprintf("%s/%s/%s/%s/", s.prefix, orgID, projectID, runID)
+	segments := make([]string, 0, 6)
+	if s.prefix != "" {
+		segments = append(segments, s.prefix)
+	}
+	segments = append(segments, "orgs")
+	for _, seg := range []string{orgID, "artifacts", projectID, runID} {
+		if seg == "" {
+			continue
+		}
+		segments = append(segments, seg)
+	}
+	prefix := strings.Join(segments, "/")
+	if prefix != "" {
+		prefix = fmt.Sprintf("%s/", prefix)
+	}
 	var keys []string
 	for obj := range s.client.ListObjects(ctx, s.bucket, minio.ListObjectsOptions{Prefix: prefix, Recursive: true}) {
 		if obj.Err != nil {

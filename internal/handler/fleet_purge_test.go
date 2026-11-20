@@ -24,11 +24,19 @@ type stubEngineCachePurger struct {
 	ok     bool
 }
 
-func (s *stubEngineCachePurger) Purge(context.Context, string) (*domain.EngineCachePurgeResult, error) {
+func (s *stubEngineCachePurger) PurgeForOrg(_ context.Context, orgID, version string) (*domain.EngineCachePurgeResult, error) {
+	return s.PurgeResultFor(orgID, version)
+}
+
+func (s *stubEngineCachePurger) StatusForOrg(orgID, version string) (*domain.EngineCachePurgeResult, bool) {
+	return s.StatusResultFor(orgID, version)
+}
+
+func (s *stubEngineCachePurger) PurgeResultFor(orgID, version string) (*domain.EngineCachePurgeResult, error) {
 	return s.result, s.err
 }
 
-func (s *stubEngineCachePurger) Status(string) (*domain.EngineCachePurgeResult, bool) {
+func (s *stubEngineCachePurger) StatusResultFor(orgID, version string) (*domain.EngineCachePurgeResult, bool) {
 	return s.status, s.ok
 }
 

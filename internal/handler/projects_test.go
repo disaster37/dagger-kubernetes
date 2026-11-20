@@ -18,9 +18,9 @@ func TestProjectsList(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	env.projects.Create(ctx, "github.com/acme/api", "")
+	env.projects.Create(ctx, env.orgID, "github.com/acme/api", "")
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/projects", nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp := ut.PerformRequest(e, "GET", env.orgPath("/projects"), nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("list: %d", resp.Result().StatusCode())
 	}
@@ -37,7 +37,7 @@ func TestProjectCreate(t *testing.T) {
 
 	bearer := env.loginAsAdmin(t)
 	body := `{"name":"github.com/acme/api","group_id":""}`
-	resp := ut.PerformRequest(e, "POST", "/api/v1/projects", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "POST", env.orgPath("/projects"), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusCreated {
@@ -51,9 +51,9 @@ func TestProjectCreateWithGroup(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
 	body := `{"name":"github.com/acme/api","group_id":"` + g.ID + `"}`
-	resp := ut.PerformRequest(e, "POST", "/api/v1/projects", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "POST", env.orgPath("/projects"), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusCreated {
@@ -72,11 +72,11 @@ func TestProjectUpdateAssign(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
-	p, _ := env.projects.Create(ctx, "github.com/acme/api", "")
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
+	p, _ := env.projects.Create(ctx, env.orgID, "github.com/acme/api", "")
 
 	body := `{"group_id":"` + g.ID + `"}`
-	resp := ut.PerformRequest(e, "PUT", "/api/v1/projects/"+p.ID, &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp := ut.PerformRequest(e, "PUT", env.orgPath("/projects/%s", p.ID), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusOK {
@@ -90,7 +90,7 @@ func TestProjectUpdateAssign(t *testing.T) {
 
 	// Unassign.
 	body = `{"group_id":""}`
-	resp = ut.PerformRequest(e, "PUT", "/api/v1/projects/"+p.ID, &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+	resp = ut.PerformRequest(e, "PUT", env.orgPath("/projects/%s", p.ID), &ut.Body{Body: strings.NewReader(body), Len: len(body)},
 		ut.Header{Key: "Authorization", Value: bearer},
 		ut.Header{Key: "Content-Type", Value: "application/json"})
 	if resp.Result().StatusCode() != http.StatusOK {
@@ -108,8 +108,8 @@ func TestProjectDelete(t *testing.T) {
 	ctx := context.Background()
 
 	bearer := env.loginAsAdmin(t)
-	p, _ := env.projects.Create(ctx, "github.com/acme/api", "")
-	resp := ut.PerformRequest(e, "DELETE", "/api/v1/projects/"+p.ID, nil, ut.Header{Key: "Authorization", Value: bearer})
+	p, _ := env.projects.Create(ctx, env.orgID, "github.com/acme/api", "")
+	resp := ut.PerformRequest(e, "DELETE", env.orgPath("/projects/%s", p.ID), nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusNoContent {
 		t.Fatalf("delete: %d", resp.Result().StatusCode())
 	}

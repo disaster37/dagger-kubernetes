@@ -33,7 +33,7 @@ func TestCloudParityRoutes(t *testing.T) {
 	jwtSvc := service.NewJWTService([]byte("cloud-parity-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	deviceSvc := service.NewDeviceAuthService(service.NewMemoryDeviceAuthStore(), usersSvc, groupRepo, jwtSvc, 10*time.Minute, 5*time.Second, logger)
-	graphql := repository.NewCloudGraphQL(userRepo, repository.NewOrgRepo(store), traceMetaRepo, repository.NewCheckRunRepo(store), domain.GraphQLConfig{MaxDepth: 15, MaxSelections: 250, MaxQueryBytes: 65536, MaxParallelism: 10})
+	graphql := repository.NewCloudGraphQL(userRepo, repository.NewOrgRepo(store), groupRepo, traceMetaRepo, repository.NewCheckRunRepo(store), domain.GraphQLConfig{MaxDepth: 15, MaxSelections: 250, MaxQueryBytes: 65536, MaxParallelism: 10})
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)

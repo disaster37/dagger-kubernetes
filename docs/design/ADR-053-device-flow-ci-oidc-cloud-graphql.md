@@ -33,3 +33,19 @@ Cloud clients can use the standard GraphQL contract.
 - `Org.checks(first:)` exposes Cloud Checks for CLI/UI parity.
 - `OrgService.EnsureToken` reuses a recoverable `dag_<org>_` token so OIDC
   exchanges and supervisor restarts never invalidate in-flight runs.
+
+## Follow-up (2026-11-18)
+- **Quickstart-org mutation.** `Mutation.createQuickstartOrg(name: String!): Org!`
+  lets a freshly authenticated user with no org memberships bootstrap their own
+  org from `dagger cloud login` (creating it and granting `org_admin`, or
+  idempotently returning an existing membership; server-side slug sanitization
+  and collision suffixes apply). `User.orgs` and `canAccessOrg` now also include
+  group-derived orgs.
+- **`CLINotice` object.** `Org.cliNotice` is typed as
+  `CLINotice { level: String!, title: String!, body: String! }` (null when
+  none), so the per-command `GetOrgCLINotice` query (`cliNotice { level title
+  body }`) validates and succeeds.
+- **Host-based internal data host + SNI routing.** See
+  [ADR-052](ADR-052-semver-prereleases-org-tenancy.md) — the internal data host
+  is chosen from the request `Host`, and internal `.svc` SNIs receive the
+  minting-CA leaf.

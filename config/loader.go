@@ -39,6 +39,7 @@ var supervisorValidations = []validation{
 	{wrap: "validate group mapping default limit", fn: validateOAuthGroupMappingDefaultLimit},
 	{wrap: "validate oauth admin_groups", fn: validateOAuthAdminGroups},
 	{wrap: "validate server config", fn: validateServerConfig},
+	{wrap: "validate org config", fn: validateOrgConfig},
 	{wrap: "validate fleet config", fn: validateFleetConfig},
 	{wrap: "validate cli config", fn: validateCLIConfig},
 	{wrap: "validate image cache config", fn: validateImageCacheConfig},
@@ -115,6 +116,21 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("auth.oauth.session_max_age", 0)
 
 	v.SetDefault("attribution.project_mappings", []domain.ProjectMappingRule{})
+
+	v.SetDefault("org.default.display_name", domain.DefaultOrgDisplayName)
+	v.SetDefault("org.default_quotas.max_groups.soft", 0)
+	v.SetDefault("org.default_quotas.max_groups.hard", 0)
+	v.SetDefault("org.default_quotas.max_projects.soft", 0)
+	v.SetDefault("org.default_quotas.max_projects.hard", 0)
+	v.SetDefault("org.default_quotas.max_members.soft", 0)
+	v.SetDefault("org.default_quotas.max_members.hard", 0)
+	v.SetDefault("org.default_quotas.max_concurrent_sessions.soft", 0)
+	v.SetDefault("org.default_quotas.max_concurrent_sessions.hard", 0)
+	v.SetDefault("org.default_quotas.max_engines.soft", 0)
+	v.SetDefault("org.default_quotas.max_engines.hard", 0)
+	v.SetDefault("org.default_quotas.max_cache_bytes.soft", 0)
+	v.SetDefault("org.default_quotas.max_cache_bytes.hard", 0)
+	v.SetDefault("org.default_quotas.max_pipeline_retention", time.Duration(0))
 
 	v.SetDefault("auth.jwt.secret", "")
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)
@@ -777,6 +793,60 @@ func validateOAuthRevalidation(cfg *domain.Config) error {
 // almost always a unit mistake — in particular, an unquoted YAML integer (e.g.
 // `version_retention: 24`) is decoded by Viper/mapstructure as *nanoseconds*,
 // not hours, which would GC idle fleets within one sweep tick.
+// validateOrgConfig validates the bootstrap organization presentation and the
+// cluster-wide default quotas, plus optional org targets on mapping rules.
+func validateOrgConfig(cfg *domain.Config) error {
+	if n := len(strings.TrimSpace(cfg.Org.Default.DisplayName)); n > 128 {
+		return fmt.Errorf("org.default.display_name must be at most 128 characters (got %d)", n)
+	}
+	if cfg.Org.Default.DisplayName == "" {
+		cfg.Org.Default.DisplayName = domain.DefaultOrgDisplayName
+	}
+	if err := cfg.Org.DefaultQuotas.Validate(); err != nil {
+		return fmt.Errorf("org.default_quotas: %w", err)
+	}
+	for i, rule := range cfg.Auth.OAuth.GroupMappings {
+		if err := validateOrgSelector(fmt.Sprintf("auth.oauth.group_mappings[%d].org", i), rule.Org); err != nil {
+			return err
+		}
+	}
+	for i, rule := range cfg.Attribution.ProjectMappings {
+		if err := validateOrgSelector(fmt.Sprintf("attribution.project_mappings[%d].org", i), rule.Org); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var orgSlugRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// validOrgSelector reports whether s is a valid org slug or org-<16hex> ID.
+// It mirrors service.OrgService.ValidateOrgName without importing service.
+func validOrgSelector(s string) bool {
+	if orgSlugRe.MatchString(s) {
+		return true
+	}
+	if len(s) != 20 || !strings.HasPrefix(s, "org-") {
+		return false
+	}
+	for _, r := range s[4:] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateOrgSelector(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if !validOrgSelector(value) {
+		return fmt.Errorf("%s must be a valid organization slug or org-<16hex> id, got %q", field, value)
+	}
+	return nil
+}
+
 func validateFleetConfig(cfg *domain.Config) error {
 	if cfg.Fleet.Isolation != "" && cfg.Fleet.Isolation != "per_org" && cfg.Fleet.Isolation != "shared" {
 		return fmt.Errorf("fleet.isolation must be \"per_org\" or \"shared\"")

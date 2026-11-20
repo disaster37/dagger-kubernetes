@@ -25,7 +25,24 @@ func (s *Server) handleConnectEnv(ctx context.Context, c *app.RequestContext) {
 	}
 	reveal := c.Query("reveal") == "true"
 	version := c.Query("version")
-	snap, err := s.connect.ConnectEnv(ctx, id.UserID, version, reveal)
+	tokenType := c.Query("token_type")
+	if tokenType == "" {
+		tokenType = "personal"
+	}
+	if tokenType != "personal" && tokenType != "org" {
+		writeError(c, consts.StatusBadRequest, "token_type must be personal or org")
+		return
+	}
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return
+	}
+	if tokenType == "org" && !id.IsAdmin() && !s.orgs.IsOrgAdmin(ctx, org.ID, id.UserID) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	orgs, _ := s.orgs.OrgsForUser(ctx, id.UserID)
+	snap, err := s.connect.ConnectEnv(ctx, id.UserID, org, version, tokenType, len(orgs) > 1, reveal)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return

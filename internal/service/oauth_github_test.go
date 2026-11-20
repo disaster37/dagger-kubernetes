@@ -166,7 +166,7 @@ func TestOAuthCompleteDefaultGroupAutoJoin(t *testing.T) {
 	ctx := context.Background()
 
 	// Pre-create the configured "default" group.
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -317,8 +317,8 @@ func TestOAuthCompleteGroupMapping(t *testing.T) {
 
 	// Pre-create the target groups; acme-all carries an explicit quota that
 	// must never be overwritten by the mapping default.
-	all, _ := gsvc.Create(ctx, GroupInput{Name: "acme-all", MaxRunnerSessions: 7, AgentAvailable: true})
-	eng, _ := gsvc.Create(ctx, GroupInput{Name: "acme-eng", AgentAvailable: true})
+	all, _ := gsvc.Create(ctx, "", GroupInput{Name: "acme-all", MaxRunnerSessions: 7, AgentAvailable: true})
+	eng, _ := gsvc.Create(ctx, "", GroupInput{Name: "acme-eng", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -332,7 +332,7 @@ func TestOAuthCompleteGroupMapping(t *testing.T) {
 	if !ids[all.ID] || !ids[eng.ID] {
 		t.Fatalf("user should be member of mapped groups, got %v", groups)
 	}
-	got, err := gsvc.GetByName(ctx, "acme-all")
+	got, err := gsvc.GetByName(ctx, "", "acme-all")
 	if err != nil {
 		t.Fatalf("GetByName acme-all: %v", err)
 	}
@@ -369,7 +369,7 @@ func TestOAuthCompleteGroupMappingAutoCreatesGroup(t *testing.T) {
 	if !groups[0].AgentAvailable {
 		t.Fatal("auto-created group must have AgentAvailable = true")
 	}
-	created, err := gsvc.GetByName(ctx, "does-not-exist")
+	created, err := gsvc.GetByName(ctx, "", "does-not-exist")
 	if err != nil {
 		t.Fatalf("auto-created group not persisted: %v", err)
 	}
@@ -392,13 +392,13 @@ func TestOAuthCompleteGroupMappingInvalidNameSkipped(t *testing.T) {
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
 
-	dg, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	dg, _ := gsvc.Create(ctx, "", GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
 		t.Fatalf("Complete: %v", err)
 	}
-	if _, err := gsvc.GetByName(ctx, "has space"); err == nil {
+	if _, err := gsvc.GetByName(ctx, "", "has space"); err == nil {
 		t.Fatal("invalid mapped name must not be persisted")
 	}
 	groups, _ := gsvc.GroupsForUser(ctx, u.ID)
@@ -420,7 +420,7 @@ func TestOAuthCompleteNoGroupMappingsNoSync(t *testing.T) {
 	// Pre-create a group whose name matches an org/team — it must NOT be joined
 	// because no mapping rules are configured (identity at Map level, but the
 	// service skips sync via Active()).
-	gsvc.Create(ctx, GroupInput{Name: "acme", AgentAvailable: true})
+	gsvc.Create(ctx, "", GroupInput{Name: "acme", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -445,7 +445,7 @@ func TestOAuthCompleteTeamsFetchFailureBestEffort(t *testing.T) {
 	}
 	svc, _, gsvc := newOAuthService(t, &cfg, gh)
 	ctx := context.Background()
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "acme-mapped", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "acme-mapped", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -487,7 +487,7 @@ func TestCompleteOAuthUserFallbackToDefault(t *testing.T) {
 	ctx := context.Background()
 
 	// Create the "default" group.
-	dg, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	dg, _ := gsvc.Create(ctx, "", GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {
@@ -514,8 +514,8 @@ func TestCompleteOAuthUserWithMappedGroups(t *testing.T) {
 	ctx := context.Background()
 
 	// Create both the mapped group and the "default" group.
-	mapped, _ := gsvc.Create(ctx, GroupInput{Name: "acme-mapped", AgentAvailable: true})
-	dg, _ := gsvc.Create(ctx, GroupInput{Name: "default", AgentAvailable: true})
+	mapped, _ := gsvc.Create(ctx, "", GroupInput{Name: "acme-mapped", AgentAvailable: true})
+	dg, _ := gsvc.Create(ctx, "", GroupInput{Name: "default", AgentAvailable: true})
 
 	_, _, u, err := svc.Complete(ctx, "code")
 	if err != nil {

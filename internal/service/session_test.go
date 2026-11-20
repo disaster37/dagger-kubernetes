@@ -10,7 +10,7 @@ import (
 
 func TestStoreRegisterAndGet(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	lease, err := s.Get("fp1")
 	if err != nil {
@@ -26,7 +26,7 @@ func TestStoreRegisterAndGet(t *testing.T) {
 
 func TestStoreExpiry(t *testing.T) {
 	s := NewStore(10 * time.Millisecond)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -38,7 +38,7 @@ func TestStoreExpiry(t *testing.T) {
 
 func TestStoreTouch(t *testing.T) {
 	s := NewStore(50 * time.Millisecond)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	time.Sleep(25 * time.Millisecond)
 	s.Touch("fp1")
@@ -53,8 +53,8 @@ func TestStoreTouch(t *testing.T) {
 
 func TestStoreReapOrphans(t *testing.T) {
 	s := NewStore(10 * time.Millisecond)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
-	s.Register("fp2", "v0.21.4", "pod-1", "inst-2", "trace-2", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp2", "v0.21.4", "pod-1", "inst-2", "trace-2", "")
 
 	time.Sleep(20 * time.Millisecond)
 
@@ -69,9 +69,9 @@ func TestStoreReapOrphans(t *testing.T) {
 
 func TestStorePinnedSessionsOnReplica(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
-	s.Register("fp2", "v0.20.0", "pod-0", "inst-2", "trace-2", "")
-	s.Register("fp3", "v0.21.4", "pod-1", "inst-3", "trace-3", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp2", "v0.20.0", "pod-0", "inst-2", "trace-2", "")
+	s.Register("", "fp3", "v0.21.4", "pod-1", "inst-3", "trace-3", "")
 
 	if count := s.PinnedSessionsOnReplica("pod-0"); count != 2 {
 		t.Fatalf("expected 2 on pod-0, got %d", count)
@@ -83,7 +83,7 @@ func TestStorePinnedSessionsOnReplica(t *testing.T) {
 
 func TestStoreInFlight(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	s.IncInFlight("fp1")
 	s.IncInFlight("fp1")
@@ -102,7 +102,7 @@ func TestStoreInFlight(t *testing.T) {
 
 func TestDecInFlightAndGet(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	s.IncInFlight("fp1")
 	s.IncInFlight("fp1")
@@ -138,7 +138,7 @@ func TestDecInFlightAndGet(t *testing.T) {
 // Run with -race.
 func TestStoreListSnapshotNoRace(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "")
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
@@ -180,7 +180,7 @@ func TestStoreListSnapshotNoRace(t *testing.T) {
 
 func TestStoreSetGroupID(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "u1")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "u1")
 
 	s.SetGroupID("fp1", "g1")
 	leases := s.List()
@@ -197,7 +197,7 @@ func TestStoreSetGroupID(t *testing.T) {
 // with -race.
 func TestStoreSetGroupIDNoRace(t *testing.T) {
 	s := NewStore(5 * time.Minute)
-	s.Register("fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "u1")
+	s.Register("", "fp1", "v0.21.4", "pod-0", "inst-1", "trace-1", "u1")
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})

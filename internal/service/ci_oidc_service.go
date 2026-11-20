@@ -48,7 +48,7 @@ type CIOIDCResult struct {
 // Exchange verifies idToken for provider and returns the org token for the
 // project's org. projectName is the canonical repo slug (e.g.
 // "github.com/acme/api").
-func (s *CIOIDCService) Exchange(ctx context.Context, provider, idToken, projectName string) (*CIOIDCResult, error) {
+func (s *CIOIDCService) Exchange(ctx context.Context, provider, idToken, explicitOrg, projectName string) (*CIOIDCResult, error) {
 	issuer, ok := s.issuers[provider]
 	if !ok || issuer == "" {
 		return nil, fmt.Errorf("%w: unsupported oidc provider %q", domain.ErrValidation, provider)
@@ -73,23 +73,54 @@ func (s *CIOIDCService) Exchange(ctx context.Context, provider, idToken, project
 	if projectName != "" && !repoMatches(repo, projectName) {
 		return nil, fmt.Errorf("%w: oidc repository %q does not match project %q", domain.ErrForbidden, repo, projectName)
 	}
-	proj, err := s.projects.GetOrCreateByName(ctx, projectName)
+	org, err := s.resolveOrg(ctx, explicitOrg, projectName)
 	if err != nil {
 		return nil, err
 	}
-	orgID := proj.OrgID
-	if orgID == "" {
-		orgID = domain.DefaultOrgID
-	}
-	org, err := s.orgs.Get(ctx, orgID)
+	proj, err := s.projects.GetOrCreateByName(ctx, org.ID, projectName)
 	if err != nil {
 		return nil, err
 	}
+	_ = proj
 	token, err := s.orgs.EnsureToken(ctx, org.ID)
 	if err != nil {
 		return nil, err
 	}
 	return &CIOIDCResult{Token: token, OrgID: org.ID, OrgName: org.Name}, nil
+}
+
+// resolveOrg determines the organization for a secretless CI exchange.
+func (s *CIOIDCService) resolveOrg(ctx context.Context, explicitOrg, projectName string) (*domain.Org, error) {
+	if explicitOrg != "" {
+		org, err := s.orgs.Resolve(ctx, explicitOrg)
+		if err != nil {
+			return nil, fmt.Errorf("%w: organization not found", domain.ErrForbidden)
+		}
+		return org, nil
+	}
+	matches, err := s.projects.ListByNameAcrossOrgs(ctx, projectName)
+	if err != nil {
+		return nil, err
+	}
+	switch len(matches) {
+	case 1:
+		return s.orgs.Get(ctx, matches[0].OrgID)
+	case 0:
+	default:
+		return nil, fmt.Errorf("%w: project exists in multiple organizations", domain.ErrAmbiguousOrg)
+	}
+	all, err := s.orgs.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	switch len(all) {
+	case 0:
+		return nil, domain.ErrBootstrapNotReady
+	case 1:
+		return all[0], nil
+	default:
+		return nil, fmt.Errorf("%w: organization is required", domain.ErrAmbiguousOrg)
+	}
 }
 
 func (s *CIOIDCService) provider(ctx context.Context, name, issuer string) (*oidc.Provider, error) {

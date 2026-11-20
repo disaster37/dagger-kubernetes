@@ -37,8 +37,16 @@ func (r *GroupRepo) Get(ctx context.Context, id string) (*domain.Group, error) {
 	return r.store.fsmRead().readGroupByID(id)
 }
 
-func (r *GroupRepo) GetByName(ctx context.Context, name string) (*domain.Group, error) {
-	return r.store.fsmRead().readGroupByName(name)
+func (r *GroupRepo) GetByName(ctx context.Context, orgID, name string) (*domain.Group, error) {
+	return r.store.fsmRead().readGroupByName(orgID, name)
+}
+
+func (r *GroupRepo) ListByOrg(ctx context.Context, orgID string) ([]*domain.Group, error) {
+	return r.store.fsmRead().listGroupsByOrg(orgID), nil
+}
+
+func (r *GroupRepo) GroupsForUserInOrg(ctx context.Context, orgID, userID string) ([]*domain.Group, error) {
+	return r.store.fsmRead().groupsForUserInOrg(orgID, userID), nil
 }
 
 func (r *GroupRepo) List(ctx context.Context) ([]*domain.Group, error) {
@@ -57,7 +65,7 @@ func (r *GroupRepo) Delete(ctx context.Context, id string) error {
 // SetMembers replaces the full membership of groupID with userIDs in one
 // atomic log entry (no SQL transaction needed).
 func (r *GroupRepo) SetMembers(ctx context.Context, groupID string, userIDs []string) error {
-	return r.store.applyCtx(ctx, kindSetMembers, cmdSetMembers{GroupID: groupID, UserIDs: userIDs})
+	return r.store.applyCtx(ctx, kindSetMembers, cmdSetMembers{GroupID: groupID, UserIDs: userIDs, At: time.Now().UTC()})
 }
 
 func (r *GroupRepo) Members(ctx context.Context, groupID string) ([]*domain.User, error) {

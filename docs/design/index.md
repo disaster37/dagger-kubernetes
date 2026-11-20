@@ -65,3 +65,4 @@ the decision.
 | 055  | [Read-through remote cache service](ADR-055-read-through-remote-cache.md) |
 | 056  | [Cloud Checks and multi-forge integration](ADR-056-cloud-checks-multi-forge.md) |
 | 057  | [Dagger-native workflows, artifacts, and approvals](ADR-057-dagger-native-workflows.md) |
+| 058  | [Organization as root namespace: tenancy, quotas, and storage](ADR-058-organization-root-tenancy-quotas-storage.md) |

@@ -140,7 +140,10 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 			Name: "minting-ca", MountPath: "/etc/dagger-kubernetes/ca", ReadOnly: true,
 		}}
 		job.Spec.Template.Spec.Containers[0].Env = append(job.Spec.Template.Spec.Containers[0].Env,
-			corev1.EnvVar{Name: "SSL_CERT_FILE", Value: "/etc/dagger-kubernetes/ca/ca.crt"})
+			// Keep the system CA bundle (for `git clone https://…`) and add the
+			// mounted Minting CA (for internal supervisor control/data TLS).
+			// SSL_CERT_FILE would REPLACE the system bundle.
+			corev1.EnvVar{Name: "SSL_CERT_DIR", Value: "/etc/ssl/certs:/etc/dagger-kubernetes/ca"})
 	}
 	created, err := r.clientset.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{})
 	if err != nil {
