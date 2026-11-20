@@ -28,7 +28,10 @@ spec:
   selector:
     {{- include "dagger-kubernetes.selectorLabels" . | nindent 4 }}
   ports:
-    - name: http
+    # Port name must match the pod's container port name ("control"): the F5
+    # NGINX Ingress Controller resolves endpoints by matching the service port
+    # name against pod port names.
+    - name: control
       port: {{ .Values.service.control.port }}
       targetPort: control
       {{- if and (eq .Values.service.control.type "NodePort") .Values.service.control.nodePort }}
@@ -47,7 +50,10 @@ spec:
   selector:
     {{- include "dagger-kubernetes.selectorLabels" . | nindent 4 }}
   ports:
-    - name: tls
+    # Port name must match the pod's container port name ("data"): the F5
+    # NGINX Ingress Controller resolves endpoints by matching the service port
+    # name against pod port names.
+    - name: data
       port: {{ .Values.service.data.port }}
       targetPort: data
       {{- if and (eq .Values.service.data.type "NodePort") .Values.service.data.nodePort }}
