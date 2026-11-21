@@ -52,6 +52,20 @@ func (s *Server) handleDeviceApprove(ctx context.Context, c *app.RequestContext)
 	c.SetStatusCode(consts.StatusNoContent)
 }
 
+// oauthErrorResponse is the RFC 6749 §5.2 / RFC 8628 §3.5 token error payload.
+type oauthErrorResponse struct {
+	Error            string `json:"error"`
+	ErrorDescription string `json:"error_description,omitempty"`
+}
+
+// writeOAuthError emits an OAuth token error. Token responses must not be
+// cached (RFC 6749 §5.1), so both no-store and no-cache are set.
+func writeOAuthError(c *app.RequestContext, status int, code, description string) {
+	c.Response.Header.Set("Cache-Control", "no-store")
+	c.Response.Header.Set("Pragma", "no-cache")
+	c.JSON(status, oauthErrorResponse{Error: code, ErrorDescription: description})
+}
+
 // handleDeviceToken implements POST /oauth/token for the device_code and
 // refresh_token grants.
 func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
@@ -64,10 +78,10 @@ func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
 	body, err := readBoundedBody(c, maxControlBody)
 	if err != nil {
 		if errors.Is(err, errBodyTooLarge) {
-			writeError(c, consts.StatusRequestEntityTooLarge, "request body too large")
+			writeOAuthError(c, consts.StatusRequestEntityTooLarge, "invalid_request", "request body too large")
 			return
 		}
-		writeError(c, consts.StatusBadRequest, "invalid body")
+		writeOAuthError(c, consts.StatusBadRequest, "invalid_request", "invalid request body")
 		return
 	}
 	params := oauthTokenParams(c, body)
@@ -75,11 +89,16 @@ func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
 	case "urn:ietf:params:oauth:grant-type:device_code":
 		res, err := s.deviceAuth.ExchangeDeviceCode(ctx, params.Get("device_code"))
 		if err != nil {
-			if errors.Is(err, domain.ErrUnauthenticated) {
-				writeError(c, consts.StatusBadRequest, err.Error())
-				return
+			switch {
+			case errors.Is(err, domain.ErrAuthorizationPending):
+				writeOAuthError(c, consts.StatusBadRequest, "authorization_pending", "device authorization is pending user approval")
+			case errors.Is(err, domain.ErrExpiredDeviceToken):
+				writeOAuthError(c, consts.StatusBadRequest, "expired_token", "device code has expired")
+			case errors.Is(err, domain.ErrInvalidGrant):
+				writeOAuthError(c, consts.StatusBadRequest, "invalid_grant", "device code is invalid or has already been used")
+			default:
+				s.writeServiceError(c, err)
 			}
-			s.writeServiceError(c, err)
 			return
 		}
 		writeJSON(c, res)
@@ -90,6 +109,10 @@ func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
 		}
 		access, refresh, err := s.auth.Refresh(ctx, params.Get("refresh_token"))
 		if err != nil {
+			if errors.Is(err, domain.ErrUnauthenticated) || errors.Is(err, domain.ErrSessionRevoked) {
+				writeOAuthError(c, consts.StatusBadRequest, "invalid_grant", "refresh token is invalid, expired, or revoked")
+				return
+			}
 			s.writeServiceError(c, err)
 			return
 		}
@@ -100,7 +123,7 @@ func (s *Server) handleDeviceToken(ctx context.Context, c *app.RequestContext) {
 			"expires_in":    int(s.jwt.AccessTTL().Seconds()),
 		})
 	default:
-		writeError(c, consts.StatusBadRequest, "unsupported grant_type")
+		writeOAuthError(c, consts.StatusBadRequest, "unsupported_grant_type", "grant_type is not supported")
 	}
 }
 

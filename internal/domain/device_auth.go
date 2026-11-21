@@ -1,6 +1,24 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// RFC 8628 §3.5 / RFC 6749 §5.2 device-token exchange sentinel errors. The
+// handler maps these onto OAuth error codes so clients such as
+// golang.org/x/oauth2 Config.DeviceAccessToken can react correctly (keep
+// polling on ErrAuthorizationPending, stop on the others).
+var (
+	// ErrAuthorizationPending indicates the user has not yet completed approval
+	// for an unexpired, unconsumed device code.
+	ErrAuthorizationPending = errors.New("authorization pending")
+	// ErrExpiredDeviceToken indicates the device code has passed ExpiresAt.
+	ErrExpiredDeviceToken = errors.New("device code expired")
+	// ErrInvalidGrant indicates an unknown, malformed, already-consumed, or
+	// resource-owner-invalidated authorization grant.
+	ErrInvalidGrant = errors.New("invalid grant")
+)
 
 // DeviceAuthorization is an RFC 8628 device-code grant. Codes are ephemeral
 // (default 10m) and single-use.

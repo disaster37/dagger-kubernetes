@@ -27,6 +27,7 @@ type testEnv struct {
 	jwt      *service.JWTService
 	sessions *service.Store
 	store    *repository.RaftStore
+	device   *service.MemoryDeviceAuthStore
 }
 
 // newTestStore builds a single-node in-memory Raft store for handler tests.
@@ -106,6 +107,8 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 
 	sessions := service.NewStore(2 * time.Minute)
 	store.SetSessionSink(sessions)
+	deviceStore := service.NewMemoryDeviceAuthStore()
+	deviceAuthSvc := service.NewDeviceAuthService(deviceStore, usersSvc, groupRepo, jwtSvc, 10*time.Minute, 5*time.Second, logger)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger).
 		WithOrgRepository(orgRepo, projectRepo)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
@@ -166,6 +169,7 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 		Traces:        traces,
 		Logs:          logsClient,
 		JWT:           jwtSvc,
+		DeviceAuth:    deviceAuthSvc,
 		OAuthProvider: "",
 		HistoryStatsProvider: &stubHistoryStatsProvider{
 			stats: &domain.HistoryStats{TraceCount: 0, GC: domain.HistoryGCRules{}},
@@ -191,6 +195,7 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 		jwt:      jwtSvc,
 		sessions: sessions,
 		store:    store,
+		device:   deviceStore,
 	}
 }
 

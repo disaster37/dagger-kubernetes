@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -90,22 +91,39 @@ type TokenResult struct {
 func (s *DeviceAuthService) ExchangeDeviceCode(ctx context.Context, deviceCode string) (*TokenResult, error) {
 	a, err := s.store.GetByDeviceCode(deviceCode)
 	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, fmt.Errorf("%w: unknown device code", domain.ErrInvalidGrant)
+		}
 		return nil, err
 	}
+	// Check consumption before expiry: a code that was already redeemed is an
+	// invalid grant regardless of how much time has passed since (RFC 6749 §5.2).
+	if a.Consumed {
+		return nil, fmt.Errorf("%w: device code already used", domain.ErrInvalidGrant)
+	}
 	if time.Now().UTC().After(a.ExpiresAt) {
-		return nil, fmt.Errorf("%w: device code expired", domain.ErrUnauthenticated)
+		return nil, fmt.Errorf("%w: device code expired", domain.ErrExpiredDeviceToken)
 	}
 	if !a.Approved || a.UserID == "" {
-		return nil, fmt.Errorf("%w: authorization_pending", domain.ErrUnauthenticated)
+		return nil, fmt.Errorf("%w: authorization pending", domain.ErrAuthorizationPending)
 	}
 	// Atomically consume before issuing tokens so a concurrent exchange cannot
 	// mint a second token pair for the same device code (CWE-362).
 	if err := s.store.Consume(deviceCode); err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, fmt.Errorf("%w: unknown device code", domain.ErrInvalidGrant)
+		}
 		return nil, err
 	}
 	u, err := s.users.Get(ctx, a.UserID)
 	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, fmt.Errorf("%w: user not found", domain.ErrInvalidGrant)
+		}
 		return nil, err
+	}
+	if u.AccessBlocked() {
+		return nil, fmt.Errorf("%w: user account disabled", domain.ErrInvalidGrant)
 	}
 	gids, err := s.groups.GroupsForUser(ctx, u.ID)
 	if err != nil {
@@ -217,7 +235,7 @@ func (m *MemoryDeviceAuthStore) Consume(deviceCode string) error {
 		return domain.ErrNotFound
 	}
 	if a.Consumed {
-		return fmt.Errorf("%w: device code already used", domain.ErrUnauthenticated)
+		return fmt.Errorf("%w: device code already used", domain.ErrInvalidGrant)
 	}
 	a.Consumed = true
 	return nil

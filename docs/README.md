@@ -1023,7 +1023,13 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   `dag_<org>_` tokens. `fleet.isolation` is `per_org` (default) or `shared`.
 - **CLI login & CI auth.** `dagger login` uses RFC 8628
   (`POST /oauth/device/code`, `/api/v1/auth/device/approve`, `/oauth/token`).
-  CI can exchange GitHub/GitLab OIDC ID tokens at `POST /v1/oidc`.
+  `POST /oauth/token` returns RFC 8628 §3.5 / RFC 6749 §5.2 error codes
+  (`authorization_pending` while approval is outstanding, `expired_token` for
+  an expired device code, `invalid_grant` for an unknown or already-used
+  device code or an invalid/expired/revoked refresh token, and
+  `unsupported_grant_type`), so `golang.org/x/oauth2` clients keep polling
+  until the user approves. CI can exchange GitHub/GitLab OIDC ID tokens at
+  `POST /v1/oidc`.
 - **Cloud GraphQL.** `POST /query` serves the Cloud-compatible schema
   (`user`, `org`, `trace`, cursor-paginated traces, per-org checks). To
   bootstrap `dagger cloud login`, a freshly authenticated user with no org
