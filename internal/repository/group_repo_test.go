@@ -36,7 +36,7 @@ func TestGroupRepoCRUD(t *testing.T) {
 		t.Fatalf("max = %d", got.MaxRunnerSessions)
 	}
 
-	byName, err := repo.GetByName(ctx, "engines")
+	byName, err := repo.GetByName(ctx, "", "engines")
 	if err != nil {
 		t.Fatalf("GetByName (case-insensitive): %v", err)
 	}

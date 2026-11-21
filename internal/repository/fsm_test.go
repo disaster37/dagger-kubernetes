@@ -335,13 +335,13 @@ func TestFSMTraceListTextFilters(t *testing.T) {
 	ingest := func(id, userID, ciRepo, project string) {
 		t.Helper()
 		applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{
-			TraceID: id, UserID: userID, CIRepo: ciRepo, ProjectName: project,
+			TraceID: id, OrgID: "", UserID: userID, CIRepo: ciRepo, ProjectName: project,
 			StartedAt: base, UpdatedAt: base,
 		})
 	}
 	ingest("t1", "u1", "github.com/org/repo", "org-project")
 	ingest("t2", "u2", "gitlab.com/other/thing", "other-project")
-	ingest("t3", "", "", "bare-project")
+	ingest("t3", "", "bare-project", "")
 
 	cases := []struct {
 		name   string
@@ -500,7 +500,7 @@ func TestFSMTraceStats(t *testing.T) {
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "old", StartedAt: base.Add(-2 * time.Hour), UpdatedAt: base.Add(-2 * time.Hour)})
 	applyCmd(t, f, kindUpsertTraceIngest, &domain.TraceMeta{TraceID: "no-time"})
 
-	count, oldest := f.traceStats()
+	count, oldest := f.traceStats("")
 	if count != 3 {
 		t.Fatalf("count = %d, want 3", count)
 	}
@@ -510,7 +510,7 @@ func TestFSMTraceStats(t *testing.T) {
 
 	// Empty FSM: zero count and zero oldest.
 	empty := NewFSM()
-	count, oldest = empty.traceStats()
+	count, oldest = empty.traceStats("")
 	if count != 0 || !oldest.IsZero() {
 		t.Fatalf("empty stats = (%d, %v), want (0, zero)", count, oldest)
 	}
@@ -1171,5 +1171,72 @@ func TestFSMRestoreLegacyUserWithoutTokenVersion(t *testing.T) {
 	}
 	if u.TokenVersion != 0 {
 		t.Fatalf("legacy TokenVersion = %d, want 0", u.TokenVersion)
+	}
+}
+
+func TestFSMCloudParityCommandsAndSnapshot(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Now().UTC()
+	env := &domain.Environment{ID: "acme/prod", OrgID: "acme", Name: "prod", ApproverGroupIDs: []string{"g1"}, PreventSelfApproval: true, CreatedAt: now, UpdatedAt: now}
+	if err := applyCmd(t, f, kindUpsertEnvironment, cmdEnvironment{Environment: *env}); err != nil {
+		t.Fatalf("upsert environment: %v", err)
+	}
+	rec := &domain.CheckRunRecord{ID: "check-1", OrgID: "acme", ProjectID: "p1", Status: "running", RunTokenHash: "check-hash", CreatedAt: now, UpdatedAt: now}
+	if err := applyCmd(t, f, kindUpsertCheckRun, cmdCheckRunFrom(rec)); err != nil {
+		t.Fatalf("upsert check run: %v", err)
+	}
+	def := &domain.WorkflowDef{ID: "acme/p1/release", OrgID: "acme", ProjectID: "p1", Workflow: domain.Workflow{Name: "release"}}
+	if err := applyCmd(t, f, kindSyncProjectWorkflowDefs, cmdSyncProjectWorkflowDefs{OrgID: "acme", ProjectID: "p1", Defs: []*domain.WorkflowDef{def}}); err != nil {
+		t.Fatalf("sync defs: %v", err)
+	}
+	run := &domain.WorkflowRun{OrgID: "acme", ProjectID: "p1", Workflow: "release", Status: "running", Jobs: map[string]domain.WorkflowJobRun{"build": {Name: "build", Status: "pending"}}, ContextFiles: map[string][]byte{"VERSION": []byte("1.0.0")}, RunTokenHash: "workflow-hash", PreviousRunTokenHash: "workflow-prev-hash"}
+	resp, err := f.applyCommand(mustCommand(t, kindCreateWorkflowRun, cmdWorkflowRunFrom(run)))
+	if err != nil {
+		t.Fatalf("create run: %v", err)
+	}
+	created, ok := resp.(*domain.WorkflowRun)
+	if !ok || created.Number != 1 || created.ID != "p1-release-1" {
+		t.Fatalf("created = %+v", resp)
+	}
+	// A second run gets the next monotonic number.
+	resp2, err := f.applyCommand(mustCommand(t, kindCreateWorkflowRun, cmdWorkflowRunFrom(&domain.WorkflowRun{OrgID: "acme", ProjectID: "p1", Workflow: "release"})))
+	if err != nil {
+		t.Fatalf("create run 2: %v", err)
+	}
+	if got := resp2.(*domain.WorkflowRun); got.Number != 2 {
+		t.Fatalf("second number = %d", got.Number)
+	}
+
+	// Snapshot/restore preserves all new maps and the counter.
+	snap, err := f.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sink := &memSink{}
+	if err := snap.Persist(sink); err != nil {
+		t.Fatal(err)
+	}
+	restored := newTestFSM(t)
+	if err := restored.Restore(io.NopCloser(bytes.NewReader(sink.Bytes()))); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := restored.readEnvironment("acme", "prod"); err != nil || !got.PreventSelfApproval {
+		t.Fatalf("restored env = %+v err=%v", got, err)
+	}
+	if got, err := restored.readCheckRun("check-1"); err != nil || got.Status != "running" || got.RunTokenHash != "check-hash" {
+		t.Fatalf("restored check = %+v err=%v", got, err)
+	}
+	if got, err := restored.readWorkflowDef("acme", "p1", "release"); err != nil || got.Workflow.Name != "release" {
+		t.Fatalf("restored def = %+v err=%v", got, err)
+	}
+	if got, err := restored.readWorkflowRun("p1-release-1"); err != nil || string(got.ContextFiles["VERSION"]) != "1.0.0" || got.RunTokenHash != "workflow-hash" || got.PreviousRunTokenHash != "workflow-prev-hash" {
+		t.Fatalf("restored run = %+v err=%v", got, err)
+	}
+	resp3, err := restored.applyCommand(mustCommand(t, kindCreateWorkflowRun, cmdWorkflowRunFrom(&domain.WorkflowRun{OrgID: "acme", ProjectID: "p1", Workflow: "release"})))
+	if err != nil {
+		t.Fatalf("create after restore: %v", err)
+	}
+	if got := resp3.(*domain.WorkflowRun); got.Number != 3 {
+		t.Fatalf("post-restore number = %d, want 3", got.Number)
 	}
 }

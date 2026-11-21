@@ -163,6 +163,30 @@ func TestK8sManagerSweepGCDeletesIdleVersion(t *testing.T) {
 	}
 }
 
+// TestK8sManagerPerOrgSweepGCScaledStatefulSet verifies the unscoped Sweep
+// (the exact cmd/api/main.go call) discovers and GCs a per-org StatefulSet by
+// its real name via AllScopes, rather than missing it as dagger-engine-<v>.
+func TestK8sManagerPerOrgSweepGCScaledStatefulSet(t *testing.T) {
+	manager, p, cs := newK8sGCManager(t)
+
+	scoped := p.WithScope("default")
+	if err := scoped.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
+		t.Fatalf("EnsureStatefulSet: %v", err)
+	}
+	if err := scoped.SetVersionIdleSince("v0.20.0", time.Now().Add(-time.Hour)); err != nil {
+		t.Fatalf("SetVersionIdleSince: %v", err)
+	}
+
+	if err := manager.Sweep(context.Background()); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+
+	name := domain.EngineStsName("default", "v0.20.0")
+	if _, err := cs.AppsV1().StatefulSets("dagger-kubernetes").Get(context.Background(), name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+		t.Fatalf("scoped statefulset Get err = %v, want IsNotFound (name %s)", err, name)
+	}
+}
+
 func TestK8sManagerSweepGCMalformedAnnotationResets(t *testing.T) {
 	manager, p, cs := newK8sGCManager(t)
 

@@ -17,6 +17,7 @@ import (
 
 // testEnv bundles a Server with its backing services + repos for handler tests.
 type testEnv struct {
+	orgID    string
 	server   *Server
 	users    *service.UserService
 	groups   *service.GroupService
@@ -26,6 +27,7 @@ type testEnv struct {
 	jwt      *service.JWTService
 	sessions *service.Store
 	store    *repository.RaftStore
+	device   *service.MemoryDeviceAuthStore
 }
 
 // newTestStore builds a single-node in-memory Raft store for handler tests.
@@ -75,11 +77,21 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 	projectRepo := repository.NewProjectRepo(store)
 	tokenRepo := repository.NewTokenRepo(store)
 	traceMetaRepo := repository.NewTraceMetaRepo(store)
+	orgRepo := repository.NewOrgRepo(store)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, testTokenEncKey())
+	metaStore := repository.NewMetaStore(store)
+	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger).
+		WithMetaStore(metaStore).
+		WithDefaultQuotas(domain.OrgQuotas{})
+	bootOrg, err := orgsSvc.EnsureBootstrap(context.Background(), domain.DefaultOrgDisplayName)
+	if err != nil {
+		t.Fatalf("bootstrap org: %v", err)
+	}
+	usersSvc.SetOrgRepository(orgRepo)
 	jwtSvc := service.NewJWTService([]byte("test-secret-32-bytes-long-enough!!"), 15*time.Minute, 168*time.Hour)
 
 	// Bootstrap an admin user so admin routes work in tests.
@@ -91,11 +103,16 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 
 	var legacy domain.TokenValidator
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacy, logger)
+	authSvc.SetOrgRepository(orgRepo)
 
 	sessions := service.NewStore(2 * time.Minute)
 	store.SetSessionSink(sessions)
-	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
+	deviceStore := service.NewMemoryDeviceAuthStore()
+	deviceAuthSvc := service.NewDeviceAuthService(deviceStore, usersSvc, groupRepo, jwtSvc, 10*time.Minute, 5*time.Second, logger)
+	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger).
+		WithOrgRepository(orgRepo, projectRepo)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
+	attributionSvc.SetOrgRepository(orgRepo)
 
 	liveHub := repository.NewLiveHub()
 	pipelineLifecycle := service.NewPipelineLifecycle(attributionSvc, traceMetaRepo, sessions, liveHub, domain.PipelineConfig{}, logger, observ.NewMetrics(nil))
@@ -141,6 +158,7 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 			AccessName:  "dagger_kubernetes_access",
 			RefreshName: "dagger_kubernetes_refresh",
 		},
+		Orgs:          orgsSvc,
 		Users:         usersSvc,
 		Groups:        groupsSvc,
 		Projects:      projectsSvc,
@@ -151,13 +169,14 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 		Traces:        traces,
 		Logs:          logsClient,
 		JWT:           jwtSvc,
+		DeviceAuth:    deviceAuthSvc,
 		OAuthProvider: "",
 		HistoryStatsProvider: &stubHistoryStatsProvider{
 			stats: &domain.HistoryStats{TraceCount: 0, GC: domain.HistoryGCRules{}},
 		},
 		HistoryPurger:      &stubHistoryPurger{result: &domain.HistoryPurgeResult{}},
 		StatusProvider:     &stubStatusProvider{status: &domain.PlatformStatus{State: domain.ServiceOK, Services: []domain.ServiceStatus{}}},
-		Connect:            connectSvc,
+		Connect:            connectSvc.WithOrgService(orgsSvc),
 		LiveHub:            liveHub,
 		Lifecycle:          pipelineLifecycle,
 		LeaderInfo:         store,
@@ -167,6 +186,7 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 
 	return &testEnv{
 		server:   srv,
+		orgID:    bootOrg.ID,
 		users:    usersSvc,
 		groups:   groupsSvc,
 		projects: projectsSvc,
@@ -175,7 +195,14 @@ func newTestEnvFull(t *testing.T, guard *secguard.Guard, corsOrigins []string) *
 		jwt:      jwtSvc,
 		sessions: sessions,
 		store:    store,
+		device:   deviceStore,
 	}
+}
+
+// orgPath builds an org-scoped API path for the bootstrap org, e.g.
+// orgPath("/groups") or orgPath("/groups/%s", id).
+func (e *testEnv) orgPath(format string, args ...any) string {
+	return fmt.Sprintf("/api/v1/orgs/%s%s", e.orgID, fmt.Sprintf(format, args...))
 }
 
 // loginAsAdmin returns an Authorization header value for the bootstrap admin.
@@ -228,6 +255,10 @@ type stubHistoryStatsProvider struct {
 func (s *stubHistoryStatsProvider) Stats(context.Context) (*domain.HistoryStats, error) {
 	return s.stats, s.err
 }
+func (s *stubHistoryStatsProvider) StatsForOrg(ctx context.Context, _ string) (*domain.HistoryStats, error) {
+	return s.Stats(ctx)
+}
+
 func (s *stubHistoryStatsProvider) GCRules() domain.HistoryGCRules { return domain.HistoryGCRules{} }
 
 type stubHistoryPurger struct {

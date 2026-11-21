@@ -189,6 +189,84 @@ func TestIsIOOperationField(t *testing.T) {
 	}
 }
 
+func TestIsImageSourceField(t *testing.T) {
+	tests := []struct {
+		field string
+		want  bool
+	}{
+		{"from", true},
+		{"From", true},
+		{"withExec", false},
+		{"publish", false},
+		{"", false},
+	}
+	for _, tc := range tests {
+		if got := isImageSourceField(tc.field); got != tc.want {
+			t.Fatalf("isImageSourceField(%q) = %v, want %v", tc.field, got, tc.want)
+		}
+	}
+}
+
+func TestIsWorkdirUserCallField(t *testing.T) {
+	tests := []struct {
+		field    string
+		wantWork bool
+		wantUser bool
+	}{
+		{"withWorkdir", true, false},
+		{"WithWorkdir", true, false},
+		{"withUser", false, true},
+		{"WithUser", false, true},
+		{"withExec", false, false},
+		{"", false, false},
+	}
+	for _, tc := range tests {
+		if got := isWorkdirCallField(tc.field); got != tc.wantWork {
+			t.Fatalf("isWorkdirCallField(%q) = %v, want %v", tc.field, got, tc.wantWork)
+		}
+		if got := isUserCallField(tc.field); got != tc.wantUser {
+			t.Fatalf("isUserCallField(%q) = %v, want %v", tc.field, got, tc.wantUser)
+		}
+	}
+}
+
+// TestImageSourceArgv verifies the from call is synthesized into an argv.
+func TestImageSourceArgv(t *testing.T) {
+	got := imageSourceArgv(map[string]string{"dagger.io/dag.call": dagCallBetaFromAlpine})
+	want := []string{"from", "alpine:3.20"}
+	if len(got) != len(want) {
+		t.Fatalf("imageSourceArgv = %v, want %v", got, want)
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			t.Fatalf("imageSourceArgv = %v, want %v", got, want)
+		}
+	}
+	// Non-from calls yield nil.
+	if got := imageSourceArgv(map[string]string{"dagger.io/dag.call": dagCallBetaWithExecEnv}); got != nil {
+		t.Fatalf("imageSourceArgv(withExec) = %v, want nil", got)
+	}
+}
+
+// TestCallContainerSetup verifies withWorkdir/withUser decode and that other
+// calls report ok=false.
+func TestCallContainerSetup(t *testing.T) {
+	cwd, user, ok := callContainerSetup(map[string]string{"dagger.io/dag.call": dagCallBetaWithWorkdir})
+	if !ok || cwd != "/src" || user != "" {
+		t.Fatalf("withWorkdir = (%q,%q,%v), want (/src,,true)", cwd, user, ok)
+	}
+	cwd, user, ok = callContainerSetup(map[string]string{"dagger.io/dag.call": encodeDagCall(t, "withUser", "name", "root")})
+	if !ok || cwd != "" || user != "root" {
+		t.Fatalf("withUser = (%q,%q,%v), want (,root,true)", cwd, user, ok)
+	}
+	if _, _, ok := callContainerSetup(map[string]string{"dagger.io/dag.call": dagCallBetaWithExecEnv}); ok {
+		t.Fatal("withExec reported as container setup, want false")
+	}
+	if _, _, ok := callContainerSetup(nil); ok {
+		t.Fatal("empty attrs reported as container setup, want false")
+	}
+}
+
 func TestParseArgvDagCall(t *testing.T) {
 	// dag.call with withExec yields the argv.
 	got := parseArgv(map[string]string{"dagger.io/dag.call": dagCallWithExec})

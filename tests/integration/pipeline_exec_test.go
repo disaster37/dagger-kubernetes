@@ -110,7 +110,7 @@ func startPipelineExecServer(t *testing.T) (controlURL, adminToken string) {
 	if err != nil {
 		t.Fatalf("generate token: %v", err)
 	}
-	if err := traceMetaRepo.UpsertProvision(context.Background(), execTraceID, admin.ID, "v0.19.0"); err != nil {
+	if err := traceMetaRepo.UpsertProvision(context.Background(), "", execTraceID, admin.ID, "v0.19.0"); err != nil {
 		t.Fatalf("seed trace meta: %v", err)
 	}
 

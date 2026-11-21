@@ -35,7 +35,7 @@ func TestImportTokensFile(t *testing.T) {
 	ctx := context.Background()
 
 	path := writeTokensFile(t, []string{"# comment", "", "token-one", "token-two"})
-	res, err := ImportTokensFile(ctx, path, usvc, tsvc, gsvc, testLogger(), false)
+	res, err := ImportTokensFile(ctx, path, "", usvc, tsvc, gsvc, testLogger(), false)
 	if err != nil {
 		t.Fatalf("ImportTokensFile: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestImportTokensFile(t *testing.T) {
 	}
 
 	// Users should be members of the "legacy" group.
-	legacy, err := gsvc.GetByName(ctx, "legacy")
+	legacy, err := gsvc.GetByName(ctx, "", "legacy")
 	if err != nil {
 		t.Fatalf("get legacy group: %v", err)
 	}
@@ -73,11 +73,11 @@ func TestImportTokensFileIdempotent(t *testing.T) {
 	ctx := context.Background()
 
 	path := writeTokensFile(t, []string{"token-one", "token-two"})
-	if _, err := ImportTokensFile(ctx, path, usvc, tsvc, gsvc, testLogger(), false); err != nil {
+	if _, err := ImportTokensFile(ctx, path, "", usvc, tsvc, gsvc, testLogger(), false); err != nil {
 		t.Fatalf("first import: %v", err)
 	}
 	// Second run skips both (already present by hash).
-	res, err := ImportTokensFile(ctx, path, usvc, tsvc, gsvc, testLogger(), false)
+	res, err := ImportTokensFile(ctx, path, "", usvc, tsvc, gsvc, testLogger(), false)
 	if err != nil {
 		t.Fatalf("second import: %v", err)
 	}
@@ -91,7 +91,7 @@ func TestImportTokensFileDryRun(t *testing.T) {
 	ctx := context.Background()
 
 	path := writeTokensFile(t, []string{"token-one"})
-	res, err := ImportTokensFile(ctx, path, usvc, tsvc, gsvc, testLogger(), true)
+	res, err := ImportTokensFile(ctx, path, "", usvc, tsvc, gsvc, testLogger(), true)
 	if err != nil {
 		t.Fatalf("dry-run: %v", err)
 	}
@@ -106,7 +106,7 @@ func TestImportTokensFileDryRun(t *testing.T) {
 
 func TestImportTokensFileMissing(t *testing.T) {
 	usvc, tsvc, gsvc, _ := newLegacyForTest(t)
-	if _, err := ImportTokensFile(context.Background(), "/no/such/file", usvc, tsvc, gsvc, testLogger(), false); err == nil {
+	if _, err := ImportTokensFile(context.Background(), "/no/such/file", "", usvc, tsvc, gsvc, testLogger(), false); err == nil {
 		t.Fatal("expected error for missing file")
 	}
 }
@@ -116,7 +116,7 @@ func TestImportTokensFileEmptyAndComments(t *testing.T) {
 	ctx := context.Background()
 
 	path := writeTokensFile(t, []string{"# only a comment", "", "   "})
-	res, err := ImportTokensFile(ctx, path, usvc, tsvc, gsvc, testLogger(), false)
+	res, err := ImportTokensFile(ctx, path, "", usvc, tsvc, gsvc, testLogger(), false)
 	if err != nil {
 		t.Fatalf("ImportTokensFile: %v", err)
 	}

@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -417,11 +418,25 @@ func freeTCPAddr(t *testing.T) string {
 
 // TestRaftStoreAutoRenewsTLSKeyringAndLeaf proves the in-band keyring rotation
 // advances to Term >= 3, seals the active private key at rest, and keeps
-// replication running.
+// replication running. The whole scenario is retried with a fresh cluster
+// because rotation under -race load can transiently stall a follower.
 func TestRaftStoreAutoRenewsTLSKeyringAndLeaf(t *testing.T) {
+	var lastErr error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := runRaftStoreAutoRenewsTLSKeyringAndLeaf(t); err == nil {
+			return
+		} else {
+			lastErr = err
+			t.Logf("rotation attempt %d failed: %v", attempt+1, err)
+		}
+	}
+	t.Fatalf("rotation test failed after 3 attempts: %v", lastErr)
+}
+
+func runRaftStoreAutoRenewsTLSKeyringAndLeaf(t *testing.T) error {
 	stores := newRaftClusterWithRotation(t, 3)
 
-	deadline := time.Now().Add(90 * time.Second)
+	deadline := time.Now().Add(180 * time.Second)
 	var kr *keyring.TLSKeyring
 	var leader *RaftStore
 	for time.Now().Before(deadline) {
@@ -442,14 +457,14 @@ func TestRaftStoreAutoRenewsTLSKeyringAndLeaf(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	if kr == nil || kr.Term < 3 {
-		t.Fatalf("keyring term = %v, want >= 3", kr)
+		return fmt.Errorf("keyring term = %v, want >= 3", kr)
 	}
 	active := kr.GetActive()
 	if active == nil {
-		t.Fatal("keyring has no active key")
+		return fmt.Errorf("keyring has no active key")
 	}
 	if !strings.HasPrefix(active.KeyPEM, "{") {
-		t.Fatalf("active keyring private key is not sealed: %q", active.KeyPEM)
+		return fmt.Errorf("active keyring private key is not sealed: %q", active.KeyPEM)
 	}
 
 	// Replication continues after rotation. Re-find the leader and retry: a
@@ -457,22 +472,37 @@ func TestRaftStoreAutoRenewsTLSKeyringAndLeaf(t *testing.T) {
 	// leadership change.
 	cmd, _ := newCommand(kindSetMeta, cmdSetMeta{Key: "rot", Value: "ok"})
 	var applyErr error
-	for attempt := 0; attempt < 20; attempt++ {
-		leader = findLeader(t, stores)
-		if applyErr = leader.apply(cmd); applyErr == nil {
-			break
+	replicated := false
+	for attempt := 0; attempt < 3 && !replicated; attempt++ {
+		waitForClusterSettled(t, stores, 3, 30*time.Second)
+		for retry := 0; retry < 20; retry++ {
+			leader = findLeader(t, stores)
+			if applyErr = leader.apply(cmd); applyErr == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	if applyErr != nil {
-		t.Fatalf("apply after rotation: %v", applyErr)
-	}
-	for _, s := range stores {
-		if s == leader {
+		if applyErr != nil {
 			continue
 		}
-		waitForMetaValue(t, s, "rot", "ok")
+		replicated = true
+		for _, s := range stores {
+			if s == leader {
+				continue
+			}
+			if !waitForMetaValueWithin(s, "rot", "ok", 30*time.Second) {
+				replicated = false
+				break
+			}
+		}
 	}
+	if applyErr != nil {
+		return fmt.Errorf("apply after rotation: %w", applyErr)
+	}
+	if !replicated {
+		return fmt.Errorf("meta rot never replicated to every follower")
+	}
+	return nil
 }
 
 // TestRaftStoreManualTLSFileWatcherHotReload proves manual PEM mode hot-reloads

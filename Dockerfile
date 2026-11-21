@@ -37,7 +37,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
 
 # ---------- Runtime ----------
 FROM alpine:3.21
-RUN apk add --no-cache ca-certificates tzdata \
+RUN apk add --no-cache ca-certificates tzdata git \
     && update-ca-certificates \
     && addgroup -S dagger && adduser -S -G dagger -u 10001 dagger
 COPY --from=go-builder /out/supervisor        /usr/local/bin/supervisor

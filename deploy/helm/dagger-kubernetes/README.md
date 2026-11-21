@@ -763,14 +763,22 @@ subchart values.
 | `supervisor.config.fleet.engineRegistryMirrorsHttp` | array | `[]` | Mirror host[:port] values dialed over plaintext HTTP; engine.toml emits `[registry."<mirror>"]` + `http = true` per entry. Auto-populated with the image-cache mirrors when `imageCache.enabled`. |
 | `supervisor.config.leaseTtl` | string | `"2m"` | Engine session lease TTL. |
 | `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
-| `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21"]` | Allowed Dagger versions (major.minor prefixes; empty = admit all versions >= floor). |
+| `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21", "1.0"]` | Allowed Dagger versions. A `MAJOR.MINOR` entry admits the whole minor series (including pre-releases); a full `MAJOR.MINOR.PATCH` admits that exact version; a dotted-pre-release-less full version such as `1.0.0-beta` admits only that pre-release track. Empty = admit all versions >= floor. |
 | `supervisor.config.cli.enabled` | bool | `true` | Enable on-the-fly Dagger CLI provisioning addon. |
 | `supervisor.config.cli.releaseListTtl` | string | `"1h"` | Upstream release-list cache TTL. |
 | `supervisor.config.cli.downloadTimeout` | string | `"5m"` | Outbound upstream fetch timeout. |
 | `supervisor.config.cli.upstream.releasesUrl` | string | `"https://api.github.com/repos/dagger/dagger/releases"` | Release discovery URL (mirror-able). |
 | `supervisor.config.cli.upstream.downloadBase` | string | `"https://github.com/dagger/dagger/releases/download"` | Tarball + checksums.txt base URL (mirror-able). |
 | `supervisor.config.cli.upstream.githubToken` | string | `""` | Optional GitHub token for the releases API (set via `DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN` or `supervisor.extraEnv`). |
-| `supervisor.config.attribution.projectMappings` | array | `[]` | Ordered list of `{pattern, group}` mapping a project name (CI repo slug; Go regexp, case-sensitive) to a supervisor group name. First-match-wins; no match falls through to per-group `auto_assign_pattern`; empty = disabled. Target groups must already exist. |
+| `supervisor.config.org.default.displayName` | string | `"Default"` | Display name of the bootstrap organization (slug is always `default`; storage UID is generated). |
+| `supervisor.config.org.defaultQuotas.maxGroups.{soft,hard}` | int | `0` | Group-count soft warning / hard cap (0 = unlimited; hard binds admins). |
+| `supervisor.config.org.defaultQuotas.maxProjects.{soft,hard}` | int | `0` | Project-count soft warning / hard cap. |
+| `supervisor.config.org.defaultQuotas.maxMembers.{soft,hard}` | int | `0` | Distinct-member soft warning / hard cap. |
+| `supervisor.config.org.defaultQuotas.maxConcurrentSessions.{soft,hard}` | int | `0` | Concurrent engine-session soft warning / hard cap. |
+| `supervisor.config.org.defaultQuotas.maxEngines.{soft,hard}` | int | `0` | Engine-pod soft warning / hard cap across all versions. |
+| `supervisor.config.org.defaultQuotas.maxCacheBytes.{soft,hard}` | int | `0` | Remote-cache byte soft warning / hard cap. |
+| `supervisor.config.org.defaultQuotas.maxPipelineRetention` | duration | `"0s"` | Per-org trace retention (0s inherits history.gc.maxAge). |
+| `supervisor.config.attribution.projectMappings` | array | `[]` | Ordered list of `{pattern, group, org}` mapping a project name (CI repo slug; Go regexp, case-sensitive) to a supervisor group name. First-match-wins; no match falls through to per-group `auto_assign_pattern`; empty = disabled. Target groups must already exist. `org` optionally restricts the rule to one org slug/ID (empty = the trace's resolved org). |
 | `supervisor.config.logLevel` | string | `"info"` | Supervisor log level. |
 | `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
 | `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |
@@ -852,7 +860,7 @@ subchart values.
 | `auth.oauth.allowedOrgs` | array | `[]` | Allowed OAuth organizations (github: org membership; oidc: deprecated alias for allowedGroups). |
 | `auth.oauth.allowedTeams` | array | `[]` | (github) Allowed "org/team" slugs; when set with allowedOrgs, both must be satisfied. |
 | `auth.oauth.allowedGroups` | array | `[]` | (oidc) Allowed provider group names (groups-claim allowlist; union with allowedOrgs). |
-| `auth.oauth.groupMappings` | array | `[]` | Regex group mapping: list of {pattern, replacement} mapping provider groups to supervisor group names (first-match-wins; no match drops the group). |
+| `auth.oauth.groupMappings` | array | `[]` | Regex group mapping: list of `{pattern, replacement, org}` mapping provider groups to supervisor group names (first-match-wins; no match drops the group). `org` is an optional target organization slug or `org-<16hex>` ID (empty = bootstrap organization); auto-created groups land in that org, and an unknown org fails closed. |
 | `auth.oauth.defaultGroup` | string | `""` | Default group for OAuth users. |
 | `auth.oauth.mappedGroupMaxRunnerSessions` | int | `0` | Default `max_runner_sessions` (0 = unlimited) for supervisor groups auto-created by `groupMappings`; applied only at creation time. |
 | `auth.oauth.adminGroups` | array | `[]` | Upstream IdP group names granting the admin role on login/revalidation (exact, case-sensitive, checked pre-mapping); empty = disabled. |
@@ -1028,3 +1036,17 @@ helm uninstall dagger-kubernetes -n dagger-stack
 # PVCs and PVs are NOT deleted by default. Clean up manually if needed:
 kubectl delete pvc -n dagger-stack -l app.kubernetes.io/instance=dagger-kubernetes
 ```
+
+### Cloud parity residual-risk values
+
+| Name | Type | Default | Description |
+|---|---|---|---|
+| `supervisor.config.cache.remote.packMaxMemberBytes` | int | `4194304` | Largest blob packed into a `dagger-pack v1` object (4 MiB). |
+| `supervisor.config.cache.remote.gcInterval` | string | `"5m"` | Remote-cache GC + S3 index checkpoint cadence. |
+| `supervisor.config.graphql.introspectionEnabled` | bool | `false` | Enable GraphQL introspection (disabled by default). |
+| `supervisor.config.graphql.maxDepth` | int | `15` | Maximum GraphQL query depth. |
+| `supervisor.config.graphql.maxSelections` | int | `250` | Maximum expanded selection count. |
+| `supervisor.config.graphql.maxQueryBytes` | int | `65536` | Maximum query length in bytes. |
+| `supervisor.config.graphql.maxParallelism` | int | `10` | Maximum resolver parallelism. |
+| `supervisor.config.fleet.isolation` | string | `"per_org"` | Engine/cache namespace isolation (`per_org` or `shared`). |
+| `supervisor.config.cli.includePrereleases` | bool | `false` | Include `vX.Y.Z-beta.*` in `latest` CLI resolution. |

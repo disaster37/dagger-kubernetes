@@ -21,6 +21,36 @@ type Metrics struct {
 	DataHandshakeFailuresTotal    *prometheus.CounterVec
 	SecurityIPBansTotal           *prometheus.CounterVec
 	SecurityRejectionsTotal       *prometheus.CounterVec
+	RemoteCacheLookupHits         *prometheus.CounterVec
+	RemoteCacheLookupMisses       *prometheus.CounterVec
+	RemoteCacheExportedBundles    *prometheus.CounterVec
+	RemoteCacheStoredBytes        *prometheus.GaugeVec
+	OrgQuotaUsage                 *prometheus.GaugeVec
+	OrgQuotaLimit                 *prometheus.GaugeVec
+	OrgQuotaSoftExceededTotal     *prometheus.CounterVec
+	OrgQuotaHardRejectedTotal     *prometheus.CounterVec
+	WebhookSignatureInvalid       *prometheus.CounterVec
+}
+
+// DeleteOrgSeries removes every Prometheus series labelled with org (and the
+// remote-cache namespace series) when an organization is deleted.
+func (m *Metrics) DeleteOrgSeries(orgID string) {
+	if m == nil || orgID == "" {
+		return
+	}
+	org := prometheus.Labels{"org": orgID}
+	m.EngineAcquireTotal.DeletePartialMatch(org)
+	m.EngineAcquireDuration.DeletePartialMatch(org)
+	m.ActiveReplicas.DeletePartialMatch(org)
+	m.OrgQuotaUsage.DeletePartialMatch(org)
+	m.OrgQuotaLimit.DeletePartialMatch(org)
+	m.OrgQuotaSoftExceededTotal.DeletePartialMatch(org)
+	m.OrgQuotaHardRejectedTotal.DeletePartialMatch(org)
+	ns := prometheus.Labels{"namespace": orgID}
+	m.RemoteCacheLookupHits.DeletePartialMatch(ns)
+	m.RemoteCacheLookupMisses.DeletePartialMatch(ns)
+	m.RemoteCacheExportedBundles.DeletePartialMatch(ns)
+	m.RemoteCacheStoredBytes.DeletePartialMatch(ns)
 }
 
 // NewMetrics builds the Metrics collectors and registers them on reg when
@@ -31,13 +61,13 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		EngineAcquireTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "dagger_kubernetes_engine_acquire_total",
 			Help: "Total number of engine acquire requests",
-		}, []string{"version", "status"}),
+		}, []string{"org", "version", "status"}),
 
 		EngineAcquireDuration: prometheus.NewHistogramVec(prometheus.HistogramOpts{
 			Name:    "dagger_kubernetes_engine_acquire_duration_seconds",
 			Help:    "Duration of engine acquire requests",
 			Buckets: prometheus.DefBuckets,
-		}, []string{"version"}),
+		}, []string{"org", "version"}),
 
 		ActiveLeases: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "dagger_kubernetes_active_leases",
@@ -47,7 +77,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 		ActiveReplicas: prometheus.NewGaugeVec(prometheus.GaugeOpts{
 			Name: "dagger_kubernetes_active_replicas",
 			Help: "Number of active engine replicas per version",
-		}, []string{"version"}),
+		}, []string{"org", "version"}),
 
 		OTelIngestTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
 			Name: "dagger_kubernetes_otel_ingest_total",
@@ -93,6 +123,43 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_kubernetes_security_rejections_total",
 			Help: "Total number of requests rejected by the security guard, by reason",
 		}, []string{"reason"}),
+
+		RemoteCacheLookupHits: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_remote_cache_lookup_hits_total",
+			Help: "Total remote-cache lookup hits",
+		}, []string{"namespace"}),
+		RemoteCacheLookupMisses: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_remote_cache_lookup_misses_total",
+			Help: "Total remote-cache lookup misses",
+		}, []string{"namespace"}),
+		RemoteCacheExportedBundles: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_remote_cache_exported_bundles_total",
+			Help: "Total remote-cache bundles exported",
+		}, []string{"namespace"}),
+		RemoteCacheStoredBytes: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dagger_kubernetes_remote_cache_stored_bytes",
+			Help: "Total bytes stored in the remote cache index",
+		}, []string{"namespace"}),
+		OrgQuotaUsage: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dagger_kubernetes_org_quota_usage",
+			Help: "Current organization quota usage by resource",
+		}, []string{"org", "resource"}),
+		OrgQuotaLimit: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "dagger_kubernetes_org_quota_limit",
+			Help: "Configured organization quota limits by resource and tier",
+		}, []string{"org", "resource", "tier"}),
+		OrgQuotaSoftExceededTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_org_quota_soft_exceeded_total",
+			Help: "Total admissions that exceeded an organization soft quota",
+		}, []string{"org", "resource"}),
+		OrgQuotaHardRejectedTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_org_quota_hard_rejected_total",
+			Help: "Total admissions rejected by an organization hard quota",
+		}, []string{"org", "resource"}),
+		WebhookSignatureInvalid: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_webhook_signature_invalid_total",
+			Help: "Total webhook requests rejected for an invalid signature, by provider",
+		}, []string{"provider"}),
 	}
 
 	if reg != nil {
@@ -110,6 +177,15 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.DataHandshakeFailuresTotal,
 			m.SecurityIPBansTotal,
 			m.SecurityRejectionsTotal,
+			m.RemoteCacheLookupHits,
+			m.RemoteCacheLookupMisses,
+			m.RemoteCacheExportedBundles,
+			m.RemoteCacheStoredBytes,
+			m.WebhookSignatureInvalid,
+			m.OrgQuotaUsage,
+			m.OrgQuotaLimit,
+			m.OrgQuotaSoftExceededTotal,
+			m.OrgQuotaHardRejectedTotal,
 		)
 	}
 

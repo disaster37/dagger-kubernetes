@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -31,6 +32,15 @@ func (p *fixedIPProvider) GetReplicas(version string) ([]domain.Replica, error) 
 		Ready:     true,
 		StartedAt: time.Now(),
 	}}, nil
+}
+
+// GetReadyReplicaIP returns the fixed IP for the pinned pod so ResolvePodIP
+// (used by serveDataTunnel) finds it without a real StatefulSet.
+func (p *fixedIPProvider) GetReadyReplicaIP(version, podName string) (string, error) {
+	if podName != p.pod {
+		return "", fmt.Errorf("replica %s not found", podName)
+	}
+	return p.ip, nil
 }
 
 // startDataTunnelBackend binds a listener on 127.0.0.1:9999 (the engine port
@@ -73,7 +83,7 @@ func setupDataTunnel(t *testing.T, env *testEnv, certFP, traceID string) {
 	}); err != nil {
 		t.Fatalf("seed trace: %v", err)
 	}
-	env.sessions.Register(certFP, version, pod, "inst-1", traceID, "u1")
+	env.sessions.Register("", certFP, version, pod, "inst-1", traceID, "u1")
 }
 
 func waitFor(t *testing.T, what string, cond func() bool) {

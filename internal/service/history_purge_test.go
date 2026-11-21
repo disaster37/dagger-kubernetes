@@ -33,7 +33,7 @@ func newFakeTraceMetaRepo() *fakeTraceMetaRepo {
 	return &fakeTraceMetaRepo{traces: make(map[string]*domain.TraceMeta)}
 }
 
-func (r *fakeTraceMetaRepo) UpsertProvision(context.Context, string, string, string) error {
+func (r *fakeTraceMetaRepo) UpsertProvision(context.Context, string, string, string, string) error {
 	return nil
 }
 func (r *fakeTraceMetaRepo) UpsertIngest(_ context.Context, m *domain.TraceMeta) error {
@@ -114,7 +114,7 @@ func (r *fakeTraceMetaRepo) MarkFailed(_ context.Context, traceID, reason string
 	m.FailureReason = reason
 	return true, nil
 }
-func (r *fakeTraceMetaRepo) Stats(context.Context) (int, time.Time, error) {
+func (r *fakeTraceMetaRepo) Stats(context.Context, string) (int, time.Time, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	var oldest time.Time

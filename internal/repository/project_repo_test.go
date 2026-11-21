@@ -30,7 +30,7 @@ func TestProjectRepoCRUD(t *testing.T) {
 		t.Fatalf("group_id = %q, want empty", got.GroupID)
 	}
 
-	byName, err := repo.GetByName(ctx, "GITHUB.COM/ACME/API")
+	byName, err := repo.GetByName(ctx, "", "GITHUB.COM/ACME/API")
 	if err != nil {
 		t.Fatalf("GetByName (case-insensitive): %v", err)
 	}

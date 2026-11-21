@@ -37,6 +37,7 @@ func ValidTraceIDKey(id string) bool {
 // and visibility checks.
 type TraceMeta struct {
 	TraceID       string    `json:"trace_id"`
+	OrgID         string    `json:"org_id,omitempty"`
 	UserID        string    `json:"user_id,omitempty"`
 	GroupID       string    `json:"group_id,omitempty"`
 	ProjectName   string    `json:"project_name,omitempty"`
@@ -66,6 +67,7 @@ const (
 
 // TraceFilter scopes a trace listing query.
 type TraceFilter struct {
+	OrgID             string   // "" = no org restriction
 	GroupIDs          []string // empty = no group restriction (admin)
 	IncludeUnassigned bool     // admin: true (all); user: only their own user_id fallback
 	UnassignedOnly    bool     // admin "unassigned" view: only traces without a group
@@ -77,7 +79,7 @@ type TraceFilter struct {
 
 // TraceMetaRepository is the persistence interface for trace metadata.
 type TraceMetaRepository interface {
-	UpsertProvision(ctx context.Context, traceID, userID, version string) error
+	UpsertProvision(ctx context.Context, orgID, traceID, userID, version string) error
 	UpsertIngest(ctx context.Context, m *TraceMeta) error
 	Get(ctx context.Context, traceID string) (*TraceMeta, error)
 	List(ctx context.Context, f *TraceFilter) ([]*TraceListResult, error)
@@ -105,5 +107,5 @@ type TraceMetaRepository interface {
 
 	// Stats returns the total trace count and the oldest COALESCE(started_at,
 	// updated_at) timestamp (zero time when no traces exist). Cheap FSM read.
-	Stats(ctx context.Context) (count int, oldest time.Time, err error)
+	Stats(ctx context.Context, orgID string) (count int, oldest time.Time, err error)
 }

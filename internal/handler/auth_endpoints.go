@@ -112,11 +112,60 @@ type authMeResponse struct {
 	OAuthProvider string         `json:"oauth_provider,omitempty"`
 	OAuthGroups   []string       `json:"oauth_groups,omitempty"`
 	Groups        []groupSummary `json:"groups"`
+	Orgs          []orgSummary   `json:"orgs"`
 }
 
 type groupSummary struct {
-	ID   string `json:"id"`
-	Name string `json:"name"`
+	ID    string `json:"id"`
+	OrgID string `json:"org_id,omitempty"`
+	Name  string `json:"name"`
+}
+
+type orgSummary struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Role        string `json:"role"`
+}
+
+// orgSummaries lists the organizations visible to (userID, access) with the
+// caller's role in each, sorted by slug.
+func (s *Server) orgSummaries(ctx context.Context, userID string, access domain.Role) []orgSummary {
+	if s.orgs == nil {
+		return []orgSummary{}
+	}
+	var orgs []*domain.Org
+	if access == domain.RoleAdmin {
+		all, err := s.orgs.List(ctx)
+		if err != nil {
+			return []orgSummary{}
+		}
+		orgs = all
+	} else {
+		list, err := s.orgs.OrgsForUser(ctx, userID)
+		if err != nil {
+			return []orgSummary{}
+		}
+		orgs = list
+	}
+	out := make([]orgSummary, 0, len(orgs))
+	for _, o := range orgs {
+		role := "member"
+		if r, ok, err := s.orgs.MemberRole(ctx, o.ID, userID); err == nil && ok {
+			role = string(r)
+		} else if access == domain.RoleAdmin {
+			role = "admin"
+		}
+		out = append(out, orgSummary{ID: o.ID, Name: o.Name, DisplayName: o.DisplayName, Role: role})
+	}
+	return out
+}
+
+// authMe builds the /me response including org memberships.
+func (s *Server) authMe(ctx context.Context, u *domain.User, groups []*domain.Group) authMeResponse {
+	resp := toAuthMeResponse(u, groups)
+	resp.Orgs = s.orgSummaries(ctx, u.ID, u.Role)
+	return resp
 }
 
 type providersResponse struct {
@@ -179,7 +228,7 @@ func (s *Server) handleLogin(ctx context.Context, c *app.RequestContext) {
 	}
 	s.setAuthCookies(c, access, refresh)
 	groups, _ := s.groups.GroupsForUser(ctx, u.ID)
-	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
+	c.JSON(consts.StatusOK, s.authMe(ctx, u, groups))
 }
 
 // handleRefresh rotates a refresh token (from the refresh cookie first, then
@@ -240,7 +289,7 @@ func (s *Server) handleMe(ctx context.Context, c *app.RequestContext) {
 		return
 	}
 	groups, _ := s.groups.GroupsForUser(ctx, id.UserID)
-	c.JSON(consts.StatusOK, toAuthMeResponse(u, groups))
+	c.JSON(consts.StatusOK, s.authMe(ctx, u, groups))
 }
 
 // syntheticUserResponse builds the /me + login user object for the synthetic
@@ -252,6 +301,7 @@ func syntheticUserResponse() authMeResponse {
 		Username: name,
 		Role:     domain.RoleAdmin,
 		Groups:   []groupSummary{},
+		Orgs:     []orgSummary{},
 	}
 }
 

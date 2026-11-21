@@ -10,10 +10,10 @@ func TestParse(t *testing.T) {
 		want    *Version
 		wantErr bool
 	}{
-		{"v0.21.4", &Version{0, 21, 4, "v0.21.4"}, false},
-		{"0.21.4", &Version{0, 21, 4, "v0.21.4"}, false},
-		{"v1.0.0", &Version{1, 0, 0, "v1.0.0"}, false},
-		{"0.19", &Version{0, 19, 0, "v0.19.0"}, false},
+		{"v0.21.4", &Version{Major: 0, Minor: 21, Patch: 4, Raw: "v0.21.4"}, false},
+		{"0.21.4", &Version{Major: 0, Minor: 21, Patch: 4, Raw: "v0.21.4"}, false},
+		{"v1.0.0", &Version{Major: 1, Minor: 0, Patch: 0, Raw: "v1.0.0"}, false},
+		{"0.19", &Version{Major: 0, Minor: 19, Patch: 0, Raw: "v0.19.0"}, false},
 		{"invalid", nil, true},
 	}
 
@@ -58,7 +58,8 @@ func TestIsFullVersion(t *testing.T) {
 		{"v1.0.0", true},
 		{"0.21", false},
 		{"v0.21", false},
-		{"v0.21.8-rc.1", false},
+		{"v0.21.8-rc.1", true},
+		{"v1.0.0-beta.27", true},
 		{"notaversion", false},
 		{"", false},
 	}
@@ -67,5 +68,33 @@ func TestIsFullVersion(t *testing.T) {
 		if got := IsFullVersion(tt.raw); got != tt.want {
 			t.Errorf("IsFullVersion(%q) = %v, want %v", tt.raw, got, tt.want)
 		}
+	}
+}
+
+func TestVersionPreReleaseOrdering(t *testing.T) {
+	beta26, _ := Parse("v1.0.0-beta.26")
+	beta27, _ := Parse("v1.0.0-beta.27")
+	release, _ := Parse("v1.0.0")
+	if beta26.Compare(beta27) >= 0 {
+		t.Fatal("beta.26 must be lower than beta.27")
+	}
+	if beta27.Compare(release) >= 0 {
+		t.Fatal("pre-release must be lower than the final release")
+	}
+	if release.Compare(beta27) <= 0 {
+		t.Fatal("final release must be higher than a pre-release")
+	}
+}
+
+func TestVersionSlugPreRelease(t *testing.T) {
+	v, err := Parse("v1.0.0-beta.27")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := v.Slug(); got != "v1-0-0-beta-27" {
+		t.Fatalf("Slug() = %q, want v1-0-0-beta-27", got)
+	}
+	if got := StsName(v.String()); got != "dagger-engine-v1-0-0-beta-27" {
+		t.Fatalf("StsName() = %q", got)
 	}
 }

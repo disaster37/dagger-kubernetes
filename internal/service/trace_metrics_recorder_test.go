@@ -115,8 +115,35 @@ func TestTraceMetricsRecorderSamplesValidTraces(t *testing.T) {
 		if strings.Contains(q, "{ns}") || strings.Contains(q, "{pod}") || strings.Contains(q, "{rate}") {
 			t.Fatalf("query %q still contains template vars", q)
 		}
-		if !strings.Contains(q, `namespace="my-ns"`) || !strings.Contains(q, `pod=~"dagger-engine-v0-21-4-.*"`) {
+		if !strings.Contains(q, `namespace="my-ns"`) || !strings.Contains(q, `pod=~"dagger-engine-(?:[a-z0-9-]+-)?v0-21-4-.*"`) {
 			t.Fatalf("query %q missing substitutions", q)
+		}
+	}
+}
+
+// TestTraceMetricsRecorderPerOrgScoping verifies the sampled pod selector
+// narrows to the trace's org in per_org isolation.
+func TestTraceMetricsRecorderPerOrgScoping(t *testing.T) {
+	store := &fakeRecorderStore{instantOK: true, instantVal: 1}
+	repo := &stubRunningRepo{running: []*domain.TraceMeta{{
+		TraceID: "abcdef0123456789abcdef0123456789", OrgID: "default", Version: "v0.21.4",
+		Status: "running", StartedAt: time.Now(),
+	}}}
+	rec := NewTraceMetricsRecorder(store, repo, "my-ns", time.Minute, time.Minute, 24*time.Hour, func() bool { return true }, testMetricsLogger()).
+		WithFleetIsolation("per_org")
+
+	rec.Run(context.Background())
+
+	queries := store.snapshotQueries()
+	if len(queries) == 0 {
+		t.Fatal("no queries issued")
+	}
+	for _, q := range queries {
+		if !strings.Contains(q, `pod=~"dagger-engine-default-v0-21-4-.*"`) {
+			t.Fatalf("query %q missing org-scoped pod selector", q)
+		}
+		if strings.Contains(q, `pod=~"dagger-engine-(?:[a-z0-9-]+-)?v0-21-4-.*"`) {
+			t.Fatalf("query %q unexpectedly broad", q)
 		}
 	}
 }

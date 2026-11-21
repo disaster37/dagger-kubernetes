@@ -1,17 +1,48 @@
 export type Role = 'admin' | 'user'
 
-export interface GroupSummary { id: string; name: string }
+export interface GroupSummary { id: string; org_id?: string; name: string }
+
+export interface OrgSummary {
+  id: string
+  name: string
+  display_name: string
+  role: 'admin' | 'org_admin' | 'member'
+}
+
+export interface QuotaThreshold { soft: number; hard: number }
+
+export interface OrgQuotas {
+  max_groups: QuotaThreshold
+  max_projects: QuotaThreshold
+  max_members: QuotaThreshold
+  max_concurrent_sessions: QuotaThreshold
+  max_engines: QuotaThreshold
+  max_cache_bytes: QuotaThreshold
+  max_pipeline_retention: number
+}
+
+export interface OrgQuotaUsage {
+  groups: number
+  projects: number
+  members: number
+  concurrent_sessions: number
+  engines: number
+  cache_bytes: number
+  effective: OrgQuotas
+}
 
 export interface AuthUser {
   id: string
   username: string
   role: Role
   groups: GroupSummary[]
+  orgs: OrgSummary[]
   oauth_provider?: string
   oauth_groups?: string[]
 }
 
 export interface Group extends GroupSummary {
+  org_id: string
   description: string
   max_runner_sessions: number
   agent_available: boolean
@@ -44,6 +75,7 @@ export interface UserRow {
 
 export interface Project {
   id: string
+  org_id?: string
   name: string
   group_id: string
   group_name?: string
@@ -68,6 +100,7 @@ export interface TraceFilterParams {
   groupId?: string // group id, or the 'unassigned' sentinel
   ciRepo?: string // substring
   user?: string // substring
+  org?: string // org slug, or 'all' for admin cross-org view
 }
 
 export interface ExecEnvVar {
@@ -218,6 +251,8 @@ export interface FleetReplica {
 export interface FleetInfo {
   version: string
   stsName: string
+  org?: string
+  org_slug?: string
   replicas: number
   readyReplicas: number
   ordinals: FleetReplica[]
@@ -402,4 +437,167 @@ export interface ImageCachePruneAllMirror {
 export interface ImageCachePruneAllResult {
   mirrors: ImageCachePruneAllMirror[]
   message?: string
+}
+
+// --- Cloud parity (orgs, environments, checks, workflows, artifacts, cache) ---
+export interface Org {
+  id: string
+  name: string
+  display_name: string
+  features: string[]
+  quotas?: OrgQuotas
+  created_at: string
+}
+
+export interface OrgMemberRow {
+  org_id: string
+  user_id: string
+  username?: string
+  role: 'org_admin' | 'member'
+  groups?: GroupSummary[]
+  created_at?: string
+}
+
+export interface OrgMember {
+  org_id: string
+  user_id: string
+  role: 'org_admin' | 'member'
+}
+
+export interface OrgTokenMeta extends TokenMeta {
+  exists?: boolean
+}
+
+export interface SecretMeta {
+  id: string
+  scope: 'org' | 'project' | 'environment'
+  scope_id: string
+  name: string
+  created_at: string
+  updated_at: string
+}
+
+export interface ProtectedEnvironment {
+  id: string
+  org_id: string
+  name: string
+  approver_group_ids: string[]
+  prevent_self_approval: boolean
+  approval_timeout: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ForgeSource {
+  id: string
+  org_id: string
+  project_id?: string
+  provider: 'github' | 'gitlab' | 'gitea'
+  base_url: string
+  repo: string
+  app_id?: string
+  installation_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface CheckItem {
+  name: string
+  state: 'pending' | 'success' | 'failure' | 'error'
+  trace_id?: string
+  summary?: string
+  updated_at: string
+}
+
+export interface CheckRunRecord {
+  id: string
+  org_id: string
+  project_id: string
+  source_id: string
+  provider: string
+  repo: string
+  event: string
+  sha: string
+  ref: string
+  default_branch?: string
+  target_branch?: string
+  tag?: string
+  pr_number?: number
+  is_fork: boolean
+  is_release: boolean
+  status: 'waiting_approval' | 'running' | 'success' | 'failed' | 'canceled'
+  include_secrets: boolean
+  approved_by?: string
+  approved_at?: string
+  checks?: CheckItem[]
+  error?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface WorkflowInput {
+  type: 'string' | 'boolean' | 'number' | 'choice' | 'artifact'
+  description?: string
+  required?: boolean
+  default?: unknown
+  options?: string[]
+}
+
+export interface WorkflowDef {
+  id: string
+  org_id: string
+  project_id: string
+  repo: string
+  default_ref: string
+  default_sha: string
+  workflow: {
+    name: string
+    on: Record<string, unknown>
+    after_checks: boolean
+    jobs: Record<string, unknown>
+    inputs?: Record<string, WorkflowInput>
+  }
+  updated_at: string
+}
+
+export interface WorkflowJobRun {
+  name: string
+  status: string
+  trace_id?: string
+  outputs?: Record<string, string>
+  artifacts?: string[]
+  environment?: string
+  waiting_since?: string
+  approval_deadline?: string
+  approved_by?: string
+  approved_at?: string
+  rejected_by?: string
+  triggered_run_id?: string
+  error?: string
+}
+
+export interface WorkflowRun {
+  id: string
+  workflow: string
+  org_id: string
+  project_id: string
+  sha: string
+  ref: string
+  status: string
+  number: number
+  jobs: Record<string, WorkflowJobRun>
+  git: Record<string, unknown>
+  inputs?: Record<string, unknown>
+  triggered_by?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface RemoteCacheStats {
+  enabled: boolean
+  namespace?: string
+  entries?: number
+  bytes?: number
+  soft_limit_bytes?: number
+  hard_limit_bytes?: number
 }

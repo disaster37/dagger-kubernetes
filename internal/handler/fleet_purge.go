@@ -14,6 +14,10 @@ import (
 // version's StatefulSet. Admin-only; blocks until the purge completes (or
 // per-pod timeouts fire).
 func (s *Server) handleFleetPurgeCache(ctx context.Context, c *app.RequestContext) {
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
 	version := c.Param("version")
 	if !domain.IsFullVersion(version) {
 		writeError(c, consts.StatusBadRequest, "invalid version")
@@ -23,7 +27,7 @@ func (s *Server) handleFleetPurgeCache(ctx context.Context, c *app.RequestContex
 		writeError(c, consts.StatusServiceUnavailable, "engine cache purge unavailable")
 		return
 	}
-	result, err := s.engineCachePurger.Purge(ctx, version)
+	result, err := s.engineCachePurger.PurgeForOrg(ctx, org.ID, version)
 	if err != nil {
 		s.writeFleetPurgeError(c, err)
 		return
@@ -33,7 +37,11 @@ func (s *Server) handleFleetPurgeCache(ctx context.Context, c *app.RequestContex
 
 // handleFleetPurgeStatus returns the last recorded purge result for the
 // version, or 404 when no purge has been recorded. Admin-only.
-func (s *Server) handleFleetPurgeStatus(_ context.Context, c *app.RequestContext) {
+func (s *Server) handleFleetPurgeStatus(ctx context.Context, c *app.RequestContext) {
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return
+	}
 	version := c.Param("version")
 	if !domain.IsFullVersion(version) {
 		writeError(c, consts.StatusBadRequest, "invalid version")
@@ -43,7 +51,7 @@ func (s *Server) handleFleetPurgeStatus(_ context.Context, c *app.RequestContext
 		writeError(c, consts.StatusServiceUnavailable, "engine cache purge unavailable")
 		return
 	}
-	result, ok := s.engineCachePurger.Status(version)
+	result, ok := s.engineCachePurger.StatusForOrg(org.ID, version)
 	if !ok {
 		writeError(c, consts.StatusNotFound, "no purge recorded")
 		return

@@ -66,11 +66,31 @@ func recordedMetricName(name string) string { return recordedMetricPrefix + name
 // cAdvisor metrics and runs it against the metrics backend. The UI never
 // writes PromQL; it consumes the curated series this service returns.
 type EngineMetricsService struct {
-	queryer    domain.MetricsQueryer
-	namespace  string
-	step       time.Duration
-	rateWindow time.Duration
-	logger     *logrus.Logger
+	queryer        domain.MetricsQueryer
+	namespace      string
+	step           time.Duration
+	rateWindow     time.Duration
+	fleetIsolation string
+	logger         *logrus.Logger
+}
+
+// WithFleetIsolation sets fleet.isolation ("per_org" | "shared") so the
+// trace-scoped engine pod selector narrows to the trace's org in per_org mode.
+// Returns the service for chaining.
+func (s *EngineMetricsService) WithFleetIsolation(isolation string) *EngineMetricsService {
+	s.fleetIsolation = isolation
+	return s
+}
+
+// podRegex returns the PromQL pod selector for a trace's engine fleet. In
+// per_org isolation with a non-empty org, it matches only that org's engine
+// pods; otherwise it uses the broad version-level matcher (which covers both
+// isolation modes).
+func (s *EngineMetricsService) podRegex(meta *domain.TraceMeta) string {
+	if s.fleetIsolation == "per_org" && meta.OrgID != "" {
+		return domain.EngineOrgPodRegex(meta.OrgID, meta.Version)
+	}
+	return domain.EnginePodRegex(meta.Version)
 }
 
 // NewEngineMetricsService constructs the service. step is the query_range
@@ -138,9 +158,8 @@ func (s *EngineMetricsService) TraceMetrics(ctx context.Context, meta *domain.Tr
 		return result, nil
 	}
 
-	stsName := domain.StsName(meta.Version)
 	ns := escapePromQLLabelValue(s.namespace)
-	pod := escapePromQLLabelValue(stsName)
+	pod := escapePromQLLabelValue(s.podRegex(meta))
 	var lastErr error
 	for _, q := range defaultMetricQueries {
 		promql := buildPromQL(q.promql, ns, pod, s.rateString())

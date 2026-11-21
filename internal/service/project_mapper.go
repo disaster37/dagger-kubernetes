@@ -17,6 +17,7 @@ type ProjectMapper struct {
 type projectMappingRule struct {
 	pattern *regexp.Regexp
 	group   string
+	org     string
 }
 
 // NewProjectMapper compiles the configured rules. A nil or empty list yields an
@@ -32,7 +33,7 @@ func NewProjectMapper(rules []domain.ProjectMappingRule) (*ProjectMapper, error)
 		if err != nil {
 			return nil, fmt.Errorf("project_mappings[%d] pattern %q: %w", i, rule.Pattern, err)
 		}
-		compiled = append(compiled, projectMappingRule{pattern: re, group: rule.Group})
+		compiled = append(compiled, projectMappingRule{pattern: re, group: rule.Group, org: rule.Org})
 	}
 	return &ProjectMapper{rules: compiled}, nil
 }
@@ -43,12 +44,21 @@ func (m *ProjectMapper) Active() bool {
 }
 
 // Map returns the target group of the first matching rule, or ("", false) when
-// no rule matches.
+// no rule matches. It ignores org-scoped rules.
 func (m *ProjectMapper) Map(projectName string) (string, bool) {
+	return m.MapForOrg("", "", projectName)
+}
+
+// MapForOrg returns the target group of the first matching rule scoped to the
+// given organization (by ID or slug), or ("", false) when no rule matches.
+func (m *ProjectMapper) MapForOrg(orgID, orgName, projectName string) (string, bool) {
 	if m == nil {
 		return "", false
 	}
 	for _, rule := range m.rules {
+		if rule.org != "" && rule.org != orgID && rule.org != orgName {
+			continue
+		}
 		if rule.pattern.MatchString(projectName) {
 			return rule.group, true
 		}

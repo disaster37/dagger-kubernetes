@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,10 +14,12 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
+var testStoreSeq atomic.Uint64
+
 // newServiceStore builds a single-node in-memory Raft store for service tests.
 func newServiceStore(t *testing.T) *repository.RaftStore {
 	t.Helper()
-	store, err := repository.NewInmemRaftStore("service-test", observ.NewTestLogger(), 5*time.Second)
+	store, err := repository.NewInmemRaftStore(fmt.Sprintf("service-test-%d-%d", time.Now().UnixNano(), testStoreSeq.Add(1)), observ.NewTestLogger(), 5*time.Second)
 	if err != nil {
 		t.Fatalf("NewInmemRaftStore: %v", err)
 	}

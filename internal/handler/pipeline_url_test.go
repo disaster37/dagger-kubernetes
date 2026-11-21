@@ -47,7 +47,7 @@ func TestHandleTracesURL(t *testing.T) {
 		if err != nil {
 			t.Fatalf("get admin: %v", err)
 		}
-		if err := env.server.traceMeta.UpsertProvision(ctx, "trace-url-denied", admin.ID, ""); err != nil {
+		if err := env.server.traceMeta.UpsertProvision(ctx, "", "trace-url-denied", admin.ID, ""); err != nil {
 			t.Fatalf("upsert provision: %v", err)
 		}
 
@@ -103,7 +103,7 @@ func TestHandleTracesDetailIncludesURL(t *testing.T) {
 	}
 
 	t.Run("url present", func(t *testing.T) {
-		if err := env.server.traceMeta.UpsertProvision(ctx, "trace-detail-url", "", ""); err != nil {
+		if err := env.server.traceMeta.UpsertProvision(ctx, "", "trace-detail-url", "", ""); err != nil {
 			t.Fatalf("upsert provision: %v", err)
 		}
 		env.server.traces = &stubTraceRepo{trace: minimalTrace("trace-detail-url")}
@@ -128,7 +128,7 @@ func TestHandleTracesDetailIncludesURL(t *testing.T) {
 
 	t.Run("url omitted when base empty", func(t *testing.T) {
 		env.server.cfg.PipelineURL = ""
-		if err := env.server.traceMeta.UpsertProvision(ctx, "trace-detail-no-url", "", ""); err != nil {
+		if err := env.server.traceMeta.UpsertProvision(ctx, "", "trace-detail-no-url", "", ""); err != nil {
 			t.Fatalf("upsert provision: %v", err)
 		}
 		env.server.traces = &stubTraceRepo{trace: minimalTrace("trace-detail-no-url")}

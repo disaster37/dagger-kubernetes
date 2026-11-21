@@ -348,6 +348,60 @@ func TestCLIServiceEnsureCachedVersionValidation(t *testing.T) {
 	}
 }
 
+// TestCLIServiceBetaAllowlist covers the v1.0.0-beta.* policy: an explicit
+// beta download succeeds when the minor series "1.0" is allowlisted even with
+// includePrereleases=false (Filtering by includePrereleases only applies to
+// ResolveLatest*), while "latest" still prefers the stable 0.21.x unless
+// prereleases are asked for explicitly.
+func TestCLIServiceBetaAllowlist(t *testing.T) {
+	up := &stubCLIUpstream{releases: []string{"v0.21.8", "v1.0.0-beta.28"}}
+	data, sums := stubTarball("v1.0.0-beta.28")
+	up.tarball = data
+	up.checksums = sums
+
+	svc := newCLITestService(t, []string{"0.19", "0.20", "0.21", "1.0"}, up)
+
+	art, err := svc.EnsureCached(context.Background(), "v1.0.0-beta.28", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("EnsureCached(v1.0.0-beta.28): %v", err)
+	}
+	if art.Version != "v1.0.0-beta.28" {
+		t.Fatalf("version = %q, want v1.0.0-beta.28", art.Version)
+	}
+}
+
+// TestCLIServiceResolveLatestPrereleasePreference verifies includePrereleases
+// still gates "latest": false returns the stable 0.21.x, true returns the beta.
+func TestCLIServiceResolveLatestPrereleasePreference(t *testing.T) {
+	up := &stubCLIUpstream{releases: []string{"v0.21.8", "v1.0.0-beta.28"}}
+	data, sums := stubTarball("v0.21.8")
+	up.tarball = data
+	up.checksums = sums
+	svc := newCLITestService(t, []string{"0.19", "0.20", "0.21", "1.0"}, up)
+
+	stable, err := svc.ResolveLatestWithPrereleases(context.Background(), "linux", "amd64", false)
+	if err != nil {
+		t.Fatalf("ResolveLatestWithPrereleases(false): %v", err)
+	}
+	if stable.Version != "v0.21.8" {
+		t.Fatalf("stable latest = %q, want v0.21.8", stable.Version)
+	}
+
+	dataBeta, sumsBeta := stubTarball("v1.0.0-beta.28")
+	up.mu.Lock()
+	up.tarball = dataBeta
+	up.checksums = sumsBeta
+	up.mu.Unlock()
+
+	pre, err := svc.ResolveLatestWithPrereleases(context.Background(), "linux", "amd64", true)
+	if err != nil {
+		t.Fatalf("ResolveLatestWithPrereleases(true): %v", err)
+	}
+	if pre.Version != "v1.0.0-beta.28" {
+		t.Fatalf("prerelease latest = %q, want v1.0.0-beta.28", pre.Version)
+	}
+}
+
 func TestCLIServiceEnsureCachedFullPatchZero(t *testing.T) {
 	up := &stubCLIUpstream{}
 	data, sums := stubTarball("v0.21.0")

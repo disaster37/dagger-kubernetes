@@ -350,7 +350,7 @@ func TestHandleFleetInfoEmpty(t *testing.T) {
 	s, bearer := newTestServer(t)
 	e := newTestEngine(s)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet?org=all", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
@@ -375,7 +375,7 @@ func TestHandleFleetInfoJSONShape(t *testing.T) {
 		t.Fatalf("expected 201 from engines endpoint, got %d", respEng.Result().StatusCode())
 	}
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet?org=all", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusOK {
 		t.Fatalf("expected 200, got %d", resp.Result().StatusCode())
 	}
@@ -421,6 +421,11 @@ func (p *faultyProvider) AllVersions() ([]string, error) {
 	return nil, fmt.Errorf("simulated k8s failure")
 }
 
+// AllScopes also fails: it depends on the same k8s listing as AllVersions.
+func (p *faultyProvider) AllScopes() ([]domain.FleetScope, error) {
+	return nil, fmt.Errorf("simulated k8s failure")
+}
+
 func TestHandleFleetInfoError(t *testing.T) {
 	env := newTestEnv(t)
 
@@ -439,7 +444,7 @@ func TestHandleFleetInfoError(t *testing.T) {
 	e := newTestEngine(env.server)
 	bearer := env.loginAsAdmin(t)
 
-	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet", nil, ut.Header{Key: "Authorization", Value: bearer})
+	resp := ut.PerformRequest(e, "GET", "/api/v1/fleet?org=all", nil, ut.Header{Key: "Authorization", Value: bearer})
 	if resp.Result().StatusCode() != http.StatusInternalServerError {
 		t.Fatalf("expected 500, got %d", resp.Result().StatusCode())
 	}

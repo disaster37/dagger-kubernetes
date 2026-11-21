@@ -40,11 +40,18 @@
           <UBadge v-if="focusExec.cwd" color="neutral" variant="soft">cwd: {{ focusExec.cwd }}</UBadge>
           <UBadge v-if="focusExec.user" color="neutral" variant="soft">user: {{ focusExec.user }}</UBadge>
           <UBadge
-            v-if="(focusExec.exit_code !== null && focusExec.exit_code !== undefined) || focusExec.kind === 'exec'"
+            v-if="focusExec.exit_code !== null && focusExec.exit_code !== undefined"
             :color="exitBadgeColor(focusExec.exit_code)"
             variant="soft"
           >
-            {{ focusExec.exit_code === null || focusExec.exit_code === undefined ? 'running' : `exit ${focusExec.exit_code}` }}
+            exit {{ focusExec.exit_code }}
+          </UBadge>
+          <UBadge
+            v-else-if="focus?.status === 'running'"
+            color="neutral"
+            variant="soft"
+          >
+            running
           </UBadge>
           <UBadge v-if="focusExec.kind" color="neutral" variant="soft">{{ focusExec.kind }}</UBadge>
         </div>
@@ -94,13 +101,22 @@
             size="xs"
             square
             :icon="expanded.has(row.node.span_id) ? 'i-lucide-chevron-down' : 'i-lucide-chevron-right'"
-            @click="toggleExpanded(row.node.span_id)"
+            @click.stop="toggleExpanded(row.node.span_id)"
           />
           <span v-else class="w-3.5"></span>
           <span :class="['dot', `dot-${row.node.status}`]"></span>
           <UButton variant="link" color="neutral" class="step-name" @click="zoomIn(row.node)">
             {{ row.node.name || row.node.span_id }}
           </UButton>
+          <span v-if="inlineDetail(row.node)" class="step-exec" :title="inlineDetailTitle(row.node)">
+            <code>{{ inlineDetail(row.node) }}</code>
+          </span>
+          <UBadge
+            v-if="exitLabel(row.node)"
+            :color="exitBadgeColor(row.node.exec?.exit_code)"
+            variant="soft"
+            class="step-exit"
+          >{{ exitLabel(row.node) }}</UBadge>
           <span class="step-duration">{{ formatDuration(liveSpanDuration(row.node, now)) }}</span>
           <UBadge
             v-if="rowCounts.get(row.node.span_id)"
@@ -117,11 +133,21 @@
           <div
             v-for="child in row.children"
             :key="child.node.span_id"
-            class="subspan"
+            class="subspan subspan-clickable"
             :style="{ paddingLeft: (12 + child.depth * 16) + 'px' }"
+            :title="`Zoom into ${child.node.name || child.node.span_id}`"
+            @click="zoomInSubspan(row.node, child.node)"
           >
             <span :class="['dot', `dot-${child.node.status}`]"></span>
             <span class="subspan-name">{{ child.node.name || child.node.span_id }}</span>
+            <span v-if="inlineDetail(child.node)" class="subspan-exec" :title="inlineDetailTitle(child.node)">
+              <code>{{ inlineDetail(child.node) }}</code>
+            </span>
+            <UBadge
+              v-if="exitLabel(child.node)"
+              :color="exitBadgeColor(child.node.exec?.exit_code)"
+              variant="soft"
+            >{{ exitLabel(child.node) }}</UBadge>
             <span class="subspan-duration">{{ formatDuration(liveSpanDuration(child.node, now)) }}</span>
           </div>
         </div>
@@ -138,10 +164,13 @@ import {
   entryKey,
   exitCodeTone,
   findSpanByID,
+  findSpanPathByID,
   flattenVisibleChildren,
   formatArgv,
   formatCount,
   formatDuration,
+  formatEnvInline,
+  hasMeaningfulExec,
   liveSpanDuration,
   maxEntryTimestampNanos,
   visibleChildren,
@@ -158,6 +187,9 @@ const PAGE_SIZE = 500
 const root = computed<SpanNode | null>(() => props.trace.root_span)
 const focusPath = ref<SpanNode[]>([])
 const expanded = ref<Set<string>>(new Set())
+// Spans the user explicitly collapsed: auto-expand must never re-open these
+// across live refreshes.
+const userCollapsed = ref<Set<string>>(new Set())
 
 const query = ref('')
 const mode = ref<LogSearchMode>('contains')
@@ -202,6 +234,44 @@ const focusCommand = computed(() => (focusExec.value ? formatArgv(focusExec.valu
 function exitBadgeColor(code: number | null | undefined): 'success' | 'error' | 'neutral' {
   const tone = exitCodeTone(code)
   return tone === 'muted' ? 'neutral' : tone
+}
+
+// exitLabel renders the exit badge text for a span: an "running" label only
+// when the span is genuinely still running with no exit code; a finished span
+// with no exit code shows nothing (the badge is hidden by the caller).
+function exitLabel(node: SpanNode): string {
+  const code = node.exec?.exit_code
+  if (code === null || code === undefined) return node.status === 'running' ? 'running' : ''
+  return `exit ${code}`
+}
+
+// inlineDetail renders the one-line call summary for a row/sub-span: the
+// command line when present, else an env summary, else a cwd/user hint. Returns
+// '' when the span has nothing worth surfacing inline.
+function inlineDetail(node: SpanNode): string {
+  const exec = node.exec
+  if (!exec) return ''
+  if (exec.args && exec.args.length > 0) return formatArgv(exec)
+  if (exec.command) return formatArgv(exec)
+  if (exec.env && exec.env.length > 0) return formatEnvInline(exec.env)
+  if (exec.cwd) return `cwd: ${exec.cwd}`
+  if (exec.user) return `user: ${exec.user}`
+  return ''
+}
+
+// inlineDetailTitle is the full (untruncated) tooltip for an inline summary.
+function inlineDetailTitle(node: SpanNode): string {
+  const exec = node.exec
+  if (!exec) return ''
+  const parts: string[] = []
+  const cmd = inlineDetail(node)
+  if (cmd) parts.push(cmd)
+  if (exec.cwd) parts.push(`cwd: ${exec.cwd}`)
+  if (exec.user) parts.push(`user: ${exec.user}`)
+  if (exec.env && exec.env.length > 0 && !(exec.args && exec.args.length > 0)) {
+    parts.push(formatEnvInline(exec.env))
+  }
+  return parts.join('  ')
 }
 
 // copyCommand copies the focused step's command line to the clipboard.
@@ -291,6 +361,22 @@ watch(
   { immediate: true }
 )
 
+// Auto-expand rows that carry a meaningful exec whenever the focused level
+// changes (navigation, first load, live refresh). Preserves manual collapse via
+// userCollapsed.
+watch(
+  () => focus.value?.span_id,
+  () => {
+    void nextTick(autoExpandExecRows)
+  }
+)
+watch(
+  () => rows.value,
+  () => {
+    autoExpandExecRows()
+  }
+)
+
 // Live refresh: the parent bumps refreshKey on logs_update / the 5s poll.
 // Debounce so a burst of events collapses into a single non-disruptive refresh,
 // preserving the current focus + query and the user's scroll position.
@@ -322,6 +408,7 @@ onUnmounted(() => {
 function zoomIn(node: SpanNode) {
   focusPath.value = [...focusPath.value, node]
   expanded.value = new Set()
+  userCollapsed.value = new Set()
   panelOpen.value = true
   void resetAndLoad()
 }
@@ -329,14 +416,53 @@ function zoomIn(node: SpanNode) {
 function zoomTo(index: number) {
   focusPath.value = focusPath.value.slice(0, index + 1)
   expanded.value = new Set()
+  userCollapsed.value = new Set()
+  panelOpen.value = true
+  void resetAndLoad()
+}
+
+// zoomInSubspan focuses a sub-span (e.g. Container.withExec under E2E.envVar)
+// by setting the breadcrumb to its full ancestor path.
+function zoomInSubspan(parent: SpanNode, child: SpanNode) {
+  const base = focusPath.value[focusPath.value.length - 1] === parent
+    ? focusPath.value
+    : [...focusPath.value, parent]
+  const pathToChild = findSpanPathByID(parent, child.span_id)
+  focusPath.value = pathToChild ? [...base, ...pathToChild.slice(1)] : [...base, child]
+  expanded.value = new Set()
+  userCollapsed.value = new Set()
   panelOpen.value = true
   void resetAndLoad()
 }
 
 function toggleExpanded(spanID: string) {
   const next = new Set(expanded.value)
-  if (next.has(spanID)) next.delete(spanID)
-  else next.add(spanID)
+  const collapsed = new Set(userCollapsed.value)
+  if (next.has(spanID)) {
+    next.delete(spanID)
+    collapsed.add(spanID)
+  } else {
+    next.add(spanID)
+    collapsed.delete(spanID)
+  }
+  expanded.value = next
+  userCollapsed.value = collapsed
+}
+
+// autoExpandExecRows opens top-level rows that contain a meaningful exec
+// sub-span (so `Container.withExec sh -c …` shows without a click), leaving
+// rows the user has manually collapsed closed. Rows with more than 20 children
+// stay closed to avoid a wall of sub-spans.
+function autoExpandExecRows() {
+  const next = new Set(expanded.value)
+  for (const row of rows.value) {
+    if (userCollapsed.value.has(row.node.span_id)) continue
+    if (!row.hasChildren || row.children.length > 20) continue
+    if (next.has(row.node.span_id)) continue
+    if (row.children.some((c) => hasMeaningfulExec(c.node))) {
+      next.add(row.node.span_id)
+    }
+  }
   expanded.value = next
 }
 

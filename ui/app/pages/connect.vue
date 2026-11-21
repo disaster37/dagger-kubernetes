@@ -20,6 +20,7 @@
           <div v-if="snap.allowed_versions.length > 0">
             <label class="mb-1 block text-[13px] text-muted">Engine version</label>
             <USelect v-model="version" :items="versionOptions" @change="load" />
+            <USelect v-model="tokenType" :items="tokenTypeOptions" @change="load" />
           </div>
           <div>
             <UCheckbox v-model="reveal" label="Show token plaintext" @change="onRevealChange" />
@@ -131,6 +132,7 @@ import type { ConnectEnvSnapshot, ConnectEnvVar } from '~/api/types'
 
 const snap = ref<ConnectEnvSnapshot | null>(null)
 const version = ref('__none__')
+const tokenType = ref('personal')
 const reveal = ref(false)
 const error = ref('')
 const copied = ref('')
@@ -143,6 +145,14 @@ const envColumns = [
   { id: 'value', accessorKey: 'value', header: 'Value' },
   { id: 'description', accessorKey: 'description', header: 'Notes' },
 ]
+
+const tokenTypeOptions = computed(() => {
+  const options = [{ label: 'Personal token (dct_)', value: 'personal' }]
+  if (useAuthStore().isAdmin || useOrgStore().activeOrg?.role === 'org_admin') {
+    options.unshift({ label: 'Organization token (dag_<slug>_)', value: 'org' })
+  }
+  return options
+})
 
 const versionOptions = computed(() => [
   { label: 'No pin (use CLI default)', value: '__none__' },
@@ -207,7 +217,7 @@ const gitlabSnippet = computed(() => ciSnippet('variables:', ciTokenLine('$DAGGE
 async function load() {
   error.value = ''
   try {
-    snap.value = await fetchConnectEnv(version.value === '__none__' ? undefined : version.value, reveal.value)
+    snap.value = await fetchConnectEnv(version.value === '__none__' ? undefined : version.value, reveal.value, tokenType.value)
   } catch (e: any) {
     error.value = e.response?.data?.message || 'Failed to load connection environment'
   }

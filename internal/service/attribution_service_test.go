@@ -37,7 +37,7 @@ func TestAttributionProvision(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
 
-	asvc.Provision(ctx, "t1", u.ID, "v0.21.4")
+	asvc.Provision(ctx, "", "t1", u.ID, "v0.21.4")
 	meta, err := asvc.traceMeta.Get(ctx, "t1")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -52,7 +52,7 @@ func TestAttributionProvision(t *testing.T) {
 	// Second provision by a different user does not steal, and an empty
 	// version does not wipe the previously recorded one.
 	u2 := seedUserSvc(t, usvc, "u2")
-	asvc.Provision(ctx, "t1", u2.ID, "")
+	asvc.Provision(ctx, "", "t1", u2.ID, "")
 	meta, _ = asvc.traceMeta.Get(ctx, "t1")
 	if meta.UserID != u.ID {
 		t.Fatalf("user_id = %q, want %s (first writer wins)", meta.UserID, u.ID)
@@ -62,17 +62,20 @@ func TestAttributionProvision(t *testing.T) {
 	}
 
 	// Empty traceID is a no-op.
-	asvc.Provision(ctx, "", u.ID, "v0.21.4")
+	asvc.Provision(ctx, "", "", u.ID, "v0.21.4")
 }
 
 func TestAttributionIngestExplicitAssignment(t *testing.T) {
 	asvc, gsvc, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true})
-	proj, _ := asvc.projects.Create(ctx, "github.com/acme/api", g.ID)
+	g, gerr := gsvc.Create(ctx, "", GroupInput{Name: "G1", AgentAvailable: true})
+	if gerr != nil || g == nil {
+		t.Fatalf("create group: %v", gerr)
+	}
+	proj, _ := asvc.projects.Create(ctx, "", "github.com/acme/api", g.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 1000, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 1000, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != g.ID {
@@ -90,15 +93,15 @@ func TestAttributionIngestRegexAutoAssign(t *testing.T) {
 	u := seedUserSvc(t, usvc, "u1")
 
 	// Two groups with patterns; first by id order should win.
-	g1, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true, AutoAssignPattern: `^github\.com/acme/.*`})
-	g2, _ := gsvc.Create(ctx, GroupInput{Name: "G2", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	g1, _ := gsvc.Create(ctx, "", GroupInput{Name: "G1", AgentAvailable: true, AutoAssignPattern: `^github\.com/acme/.*`})
+	g2, _ := gsvc.Create(ctx, "", GroupInput{Name: "G2", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
 	// Ensure g1 wins by id order. If g2's id is lower, swap patterns.
 	// (We rely on Create generating ids; to make the test deterministic we
 	// re-create so g1 has the lower id by insertion order — but ids are random.
 	// Instead, verify the assigned group is one of the two and the project is
 	// assigned.)
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 1000, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 1000, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID == "" {
@@ -128,9 +131,9 @@ func TestAttributionIngestInvalidRegexSkipped(t *testing.T) {
 	// directly via the repo to simulate a bad row.
 	gBad := &domain.Group{ID: newID(), Name: "BadPat", AgentAvailable: true, AutoAssignPattern: "["}
 	_ = asvc.groups.Create(ctx, gBad)
-	gGood, _ := gsvc.Create(ctx, GroupInput{Name: "GoodPat", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	gGood, _ := gsvc.Create(ctx, "", GroupInput{Name: "GoodPat", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID == "" {
 		t.Fatal("expected auto-assign via good pattern")
@@ -144,18 +147,18 @@ func TestAttributionIngestGroupSetOnce(t *testing.T) {
 	asvc, gsvc, usvc, r := newAttributionForTest(t)
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	g1, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true})
-	asvc.projects.Create(ctx, "github.com/acme/api", g1.ID)
+	g1, _ := gsvc.Create(ctx, "", GroupInput{Name: "G1", AgentAvailable: true})
+	asvc.projects.Create(ctx, "", "github.com/acme/api", g1.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 100, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 100, time.Now().UTC())
 
 	// Reassign the project to a different group; the existing trace's group
 	// must NOT change (set-once).
-	g2, _ := gsvc.Create(ctx, GroupInput{Name: "G2", AgentAvailable: true})
-	proj, _ := r.projects.GetByName(ctx, "github.com/acme/api")
-	asvc.projects.Assign(ctx, proj.ID, g2.ID)
+	g2, _ := gsvc.Create(ctx, "", GroupInput{Name: "G2", AgentAvailable: true})
+	proj, _ := r.projects.GetByName(ctx, "", "github.com/acme/api")
+	asvc.projects.Assign(ctx, "", proj.ID, g2.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "failed", 200, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "failed", 200, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != g1.ID {
 		t.Fatalf("group_id = %q, want %s (set-once)", meta.GroupID, g1.ID)
@@ -169,7 +172,7 @@ func TestAttributionIngestNoCIRepo(t *testing.T) {
 	asvc, _, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	asvc.Ingest(ctx, "t1", u.ID, "", "", "", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "", "", "", "v0.21.4", "success", 0, time.Now().UTC())
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != "" {
 		t.Fatalf("group_id = %q, want empty (no ci_repo)", meta.GroupID)
@@ -189,7 +192,7 @@ func TestAttributionMarkFailed(t *testing.T) {
 	}
 
 	// A provisioned (non-terminal) trace transitions to failed with the reason.
-	asvc.Provision(ctx, "t1", "u1", "v0.21.4")
+	asvc.Provision(ctx, "", "t1", "u1", "v0.21.4")
 	if !asvc.MarkFailed(ctx, "t1", "client connection lost") {
 		t.Fatal("expected transition for t1")
 	}
@@ -210,7 +213,7 @@ func TestAttributionMarkFailed(t *testing.T) {
 // errorTraceMetaRepo is a TraceMetaRepository whose MarkFailed always errors.
 type errorTraceMetaRepo struct{}
 
-func (errorTraceMetaRepo) UpsertProvision(context.Context, string, string, string) error {
+func (errorTraceMetaRepo) UpsertProvision(context.Context, string, string, string, string) error {
 	return nil
 }
 func (errorTraceMetaRepo) UpsertIngest(context.Context, *domain.TraceMeta) error { return nil }
@@ -230,7 +233,9 @@ func (errorTraceMetaRepo) Delete(context.Context, string) error { return nil }
 func (errorTraceMetaRepo) MarkFailed(context.Context, string, string) (bool, error) {
 	return false, errors.New("boom")
 }
-func (errorTraceMetaRepo) Stats(context.Context) (int, time.Time, error) { return 0, time.Time{}, nil }
+func (errorTraceMetaRepo) Stats(context.Context, string) (int, time.Time, error) {
+	return 0, time.Time{}, nil
+}
 
 func TestAttributionMarkFailedRepoError(t *testing.T) {
 	asvc := NewAttributionService(nil, nil, errorTraceMetaRepo{}, testLogger())
@@ -246,9 +251,9 @@ func TestAttributionIngestGitRemoteFallback(t *testing.T) {
 	asvc, gsvc, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "G1", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "G1", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
-	asvc.Ingest(ctx, "t1", u.ID, "", "github.com/acme/api", "", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "", "github.com/acme/api", "", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.ProjectName != "github.com/acme/api" {
@@ -269,7 +274,7 @@ func TestAttributionIngestCIRepoPrecedence(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/ci/slug", "github.com/git/remote", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/ci/slug", "github.com/git/remote", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.ProjectName != "github.com/ci/slug" {
@@ -289,13 +294,13 @@ func TestAttributionIngestBoundsFields(t *testing.T) {
 	u := seedUserSvc(t, usvc, "u1")
 
 	// Oversized trace ID: dropped entirely.
-	asvc.Ingest(ctx, strings.Repeat("t", maxIngestFieldLen+1), u.ID, "github.com/acme/api", "", "", "", "", 0, time.Time{})
+	asvc.Ingest(ctx, "", strings.Repeat("t", maxIngestFieldLen+1), u.ID, "github.com/acme/api", "", "", "", "", 0, time.Time{})
 	if _, err := asvc.traceMeta.Get(ctx, strings.Repeat("t", maxIngestFieldLen+1)); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("oversized trace_id should not be persisted: %v", err)
 	}
 
 	// Oversized ci_repo: treated as absent (no project row created).
-	asvc.Ingest(ctx, "t-big-repo", u.ID, strings.Repeat("r", maxIngestFieldLen+1), "", "github", "v0.21.4", "success", 0, time.Time{})
+	asvc.Ingest(ctx, "", "t-big-repo", u.ID, strings.Repeat("r", maxIngestFieldLen+1), "", "github", "v0.21.4", "success", 0, time.Time{})
 	meta, err := asvc.traceMeta.Get(ctx, "t-big-repo")
 	if err != nil {
 		t.Fatalf("Get: %v", err)
@@ -315,15 +320,15 @@ func TestAttributionIngestProjectMappingAssigns(t *testing.T) {
 	})
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "acme", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "acme", AgentAvailable: true})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != g.ID {
 		t.Fatalf("group_id = %q, want %s (mapped)", meta.GroupID, g.ID)
 	}
-	proj, err := r.projects.GetByName(ctx, "github.com/acme/api")
+	proj, err := r.projects.GetByName(ctx, "", "github.com/acme/api")
 	if err != nil {
 		t.Fatalf("GetByName: %v", err)
 	}
@@ -338,11 +343,11 @@ func TestAttributionIngestProjectMappingPrecedenceExplicitWins(t *testing.T) {
 	})
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	gExplicit, _ := gsvc.Create(ctx, GroupInput{Name: "explicit", AgentAvailable: true})
-	gsvc.Create(ctx, GroupInput{Name: "mapped", AgentAvailable: true})
-	asvc.projects.Create(ctx, "github.com/acme/api", gExplicit.ID)
+	gExplicit, _ := gsvc.Create(ctx, "", GroupInput{Name: "explicit", AgentAvailable: true})
+	gsvc.Create(ctx, "", GroupInput{Name: "mapped", AgentAvailable: true})
+	asvc.projects.Create(ctx, "", "github.com/acme/api", gExplicit.ID)
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != gExplicit.ID {
@@ -356,10 +361,10 @@ func TestAttributionIngestProjectMappingAuthoritativeOverAutoAssign(t *testing.T
 	})
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	gsvc.Create(ctx, GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
-	gMapped, _ := gsvc.Create(ctx, GroupInput{Name: "mapped", AgentAvailable: true})
+	gsvc.Create(ctx, "", GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	gMapped, _ := gsvc.Create(ctx, "", GroupInput{Name: "mapped", AgentAvailable: true})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != gMapped.ID {
@@ -373,10 +378,10 @@ func TestAttributionIngestProjectMappingNoMatchFallsBackToAutoAssign(t *testing.
 	})
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	gAuto, _ := gsvc.Create(ctx, GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
-	gsvc.Create(ctx, GroupInput{Name: "mapped", AgentAvailable: true})
+	gAuto, _ := gsvc.Create(ctx, "", GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	gsvc.Create(ctx, "", GroupInput{Name: "mapped", AgentAvailable: true})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != gAuto.ID {
@@ -391,9 +396,9 @@ func TestAttributionIngestProjectMappingMissingGroupSkipped(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
 	// An auto-assign group also matches; the matched rule must NOT fall through.
-	gsvc.Create(ctx, GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	gsvc.Create(ctx, "", GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != "" {
@@ -408,10 +413,10 @@ func TestAttributionIngestProjectMappingFirstMatchWins(t *testing.T) {
 	})
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	gFirst, _ := gsvc.Create(ctx, GroupInput{Name: "first", AgentAvailable: true})
-	gsvc.Create(ctx, GroupInput{Name: "second", AgentAvailable: true})
+	gFirst, _ := gsvc.Create(ctx, "", GroupInput{Name: "first", AgentAvailable: true})
+	gsvc.Create(ctx, "", GroupInput{Name: "second", AgentAvailable: true})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != gFirst.ID {
@@ -423,9 +428,9 @@ func TestAttributionIngestProjectMappingEmptyConfigPreservesBehavior(t *testing.
 	asvc, gsvc, usvc, _ := newAttributionForTest(t)
 	ctx := context.Background()
 	u := seedUserSvc(t, usvc, "u1")
-	gAuto, _ := gsvc.Create(ctx, GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	gAuto, _ := gsvc.Create(ctx, "", GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 
-	asvc.Ingest(ctx, "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	asvc.Ingest(ctx, "", "t1", u.ID, "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, _ := asvc.traceMeta.Get(ctx, "t1")
 	if meta.GroupID != gAuto.ID {

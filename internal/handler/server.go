@@ -12,6 +12,7 @@ import (
 	"io"
 	"net"
 	"net/url"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
@@ -30,6 +31,7 @@ import (
 	"github.com/hertz-contrib/reverseproxy"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/sirupsen/logrus"
+	"golang.org/x/sync/semaphore"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/observ"
@@ -55,7 +57,14 @@ const (
 	// control-API cap.
 	defaultOTLPMaxBodyBytes = int64(64 << 20) // 64 MiB
 
-	maxDataConnections = 512 // concurrent data-plane connections (M4).
+	// defaultOTelMaxInflightBytes caps concurrently buffered OTLP heap usage.
+	defaultOTelMaxInflightBytes = int64(256 << 20) // 256 MiB
+
+	defaultMaxDataConnections = 2048 // concurrent data-plane connections (M4).
+
+	// orgHeaderName is the request header a client uses to select the
+	// organization when the path is not org-scoped.
+	orgHeaderName = "X-Dagger-Org"
 
 	otelSignalKey = "otel_signal" // per-request OTel signal label (B1).
 	otelErrorKey  = "otel_error"  // set when the OTel proxy hit a transport error (B1).
@@ -102,6 +111,8 @@ type EngineRequest struct {
 	Module               string   `json:"module"`
 	Function             string   `json:"function"`
 	ExecCmd              []string `json:"exec_cmd"`
+	GitRemote            string   `json:"git_remote"`
+	WorkspacePath        string   `json:"workspace_path"`
 	ClientID             string   `json:"client_id"`
 	MinimumEngineVersion string   `json:"minimum_engine_version"`
 	TraceID              string   `json:"trace_id"`
@@ -116,6 +127,7 @@ type EngineSpecResponse struct {
 	Location   string                          `json:"location"`
 	OrgID      string                          `json:"org_id,omitempty"`
 	UserID     string                          `json:"user_id,omitempty"`
+	ClaimID    string                          `json:"claim_id,omitempty"`
 }
 
 // ErrorResponse is the standard error body shape.
@@ -147,6 +159,19 @@ type Deps struct {
 	Users                *service.UserService
 	Groups               *service.GroupService
 	Projects             *service.ProjectService
+	Orgs                 *service.OrgService
+	DeviceAuth           *service.DeviceAuthService
+	CIOIDC               *service.CIOIDCService
+	CloudGraphQL         *repository.CloudGraphQL
+	OTLPStream           *service.OTLPStreamService
+	RemoteCache          *service.RemoteCacheService
+	Checks               *service.ChecksService
+	Forge                *service.ForgeService
+	Secrets              *service.SecretService
+	Environments         *service.EnvironmentService
+	Workflows            *service.WorkflowService
+	Artifacts            domain.ArtifactStore
+	WSLeaderDialer       repository.WSLeaderDialer
 	Tokens               *service.TokenService
 	Quota                *service.QuotaService
 	Attribution          *service.AttributionService
@@ -210,6 +235,23 @@ type ServerConfig struct {
 	// OTelMaxBodyBytes caps OTLP ingest request bodies (bytes). 0 = default
 	// (64 MiB). The control-API maxControlBody cap is unaffected.
 	OTelMaxBodyBytes int64
+	// OTelMaxInflightBytes caps the total bytes of concurrently buffered OTLP
+	// bodies. 0 = default (256 MiB).
+	OTelMaxInflightBytes int64
+	// MaxDataConns bounds concurrent data-plane tunnels. 0 = default (2048).
+	MaxDataConns int
+	// CLIIncludePrereleases includes vX.Y.Z-beta.* in "latest" resolution.
+	CLIIncludePrereleases bool
+	// InternalControlURL / InternalDataHost are the in-cluster endpoints
+	// returned to engine/runner pods to avoid hairpin NAT.
+	InternalControlURL string
+	InternalDataHost   string
+	// ClusterDomain is the Kubernetes cluster DNS suffix (raft.cluster_domain,
+	// e.g. "cluster.local"). When set, a configured internal host ending in
+	// ".svc" also matches its "<host>.<clusterDomain>" FQDN SNI form.
+	ClusterDomain string
+	// FleetIsolation mirrors fleet.isolation ("per_org" | "shared").
+	FleetIsolation string
 
 	// Dynamic per-handshake TLS providers (ADR-050). When set they take
 	// precedence over the static CertPath/KeyPath/InternalTLSCert so renewed
@@ -242,6 +284,7 @@ type Server struct {
 	relayListener       net.Listener
 	relayInPort         int
 	dataConnSem         chan struct{}
+	otelSem             *semaphore.Weighted
 	leaderInfo          leaderInfo
 	forwardTLSProvider  *rafttransport.DynamicTLSProvider
 	forwarder           *httpext.Forwarder
@@ -257,6 +300,19 @@ type Server struct {
 	users               *service.UserService
 	groups              *service.GroupService
 	projects            *service.ProjectService
+	orgs                *service.OrgService
+	deviceAuth          *service.DeviceAuthService
+	ciOIDC              *service.CIOIDCService
+	cloudGraphQL        *repository.CloudGraphQL
+	otlpStream          *service.OTLPStreamService
+	remoteCache         *service.RemoteCacheService
+	checks              *service.ChecksService
+	forges              *service.ForgeService
+	secrets             *service.SecretService
+	environments        *service.EnvironmentService
+	workflows           *service.WorkflowService
+	artifacts           domain.ArtifactStore
+	wsDialer            repository.WSLeaderDialer
 	tokens              *service.TokenService
 	quota               *service.QuotaService
 	attribution         *service.AttributionService
@@ -284,6 +340,14 @@ type Server struct {
 
 // NewServer constructs a Server from a config and a Deps bundle.
 func NewServer(cfg *ServerConfig, deps *Deps) *Server {
+	maxConns := cfg.MaxDataConns
+	if maxConns <= 0 {
+		maxConns = defaultMaxDataConnections
+	}
+	inflight := cfg.OTelMaxInflightBytes
+	if inflight <= 0 {
+		inflight = defaultOTelMaxInflightBytes
+	}
 	return &Server{
 		cfg:                cfg,
 		logger:             deps.Logger,
@@ -297,7 +361,8 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		lifecycle:          deps.Lifecycle,
 		traces:             deps.Traces,
 		logs:               deps.Logs,
-		dataConnSem:        make(chan struct{}, maxDataConnections),
+		dataConnSem:        make(chan struct{}, maxConns),
+		otelSem:            semaphore.NewWeighted(inflight),
 		leaderInfo:         deps.LeaderInfo,
 		forwardTLSProvider: deps.ForwardTLSProvider,
 
@@ -309,6 +374,19 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		users:               deps.Users,
 		groups:              deps.Groups,
 		projects:            deps.Projects,
+		orgs:                deps.Orgs,
+		deviceAuth:          deps.DeviceAuth,
+		ciOIDC:              deps.CIOIDC,
+		cloudGraphQL:        deps.CloudGraphQL,
+		otlpStream:          deps.OTLPStream,
+		remoteCache:         deps.RemoteCache,
+		checks:              deps.Checks,
+		forges:              deps.Forge,
+		secrets:             deps.Secrets,
+		environments:        deps.Environments,
+		workflows:           deps.Workflows,
+		artifacts:           deps.Artifacts,
+		wsDialer:            deps.WSLeaderDialer,
 		tokens:              deps.Tokens,
 		quota:               deps.Quota,
 		attribution:         deps.Attribution,
@@ -441,6 +519,19 @@ func (s *Server) serveTLSConn(raw net.Conn, base *tls.Config) {
 	cfg := base.Clone()
 	cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
 		info.serverName = hello.ServerName
+		// Internal Kubernetes SNIs (e.g. <svc>.<ns>.svc) get the Minting-CA
+		// leaf so in-cluster pods can verify the data plane; the public SNI
+		// (dataplane.<host>) keeps the external Let's Encrypt certificate.
+		if s.matchesInternalSNI(hello.ServerName) {
+			if cert, err := s.internalCert(); err == nil {
+				return &tls.Config{
+					Certificates: []tls.Certificate{*cert},
+					ClientCAs:    s.mintingCA.CertPool(),
+					ClientAuth:   tls.RequireAndVerifyClientCert,
+					MinVersion:   tls.VersionTLS12,
+				}, nil
+			}
+		}
 		if s.cfg.DataTLSProvider != nil {
 			return &tls.Config{
 				GetCertificate: s.cfg.DataTLSProvider.GetCertificate,
@@ -606,23 +697,65 @@ func (s *Server) configure() (*server.Hertz, error) {
 		// capped per-handler.
 		server.WithStreamBody(true),
 	)
-	if s.cfg.ControlTLSProvider != nil {
-		opts = append(opts, server.WithTLS(s.cfg.ControlTLSProvider.ServerTLSConfig()))
-	} else if s.cfg.CertPath != "" && s.cfg.KeyPath != "" {
-		cert, err := tls.LoadX509KeyPair(s.cfg.CertPath, s.cfg.KeyPath)
-		if err != nil {
-			return nil, fmt.Errorf("load control plane TLS cert: %w", err)
-		}
-		opts = append(opts, server.WithTLS(&tls.Config{
-			Certificates: []tls.Certificate{cert},
-			MinVersion:   tls.VersionTLS12,
-		}))
+	if cfg, err := s.controlTLSConfig(); err != nil {
+		return nil, err
+	} else if cfg != nil {
+		opts = append(opts, server.WithTLS(cfg))
 	}
 	h := server.Default(opts...)
 
 	s.registerRoutes(h)
 
 	return h, nil
+}
+
+// controlTLSConfig builds the public control-plane (:8080) TLS config. It keeps
+// the configured external certificate (dynamic provider or static keypair) for
+// public SNIs and transparently serves the Minting-CA internal leaf for internal
+// Kubernetes SNIs (e.g. <svc>.<ns>.svc), so in-cluster clients dialing the
+// internal service name verify successfully. Returns nil when no TLS is
+// configured (plaintext dev / test listeners).
+func (s *Server) controlTLSConfig() (*tls.Config, error) {
+	var cfg *tls.Config
+	switch {
+	case s.cfg.ControlTLSProvider != nil:
+		cfg = s.cfg.ControlTLSProvider.ServerTLSConfig()
+	case s.cfg.CertPath != "" && s.cfg.KeyPath != "":
+		cert, err := tls.LoadX509KeyPair(s.cfg.CertPath, s.cfg.KeyPath)
+		if err != nil {
+			return nil, fmt.Errorf("load control plane TLS cert: %w", err)
+		}
+		cfg = &tls.Config{
+			Certificates: []tls.Certificate{cert},
+			MinVersion:   tls.VersionTLS12,
+		}
+	default:
+		return nil, nil
+	}
+	if cfg == nil {
+		return nil, nil
+	}
+	cfg = cfg.Clone()
+	if cfg.MinVersion == 0 {
+		cfg.MinVersion = tls.VersionTLS12
+	}
+	// Preserve the public certificate callback and layer internal-SNI routing.
+	publicGetCert := cfg.GetCertificate
+	cfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+		if s.matchesInternalSNI(hello.ServerName) {
+			if cert, err := s.internalCert(); err == nil {
+				return cert, nil
+			}
+		}
+		if publicGetCert != nil {
+			return publicGetCert(hello)
+		}
+		if len(cfg.Certificates) > 0 {
+			return &cfg.Certificates[0], nil
+		}
+		return nil, nil
+	}
+	return cfg, nil
 }
 
 // registerRoutes registers the full middleware stack + route table on h. It
@@ -641,11 +774,17 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.POST("/v1/traces", s.handleOTel("traces"))
 	h.POST("/v1/logs", s.handleOTel("logs"))
 	h.POST("/v1/metrics", s.handleOTel("metrics"))
+	h.GET("/v1/traces/:traceID", s.handleOTLPStream("traces"))
+	h.GET("/v1/logs/:traceID", s.handleOTLPStream("logs"))
+	h.GET("/v1/metrics/:traceID", s.handleOTLPStream("metrics"))
+	h.GET("/v1/engine", s.handleRemoteCacheWS)
+	h.POST("/v1/oidc", s.handleCIOIDC)
+	h.POST("/query", s.handleCloudGraphQL)
 
 	h.GET("/api/v1/fleet", s.handleFleetInfo)
 	h.GET("/api/v1/fleet/:version/metrics", s.handleFleetMetrics)
-	h.POST("/api/v1/fleet/:version/purge-cache", s.adminOnly(s.handleFleetPurgeCache))
-	h.GET("/api/v1/fleet/:version/purge-cache", s.adminOnly(s.handleFleetPurgeStatus))
+	h.POST("/api/v1/fleet/:version/purge-cache", s.handleFleetPurgeCache)
+	h.GET("/api/v1/fleet/:version/purge-cache", s.handleFleetPurgeStatus)
 	h.GET("/api/v1/history", s.handleHistoryInfo)
 	h.POST("/api/v1/history/purge", s.adminOnly(s.handleHistoryPurge))
 	h.POST("/api/v1/history/purge-all", s.adminOnly(s.handleHistoryPurgeAll))
@@ -653,6 +792,8 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/image-cache", s.adminOnly(s.handleImageCacheInfo))
 	h.POST("/api/v1/image-cache/prune", s.adminOnly(s.handleImageCachePrune))
 	h.POST("/api/v1/image-cache/prune-all", s.adminOnly(s.handleImageCachePruneAll))
+	h.GET("/api/v1/remote-cache", s.handleRemoteCacheStats)
+	h.POST("/api/v1/remote-cache/purge", s.adminOnly(s.handleRemoteCachePurge))
 	h.GET("/api/v1/connect/env", s.handleConnectEnv)
 	h.GET("/api/v1/cli/versions/latest", s.handleCLILatest)
 	h.GET("/api/v1/cli/:version", s.handleCLIDownload)
@@ -667,6 +808,9 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/auth/oauth/github/callback", s.handleOAuthCallback)
 	h.GET("/api/v1/auth/oauth/oidc/login", s.handleOAuthOIDCLogin)
 	h.GET("/api/v1/auth/oauth/oidc/callback", s.handleOAuthOIDCCallback)
+	h.POST("/oauth/device/code", s.handleDeviceCode)
+	h.POST("/oauth/token", s.handleDeviceToken)
+	h.POST("/api/v1/auth/device/approve", s.handleDeviceApprove)
 	h.GET("/api/v1/auth/me", s.handleMe)
 	h.PUT("/api/v1/auth/password", s.handleChangePassword)
 
@@ -688,20 +832,70 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/users/:id/token", s.adminOnly(s.handleUserTokenMeta))
 	h.DELETE("/api/v1/users/:id/token", s.adminOnly(s.handleUserTokenRevoke))
 
-	// Admin group CRUD + members.
-	h.GET("/api/v1/groups", s.adminOnly(s.handleGroupsList))
-	h.POST("/api/v1/groups", s.adminOnly(s.handleGroupCreate))
-	h.GET("/api/v1/groups/:id", s.adminOnly(s.handleGroupGet))
-	h.PUT("/api/v1/groups/:id", s.adminOnly(s.handleGroupUpdate))
-	h.DELETE("/api/v1/groups/:id", s.adminOnly(s.handleGroupDelete))
-	h.GET("/api/v1/groups/:id/members", s.adminOnly(s.handleGroupMembers))
-	h.PUT("/api/v1/groups/:id/members", s.adminOnly(s.handleGroupSetMembers))
-
-	// Admin project CRUD.
-	h.GET("/api/v1/projects", s.adminOnly(s.handleProjectsList))
-	h.POST("/api/v1/projects", s.adminOnly(s.handleProjectCreate))
-	h.PUT("/api/v1/projects/:id", s.adminOnly(s.handleProjectUpdate))
-	h.DELETE("/api/v1/projects/:id", s.adminOnly(s.handleProjectDelete))
+	// Organization tenancy CRUD + members + org tokens.
+	h.GET("/api/v1/orgs", s.handleOrgsList)
+	h.POST("/api/v1/orgs", s.handleOrgCreate)
+	h.GET("/api/v1/orgs/:org", s.handleOrgGet)
+	h.PUT("/api/v1/orgs/:org", s.handleOrgUpdate)
+	h.DELETE("/api/v1/orgs/:org", s.handleOrgDelete)
+	h.GET("/api/v1/orgs/:org/members", s.handleOrgMembers)
+	h.PUT("/api/v1/orgs/:org/members", s.handleOrgSetMember)
+	h.DELETE("/api/v1/orgs/:org/members/:userID", s.handleOrgRemoveMember)
+	h.PUT("/api/v1/orgs/:org/members/:userID/groups", s.handleOrgMemberGroups)
+	h.GET("/api/v1/orgs/:org/quotas", s.handleOrgQuotasGet)
+	h.PUT("/api/v1/orgs/:org/quotas", s.adminOnly(s.handleOrgQuotasPut))
+	h.GET("/api/v1/orgs/:org/groups", s.handleGroupsList)
+	h.POST("/api/v1/orgs/:org/groups", s.handleGroupCreate)
+	h.GET("/api/v1/orgs/:org/groups/:id", s.handleGroupGet)
+	h.PUT("/api/v1/orgs/:org/groups/:id", s.handleGroupUpdate)
+	h.DELETE("/api/v1/orgs/:org/groups/:id", s.handleGroupDelete)
+	h.GET("/api/v1/orgs/:org/groups/:id/members", s.handleGroupMembers)
+	h.PUT("/api/v1/orgs/:org/groups/:id/members", s.handleGroupSetMembers)
+	h.GET("/api/v1/orgs/:org/projects", s.handleProjectsList)
+	h.POST("/api/v1/orgs/:org/projects", s.handleProjectCreate)
+	h.PUT("/api/v1/orgs/:org/projects/:id", s.handleProjectUpdate)
+	h.DELETE("/api/v1/orgs/:org/projects/:id", s.handleProjectDelete)
+	h.GET("/api/v1/orgs/:org/projects/:id/secrets", s.handleProjectSecretsList)
+	h.PUT("/api/v1/orgs/:org/projects/:id/secrets", s.handleProjectSecretPut)
+	h.DELETE("/api/v1/orgs/:org/projects/:id/secrets/:name", s.handleProjectSecretDelete)
+	h.GET("/api/v1/orgs/:org/fleet", s.handleFleetInfo)
+	h.GET("/api/v1/orgs/:org/fleet/:version/metrics", s.handleFleetMetrics)
+	h.POST("/api/v1/orgs/:org/fleet/:version/purge-cache", s.handleFleetPurgeCache)
+	h.GET("/api/v1/orgs/:org/fleet/:version/purge-cache", s.handleFleetPurgeStatus)
+	h.GET("/api/v1/orgs/:org/remote-cache", s.handleRemoteCacheStats)
+	h.POST("/api/v1/orgs/:org/remote-cache/purge", s.handleRemoteCachePurge)
+	h.GET("/api/v1/orgs/:org/token", s.handleOrgTokenMeta)
+	h.POST("/api/v1/orgs/:org/token", s.handleOrgTokenGenerate)
+	h.DELETE("/api/v1/orgs/:org/token", s.handleOrgTokenRevoke)
+	h.GET("/api/v1/orgs/:org/integrations", s.handleForgeSourcesList)
+	h.POST("/api/v1/orgs/:org/integrations", s.handleForgeSourceCreate)
+	h.DELETE("/api/v1/orgs/:org/integrations/:sourceID", s.handleForgeSourceDelete)
+	h.GET("/api/v1/orgs/:org/secrets", s.handleOrgSecretsList)
+	h.PUT("/api/v1/orgs/:org/secrets", s.handleOrgSecretPut)
+	h.DELETE("/api/v1/orgs/:org/secrets/:name", s.handleOrgSecretDelete)
+	h.GET("/api/v1/orgs/:org/environments", s.handleEnvironmentsList)
+	h.PUT("/api/v1/orgs/:org/environments/:env", s.handleEnvironmentPut)
+	h.DELETE("/api/v1/orgs/:org/environments/:env", s.handleEnvironmentDelete)
+	h.GET("/api/v1/orgs/:org/environments/:env/secrets", s.handleEnvSecretsList)
+	h.PUT("/api/v1/orgs/:org/environments/:env/secrets", s.handleEnvSecretPut)
+	h.DELETE("/api/v1/orgs/:org/environments/:env/secrets/:name", s.handleEnvSecretDelete)
+	h.POST("/v1/webhooks/:provider/:sourceID", s.handleForgeWebhook)
+	h.GET("/api/v1/orgs/:org/checks", s.handleOrgChecksList)
+	h.GET("/api/v1/checks/runs/:id", s.handleCheckRunGet)
+	h.POST("/api/v1/checks/runs/:id/approve", s.handleCheckRunApprove)
+	h.POST("/api/v1/checks/runs/:id/rerun", s.handleCheckRunRerun)
+	h.POST("/api/v1/checks/runs/:id/load", s.handleCheckRunLoad)
+	h.POST("/api/v1/checks/runs/:id/complete", s.handleCheckRunComplete)
+	h.GET("/api/v1/orgs/:org/workflows", s.handleOrgWorkflowsList)
+	h.POST("/api/v1/orgs/:org/workflows/dispatch", s.handleWorkflowDispatch)
+	h.GET("/api/v1/orgs/:org/workflows/runs", s.handleOrgWorkflowRunsList)
+	h.GET("/api/v1/workflows/runs/:runID", s.handleWorkflowRunGet)
+	h.POST("/api/v1/workflows/runs/:runID/approve/:job", s.handleWorkflowApprove)
+	h.POST("/api/v1/workflows/runs/:runID/reject/:job", s.handleWorkflowReject)
+	h.POST("/api/v1/workflows/runs/:runID/jobs/:job/complete", s.handleWorkflowJobComplete)
+	h.GET("/api/v1/artifacts", s.handleArtifactsList)
+	h.POST("/api/v1/artifacts", s.handleArtifactUpload)
+	h.GET("/api/v1/artifacts/download", s.handleArtifactDownload)
 
 	// Admin security ban management (go-secguard).
 	h.GET("/api/v1/security/bans", s.adminOnly(s.handleSecurityBansList))
@@ -822,6 +1016,10 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
+	org, _, ok := s.resolveRequestOrg(ctx, c)
+	if !ok {
+		return
+	}
 
 	body, err := readBoundedBody(c, maxRequestBodyBytes)
 	if err != nil {
@@ -859,33 +1057,39 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	}
 
 	verStr := engineVersion.String()
-	s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "request").Inc()
+	s.metrics.EngineAcquireTotal.WithLabelValues(org.ID, verStr, "request").Inc()
 
 	if !s.versionResolver.IsAllowed(engineVersion) {
-		s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "rejected").Inc()
+		s.metrics.EngineAcquireTotal.WithLabelValues(org.ID, verStr, "rejected").Inc()
 		writeError(c, consts.StatusBadRequest, fmt.Sprintf("version %s not allowed (floor %s)", verStr, s.versionResolver.Floor()))
 		return
 	}
 
-	// Quota gate (admins bypass).
-	if err := s.quota.CheckEngineAccess(ctx, id); err != nil {
-		s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "rejected").Inc()
-		s.writeServiceError(c, err)
+	// Org admission is serialized per org so concurrent provision requests
+	// cannot overshoot the session/engine hard caps. The lock covers
+	// CheckEngineAccess -> AcquireForOrg -> SessionRegistry.Register (the
+	// concurrent-session counter is incremented only at registration).
+	unlock := s.quota.LockOrg(org.ID)
+	defer unlock()
+	if warning, qErr := s.quota.CheckEngineAccess(ctx, org.ID, id); qErr != nil {
+		s.metrics.EngineAcquireTotal.WithLabelValues(org.ID, verStr, "rejected").Inc()
+		s.writeServiceError(c, qErr)
 		return
+	} else {
+		setQuotaWarning(c, warning)
 	}
-
 	start := time.Now()
-	result, err := s.fleetManager.Acquire(ctx, verStr)
+	result, err := s.fleetManager.AcquireForOrg(ctx, org.ID, verStr)
 	if err != nil {
-		s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "error").Inc()
+		s.metrics.EngineAcquireTotal.WithLabelValues(org.ID, verStr, "error").Inc()
 		writeError(c, consts.StatusTooManyRequests, "no engine capacity")
 		return
 	}
-	s.metrics.EngineAcquireDuration.WithLabelValues(verStr).Observe(time.Since(start).Seconds())
+	s.metrics.EngineAcquireDuration.WithLabelValues(org.ID, verStr).Observe(time.Since(start).Seconds())
 
 	clientCert, err := s.mintingCA.MintClientCert(result.PodName)
 	if err != nil {
-		s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "error").Inc()
+		s.metrics.EngineAcquireTotal.WithLabelValues(org.ID, verStr, "error").Inc()
 		writeError(c, consts.StatusInternalServerError, "certificate minting failed")
 		return
 	}
@@ -902,25 +1106,28 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 	if len(id.GroupIDs) == 1 {
 		groupID = id.GroupIDs[0]
 	}
-	if err := s.sessionRegistry.Register(ctx, certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID, groupID); err != nil {
+	if err := s.sessionRegistry.Register(ctx, org.ID, certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID, groupID); err != nil {
 		// Leader failover window (or a follower that still received this
 		// request before leader-routed Services converge): keep the lease in
 		// the local store so the tunnel is not lost outright.
 		s.logger.WithError(err).Warn("session registration via raft failed; registering locally")
-		s.sessions.Register(certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID)
+		s.sessions.Register(org.ID, certFP, verStr, result.PodName, instanceID, req.TraceID, id.UserID)
 		if groupID != "" {
 			s.sessions.SetGroupID(certFP, groupID)
 		}
 	}
 	s.metrics.ActiveLeases.Inc()
-	s.metrics.EngineAcquireTotal.WithLabelValues(verStr, "success").Inc()
+	s.metrics.EngineAcquireTotal.WithLabelValues(org.ID, verStr, "success").Inc()
 
 	// Attribution: record trace_id -> user_id (best-effort; "" for synthetic
 	// identities that have no users-table row). The engine version is persisted
 	// here too because the Dagger CLI never emits dagger.io/engine.version.
-	s.attribution.Provision(ctx, req.TraceID, attributionUserID(id), verStr)
+	s.attribution.Provision(ctx, org.ID, req.TraceID, attributionUserID(id), verStr)
 
 	engineURL := s.cfg.DataHost
+	if s.cfg.InternalDataHost != "" && s.isInClusterRequest(c) {
+		engineURL = s.cfg.InternalDataHost
+	}
 	if _, _, err := net.SplitHostPort(engineURL); err != nil {
 		engineURL = fmt.Sprintf("%s:443", engineURL)
 	}
@@ -931,11 +1138,123 @@ func (s *Server) handleEngines(ctx context.Context, c *app.RequestContext) {
 		Cert:       clientCert,
 		InstanceID: instanceID,
 		Location:   "k8s",
-		OrgID:      "",
+		OrgID:      org.ID,
 		UserID:     id.Username,
+		ClaimID:    fmt.Sprintf("claim-%s", instanceID),
 	}
 
 	c.JSON(consts.StatusCreated, resp)
+}
+
+// isInClusterRequest reports whether the request was addressed to the internal
+// control service. It compares the effective request host (spoof-proof on the
+// internal listener; see effectiveHost) against hostnames derived from
+// server.internal_control_url, accepting the short (<svc>), namespaced
+// (<svc>.<ns>.svc) and fully-qualified (<svc>.<ns>.svc.<clusterDomain>) forms.
+// An RFC1918 RemoteAddr is deliberately ignored: every request via nginx-ingress
+// carries an ingress pod IP, and LAN clients are equally private, so address
+// alone cannot distinguish in-cluster callers.
+func (s *Server) isInClusterRequest(c *app.RequestContext) bool {
+	internalHost := hostOnly(s.cfg.InternalControlURL)
+	if internalHost == "" {
+		return false
+	}
+	host := hostOnly(s.effectiveHost(c))
+	if host == "" {
+		return false
+	}
+	for _, candidate := range internalHostForms(internalHost, s.cfg.ClusterDomain) {
+		if host == candidate {
+			return true
+		}
+	}
+	return false
+}
+
+// hostOnly strips a port from host and lowercases it. It accepts bare
+// hostnames, host:port and bracketed IPv6 forms.
+func hostOnly(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if rawURL, err := url.Parse(raw); err == nil && rawURL.Host != "" {
+		raw = rawURL.Host
+	}
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		raw = h
+	}
+	return strings.ToLower(strings.Trim(raw, "[]"))
+}
+
+// internalHostForms expands an internal service host into the hostname forms a
+// client may dial: the full host, the host without the cluster domain, and — for
+// a "<svc>.<ns>.svc[.<domain>]" name — the bare service name. When clusterDomain
+// is supplied, a "<svc>.<ns>.svc" host also yields its "<host>.<clusterDomain>"
+// fully-qualified form.
+func internalHostForms(host string, clusterDomain ...string) []string {
+	if host == "" {
+		return nil
+	}
+	forms := []string{host}
+	// Append the FQDN form for a bare "<svc>.<ns>.svc" host when the cluster
+	// domain is known and the host is not already fully qualified.
+	if len(clusterDomain) > 0 && clusterDomain[0] != "" {
+		clusterSuffix := strings.Trim(clusterDomain[0], ".")
+		if strings.HasSuffix(host, ".svc") && clusterSuffix != "" {
+			forms = append(forms, fmt.Sprintf("%s.%s", host, clusterSuffix))
+		}
+	}
+	// Strip a trailing cluster domain: "<svc>.<ns>.svc.<domain>" -> "<svc>.<ns>.svc".
+	if idx := strings.Index(host, ".svc."); idx >= 0 {
+		forms = append(forms, host[:idx+len(".svc")])
+	}
+	// The bare service name is the segment before the first "." of a "<svc>.<ns>.svc" form.
+	for _, f := range forms {
+		if strings.HasSuffix(f, ".svc") && strings.Count(f, ".") >= 2 {
+			forms = append(forms, strings.SplitN(f, ".", 2)[0])
+		}
+	}
+	return forms
+}
+
+// matchesInternalSNI reports whether the TLS SNI matches an EXACT configured
+// internal host form (the hostname of server.internal_control_url or
+// server.internal_data_host, in its short "<svc>", namespaced "<svc>.<ns>.svc"
+// and fully-qualified "<svc>.<ns>.svc.<clusterDomain>" forms). Such SNIs are
+// served the Minting-CA leaf so in-cluster pods can verify the supervisor;
+// every other SNI — including arbitrary ".svc" names that are not the
+// configured hosts, and the public data-plane/control ingress host — keeps the
+// Let's Encrypt / external certificate.
+func (s *Server) matchesInternalSNI(serverName string) bool {
+	sni := strings.ToLower(strings.TrimSuffix(serverName, "."))
+	if sni == "" {
+		return false
+	}
+	for _, raw := range []string{s.cfg.InternalControlURL, s.cfg.InternalDataHost} {
+		h := hostOnly(raw)
+		if h == "" {
+			continue
+		}
+		for _, form := range internalHostForms(h, s.cfg.ClusterDomain) {
+			if sni == form {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// internalCert returns the Minting-CA-signed internal leaf, preferring the
+// dynamic provider over the static certificate.
+func (s *Server) internalCert() (*tls.Certificate, error) {
+	if s.cfg.InternalTLSProvider != nil {
+		return s.cfg.InternalTLSProvider.GetCertificate(&tls.ClientHelloInfo{})
+	}
+	if s.cfg.InternalTLSCert != nil {
+		return s.cfg.InternalTLSCert, nil
+	}
+	return nil, fmt.Errorf("no internal TLS certificate configured")
 }
 
 func (s *Server) extractVersion(image string) (*domain.Version, error) {
@@ -953,9 +1272,15 @@ func (s *Server) extractVersion(image string) (*domain.Version, error) {
 
 // handleOTel reverse-proxies OTLP signals to the collector. For traces it also
 // best-effort extracts root-span metadata and runs attribution before proxying.
+//
+//nolint:gocyclo // OTLP ingest pipeline with quota, streaming, and attribution
 func (s *Server) handleOTel(signal string) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		id, ok := s.resolveIdentity(ctx, c)
+		if !ok {
+			return
+		}
+		org, _, ok := s.resolveRequestOrg(ctx, c)
 		if !ok {
 			return
 		}
@@ -981,17 +1306,54 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 			return
 		}
 
-		// Best-effort attribution for traces (Hertz buffers the body, so
-		// reading it does not consume it for the reverse proxy). The same
-		// bytes are reused below to fan out live SSE re-fetch events.
+		// Decode the OTLP body exactly once for attribution, live fan-out, and
+		// cache-event hooks. The bytes are put back on the request so the
+		// reverse proxy forwards the identical payload.
 		var body []byte
+		var batch service.OTLPBatch
 		if signal == "traces" || signal == "logs" {
-			body, _ = c.Body()
+			var err error
+			body, err = readBoundedBody(c, int(limit))
+			if err != nil {
+				s.metrics.OTelIngestTotal.WithLabelValues(signal, "error").Inc()
+				if errors.Is(err, errBodyTooLarge) {
+					writeError(c, consts.StatusRequestEntityTooLarge, "otel body too large")
+				} else {
+					writeError(c, consts.StatusBadRequest, "invalid body")
+				}
+				return
+			}
+			c.Request.SetBody(body)
+			batch = service.ExtractOTLPBatch(signal, body)
 		}
-		if signal == "traces" && len(body) > 0 {
-			sums := service.ExtractTraceSummaries(body)
-			for i := range sums {
-				s.attribution.Ingest(ctx, sums[i].TraceID, attributionUserID(id), sums[i].CIRepo, sums[i].GitRemote, sums[i].CIProvider, sums[i].Version, sums[i].Status, sums[i].DurationMS, sums[i].StartedAt)
+
+		// Weighted memory gate: reject cleanly when buffered OTLP bodies would
+		// exceed the configured heap budget instead of OOM-killing the leader.
+		if len(body) > 0 {
+			if !s.otelSem.TryAcquire(int64(len(body))) {
+				s.metrics.OTelIngestTotal.WithLabelValues(signal, "saturated").Inc()
+				writeError(c, consts.StatusServiceUnavailable, "otel ingest saturated, retry later")
+				return
+			}
+			defer s.otelSem.Release(int64(len(body)))
+		}
+
+		if s.otlpStream != nil && len(body) > 0 {
+			for _, traceID := range batch.TraceIDs {
+				s.otlpStream.Ingest(ctx, org.ID, traceID, signal, body)
+			}
+			for _, traceID := range batch.LogTraceIDs {
+				s.otlpStream.Ingest(ctx, org.ID, traceID, signal, body)
+			}
+		}
+		if s.remoteCache != nil && len(batch.CacheEvents) > 0 {
+			s.remoteCache.IngestCacheEvents(ctx, s.remoteCacheNamespaceFor(org.ID), batch.CacheEvents)
+		}
+
+		if signal == "traces" {
+			for i := range batch.Summaries {
+				sums := batch.Summaries[i]
+				s.attribution.Ingest(ctx, org.ID, sums.TraceID, attributionUserID(id), sums.CIRepo, sums.GitRemote, sums.CIProvider, sums.Version, sums.Status, sums.DurationMS, sums.StartedAt)
 			}
 		}
 
@@ -1007,7 +1369,7 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 
 		// Broadcast a lightweight re-fetch signal to live SSE subscribers,
 		// independent of proxy success.
-		s.broadcastOTelUpdate(signal, body)
+		s.broadcastOTelUpdate(signal, &batch)
 	}
 }
 
@@ -1016,20 +1378,20 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 // re-fetch steps/logs without waiting for the next poll. A trace ingest also
 // means the pipeline list changed (new pipeline or status/duration update), so
 // it additionally notifies the pipelines-overview topic.
-func (s *Server) broadcastOTelUpdate(signal string, body []byte) {
-	if s.liveHub == nil || len(body) == 0 {
+func (s *Server) broadcastOTelUpdate(signal string, batch *service.OTLPBatch) {
+	if s.liveHub == nil {
 		return
 	}
 	switch signal {
 	case "traces":
-		for _, traceID := range service.ExtractTraceIDs(body) {
+		for _, traceID := range batch.TraceIDs {
 			if traceID != "" {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "trace_update"})
 			}
 		}
 		s.liveHub.Broadcast(domain.PipelinesTopic, map[string]string{"type": "pipelines_update"})
 	case "logs":
-		for _, traceID := range service.ExtractLogTraceIDs(body) {
+		for _, traceID := range batch.LogTraceIDs {
 			if traceID != "" {
 				s.liveHub.Broadcast(traceID, map[string]string{"type": "logs_update"})
 			}
@@ -1073,17 +1435,56 @@ func (s *Server) pipelineViewURL(traceID string) (string, bool) {
 }
 
 func (s *Server) handleFleetInfo(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	id, ok := s.resolveIdentity(ctx, c)
+	if !ok {
 		return
 	}
-
-	infos, err := s.fleetManager.AllFleetInfo()
+	if id.IsAdmin() && c.Query("org") == "all" {
+		infos, err := s.fleetManager.AllFleetInfo()
+		if err != nil {
+			s.logger.WithError(err).Error("fleet info unavailable")
+			writeError(c, consts.StatusInternalServerError, "fleet unavailable")
+			return
+		}
+		writeJSON(c, s.enrichFleetOrgs(ctx, infos))
+		return
+	}
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return
+	}
+	infos, err := s.fleetManager.AllFleetInfoForOrg(org.ID)
 	if err != nil {
 		s.logger.WithError(err).Error("fleet info unavailable")
 		writeError(c, consts.StatusInternalServerError, "fleet unavailable")
 		return
 	}
+	for _, info := range infos {
+		info.OrgSlug = org.Name
+	}
 	writeJSON(c, infos)
+}
+
+// enrichFleetOrgs fills OrgSlug on cross-org fleet entries.
+func (s *Server) enrichFleetOrgs(ctx context.Context, infos []domain.FleetInfo) []domain.FleetInfo {
+	if s.orgs == nil {
+		return infos
+	}
+	cache := make(map[string]string)
+	for i := range infos {
+		if infos[i].Org == "" {
+			continue
+		}
+		name, ok := cache[infos[i].Org]
+		if !ok {
+			if o, err := s.orgs.Get(ctx, infos[i].Org); err == nil {
+				name = o.Name
+			}
+			cache[infos[i].Org] = name
+		}
+		infos[i].OrgSlug = name
+	}
+	return infos
 }
 
 func (s *Server) handleDataConn(conn net.Conn) {
@@ -1141,20 +1542,11 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 		}
 	}()
 
-	fleet, err := s.fleetManager.GetVersionFleet(lease.Version)
+	targetIP, err := s.fleetManager.ResolvePodIP(lease.OrgID, lease.Version, lease.ReplicaPod)
 	if err != nil {
-		s.logger.WithError(err).Error("get version fleet failed")
+		s.logger.WithError(err).Error("resolve pod ip failed")
 		return
 	}
-
-	var targetIP string
-	for _, r := range fleet.Ordinals {
-		if r.Name == lease.ReplicaPod {
-			targetIP = r.PodIP
-			break
-		}
-	}
-
 	if targetIP == "" {
 		s.logger.WithField("pod", lease.ReplicaPod).Error("target pod not found")
 		return
@@ -1198,6 +1590,10 @@ func (s *Server) serveDataTunnel(fp string, conn net.Conn) {
 	for {
 		select {
 		case <-heartbeat.C:
+			if _, leaseErr := s.sessions.Get(fp); leaseErr != nil {
+				s.logger.WithField("fp", fp).Warn("lease revoked; closing data tunnel")
+				return
+			}
 			s.touchSession(fp)
 			_ = conn.SetDeadline(time.Now().Add(tunnelIdleTimeout))
 			_ = backend.SetDeadline(time.Now().Add(tunnelIdleTimeout))
@@ -1235,12 +1631,17 @@ func (s *Server) touchSession(fp string) {
 // everything else keeps SPA client-side routing (extension-less paths resolve
 // to index.html).
 func (s *Server) handleNoRoute(ctx context.Context, c *app.RequestContext) {
-	path := string(c.Path())
-	if strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/v1/") {
+	if isAPIPath(string(c.Path())) {
 		writeError(c, consts.StatusNotFound, "not found")
 		return
 	}
 	s.serveUI(ctx, c)
+}
+
+// isAPIPath reports whether path belongs to the control/data API surface
+// (/api/... or /v1/...) rather than the SPA.
+func isAPIPath(path string) bool {
+	return strings.HasPrefix(path, "/api/") || strings.HasPrefix(path, "/v1/")
 }
 
 func (s *Server) requestLog() app.HandlerFunc {
@@ -1276,9 +1677,15 @@ func (s *Server) securityHeaders() app.HandlerFunc {
 // 204 + the allowed methods/headers. Vary: Origin is emitted whenever an
 // Origin header is present (allowed or not) so a shared/intermediate cache
 // cannot serve a response computed for one origin to a different origin
-// (cross-origin response confusion, CWE-349 / OWASP A05).
+// (cross-origin response confusion, CWE-349 / OWASP A05). API responses also
+// carry Vary: X-Dagger-Org because the active organization is resolved from
+// that header (or :org / an org token) and bodies differ per tenant; a cache
+// must not replay one tenant's response to another.
 func (s *Server) corsMiddleware() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
+		if isAPIPath(string(c.Path())) {
+			appendVary(c, orgHeaderName)
+		}
 		origin := string(c.Request.Header.Peek("Origin"))
 		if origin == "" {
 			c.Next(ctx)
@@ -1286,13 +1693,14 @@ func (s *Server) corsMiddleware() app.HandlerFunc {
 		}
 		// An Origin header is present: the response varies by origin regardless
 		// of whether this origin is allowed, so caches must key on it.
-		c.Response.Header.Add("Vary", "Origin")
+		appendVary(c, "Origin")
 		if s.originAllowed(origin) {
 			c.Response.Header.Set("Access-Control-Allow-Origin", origin)
 			c.Response.Header.Set("Access-Control-Allow-Credentials", "true")
+			c.Response.Header.Set("Access-Control-Expose-Headers", "X-Dagger-Quota-Warning")
 			if string(c.Method()) == "OPTIONS" {
 				c.Response.Header.Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-				c.Response.Header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type")
+				c.Response.Header.Set("Access-Control-Allow-Headers", "Authorization, Content-Type, "+orgHeaderName)
 				c.SetStatusCode(consts.StatusNoContent)
 				c.Abort()
 				return
@@ -1300,6 +1708,19 @@ func (s *Server) corsMiddleware() app.HandlerFunc {
 		}
 		c.Next(ctx)
 	}
+}
+
+// appendVary appends token to the response's Vary header without clobbering an
+// existing value and without duplicating a token that is already listed.
+func appendVary(c *app.RequestContext, token string) {
+	for _, value := range c.Response.Header.PeekAll("Vary") {
+		for _, listed := range strings.Split(string(value), ",") {
+			if strings.EqualFold(strings.TrimSpace(listed), token) {
+				return
+			}
+		}
+	}
+	c.Response.Header.Add("Vary", token)
 }
 
 // originAllowed reports whether origin exactly matches an entry in the CORS
@@ -1317,8 +1738,31 @@ func writeError(c *app.RequestContext, status int, message string) {
 	c.JSON(status, ErrorResponse{Message: message})
 }
 
+// writeJSON serializes v as a 200 JSON response. A nil slice or map is encoded
+// as an empty value of the same type ([] / {}) rather than JSON null, so list
+// endpoints always emit a JSON array and clients can iterate the result without
+// a null check. Other nil values (nil interface, nil pointer) still encode as
+// null.
 func writeJSON(c *app.RequestContext, v any) {
-	c.JSON(consts.StatusOK, v)
+	c.JSON(consts.StatusOK, normalizeJSON(v))
+}
+
+// normalizeJSON replaces a nil slice or map with an empty non-nil value of the
+// same type. Any other value (including a typed nil pointer) is returned
+// unchanged so it still encodes as null.
+func normalizeJSON(v any) any {
+	rv := reflect.ValueOf(v)
+	switch rv.Kind() {
+	case reflect.Slice:
+		if rv.IsNil() {
+			return reflect.MakeSlice(rv.Type(), 0, 0).Interface()
+		}
+	case reflect.Map:
+		if rv.IsNil() {
+			return reflect.MakeMap(rv.Type()).Interface()
+		}
+	}
+	return v
 }
 
 // formatTime renders timestamps in the API's canonical RFC3339/UTC form.
@@ -1330,7 +1774,7 @@ func formatTime(t time.Time) string {
 // retrieve the resolved identity with identityOf(c).
 func (s *Server) adminOnly(h app.HandlerFunc) app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
-		if _, ok := s.requireAdmin(ctx, c); !ok {
+		if !s.requireAdmin(ctx, c) {
 			return
 		}
 		h(ctx, c)

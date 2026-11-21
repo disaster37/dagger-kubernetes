@@ -29,6 +29,7 @@ func TestProvisionEngineWithAPIToken(t *testing.T) {
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
+	orgsSvc, _ := newIntegrationOrgService(t, store, groupRepo, tokensSvc, logger)
 	jwtSvc := service.NewJWTService([]byte("integration-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
 
 	admin, err := usersSvc.Create(context.Background(), "admin", "password123", domain.RoleAdmin)
@@ -62,7 +63,7 @@ func TestProvisionEngineWithAPIToken(t *testing.T) {
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
-		Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
+		Orgs: orgsSvc, Tokens: tokensSvc, Quota: quotaSvc, Attribution: attributionSvc,
 		TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
 	})
 
@@ -115,6 +116,7 @@ func TestHealthEndpoint(t *testing.T) {
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, nil)
+	orgsSvc, _ := newIntegrationOrgService(t, store, groupRepo, tokensSvc, logger)
 	jwtSvc := service.NewJWTService([]byte("health-secret-32-bytes-ok!!!!!!!"), 15*time.Minute, 168*time.Hour)
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
 	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
@@ -129,7 +131,7 @@ func TestHealthEndpoint(t *testing.T) {
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, InternalAuthEnabled: true,
-		Users: usersSvc, Groups: groupsSvc, Tokens: tokensSvc, Quota: quotaSvc,
+		Users: usersSvc, Groups: groupsSvc, Orgs: orgsSvc, Tokens: tokensSvc, Quota: quotaSvc,
 		Attribution: attributionSvc, TraceMeta: traceMetaRepo, Traces: traces, Logs: logsClient, JWT: jwtSvc,
 	})
 

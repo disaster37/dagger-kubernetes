@@ -727,8 +727,32 @@ func TestResolveIdentityCookieFallback(t *testing.T) {
 	}
 }
 
+// varyTokens returns the comma-separated tokens of every Vary header value.
+func varyTokens(resp *ut.ResponseRecorder) []string {
+	var out []string
+	for _, value := range resp.Result().Header.PeekAll("Vary") {
+		for _, token := range strings.Split(string(value), ",") {
+			if token = strings.TrimSpace(token); token != "" {
+				out = append(out, token)
+			}
+		}
+	}
+	return out
+}
+
+// hasVaryToken reports whether the response's Vary headers list token.
+func hasVaryToken(resp *ut.ResponseRecorder, token string) bool {
+	for _, got := range varyTokens(resp) {
+		if got == token {
+			return true
+		}
+	}
+	return false
+}
+
 // TestCORSAllowDeny verifies the CORS middleware echoes an allowed origin (with
-// credentials) and stays silent for disallowed/no origins.
+// credentials) and stays silent for disallowed/no origins, and that API
+// responses vary on the org header as well as Origin.
 func TestCORSAllowDeny(t *testing.T) {
 	env := newTestEnv(t)
 	env.server.corsAllowedOrigins = []string{"https://ui.example.com"}
@@ -743,8 +767,11 @@ func TestCORSAllowDeny(t *testing.T) {
 	if got := resp.Result().Header.Get("Access-Control-Allow-Credentials"); got != "true" {
 		t.Fatalf("ACAC = %q, want true", got)
 	}
-	if got := resp.Result().Header.Get("Vary"); got != "Origin" {
-		t.Fatalf("Vary = %q, want Origin", got)
+	if !hasVaryToken(resp, "Origin") {
+		t.Fatalf("Vary = %v, want Origin", varyTokens(resp))
+	}
+	if !hasVaryToken(resp, orgHeaderName) {
+		t.Fatalf("Vary = %v, want %s on an API response", varyTokens(resp), orgHeaderName)
 	}
 
 	// Disallowed origin -> no CORS headers, never "*".
@@ -755,14 +782,26 @@ func TestCORSAllowDeny(t *testing.T) {
 	}
 	// Vary: Origin must still be set so a shared cache cannot reuse this
 	// response for a different (allowed) origin (CWE-349).
-	if got := resp.Result().Header.Get("Vary"); got != "Origin" {
-		t.Fatalf("Vary = %q, want Origin even for disallowed origin", got)
+	if !hasVaryToken(resp, "Origin") {
+		t.Fatalf("Vary = %v, want Origin even for disallowed origin", varyTokens(resp))
 	}
 
-	// No origin -> same-origin, no CORS headers.
+	// No origin -> same-origin, no CORS headers, but the API response still
+	// varies on the org header (the body is tenant-scoped).
 	resp = ut.PerformRequest(e, "GET", "/api/v1/auth/providers", nil)
 	if got := resp.Result().Header.Get("Access-Control-Allow-Origin"); got != "" {
 		t.Fatalf("ACAO = %q, want empty when no origin", got)
+	}
+	if !hasVaryToken(resp, orgHeaderName) {
+		t.Fatalf("Vary = %v, want %s even without Origin", varyTokens(resp), orgHeaderName)
+	}
+
+	// Non-API (SPA) responses are not tenant-scoped and must not carry the
+	// org Vary token.
+	resp = ut.PerformRequest(e, "GET", "/pipelines", nil,
+		ut.Header{Key: "Origin", Value: "https://ui.example.com"})
+	if hasVaryToken(resp, orgHeaderName) {
+		t.Fatalf("Vary = %v, want no %s on an SPA path", varyTokens(resp), orgHeaderName)
 	}
 }
 
@@ -781,7 +820,7 @@ func TestCORSPreflight(t *testing.T) {
 	if got := resp.Result().Header.Get("Access-Control-Allow-Methods"); got != "GET,POST,PUT,DELETE,OPTIONS" {
 		t.Fatalf("ACAM = %q", got)
 	}
-	if got := resp.Result().Header.Get("Access-Control-Allow-Headers"); got != "Authorization, Content-Type" {
+	if got := resp.Result().Header.Get("Access-Control-Allow-Headers"); got != "Authorization, Content-Type, X-Dagger-Org" {
 		t.Fatalf("ACAH = %q", got)
 	}
 }

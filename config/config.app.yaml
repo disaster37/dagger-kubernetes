@@ -134,8 +134,21 @@ pipeline:
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
   floor: "v0.19.0"                          # minimum supported engine
-  allowlist: ["0.19", "0.20", "0.21"]       # major.minor prefixes to admit
+  allowlist: ["0.19", "0.20", "0.21", "1.0"]  # major.minor prefixes to admit (a full "MAJOR.MINOR.PATCH[-pre]" admits only that version/track)
 
 # --- Project → group attribution ---------------------------------------------
 attribution:
   project_mappings: []                      # ordered {pattern, group} rules mapping a project name to an existing supervisor group (first-match-wins; empty = disabled).
+
+# --- Organizations & multi-tenant quotas -------------------------------------
+org:
+  default:
+    display_name: "Default"
+  default_quotas:
+    max_groups:              { soft: 0, hard: 0 }
+    max_projects:            { soft: 0, hard: 0 }
+    max_members:             { soft: 0, hard: 0 }
+    max_concurrent_sessions: { soft: 0, hard: 0 }
+    max_engines:             { soft: 0, hard: 0 }
+    max_cache_bytes:         { soft: 0, hard: 0 }
+    max_pipeline_retention: "0s"

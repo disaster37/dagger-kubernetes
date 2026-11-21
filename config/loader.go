@@ -39,12 +39,17 @@ var supervisorValidations = []validation{
 	{wrap: "validate group mapping default limit", fn: validateOAuthGroupMappingDefaultLimit},
 	{wrap: "validate oauth admin_groups", fn: validateOAuthAdminGroups},
 	{wrap: "validate server config", fn: validateServerConfig},
+	{wrap: "validate org config", fn: validateOrgConfig},
 	{wrap: "validate fleet config", fn: validateFleetConfig},
 	{wrap: "validate cli config", fn: validateCLIConfig},
 	{wrap: "validate image cache config", fn: validateImageCacheConfig},
 	{wrap: "validate ci config", fn: validateCIConfig},
 	{wrap: "validate otel config", fn: validateOTelConfig},
 	{wrap: "validate pipeline metrics config", fn: validatePipelineMetricsConfig},
+	{wrap: "validate remote cache config", fn: validateRemoteCacheConfig},
+	{wrap: "validate checks config", fn: validateChecksConfig},
+	{wrap: "validate workflows config", fn: validateWorkflowsConfig},
+	{wrap: "validate graphql config", fn: validateGraphQLConfig},
 }
 
 // ciWrapperValidations is the client-relevant subset. The wrapper consumes only
@@ -81,6 +86,9 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("server.data_addr", ":8443")
 	v.SetDefault("server.data_hostname", "data.supv.example.com")
 	v.SetDefault("server.public_url", "https://supv.example.com")
+	v.SetDefault("server.max_data_conns", 2048)
+	v.SetDefault("server.internal_control_url", "")
+	v.SetDefault("server.internal_data_host", "")
 
 	v.SetDefault("auth.internal.enabled", true)
 	v.SetDefault("auth.internal.tokens_file", "/etc/dagger-kubernetes/tokens")
@@ -109,6 +117,21 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 
 	v.SetDefault("attribution.project_mappings", []domain.ProjectMappingRule{})
 
+	v.SetDefault("org.default.display_name", domain.DefaultOrgDisplayName)
+	v.SetDefault("org.default_quotas.max_groups.soft", 0)
+	v.SetDefault("org.default_quotas.max_groups.hard", 0)
+	v.SetDefault("org.default_quotas.max_projects.soft", 0)
+	v.SetDefault("org.default_quotas.max_projects.hard", 0)
+	v.SetDefault("org.default_quotas.max_members.soft", 0)
+	v.SetDefault("org.default_quotas.max_members.hard", 0)
+	v.SetDefault("org.default_quotas.max_concurrent_sessions.soft", 0)
+	v.SetDefault("org.default_quotas.max_concurrent_sessions.hard", 0)
+	v.SetDefault("org.default_quotas.max_engines.soft", 0)
+	v.SetDefault("org.default_quotas.max_engines.hard", 0)
+	v.SetDefault("org.default_quotas.max_cache_bytes.soft", 0)
+	v.SetDefault("org.default_quotas.max_cache_bytes.hard", 0)
+	v.SetDefault("org.default_quotas.max_pipeline_retention", time.Duration(0))
+
 	v.SetDefault("auth.jwt.secret", "")
 	v.SetDefault("auth.jwt.access_ttl", 15*time.Minute)
 	v.SetDefault("auth.jwt.refresh_ttl", 168*time.Hour) // 7d
@@ -118,6 +141,9 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("auth.bootstrap_admin.username", "admin")
 	v.SetDefault("auth.bootstrap_admin.password", "")
 	v.SetDefault("auth.bootstrap_admin.password_file", "")
+
+	v.SetDefault("auth.device.code_ttl", 10*time.Minute)
+	v.SetDefault("auth.device.poll_interval", 5*time.Second)
 
 	v.SetDefault("auth.cookie.access_name", "dagger_kubernetes_access")
 	v.SetDefault("auth.cookie.refresh_name", "dagger_kubernetes_refresh")
@@ -222,9 +248,26 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("cache.s3.access_key", "")
 	v.SetDefault("cache.s3.secret_key", "")
 
+	v.SetDefault("cache.remote.enabled", false)
+	v.SetDefault("cache.remote.bucket", "")
+	v.SetDefault("cache.remote.prefix", "remote-cache")
+	v.SetDefault("cache.remote.s3_engine_endpoint", "")
+	v.SetDefault("cache.remote.index_path", "/var/cache/dagger-kubernetes/remotecache.db")
+	v.SetDefault("cache.remote.ttl", 720*time.Hour)
+	v.SetDefault("cache.remote.max_bytes", int64(100<<30))
+	v.SetDefault("cache.remote.workers", 16)
+	v.SetDefault("cache.remote.pack_max_member_bytes", int64(4<<20))
+	v.SetDefault("cache.remote.gc_interval", 5*time.Minute)
+
 	// Local image mirrors (Zot) the supervisor lists/prunes over their OCI
 	// Distribution v2 API. Admin-visible/read-only; the Helm chart renders the
 	// block from what it deploys.
+	v.SetDefault("graphql.introspection_enabled", false)
+	v.SetDefault("graphql.max_depth", 15)
+	v.SetDefault("graphql.max_selections", 250)
+	v.SetDefault("graphql.max_query_bytes", 65536)
+	v.SetDefault("graphql.max_parallelism", 10)
+
 	v.SetDefault("image_cache.mirrors", []domain.ImageCacheMirror{})
 	v.SetDefault("image_cache.tls_ca_path", "")
 
@@ -269,6 +312,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("fleet.engine_registry_mirrors", map[string][]string{})
 	v.SetDefault("fleet.engine_registry_mirrors_http", []string{})
 	v.SetDefault("fleet.engine_extra_env_from", map[string]domain.EnvVarSource{})
+	v.SetDefault("fleet.isolation", "per_org")
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
@@ -286,6 +330,8 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("supervisor.dataplane.tls.cert_path", "/etc/dagger-kubernetes/tls/tls.crt")
 	v.SetDefault("supervisor.dataplane.tls.key_path", "/etc/dagger-kubernetes/tls/tls.key")
 	v.SetDefault("supervisor.dataplane.tls.reload_poll_interval", 5*time.Second)
+	v.SetDefault("supervisor.cache_scratch.size_limit", "8Gi")
+	v.SetDefault("supervisor.gomemlimit", "")
 
 	v.SetDefault("version.floor", "v0.19.0")
 	v.SetDefault("version.allowlist", []string{})
@@ -307,12 +353,33 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("cli.upstream.download_base", "https://github.com/dagger/dagger/releases/download")
 	v.SetDefault("cli.upstream.github_token", "")
 	v.SetDefault("cli.ci_wrapper_path", "/usr/local/bin/dagger-kubernetes-ci")
+	v.SetDefault("cli.include_prereleases", false)
 
 	v.SetDefault("log_level", "info")
 	v.SetDefault("log_format", "json")
 
 	v.SetDefault("otel.otlp_endpoint", "")
 	v.SetDefault("otel.ingest_max_body_size", int64(64<<20)) // 64 MiB
+	v.SetDefault("otel.max_inflight_bytes", int64(256<<20))  // 256 MiB
+
+	v.SetDefault("checks.enabled", false)
+	v.SetDefault("checks.namespace", "")
+	v.SetDefault("checks.job_image", "ghcr.io/dagger/dagger:latest")
+	v.SetDefault("checks.timeout", 30*time.Minute)
+	v.SetDefault("checks.github_oidc_issuer", "https://token.actions.githubusercontent.com")
+	v.SetDefault("checks.gitlab_oidc_issuer", "https://gitlab.com")
+	v.SetDefault("checks.oidc_audience", "dagger-kubernetes")
+
+	v.SetDefault("workflows.enabled", false)
+	v.SetDefault("workflows.namespace", "")
+	v.SetDefault("workflows.job_image", "ghcr.io/dagger/dagger:latest")
+	v.SetDefault("workflows.default_timeout", 30*time.Minute)
+	v.SetDefault("workflows.max_parallel", 8)
+
+	v.SetDefault("forge.github_api_url", "https://api.github.com")
+	v.SetDefault("forge.gitlab_api_url", "https://gitlab.com/api/v4")
+	v.SetDefault("forge.gitea_api_url", "")
+	v.SetDefault("forge.webhook_secret", "")
 
 	v.AutomaticEnv()
 
@@ -726,7 +793,64 @@ func validateOAuthRevalidation(cfg *domain.Config) error {
 // almost always a unit mistake — in particular, an unquoted YAML integer (e.g.
 // `version_retention: 24`) is decoded by Viper/mapstructure as *nanoseconds*,
 // not hours, which would GC idle fleets within one sweep tick.
+// validateOrgConfig validates the bootstrap organization presentation and the
+// cluster-wide default quotas, plus optional org targets on mapping rules.
+func validateOrgConfig(cfg *domain.Config) error {
+	if n := len(strings.TrimSpace(cfg.Org.Default.DisplayName)); n > 128 {
+		return fmt.Errorf("org.default.display_name must be at most 128 characters (got %d)", n)
+	}
+	if cfg.Org.Default.DisplayName == "" {
+		cfg.Org.Default.DisplayName = domain.DefaultOrgDisplayName
+	}
+	if err := cfg.Org.DefaultQuotas.Validate(); err != nil {
+		return fmt.Errorf("org.default_quotas: %w", err)
+	}
+	for i, rule := range cfg.Auth.OAuth.GroupMappings {
+		if err := validateOrgSelector(fmt.Sprintf("auth.oauth.group_mappings[%d].org", i), rule.Org); err != nil {
+			return err
+		}
+	}
+	for i, rule := range cfg.Attribution.ProjectMappings {
+		if err := validateOrgSelector(fmt.Sprintf("attribution.project_mappings[%d].org", i), rule.Org); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+var orgSlugRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)
+
+// validOrgSelector reports whether s is a valid org slug or org-<16hex> ID.
+// It mirrors service.OrgService.ValidateOrgName without importing service.
+func validOrgSelector(s string) bool {
+	if orgSlugRe.MatchString(s) {
+		return true
+	}
+	if len(s) != 20 || !strings.HasPrefix(s, "org-") {
+		return false
+	}
+	for _, r := range s[4:] {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+func validateOrgSelector(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if !validOrgSelector(value) {
+		return fmt.Errorf("%s must be a valid organization slug or org-<16hex> id, got %q", field, value)
+	}
+	return nil
+}
+
 func validateFleetConfig(cfg *domain.Config) error {
+	if cfg.Fleet.Isolation != "" && cfg.Fleet.Isolation != "per_org" && cfg.Fleet.Isolation != "shared" {
+		return fmt.Errorf("fleet.isolation must be \"per_org\" or \"shared\"")
+	}
 	if cfg.Fleet.VersionRetention > 0 && cfg.Fleet.VersionRetention < time.Minute {
 		return fmt.Errorf("fleet.version_retention = %v is too small; use a duration with an explicit unit of at least 1m (or <= 0 to disable GC)", cfg.Fleet.VersionRetention)
 	}
@@ -848,6 +972,82 @@ func validateCIConfig(cfg *domain.Config) error {
 func validateOTelConfig(cfg *domain.Config) error {
 	if cfg.OTel.IngestMaxBodySize < 0 {
 		return fmt.Errorf("otel.ingest_max_body_size must be >= 0")
+	}
+	if cfg.OTel.MaxInflightBytes < 0 {
+		return fmt.Errorf("otel.max_inflight_bytes must be >= 0")
+	}
+	return nil
+}
+
+// validateRemoteCacheConfig guards the read-through remote cache settings.
+func validateRemoteCacheConfig(cfg *domain.Config) error {
+	r := cfg.Cache.Remote
+	if !r.Enabled {
+		return nil
+	}
+	if r.Workers < 0 {
+		return fmt.Errorf("cache.remote.workers must be >= 0")
+	}
+	if r.TTL < 0 {
+		return fmt.Errorf("cache.remote.ttl must be >= 0")
+	}
+	if r.MaxBytes < 0 {
+		return fmt.Errorf("cache.remote.max_bytes must be >= 0")
+	}
+	if r.IndexPath == "" {
+		return fmt.Errorf("cache.remote.index_path must not be empty when cache.remote.enabled is true")
+	}
+	if r.PackMaxMemberBytes < 0 {
+		return fmt.Errorf("cache.remote.pack_max_member_bytes must be >= 0")
+	}
+	if r.GCInterval <= 0 {
+		return fmt.Errorf("cache.remote.gc_interval must be > 0 when cache.remote.enabled is true")
+	}
+	return nil
+}
+
+// validateChecksConfig guards Cloud Checks settings.
+func validateChecksConfig(cfg *domain.Config) error {
+	if !cfg.Checks.Enabled {
+		return nil
+	}
+	if cfg.Checks.Timeout <= 0 {
+		return fmt.Errorf("checks.timeout must be > 0 when checks.enabled is true")
+	}
+	if cfg.Checks.JobImage == "" {
+		return fmt.Errorf("checks.job_image must not be empty when checks.enabled is true")
+	}
+	return nil
+}
+
+// validateWorkflowsConfig guards Dagger-native workflow settings.
+func validateWorkflowsConfig(cfg *domain.Config) error {
+	if !cfg.Workflows.Enabled {
+		return nil
+	}
+	if cfg.Workflows.DefaultTimeout <= 0 {
+		return fmt.Errorf("workflows.default_timeout must be > 0 when workflows.enabled is true")
+	}
+	if cfg.Workflows.MaxParallel < 0 {
+		return fmt.Errorf("workflows.max_parallel must be >= 0")
+	}
+	return nil
+}
+
+// validateGraphQLConfig guards the Cloud GraphQL complexity bounds.
+func validateGraphQLConfig(cfg *domain.Config) error {
+	g := cfg.GraphQL
+	if g.MaxDepth <= 0 {
+		return fmt.Errorf("graphql.max_depth must be > 0")
+	}
+	if g.MaxSelections <= 0 {
+		return fmt.Errorf("graphql.max_selections must be > 0")
+	}
+	if g.MaxQueryBytes <= 0 {
+		return fmt.Errorf("graphql.max_query_bytes must be > 0")
+	}
+	if g.MaxParallelism <= 0 {
+		return fmt.Errorf("graphql.max_parallelism must be > 0")
 	}
 	return nil
 }

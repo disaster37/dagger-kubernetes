@@ -22,6 +22,9 @@ data:
       data_addr: ":8443"
       data_hostname: {{ include "dagger-kubernetes.dataHostname" . | quote }}
       public_url: {{ include "dagger-kubernetes.publicUrl" . | quote }}
+      max_data_conns: 2048
+      internal_control_url: {{ printf "https://%s-control.%s.svc:%v" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) .Values.service.control.port | quote }}
+      internal_data_host: {{ printf "%s-data.%s.svc:%v" (include "dagger-kubernetes.fullname" .) (include "dagger-kubernetes.namespace" .) .Values.service.data.port | quote }}
     auth:
       internal:
         enabled: true
@@ -71,6 +74,29 @@ data:
     attribution:
       project_mappings:
 {{ toYaml .Values.supervisor.config.attribution.projectMappings | indent 8 }}
+    org:
+      default:
+        display_name: {{ .Values.supervisor.config.org.default.displayName | quote }}
+      default_quotas:
+        max_groups:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxGroups.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxGroups.hard }}
+        max_projects:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxProjects.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxProjects.hard }}
+        max_members:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxMembers.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxMembers.hard }}
+        max_concurrent_sessions:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxConcurrentSessions.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxConcurrentSessions.hard }}
+        max_engines:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxEngines.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxEngines.hard }}
+        max_cache_bytes:
+          soft: {{ .Values.supervisor.config.org.defaultQuotas.maxCacheBytes.soft }}
+          hard: {{ .Values.supervisor.config.org.defaultQuotas.maxCacheBytes.hard }}
+        max_pipeline_retention: {{ .Values.supervisor.config.org.defaultQuotas.maxPipelineRetention | quote }}
     database:
       dir: "/var/lib/dagger-kubernetes"
     raft:
@@ -117,6 +143,17 @@ data:
         # DAGGER_KUBERNETES_CACHE_S3_* env vars. Leave the keys empty.
         access_key: ""
         secret_key: ""
+      remote:
+        enabled: {{ .Values.supervisor.config.cache.remote.enabled }}
+        bucket: {{ .Values.supervisor.config.cache.remote.bucket | quote }}
+        prefix: {{ .Values.supervisor.config.cache.remote.prefix | quote }}
+        s3_engine_endpoint: {{ .Values.supervisor.config.cache.remote.s3EngineEndpoint | quote }}
+        index_path: {{ .Values.supervisor.config.cache.remote.indexPath | quote }}
+        ttl: {{ .Values.supervisor.config.cache.remote.ttl | quote }}
+        max_bytes: {{ .Values.supervisor.config.cache.remote.maxBytes | int64 }}
+        workers: {{ .Values.supervisor.config.cache.remote.workers }}
+        pack_max_member_bytes: {{ .Values.supervisor.config.cache.remote.packMaxMemberBytes | int64 }}
+        gc_interval: {{ .Values.supervisor.config.cache.remote.gcInterval | quote }}
 {{- if .Values.imageCache.enabled }}
     image_cache:
       # external_addr (ADR-046): node-reachable mirror ingress host; routes the
@@ -185,6 +222,7 @@ data:
       # a [registry."<mirror>"] http = true section per entry.
       engine_registry_mirrors_http:
 {{ include "dagger-kubernetes.imageCacheMirrorHosts" . | indent 8 }}
+      isolation: {{ .Values.supervisor.config.fleet.isolation | quote }}
     ca:
       minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
       client_cert_ttl: {{ .Values.supervisor.dataplane.tls.clientCertTtl | quote }}
@@ -209,13 +247,40 @@ data:
         releases_url: {{ .Values.supervisor.config.cli.upstream.releasesUrl | quote }}
         download_base: {{ .Values.supervisor.config.cli.upstream.downloadBase | quote }}
         github_token: ""
+      include_prereleases: {{ .Values.supervisor.config.cli.includePrereleases }}
     log_level: {{ .Values.supervisor.config.logLevel | quote }}
     log_format: {{ .Values.supervisor.config.logFormat | quote }}
 {{- with .Values.supervisor.config.otel }}
     otel:
       otlp_endpoint: {{ .otlpEndpoint | quote }}
       ingest_max_body_size: {{ .ingestMaxBodySize | default 67108864 | int64 }}
+      max_inflight_bytes: {{ .maxInflightBytes | default 268435456 | int64 }}
 {{- end }}
+    checks:
+      enabled: {{ .Values.supervisor.config.checks.enabled }}
+      namespace: {{ .Values.supervisor.config.checks.namespace | quote }}
+      job_image: {{ .Values.supervisor.config.checks.jobImage | quote }}
+      timeout: {{ .Values.supervisor.config.checks.timeout | quote }}
+      github_oidc_issuer: {{ .Values.supervisor.config.checks.githubOidcIssuer | quote }}
+      gitlab_oidc_issuer: {{ .Values.supervisor.config.checks.gitlabOidcIssuer | quote }}
+      oidc_audience: {{ .Values.supervisor.config.checks.oidcAudience | quote }}
+    workflows:
+      enabled: {{ .Values.supervisor.config.workflows.enabled }}
+      namespace: {{ .Values.supervisor.config.workflows.namespace | quote }}
+      job_image: {{ .Values.supervisor.config.workflows.jobImage | quote }}
+      default_timeout: {{ .Values.supervisor.config.workflows.defaultTimeout | quote }}
+      max_parallel: {{ .Values.supervisor.config.workflows.maxParallel }}
+    forge:
+      github_api_url: {{ .Values.supervisor.config.forge.githubApiUrl | quote }}
+      gitlab_api_url: {{ .Values.supervisor.config.forge.gitlabApiUrl | quote }}
+      gitea_api_url: {{ .Values.supervisor.config.forge.giteaApiUrl | quote }}
+      webhook_secret: ""
+    graphql:
+      introspection_enabled: {{ .Values.supervisor.config.graphql.introspectionEnabled }}
+      max_depth: {{ .Values.supervisor.config.graphql.maxDepth }}
+      max_selections: {{ .Values.supervisor.config.graphql.maxSelections }}
+      max_query_bytes: {{ .Values.supervisor.config.graphql.maxQueryBytes }}
+      max_parallelism: {{ .Values.supervisor.config.graphql.maxParallelism }}
 {{- with .Values.supervisor.config.pipeline }}
     pipeline:
       metrics:

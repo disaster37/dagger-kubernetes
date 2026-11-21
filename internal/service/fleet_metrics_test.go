@@ -96,7 +96,7 @@ func TestFleetMetricsQueryTemplate(t *testing.T) {
 	if len(fm.Series) != 6 {
 		t.Fatalf("series = %d, want 6", len(fm.Series))
 	}
-	sts := "dagger-engine-v0-21-4"
+	sts := domain.EnginePodRegex("v0.21.4")
 	for _, query := range q.queries {
 		if strings.Contains(query, "{ns}") || strings.Contains(query, "{pod}") || strings.Contains(query, "{rate}") {
 			t.Fatalf("unsubstituted template var in %q", query)

@@ -3,9 +3,15 @@
     <h1 class="mb-6 text-2xl font-semibold">Pipelines</h1>
 
     <UCard v-if="auth.isAdmin" class="mb-4">
-      <div class="flex items-center gap-2">
-        <label class="text-sm">Filter by group:</label>
-        <USelect v-model="groupFilter" :items="groupOptions" @change="load" />
+      <div class="flex flex-wrap items-center gap-3">
+        <div class="flex items-center gap-2">
+          <label class="text-sm">Filter by group:</label>
+          <USelect v-model="groupFilter" :items="groupOptions" @change="load" />
+        </div>
+        <div class="flex items-center gap-2">
+          <label class="text-sm">All organizations</label>
+          <USwitch v-model="allOrgs" @change="load" />
+        </div>
       </div>
     </UCard>
 
@@ -65,6 +71,7 @@ const groups = ref<Group[]>([])
 const groupFilter = ref('__all__')
 const repoFilter = ref('')
 const userFilter = ref('')
+const allOrgs = ref(false)
 
 const columns = [
   { id: 'pipeline', accessorKey: 'trace_id', header: 'Pipeline' },
@@ -156,6 +163,7 @@ async function load() {
       groupId: groupFilter.value === '__all__' ? undefined : groupFilter.value,
       ciRepo: repoFilter.value.trim() || undefined,
       user: userFilter.value.trim() || undefined,
+      org: allOrgs.value ? 'all' : undefined,
     })
   } catch (e) {
     console.error('Failed to fetch traces', e)

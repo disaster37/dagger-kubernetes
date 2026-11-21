@@ -318,10 +318,16 @@ func mapToSpanNode(m map[string]interface{}) *domain.SpanNode {
 	}
 	if endTimeUnix, ok := m["endTimeUnixNano"].(string); ok {
 		ns, err := strconv.ParseInt(endTimeUnix, 10, 64)
-		if err == nil {
+		if err == nil && ns > 0 && (node.StartTime.IsZero() || ns >= node.StartTime.UnixNano()) {
 			endTime := time.Unix(0, ns)
 			node.Duration = endTime.Sub(node.StartTime)
 			node.DurationMS = node.Duration.Milliseconds()
+			// A span that ended without an explicit OK/ERROR status (OTLP
+			// STATUS_CODE_UNSET, mapped to "running") has in fact completed
+			// successfully; only a start-only record (end == 0) stays running.
+			if node.Status == "running" {
+				node.Status = "success"
+			}
 		}
 	}
 

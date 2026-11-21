@@ -79,10 +79,10 @@ func TestNewMetricsRegisters(t *testing.T) {
 		t.Fatal("nil metrics")
 	}
 
-	m.EngineAcquireTotal.WithLabelValues("v0.21.4", "request").Inc()
-	m.EngineAcquireDuration.WithLabelValues("v0.21.4").Observe(0.1)
+	m.EngineAcquireTotal.WithLabelValues("", "v0.21.4", "request").Inc()
+	m.EngineAcquireDuration.WithLabelValues("", "v0.21.4").Observe(0.1)
 	m.ActiveLeases.Inc()
-	m.ActiveReplicas.WithLabelValues("v0.21.4").Set(1)
+	m.ActiveReplicas.WithLabelValues("", "v0.21.4").Set(1)
 	m.OTelIngestTotal.WithLabelValues("traces", "success").Inc()
 	m.PipelineDisconnectFailedTotal.WithLabelValues("tunnel_close").Inc()
 	m.PipelineDisconnectFailedTotal.WithLabelValues("stale_sweep").Inc()
@@ -142,7 +142,7 @@ func TestNewMetricsRegisters(t *testing.T) {
 func TestNewMetricsNilRegistry(t *testing.T) {
 	m := NewMetrics(nil)
 	// Counters must still be usable without registration (no panic).
-	m.EngineAcquireTotal.WithLabelValues("v0.21.4", "request").Inc()
+	m.EngineAcquireTotal.WithLabelValues("", "v0.21.4", "request").Inc()
 	m.ActiveLeases.Inc()
 	m.DataHandshakeFailuresTotal.WithLabelValues("handshake_error").Inc()
 }

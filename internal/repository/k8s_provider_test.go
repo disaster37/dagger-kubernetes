@@ -919,6 +919,40 @@ func TestPodName(t *testing.T) {
 	}
 }
 
+// TestK8sAllScopes verifies AllScopes reports each deployed engine StatefulSet's
+// (org, version) pair by reading the pod labels, so the sweeper can address
+// per-org fleets by their real names.
+func TestK8sAllScopes(t *testing.T) {
+	p, cs := defaultK8sProvider()
+
+	// Shared fleet (no org label).
+	if err := p.EnsureStatefulSet("v0.20.0", "registry.dagger.io/engine:v0.20.0"); err != nil {
+		t.Fatalf("EnsureStatefulSet shared: %v", err)
+	}
+	// Per-org fleets.
+	for _, org := range []string{"default", "acme"} {
+		if err := p.WithScope(org).EnsureStatefulSet("v0.21.8", "registry.dagger.io/engine:v0.21.8"); err != nil {
+			t.Fatalf("EnsureStatefulSet %s: %v", org, err)
+		}
+	}
+	_ = cs
+
+	scopes, err := p.AllScopes()
+	if err != nil {
+		t.Fatalf("AllScopes: %v", err)
+	}
+	if len(scopes) != 3 {
+		t.Fatalf("scopes = %d, want 3: %+v", len(scopes), scopes)
+	}
+	got := map[string]string{}
+	for _, s := range scopes {
+		got[s.OrgID] = s.Version
+	}
+	if got[""] != "v0.20.0" || got["default"] != "v0.21.8" || got["acme"] != "v0.21.8" {
+		t.Fatalf("scopes = %+v, want shared v0.20.0 + default/acme v0.21.8", scopes)
+	}
+}
+
 func TestK8sExtractOrdinal(t *testing.T) {
 	p, _ := defaultK8sProvider()
 

@@ -38,7 +38,8 @@ func (s *Server) handleCLILatest(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
-	art, err := s.cli.ResolveLatest(ctx, osName, arch)
+	includePre := s.cfg.CLIIncludePrereleases || c.Query("prerelease") == "true"
+	art, err := s.cli.ResolveLatestWithPrereleases(ctx, osName, arch, includePre)
 	if err != nil {
 		s.writeCLIError(c, err)
 		return

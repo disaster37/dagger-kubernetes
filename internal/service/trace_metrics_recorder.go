@@ -16,14 +16,23 @@ import (
 // even after the engine pod has scaled down or the run has finished. Leader-only to
 // avoid duplicate samples across replicas.
 type TraceMetricsRecorder struct {
-	sampler    domain.TraceMetricsRecorderStore
-	traceMeta  domain.TraceMetaRepository
-	namespace  string
-	interval   time.Duration
-	rateWindow time.Duration
-	maxWindow  time.Duration
-	isLeader   func() bool
-	logger     *logrus.Logger
+	sampler        domain.TraceMetricsRecorderStore
+	traceMeta      domain.TraceMetaRepository
+	namespace      string
+	interval       time.Duration
+	rateWindow     time.Duration
+	maxWindow      time.Duration
+	fleetIsolation string
+	isLeader       func() bool
+	logger         *logrus.Logger
+}
+
+// WithFleetIsolation sets fleet.isolation ("per_org" | "shared") so the sampled
+// engine pod selector narrows to a trace's org in per_org mode. Returns the
+// recorder for chaining.
+func (r *TraceMetricsRecorder) WithFleetIsolation(isolation string) *TraceMetricsRecorder {
+	r.fleetIsolation = isolation
+	return r
 }
 
 // NewTraceMetricsRecorder constructs the recorder. interval is the sampling
@@ -51,6 +60,16 @@ func (r *TraceMetricsRecorder) rateString() string {
 	return fmt.Sprintf("%ds", int64(r.rateWindow.Seconds()))
 }
 
+// podRegex returns the PromQL pod selector for a trace's engine fleet: the
+// org-scoped matcher in per_org isolation with a non-empty org, else the broad
+// version-level matcher.
+func (r *TraceMetricsRecorder) podRegex(m *domain.TraceMeta) string {
+	if r.fleetIsolation == "per_org" && m.OrgID != "" {
+		return domain.EngineOrgPodRegex(m.OrgID, m.Version)
+	}
+	return domain.EnginePodRegex(m.Version)
+}
+
 // Run samples all running traces once. No-op on non-leaders.
 func (r *TraceMetricsRecorder) Run(ctx context.Context) {
 	if !r.isLeader() {
@@ -73,7 +92,7 @@ func (r *TraceMetricsRecorder) Run(ctx context.Context) {
 		if now.Sub(m.StartedAt) > r.maxWindow {
 			continue
 		}
-		pod := escapePromQLLabelValue(domain.StsName(m.Version))
+		pod := escapePromQLLabelValue(r.podRegex(m))
 		for _, q := range defaultMetricQueries {
 			promql := buildPromQL(q.promql, ns, pod, r.rateString())
 			val, ok, err := r.sampler.QueryInstant(ctx, promql, now)

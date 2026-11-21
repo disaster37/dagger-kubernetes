@@ -1,0 +1,20 @@
+{{- if and .Values.dataIngress.enabled (eq .Values.dataIngress.passthroughVia "transportServer") }}
+apiVersion: k8s.nginx.org/v1
+kind: TransportServer
+metadata:
+  name: {{ include "dagger-kubernetes.fullname" . }}-data
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  listener:
+    name: tls-passthrough
+    protocol: TLS_PASSTHROUGH
+  host: {{ .Values.dataIngress.host | quote }}
+  upstreams:
+    - name: {{ include "dagger-kubernetes.fullname" . }}-data
+      service: {{ include "dagger-kubernetes.fullname" . }}-data
+      port: {{ .Values.service.data.port }}
+  action:
+    pass: {{ include "dagger-kubernetes.fullname" . }}-data
+{{- end }}

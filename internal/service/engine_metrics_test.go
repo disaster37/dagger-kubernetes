@@ -164,7 +164,7 @@ func TestEngineMetricsFallbackToLive(t *testing.T) {
 		if !strings.Contains(query, `namespace="my-ns"`) {
 			t.Fatalf("query %q missing namespace substitution", query)
 		}
-		if !strings.Contains(query, `pod=~"dagger-engine-v0-21-4-.*"`) {
+		if !strings.Contains(query, `pod=~"dagger-engine-(?:[a-z0-9-]+-)?v0-21-4-.*"`) {
 			t.Fatalf("query %q missing pod substitution", query)
 		}
 		if strings.Contains(query, "rate(") && !strings.Contains(query, "[60s]") {
@@ -179,6 +179,62 @@ func TestEngineMetricsFallbackToLive(t *testing.T) {
 	}
 	if tm.EndTime.Unix() != 1060 {
 		t.Fatalf("end_time = %v, want unix 1060", tm.EndTime)
+	}
+}
+
+// TestEngineMetricsPerOrgScoping verifies the engine pod selector narrows to
+// the trace's org in per_org isolation, and stays broad otherwise.
+func TestEngineMetricsPerOrgScoping(t *testing.T) {
+	cases := []struct {
+		name       string
+		isolation  string
+		org        string
+		wantSubstr string
+		notSubstr  string
+	}{
+		{
+			name:       "per_org with org narrows",
+			isolation:  "per_org",
+			org:        "default",
+			wantSubstr: `pod=~"dagger-engine-default-v0-21-4-.*"`,
+			notSubstr:  `pod=~"dagger-engine-(?:[a-z0-9-]+-)?v0-21-4-.*"`,
+		},
+		{
+			name:       "per_org without org stays broad",
+			isolation:  "per_org",
+			org:        "",
+			wantSubstr: `pod=~"dagger-engine-(?:[a-z0-9-]+-)?v0-21-4-.*"`,
+		},
+		{
+			name:       "shared stays broad",
+			isolation:  "shared",
+			org:        "default",
+			wantSubstr: `pod=~"dagger-engine-(?:[a-z0-9-]+-)?v0-21-4-.*"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			q := &stubMetricsQueryer{points: []domain.MetricPoint{{T: 1, V: 2}}}
+			svc := NewEngineMetricsService(q, "my-ns", 15*time.Second, time.Minute, testMetricsLogger()).
+				WithFleetIsolation(tc.isolation)
+			meta := &domain.TraceMeta{
+				TraceID:   "abcdef0123456789abcdef0123456789",
+				Version:   "v0.21.4",
+				OrgID:     tc.org,
+				StartedAt: time.Unix(1000, 0),
+			}
+			if _, err := svc.TraceMetrics(context.Background(), meta); err != nil {
+				t.Fatalf("TraceMetrics: %v", err)
+			}
+			for _, query := range q.liveQueries() {
+				if !strings.Contains(query, tc.wantSubstr) {
+					t.Fatalf("query %q missing %q", query, tc.wantSubstr)
+				}
+				if tc.notSubstr != "" && strings.Contains(query, tc.notSubstr) {
+					t.Fatalf("query %q unexpectedly contains %q", query, tc.notSubstr)
+				}
+			}
+		})
 	}
 }
 

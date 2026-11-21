@@ -32,12 +32,13 @@ const maxSessionFieldLen = 256
 // Register persists a new session lease (or replaces the lease for the same
 // certificate fingerprint). The FSM forwards it to every pod's local session
 // store, so any pod can later serve the data-plane tunnel for certFP.
-func (r *SessionRepo) Register(ctx context.Context, certFP, version, replicaPod, instanceID, traceID, userID, groupID string) error {
+func (r *SessionRepo) Register(ctx context.Context, orgID, certFP, version, replicaPod, instanceID, traceID, userID, groupID string) error {
 	if certFP == "" {
 		return fmt.Errorf("empty cert fingerprint: %w", domain.ErrValidation)
 	}
 	lease := domain.Lease{
 		CertFP:     certFP,
+		OrgID:      clipField(orgID),
 		Version:    version,
 		ReplicaPod: replicaPod,
 		InstanceID: clipField(instanceID),
