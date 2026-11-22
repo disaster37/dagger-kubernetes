@@ -46,7 +46,7 @@ func TestCloudGraphQLDepthAndLengthLimits(t *testing.T) {
 	if out := string(g.Exec(ctx, deep, "", nil)); !strings.Contains(out, "errors") {
 		t.Fatalf("deep query must be rejected: %s", out)
 	}
-	long := `{ user { id nickname email orgs { id name createdAt features } } }`
+	long := `{ user { id nickname email orgs { id name createdAt features { name } } } }`
 	if out := string(g.Exec(ctx, long, "", nil)); !strings.Contains(out, "errors") {
 		t.Fatalf("long query must be rejected: %s", out)
 	}

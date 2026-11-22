@@ -71,3 +71,69 @@ Cloud clients can use the standard GraphQL contract.
   wraps them (cheapest-rejection ordering: unknown → consumed → expired →
   pending → issuer checks) and the handler maps them with `errors.Is`. The
   `POST /api/v1/auth/refresh` endpoint keeps its existing 401 mapping.
+
+## Follow-up (2026-11-21 — CLI v1.0.0-beta.28 Cloud GraphQL parity)
+The Dagger CLI 1.0.0-beta.28 issues a wider set of Cloud GraphQL operations.
+The self-hosted schema is extended to accept them; operations whose backing
+service does not exist on a self-hosted deployment resolve to a deterministic
+"unsupported" error **after** the uniform authorization check (auth first, so a
+caller can never distinguish an inaccessible org from an unsupported feature —
+CWE-639 / anti-enumeration). The schema is split across
+`internal/repository/cloud_graphql.go` (schema, builders, helpers, and the
+org/subscription/billing families), `cloud_graphql_traces.go` (the `Time`
+scalar and traces), and `cloud_graphql_integrations.go` (checks, integrations,
+and repos).
+
+- **Org / subscription / features.** `Org.subscription` gains `trialStart`,
+  `trialEnd`, and `subscriptionID` (all self-hosted: no trial, id
+  `self-hosted`). `Org.features` is now the `Feature` object list
+  (`name`, `status` = `ACTIVE`, null trial bounds) rather than a scalar list.
+- **Billing.** `Mutation.createPortalSession` is rejected with
+  `billing is not available on this self-hosted deployment`. `Query.billingUsage`
+  returns a **zero-state** report for the requested `org`/`month` (validated as
+  `YYYY-MM`, else `invalid month ...`): revision `0`, empty strings/null times,
+  `warnings: []` (non-nil), and null `pricing`/`bill`. All nested
+  pricing/bill/resource types are bound so the CLI query validates.
+- **Traces.** A custom `Time` scalar marshals RFC3339Nano and unmarshals either
+  an RFC3339 timestamp (`TraceFilter.since`/`until`) or a base64url offset
+  cursor (`Org.traces(after:)`). `Org.traces` accepts the full `TraceFilter`
+  input and a `TraceSort` enum (`START`/`DURATION`); `first` clamps to
+  `[1, 500]`. `START` paginates with `pageInfo { hasNextPage endCursor }`
+  (base64 offset); `DURATION` is single-page and rejects a cursor. `Trace` is
+  enriched with `name`, `status { code message }` (null while running), a
+  non-nil `endTime` for terminal traces (even at 0 ms), `local`, optional
+  `sender`, and an optional `ci { isNativeCI provider repository }` block (null
+  for local traces). `Query.trace` and `Org.lastUserTrace` enforce org access.
+- **Checks.** `Org.checks`/`User.checks` return a `CheckCommitConnection` of
+  `CheckCommit` nodes (commit refs as a `CheckCommitRef` union of tag/branch/PR;
+  the SDK `Check` object; a synthesized internal `load` check when no items are
+  discovered). `Org.moduleChecks(moduleRef, moduleVersion)` matches a canonical
+  module ref + version. `Mutation.rerunChecks`/`rerunLoad` require the build-time
+  `checks.enabled` rerunner (wired from `ChecksService.Rerun`); without it they
+  return `check rerun is not available on this self-hosted deployment
+  (checks.enabled is false)`. Check IDs are `<runID>/<checkName>`; cross-org IDs
+  return `check not found`.
+- **Integrations & repos.** `sources`, `sourceRepositories`,
+  `githubConnection`, `gitlabOrganizationSources`/`gitlabSources`,
+  `entireInstallations`, `getRepos`, `User.repositories`, and `Org.repoSettings`
+  are backed by the forge-source and project repositories. Unsupported
+  (GitHub OAuth URL, GitLab account linking, Entire, repo visibility/trigger
+  mutations) return deterministic self-hosted errors.
+- **Self-hosted error strings (verbatim).**
+  - `billing is not available on this self-hosted deployment`
+  - `GitHub OAuth app integration is not configured on this self-hosted
+    deployment; configure forge integrations via /api/v1/orgs/<org>/integrations`
+  - `personal GitLab account linking is not supported on this self-hosted
+    deployment; configure GitLab integrations via /api/v1/orgs/<org>/integrations`
+  - `Entire integration is not available on this self-hosted deployment`
+  - `repository visibility settings are not supported on this self-hosted
+    deployment; manage forge integrations via /api/v1/orgs/<org>/integrations`
+  - `repository check triggers are managed via forge integrations on this
+    self-hosted deployment (/api/v1/orgs/<org>/integrations)`
+  - `check rerun is not available on this self-hosted deployment
+    (checks.enabled is false)`
+
+Shared helpers on the resolver root: `requireAuthenticated` (uniform
+`unauthenticated`), `resolveAccessibleOrg` (ID then slug, uniform `forbidden`
+for missing-or-inaccessible), and `accessibleOrgs` (org-scoped token → its org;
+global admin → all; else direct + group-derived memberships).

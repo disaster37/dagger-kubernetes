@@ -1030,16 +1030,25 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   `unsupported_grant_type`), so `golang.org/x/oauth2` clients keep polling
   until the user approves. CI can exchange GitHub/GitLab OIDC ID tokens at
   `POST /v1/oidc`.
-- **Cloud GraphQL.** `POST /query` serves the Cloud-compatible schema
-  (`user`, `org`, `trace`, cursor-paginated traces, per-org checks). To
-  bootstrap `dagger cloud login`, a freshly authenticated user with no org
-  memberships may call the `createQuickstartOrg(name: String!): Org!` mutation,
-  which creates (or idempotently returns) an org and grants the caller
-  `org_admin`. `Org.cliNotice` is a `CLINotice { level, title, body }` object
-  (null when none) queried by subsequent CLI commands. Query
-  complexity is bounded by `graphql.max_depth`, `graphql.max_selections`,
-  `graphql.max_query_bytes`, and `graphql.max_parallelism`; introspection is
-  disabled unless `graphql.introspection_enabled: true`.
+- **Cloud GraphQL.** `POST /query` serves the Cloud-compatible schema used by
+  the Dagger CLI 1.0.0-beta.28: `user`, `org`, `trace`, cursor-paginated
+  `traces` (full `TraceFilter` + `TraceSort`, custom `Time` scalar),
+  `billingUsage` (zero-state on self-hosted), the org/check/integration/repo
+  families (`sources`, `sourceRepositories`, `gitlab*`, `entire*`, `getRepos`,
+  `repoSettings`, `moduleChecks`, `CheckCommitConnection`), and the
+  `createQuickstartOrg`/`rerunChecks`/`rerunLoad` mutations. To bootstrap
+  `dagger cloud login`, a freshly authenticated user with no org memberships
+  may call `createQuickstartOrg(name: String!): Org!`, which creates (or
+  idempotently returns) an org and grants the caller `org_admin`. `Org.features`
+  is the `Feature { name status trialStart trialEnd }` object list;
+  `Org.cliNotice` is a `CLINotice { level, title, body }` object (null when
+  none). Operations with no self-hosted backing (billing portal, GitHub OAuth
+  app, GitLab account linking, Entire, repo-setting mutations, check rerun when
+  `checks.enabled` is false) return a deterministic self-hosted error **after**
+  the uniform authorization check. Query complexity is bounded by
+  `graphql.max_depth`, `graphql.max_selections`, `graphql.max_query_bytes`, and
+  `graphql.max_parallelism`; introspection is disabled unless
+  `graphql.introspection_enabled: true`.
 - **OTLP read-back.** `GET /v1/{traces,logs,metrics}/:traceID` streams framed
   binary `application/vnd.dagger.otlp.stream` data for `dagger trace` and
   `dagger agent -r`.

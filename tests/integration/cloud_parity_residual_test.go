@@ -91,6 +91,10 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	workflowSvc := service.NewWorkflowService(workflowRepo, envRepo, orgsSvc, projectsSvc, forgeRepo, repository.NewWorkflowFileParser(), repository.NewWorkflowExprEvaluator(), nil, flowRunner, secretSvc, service.WorkflowServiceConfig{DefaultTimeout: time.Minute, MaxParallel: 1}, logger)
 	forgeProviders := []domain.ForgeProvider{repository.NewGitHubForge(""), repository.NewGitLabForge(""), repository.NewGiteaForge("")}
 	checksSvc := service.NewChecksService(forgeRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, "https://example.com", logger)
+	graphql.WithForgeSources(forgeRepo).WithProjects(projectRepo).WithPublicURL("https://example.com")
+	if checkRunner != nil {
+		graphql.WithCheckRerunner(checksSvc.Rerun)
+	}
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
@@ -654,4 +658,193 @@ jobs:
 	}, workflowToken); !bytes.Contains(body, []byte(`"success"`)) {
 		t.Fatalf("deploy complete = %s", body)
 	}
+}
+
+// gqlPost executes a GraphQL POST /query with an explicit bearer token,
+// returning the decoded response and the HTTP status code.
+func gqlPost(t *testing.T, base, token, query string, variables map[string]any) (result map[string]any, status int) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"query": query, "variables": variables})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := http.NewRequest(http.MethodPost, base+"/query", bytes.NewReader(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "" {
+		req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", token))
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, _ := io.ReadAll(resp.Body)
+	if err := json.Unmarshal(body, &result); err != nil {
+		t.Fatalf("decode %q: %v", body, err)
+	}
+	return result, resp.StatusCode
+}
+
+func gqlData(t *testing.T, res map[string]any) map[string]any {
+	t.Helper()
+	if errs, ok := res["errors"]; ok {
+		t.Fatalf("graphql errors: %v", errs)
+	}
+	data, _ := res["data"].(map[string]any)
+	return data
+}
+
+// TestCloudGraphQLCLIOperationsEndToEnd exercises the beta.28 CLI Cloud GraphQL
+// operations over real HTTP POST /query against a seeded server.
+func TestCloudGraphQLCLIOperationsEndToEnd(t *testing.T) {
+	checkRunner := &recordingCheckRunner{}
+	srv := newParityServer(t, domain.GraphQLConfig{MaxDepth: 30, MaxSelections: 1000, MaxQueryBytes: 1 << 20, MaxParallelism: 10}, nil, nil, checkRunner, nil)
+	ctx := context.Background()
+
+	// Seed an org trace (org "acme" is created by newParityServer).
+	traceRepo := repository.NewTraceMetaRepo(srv.store)
+	now := time.Now().UTC().Add(-time.Minute)
+	for i, status := range []string{"running", "success", "failed"} {
+		if err := traceRepo.UpsertIngest(ctx, &domain.TraceMeta{
+			TraceID:       fmt.Sprintf("face00000000000%d", i),
+			OrgID:         "acme",
+			ProjectName:   "acme/api",
+			Status:        status,
+			DurationMS:    int64(i * 1000),
+			FailureReason: "boom",
+			StartedAt:     now.Add(time.Duration(i) * time.Minute),
+			UpdatedAt:     now.Add(time.Duration(i) * time.Minute),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	forgeRepo := repository.NewForgeSourceRepo(srv.store)
+	tokenCT, _ := srv.secrets.SealRaw(domain.SecretScopeOrg, "acme", "forge-token")
+	if err := forgeRepo.Upsert(ctx, &domain.ForgeSource{ID: "src-e2e", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", InstallationID: "4242", TokenCiphertext: tokenCT}); err != nil {
+		t.Fatal(err)
+	}
+	checkRepo := repository.NewCheckRunRepo(srv.store)
+	if err := checkRepo.Upsert(ctx, &domain.CheckRunRecord{
+		ID: "check-e2e", OrgID: "acme", SourceID: "src-e2e", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "sha-e2e",
+		Status: "success", CreatedAt: now, Checks: []domain.CheckItem{{Name: "test", State: domain.CheckSuccess, TraceID: "trace-1"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// 401 without a token.
+	if _, status := gqlPost(t, srv.base, "", `{ user { id } }`, nil); status != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated status = %d, want 401", status)
+	}
+
+	// GetOrgDetails
+	res, _ := gqlPost(t, srv.base, srv.admin, `{ org(name: "acme") { id name createdAt subscription { status subscriptionID planID hasCaching } features { name status } cliNotice { level } } }`, nil)
+	org := gqlData(t, res)["org"].(map[string]any)
+	if org["name"] != "acme" {
+		t.Fatalf("org = %v", org)
+	}
+	if org["subscription"].(map[string]any)["subscriptionID"] != "self-hosted" {
+		t.Fatalf("subscription = %v", org["subscription"])
+	}
+
+	// CreatePortalSession -> self-hosted error
+	res, _ = gqlPost(t, srv.base, srv.admin, `mutation { createPortalSession(org: "acme") }`, nil)
+	if _, ok := res["errors"]; !ok {
+		t.Fatalf("createPortalSession must error: %v", res)
+	}
+
+	// GetBillingUsage
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ billingUsage(org: "acme", month: "2026-11") { month revision warnings pricing { planID } } }`, nil)
+	usage := gqlData(t, res)["billingUsage"].(map[string]any)
+	if usage["month"] != "2026-11" || len(usage["warnings"].([]any)) != 0 {
+		t.Fatalf("billingUsage = %v", usage)
+	}
+
+	// TraceList page 1
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ org(name: "acme") { traces(sort: START, first: 2) { nodes { id status { code } timestamp } pageInfo { hasNextPage endCursor } } } }`, nil)
+	traces := gqlData(t, res)["org"].(map[string]any)["traces"].(map[string]any)
+	pi := traces["pageInfo"].(map[string]any)
+	if pi["hasNextPage"] != true {
+		t.Fatalf("trace page1 must have next: %v", pi)
+	}
+	cursor := pi["endCursor"].(string)
+	// TraceList page 2 (cursor round-trip through the Time scalar)
+	res, _ = gqlPost(t, srv.base, srv.admin, `query($after: Time) { org(name: "acme") { traces(sort: START, first: 2, after: $after) { nodes { id } } } }`, map[string]any{"after": cursor})
+	nodes2 := gqlData(t, res)["org"].(map[string]any)["traces"].(map[string]any)["nodes"].([]any)
+	if len(nodes2) < 1 {
+		t.Fatalf("trace page2 empty for cursor %s", cursor)
+	}
+
+	// GetTraceMetadata
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ trace(id: "face000000000001", org: "acme") { id name status { code } } }`, nil)
+	tr := gqlData(t, res)["trace"].(map[string]any)
+	if tr["status"].(map[string]any)["code"] != "STATUS_CODE_OK" {
+		t.Fatalf("trace = %v", tr)
+	}
+
+	// GetOrgChecks / GetUserChecks / GetModuleChecks
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ org(name: "acme") { checks(first: 10) { nodes { repo checks { name status } } } } }`, nil)
+	if len(gqlData(t, res)["org"].(map[string]any)["checks"].(map[string]any)["nodes"].([]any)) != 1 {
+		t.Fatalf("org checks = %v", res)
+	}
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ user { checks(first: 10) { nodes { repo } } } }`, nil)
+	if len(gqlData(t, res)["user"].(map[string]any)["checks"].(map[string]any)["nodes"].([]any)) != 1 {
+		t.Fatalf("user checks = %v", res)
+	}
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ org(name: "acme") { moduleChecks(moduleRef: "github.com/acme/api", moduleVersion: "sha-e2e") { repo } } }`, nil)
+	if len(gqlData(t, res)["org"].(map[string]any)["moduleChecks"].([]any)) != 1 {
+		t.Fatalf("moduleChecks = %v", res)
+	}
+
+	// GetSources / GetUserRepositories / GetOrgRepoSetting / GetRepos
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ sources { id name type configUrl } }`, nil)
+	if len(gqlData(t, res)["sources"].([]any)) != 1 {
+		t.Fatalf("sources = %v", res)
+	}
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ user { repositories(refs: ["github.com/acme/api"]) { ref mappedSource { provider sourceName } } } }`, nil)
+	if len(gqlData(t, res)["user"].(map[string]any)["repositories"].([]any)) != 1 {
+		t.Fatalf("repositories = %v", res)
+	}
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ org(name: "acme") { repoSettings { repo isPublic } } }`, nil)
+	if len(gqlData(t, res)["org"].(map[string]any)["repoSettings"].([]any)) != 1 {
+		t.Fatalf("repoSettings = %v", res)
+	}
+	res, _ = gqlPost(t, srv.base, srv.admin, `{ getRepos { name fullName private } }`, nil)
+	if len(gqlData(t, res)["getRepos"].([]any)) < 1 {
+		t.Fatalf("getRepos = %v", res)
+	}
+
+	// RerunChecks -> the runner is invoked
+	before := checkRunner.count()
+	res, _ = gqlPost(t, srv.base, srv.admin, `mutation { rerunChecks(org: "acme", checkIds: ["check-e2e/test"]) { id name status } }`, nil)
+	out := gqlData(t, res)["rerunChecks"].([]any)
+	if len(out) != 1 || out[0].(map[string]any)["status"] != "pending" {
+		t.Fatalf("rerunChecks = %v", out)
+	}
+	if checkRunner.count() != before+1 {
+		t.Fatalf("rerun must dispatch one run: before=%d after=%d", before, checkRunner.count())
+	}
+
+	// Forbidden: an outsider (non-member, non-admin) is rejected on an org op.
+	outsiderToken := srv.parityOutsiderToken(t)
+	res, _ = gqlPost(t, srv.base, outsiderToken, `{ org(name: "acme") { id } }`, nil)
+	if _, ok := res["errors"]; !ok {
+		t.Fatalf("outsider must be forbidden: %v", res)
+	}
+}
+
+// parityOutsiderToken creates a non-member, non-admin user and returns a token.
+func (p *parityServer) parityOutsiderToken(t *testing.T) string {
+	t.Helper()
+	u, err := p.users.Create(context.Background(), "gql-outsider", "password123", domain.RoleUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tok, _, err := p.tokens.Generate(context.Background(), u.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tok
 }

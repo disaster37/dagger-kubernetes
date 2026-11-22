@@ -2,11 +2,9 @@ package repository
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -34,85 +32,103 @@ func graphqlIdentity(ctx context.Context) GraphQLIdentity {
 	return id
 }
 
+// CheckRerunner re-dispatches a Cloud Checks run identified by runID.
+type CheckRerunner func(ctx context.Context, runID string) (*domain.CheckRunRecord, error)
+
 const cloudGraphQLSchema = `
 schema { query: Query mutation: Mutation }
-
+scalar Time
 type Query {
   user: User!
   org(name: String!): Org
-  trace(id: ID!, org: String): Trace
+  trace(id: ID!, org: ID): Trace
+  billingUsage(org: ID!, month: String!): BillingUsage!
+  sources: [Source!]!
+  sourceRepositories(installationId: ID!, org: ID): [SourceRepository!]!
+  githubConnection: GitHubConnection
+  githubOAuthURL(redirectURI: String!): String!
+  gitlabOrganizationSources(org: ID!): [GitLabSource!]!
+  gitlabSources(org: ID!): [GitLabSource!]!
+  entireInstallations(org: ID!): [EntireInstallation!]!
+  entireInstallURL(org: ID!, redirectURI: String!): String!
+  getRepos: [Repo!]!
 }
-
 type Mutation {
   createQuickstartOrg(name: String!): Org!
+  createPortalSession(org: ID!): String!
+  rerunChecks(org: ID!, checkIds: [ID!]!, cleanSlate: Boolean): [Check!]!
+  rerunLoad(org: ID!, checkId: ID!): Check!
+  useGitLabAccount(org: ID!, source: ID!): GitLabSourceAccess
+  updateOrgRepoSetting(org: ID!, setting: RepoSettingInput!): Boolean!
+  deleteOrgRepoSetting(org: ID!, repoName: String!): Boolean!
+  updateOrgRepoSettings(org: ID!, settings: [RepoSettingInput!]!): Boolean!
 }
-
-type User {
-  id: ID!
-  nickname: String!
-  email: String!
-  orgs: [Org!]!
-}
-
-type CLINotice {
-  level: String!
-  title: String!
-  body: String!
-}
-
+type User { id: ID! nickname: String! email: String! orgs: [Org!]! checks(repos: [String!], first: Int): CheckCommitConnection! repositories(refs: [String!]): [UserRepository!]! }
+type CLINotice { level: String! title: String! body: String! }
 type Org {
-  id: ID!
-  name: String!
-  createdAt: String!
+  id: ID! name: String! createdAt: String!
   subscription: Subscription!
-  features: [String!]!
+  features: [Feature!]!
   cliNotice: CLINotice
   lastUserTrace: Trace
-  traces(filter: String, sort: String, first: Int, after: String): TraceConnection!
-  checks(first: Int): [CheckRun!]!
+  traces(filter: TraceFilter, sort: TraceSort, first: Int, after: Time): TraceConnection!
+  checks(repos: [String!], first: Int): CheckCommitConnection!
+  moduleChecks(moduleRef: String!, moduleVersion: String!): [CheckCommit!]!
+  repoSettings(repo: String): [RepoSettings!]!
 }
-
-type CheckRun {
-  id: ID!
-  name: String!
-  state: String!
-  traceID: String
-  summary: String
-  updatedAt: String!
+type Subscription { status: String! trialStart: String trialEnd: String subscriptionID: String! planID: String! hasCaching: Boolean! }
+type Feature { name: String! status: String! trialStart: String trialEnd: String }
+type BillingUsage {
+  month: String! revision: Int! calculation: String!
+  asOf: Time processedThrough: Time calculatedAt: Time
+  refreshStatus: String! refreshMonth: String! nextRefreshAt: Time
+  error: String! finalizedAt: Time invoiceID: String invoiceURL: String
+  warnings: [String!]! pricing: BillingUsagePricing bill: BillingUsageBill
 }
-
-type Subscription {
-  status: String!
-  planID: String!
-  hasCaching: Boolean!
-}
-
+type BillingUsagePricing { planID: String! name: String! minimumUSD: Float! }
+type BillingUsageBill { usageUSD: Float! minimumAdjustmentUSD: Float! totalUSD: Float! resources: [BillingUsageResource!]! }
+type BillingUsageResource { resource: String! unit: String! newQuantity: Float! repeatRan: Float! repeatCached: Float! repeatEstimated: Float! newPrice: Float! repeatPrice: Float! newChargeUSD: Float! repeatChargeUSD: Float! estimated: Boolean! }
+enum TraceSort { START DURATION }
+input TraceFilter { repos: [String!] branch: String commit: String tag: String change: String status: String local: Boolean mine: Boolean user: String token: String author: String name: String provider: String since: Time until: Time minDuration: Float maxDuration: Float }
 type Trace {
-  id: ID!
-  status: String!
-  project: String!
-  version: String!
-  durationMS: Int!
-  startedAt: String!
-  updatedAt: String!
+  id: ID! name: String! status: TraceStatus project: String! version: String! durationMS: Int! startedAt: String! updatedAt: String!
+  timestamp: Time! endTime: Time local: Boolean! sender: TraceSender git: TraceGit ci: TraceCI
 }
-
-type TraceConnection {
-  nodes: [Trace!]!
-  pageInfo: PageInfo!
-}
-
-type PageInfo {
-  hasNextPage: Boolean!
-  endCursor: String
-}
+type TraceStatus { code: String! message: String! }
+type TraceSender { name: String! }
+type TraceGit { remote: String! title: String! ref: String! tag: String branch: String author: TraceGitAuthor }
+type TraceGitAuthor { name: String! email: String! }
+type TraceCI { isNativeCI: Boolean! provider: String repository: String change: TraceCIChange }
+type TraceCIChange { id: String! title: String! branch: String! headSHA: String! }
+type TraceConnection { nodes: [Trace!]! pageInfo: PageInfo! }
+type PageInfo { hasNextPage: Boolean! endCursor: String }
+type CheckCommitConnection { nodes: [CheckCommit!]! }
+type CheckCommit { repo: String! commitSHA: String! commitMessage: String! timestamp: Time! authorName: String! authorEmail: String! events: [CheckEvent!]! refs: [CheckCommitRef!]! checks: [Check!]! org: CheckCommitOrg! }
+type CheckCommitOrg { id: ID! name: String! }
+type CheckEvent { provider: String! type: String! timestamp: Time! actor: CheckActor! }
+type CheckActor { id: ID! login: String! name: String! avatarUrl: String! }
+union CheckCommitRef = CheckCommitTagRef | CheckCommitBranchRef | CheckCommitPullRequestRef
+type CheckCommitTagRef { name: String! url: String! }
+type CheckCommitBranchRef { name: String! url: String! }
+type CheckCommitPullRequestRef { number: Int! url: String! title: String! state: String! integrationCommit: String! }
+type Check { id: ID! name: String! status: String! startedAt: Time endTime: Time duration: Int traceId: String! spanId: String! moduleRef: String! moduleVersion: String! internal: Boolean! }
+type Source { id: ID! name: String! type: String! configuredAt: String! orgId: ID orgName: String configUrl: String! }
+type SourceRepository { repository: String! selected: Boolean! eligible: Boolean! claimedByOrgName: String }
+type UserRepository { ref: String! settings: RepoSettings mappedSource: MappedSource }
+type MappedSource { provider: String! sourceName: String! installationId: String! configUrl: String! org: Org }
+type GitHubConnection { githubLogin: String! connectedAt: String! }
+type GitLabSource { id: ID! instanceURL: String! namespacePath: String! access(org: ID!): GitLabSourceAccess }
+type GitLabSourceAccess { connectionID: String! }
+type EntireInstallation { id: ID! name: String! manageURL: String! }
+type Repo { name: String! fullName: String! private: Boolean! }
+type RepoSettings { repo: String! isPublic: Boolean! effectiveRunChecksOnDefaultBranch: Boolean! effectiveRunChecksOnPullRequest: Boolean! }
+input RepoSettingInput { repo: String! isPublic: Boolean sourceId: ID runChecksOnDefaultBranch: Boolean runChecksOnPullRequest: Boolean runChecksOnBranchPush: Boolean }
 `
 
 // CloudGraphQL is the Cloud-compatible GraphQL schema and resolver root.
 type CloudGraphQL struct {
-	schema     *graphql.Schema
-	root       *graphqlRoot
-	orgCreator OrgCreator
+	schema *graphql.Schema
+	root   *graphqlRoot
 }
 
 // OrgCreator provisions a new organization (generated org-<16hex> ID and
@@ -122,8 +138,34 @@ type OrgCreator func(ctx context.Context, name, displayName string) (*domain.Org
 
 // WithOrgCreator installs the org provisioner used by CreateQuickstartOrg.
 func (g *CloudGraphQL) WithOrgCreator(fn OrgCreator) *CloudGraphQL {
-	g.orgCreator = fn
 	g.root.orgCreator = fn
+	return g
+}
+
+// WithForgeSources wires the forge integration repository used by the
+// sources/repositories/integrations families.
+func (g *CloudGraphQL) WithForgeSources(repo domain.ForgeSourceRepository) *CloudGraphQL {
+	g.root.forgeSources = repo
+	return g
+}
+
+// WithProjects wires the project repository used by GetRepos.
+func (g *CloudGraphQL) WithProjects(repo domain.ProjectRepository) *CloudGraphQL {
+	g.root.projects = repo
+	return g
+}
+
+// WithPublicURL wires the deployment's public base URL used to build the
+// config URLs returned by the integrations family.
+func (g *CloudGraphQL) WithPublicURL(url string) *CloudGraphQL {
+	g.root.publicURL = strings.TrimRight(url, "/")
+	return g
+}
+
+// WithCheckRerunner wires the Cloud Checks re-dispatcher used by rerunChecks
+// and rerunLoad.
+func (g *CloudGraphQL) WithCheckRerunner(fn CheckRerunner) *CloudGraphQL {
+	g.root.checkRerunner = fn
 	return g
 }
 
@@ -154,18 +196,80 @@ func (g *CloudGraphQL) Exec(ctx context.Context, query, operationName string, va
 }
 
 type graphqlRoot struct {
-	users      domain.UserRepository
-	orgs       domain.OrgRepository
-	groups     domain.GroupRepository
-	traces     domain.TraceMetaRepository
-	checks     domain.CheckRunRepository
-	orgCreator OrgCreator
+	users         domain.UserRepository
+	orgs          domain.OrgRepository
+	groups        domain.GroupRepository
+	traces        domain.TraceMetaRepository
+	checks        domain.CheckRunRepository
+	forgeSources  domain.ForgeSourceRepository
+	projects      domain.ProjectRepository
+	publicURL     string
+	orgCreator    OrgCreator
+	checkRerunner CheckRerunner
+}
+
+// requireAuthenticated returns the caller identity, rejecting requests without
+// a resolved user (CWE-306).
+func (r *graphqlRoot) requireAuthenticated(ctx context.Context) (GraphQLIdentity, error) {
+	id := graphqlIdentity(ctx)
+	if id.UserID == "" && id.OrgID == "" {
+		return id, fmt.Errorf("unauthenticated")
+	}
+	return id, nil
+}
+
+// resolveAccessibleOrg resolves a caller-supplied org ID (or, when it is not a
+// known ID, an org slug) and enforces access. Missing and inaccessible orgs
+// both return "forbidden" (anti-enumeration).
+func (r *graphqlRoot) resolveAccessibleOrg(ctx context.Context, rawOrg string) (*domain.Org, error) {
+	id, err := r.requireAuthenticated(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if rawOrg == "" {
+		return nil, fmt.Errorf("forbidden")
+	}
+	org, err := r.orgs.Get(ctx, rawOrg)
+	if err != nil {
+		if !errors.Is(err, domain.ErrNotFound) {
+			return nil, err
+		}
+		org, err = r.orgs.GetByName(ctx, rawOrg)
+		if err != nil {
+			return nil, fmt.Errorf("forbidden")
+		}
+	}
+	if !r.canAccessOrg(ctx, id, org.ID) {
+		return nil, fmt.Errorf("forbidden")
+	}
+	return org, nil
+}
+
+// accessibleOrgs lists the orgs the caller may act on: an org-scoped token sees
+// only its own org, a global admin sees all orgs, and everyone else sees their
+// direct + group-derived memberships.
+func (r *graphqlRoot) accessibleOrgs(ctx context.Context) ([]*domain.Org, error) {
+	id, err := r.requireAuthenticated(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if id.OrgID != "" {
+		org, err := r.orgs.Get(ctx, id.OrgID)
+		if err != nil {
+			return nil, err
+		}
+		return []*domain.Org{org}, nil
+	}
+	if u, err := r.users.Get(ctx, id.UserID); err == nil && u.Role == domain.RoleAdmin {
+		return r.orgs.List(ctx)
+	}
+	return r.userOrgs(ctx, id.UserID)
 }
 
 func (r *graphqlRoot) User(ctx context.Context) (*graphqlUser, error) {
-	id := graphqlIdentity(ctx)
-	if id.UserID == "" {
-		return nil, fmt.Errorf("unauthenticated")
+	id, err := r.requireAuthenticated(ctx)
+	if err != nil {
+		return nil, err
 	}
 	u, err := r.users.Get(ctx, id.UserID)
 	if err != nil {
@@ -175,7 +279,10 @@ func (r *graphqlRoot) User(ctx context.Context) (*graphqlUser, error) {
 }
 
 func (r *graphqlRoot) Org(ctx context.Context, args struct{ Name string }) (*graphqlOrg, error) {
-	id := graphqlIdentity(ctx)
+	id, err := r.requireAuthenticated(ctx)
+	if err != nil {
+		return nil, err
+	}
 	o, err := r.orgs.GetByName(ctx, args.Name)
 	if err != nil {
 		return nil, err
@@ -184,6 +291,31 @@ func (r *graphqlRoot) Org(ctx context.Context, args struct{ Name string }) (*gra
 		return nil, fmt.Errorf("forbidden")
 	}
 	return &graphqlOrg{root: r, org: o}, nil
+}
+
+// BillingUsage returns a self-hosted zero-state usage report for the month. It
+// exists so the beta.28 CLI's usage command resolves; the deployment performs
+// no metering.
+func (r *graphqlRoot) BillingUsage(ctx context.Context, args struct {
+	Org   graphql.ID
+	Month string
+}) (*graphqlBillingUsage, error) {
+	if _, err := r.resolveAccessibleOrg(ctx, string(args.Org)); err != nil {
+		return nil, err
+	}
+	if _, err := time.Parse("2006-01", args.Month); err != nil {
+		return nil, fmt.Errorf("invalid month %q: expected YYYY-MM", args.Month)
+	}
+	return &graphqlBillingUsage{month: args.Month}, nil
+}
+
+// CreatePortalSession is rejected: self-hosted deployments have no billing
+// portal.
+func (r *graphqlRoot) CreatePortalSession(ctx context.Context, args struct{ Org graphql.ID }) (string, error) {
+	if _, err := r.resolveAccessibleOrg(ctx, string(args.Org)); err != nil {
+		return "", err
+	}
+	return "", fmt.Errorf("billing is not available on this self-hosted deployment")
 }
 
 // CreateQuickstartOrg creates an organization for a platform administrator.
@@ -254,25 +386,6 @@ func sanitizeQuickstartOrgSlug(raw string) string {
 	return slug
 }
 
-func (r *graphqlRoot) Trace(ctx context.Context, args struct {
-	ID  string
-	Org *string
-}) (*graphqlTrace, error) {
-	id := graphqlIdentity(ctx)
-	m, err := r.traces.Get(ctx, args.ID)
-	if err != nil {
-		return nil, err
-	}
-	orgID := m.OrgID
-	if orgID == "" {
-		return nil, fmt.Errorf("forbidden")
-	}
-	if !r.canAccessOrg(ctx, id, orgID) {
-		return nil, fmt.Errorf("forbidden")
-	}
-	return &graphqlTrace{meta: m}, nil
-}
-
 // canAccessOrg reports whether the caller may read orgID: the caller's own
 // org-scoped token, a global admin, or a direct/group-derived org membership
 // (CWE-862).
@@ -340,8 +453,7 @@ func (u *graphqlUser) Nickname() string { return u.user.Username }
 func (u *graphqlUser) Email() string    { return "" }
 
 func (u *graphqlUser) Orgs(ctx context.Context) ([]*graphqlOrg, error) {
-	id := graphqlIdentity(ctx)
-	orgs, err := u.root.userOrgs(ctx, id.UserID)
+	orgs, err := u.root.accessibleOrgs(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -357,10 +469,18 @@ type graphqlOrg struct {
 	org  *domain.Org
 }
 
-func (o *graphqlOrg) ID() graphql.ID     { return graphql.ID(o.org.ID) }
-func (o *graphqlOrg) Name() string       { return o.org.Name }
-func (o *graphqlOrg) CreatedAt() string  { return o.org.CreatedAt.UTC().Format(time.RFC3339) }
-func (o *graphqlOrg) Features() []string { return o.org.Features }
+func (o *graphqlOrg) ID() graphql.ID    { return graphql.ID(o.org.ID) }
+func (o *graphqlOrg) Name() string      { return o.org.Name }
+func (o *graphqlOrg) CreatedAt() string { return o.org.CreatedAt.UTC().Format(time.RFC3339) }
+
+func (o *graphqlOrg) Features() []*graphqlFeature {
+	out := make([]*graphqlFeature, 0, len(o.org.Features))
+	for _, f := range o.org.Features {
+		out = append(out, &graphqlFeature{name: f})
+	}
+	return out
+}
+
 func (o *graphqlOrg) CliNotice() *graphqlCLINotice {
 	// No CLI notice is configured for self-hosted orgs; returning nil (JSON
 	// null) satisfies the CLI's `cliNotice { level title body }` query.
@@ -378,154 +498,103 @@ func (n *graphqlCLINotice) Level() string { return n.level }
 func (n *graphqlCLINotice) Title() string { return n.title }
 func (n *graphqlCLINotice) Body() string  { return n.body }
 
+// graphqlFeature is the Feature GraphQL object type.
+type graphqlFeature struct {
+	name string
+}
+
+func (f *graphqlFeature) Name() string        { return f.name }
+func (f *graphqlFeature) Status() string      { return "ACTIVE" }
+func (f *graphqlFeature) TrialStart() *string { return nil }
+func (f *graphqlFeature) TrialEnd() *string   { return nil }
+
 func (o *graphqlOrg) Subscription() *graphqlSubscription {
 	return &graphqlSubscription{}
 }
 
-func (o *graphqlOrg) LastUserTrace(ctx context.Context) (*graphqlTrace, error) {
-	rows, err := o.root.traces.List(ctx, &domain.TraceFilter{OrgID: o.org.ID, Limit: 1})
-	if err != nil || len(rows) == 0 {
-		return nil, nil
-	}
-	return &graphqlTrace{meta: &rows[0].TraceMeta}, nil
-}
-
-func (o *graphqlOrg) Traces(ctx context.Context, args struct {
-	Filter *string
-	Sort   *string
-	First  *int32
-	After  *string
-}) (*graphqlTraceConnection, error) {
-	limit := domain.DefaultTraceLimit
-	if args.First != nil && *args.First > 0 {
-		limit = int(*args.First)
-	}
-	if limit > domain.MaxTraceLimit {
-		limit = domain.MaxTraceLimit
-	}
-	offset := 0
-	if args.After != nil && *args.After != "" {
-		raw, err := base64.RawURLEncoding.DecodeString(*args.After)
-		if err != nil {
-			return nil, fmt.Errorf("invalid cursor")
-		}
-		n, err := strconv.Atoi(string(raw))
-		if err != nil || n < 0 {
-			return nil, fmt.Errorf("invalid cursor")
-		}
-		offset = n
-	}
-	rows, err := o.root.traces.List(ctx, &domain.TraceFilter{OrgID: o.org.ID, Limit: offset + limit + 1})
-	if err != nil {
-		return nil, err
-	}
-	if offset > len(rows) {
-		offset = len(rows)
-	}
-	end := offset + limit
-	if end > len(rows) {
-		end = len(rows)
-	}
-	page := rows[offset:end]
-	nodes := make([]*graphqlTrace, 0, len(page))
-	for i := range page {
-		nodes = append(nodes, &graphqlTrace{meta: &page[i].TraceMeta})
-	}
-	hasNext := len(rows) > end
-	var endCursor *string
-	if hasNext {
-		cursor := base64.RawURLEncoding.EncodeToString([]byte(strconv.Itoa(end)))
-		endCursor = &cursor
-	}
-	return &graphqlTraceConnection{nodes: nodes, hasNext: hasNext, endCursor: endCursor}, nil
-}
-
-func (o *graphqlOrg) Checks(ctx context.Context, args struct{ First *int32 }) ([]*graphqlCheckRun, error) {
-	if o.root.checks == nil {
-		return nil, nil
-	}
-	limit := domain.DefaultTraceLimit
-	if args.First != nil && *args.First > 0 {
-		limit = int(*args.First)
-	}
-	if limit > domain.MaxTraceLimit {
-		limit = domain.MaxTraceLimit
-	}
-	records, err := o.root.checks.List(ctx, &domain.CheckRunFilter{OrgID: o.org.ID, Limit: limit})
-	if err != nil {
-		return nil, err
-	}
-	out := make([]*graphqlCheckRun, 0, len(records))
-	for _, rec := range records {
-		for _, item := range rec.Checks {
-			out = append(out, &graphqlCheckRun{recordID: rec.ID, item: item})
-		}
-	}
-	return out, nil
-}
-
 type graphqlSubscription struct{}
 
-func (s *graphqlSubscription) Status() string   { return "active" }
-func (s *graphqlSubscription) PlanID() string   { return "self-hosted" }
-func (s *graphqlSubscription) HasCaching() bool { return true }
+func (s *graphqlSubscription) Status() string         { return "active" }
+func (s *graphqlSubscription) TrialStart() *string    { return nil }
+func (s *graphqlSubscription) TrialEnd() *string      { return nil }
+func (s *graphqlSubscription) SubscriptionID() string { return "self-hosted" }
+func (s *graphqlSubscription) PlanID() string         { return "self-hosted" }
+func (s *graphqlSubscription) HasCaching() bool       { return true }
 
-type graphqlTrace struct {
-	meta *domain.TraceMeta
+// graphqlBillingUsage is the self-hosted zero-state BillingUsage report.
+type graphqlBillingUsage struct {
+	month string
 }
 
-func (t *graphqlTrace) ID() graphql.ID  { return graphql.ID(t.meta.TraceID) }
-func (t *graphqlTrace) Status() string  { return t.meta.Status }
-func (t *graphqlTrace) Project() string { return t.meta.ProjectName }
-func (t *graphqlTrace) Version() string { return t.meta.Version }
-func (t *graphqlTrace) DurationMS() int32 {
-	if t.meta.DurationMS > int64(^uint32(0)>>1) {
-		return int32(^uint32(0) >> 1)
+func (b *graphqlBillingUsage) Month() string                        { return b.month }
+func (b *graphqlBillingUsage) Revision() int32                      { return 0 }
+func (b *graphqlBillingUsage) Calculation() string                  { return "" }
+func (b *graphqlBillingUsage) AsOf() *graphqlTime                   { return nil }
+func (b *graphqlBillingUsage) ProcessedThrough() *graphqlTime       { return nil }
+func (b *graphqlBillingUsage) CalculatedAt() *graphqlTime           { return nil }
+func (b *graphqlBillingUsage) RefreshStatus() string                { return "" }
+func (b *graphqlBillingUsage) RefreshMonth() string                 { return "" }
+func (b *graphqlBillingUsage) NextRefreshAt() *graphqlTime          { return nil }
+func (b *graphqlBillingUsage) Error() string                        { return "" }
+func (b *graphqlBillingUsage) FinalizedAt() *graphqlTime            { return nil }
+func (b *graphqlBillingUsage) InvoiceID() *string                   { return nil }
+func (b *graphqlBillingUsage) InvoiceURL() *string                  { return nil }
+func (b *graphqlBillingUsage) Warnings() []string                   { return []string{} }
+func (b *graphqlBillingUsage) Pricing() *graphqlBillingUsagePricing { return nil }
+func (b *graphqlBillingUsage) Bill() *graphqlBillingUsageBill       { return nil }
+
+// graphqlBillingUsagePricing is the BillingUsagePricing object type.
+type graphqlBillingUsagePricing struct {
+	planID     string
+	name       string
+	minimumUSD float64
+}
+
+func (p *graphqlBillingUsagePricing) PlanID() string      { return p.planID }
+func (p *graphqlBillingUsagePricing) Name() string        { return p.name }
+func (p *graphqlBillingUsagePricing) MinimumUSD() float64 { return p.minimumUSD }
+
+// graphqlBillingUsageBill is the BillingUsageBill object type.
+type graphqlBillingUsageBill struct {
+	usageUSD             float64
+	minimumAdjustmentUSD float64
+	totalUSD             float64
+	resources            []*graphqlBillingUsageResource
+}
+
+func (b *graphqlBillingUsageBill) UsageUSD() float64             { return b.usageUSD }
+func (b *graphqlBillingUsageBill) MinimumAdjustmentUSD() float64 { return b.minimumAdjustmentUSD }
+func (b *graphqlBillingUsageBill) TotalUSD() float64             { return b.totalUSD }
+func (b *graphqlBillingUsageBill) Resources() []*graphqlBillingUsageResource {
+	if b.resources == nil {
+		return []*graphqlBillingUsageResource{}
 	}
-	return int32(t.meta.DurationMS) // #nosec G115 -- clamped above
-}
-func (t *graphqlTrace) StartedAt() string { return t.meta.StartedAt.UTC().Format(time.RFC3339) }
-func (t *graphqlTrace) UpdatedAt() string { return t.meta.UpdatedAt.UTC().Format(time.RFC3339) }
-
-type graphqlTraceConnection struct {
-	nodes     []*graphqlTrace
-	hasNext   bool
-	endCursor *string
+	return b.resources
 }
 
-func (c *graphqlTraceConnection) Nodes() []*graphqlTrace { return c.nodes }
-func (c *graphqlTraceConnection) PageInfo() *graphqlPageInfo {
-	return &graphqlPageInfo{hasNext: c.hasNext, endCursor: c.endCursor}
+// graphqlBillingUsageResource is the BillingUsageResource object type.
+type graphqlBillingUsageResource struct {
+	resource        string
+	unit            string
+	newQuantity     float64
+	repeatRan       float64
+	repeatCached    float64
+	repeatEstimated float64
+	newPrice        float64
+	repeatPrice     float64
+	newChargeUSD    float64
+	repeatChargeUSD float64
+	estimated       bool
 }
 
-type graphqlPageInfo struct {
-	hasNext   bool
-	endCursor *string
-}
-
-func (p *graphqlPageInfo) HasNextPage() bool  { return p.hasNext }
-func (p *graphqlPageInfo) EndCursor() *string { return p.endCursor }
-
-type graphqlCheckRun struct {
-	recordID string
-	item     domain.CheckItem
-}
-
-func (c *graphqlCheckRun) ID() graphql.ID {
-	return graphql.ID(fmt.Sprintf("%s/%s", c.recordID, c.item.Name))
-}
-func (c *graphqlCheckRun) Name() string  { return c.item.Name }
-func (c *graphqlCheckRun) State() string { return string(c.item.State) }
-func (c *graphqlCheckRun) TraceID() *string {
-	if c.item.TraceID == "" {
-		return nil
-	}
-	return &c.item.TraceID
-}
-func (c *graphqlCheckRun) Summary() *string {
-	if c.item.Summary == "" {
-		return nil
-	}
-	return &c.item.Summary
-}
-func (c *graphqlCheckRun) UpdatedAt() string { return c.item.UpdatedAt.UTC().Format(time.RFC3339) }
+func (r *graphqlBillingUsageResource) Resource() string         { return r.resource }
+func (r *graphqlBillingUsageResource) Unit() string             { return r.unit }
+func (r *graphqlBillingUsageResource) NewQuantity() float64     { return r.newQuantity }
+func (r *graphqlBillingUsageResource) RepeatRan() float64       { return r.repeatRan }
+func (r *graphqlBillingUsageResource) RepeatCached() float64    { return r.repeatCached }
+func (r *graphqlBillingUsageResource) RepeatEstimated() float64 { return r.repeatEstimated }
+func (r *graphqlBillingUsageResource) NewPrice() float64        { return r.newPrice }
+func (r *graphqlBillingUsageResource) RepeatPrice() float64     { return r.repeatPrice }
+func (r *graphqlBillingUsageResource) NewChargeUSD() float64    { return r.newChargeUSD }
+func (r *graphqlBillingUsageResource) RepeatChargeUSD() float64 { return r.repeatChargeUSD }
+func (r *graphqlBillingUsageResource) Estimated() bool          { return r.estimated }
