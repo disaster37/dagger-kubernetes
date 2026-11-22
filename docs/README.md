@@ -1048,7 +1048,12 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   the uniform authorization check. Query complexity is bounded by
   `graphql.max_depth`, `graphql.max_selections`, `graphql.max_query_bytes`, and
   `graphql.max_parallelism`; introspection is disabled unless
-  `graphql.introspection_enabled: true`.
+  `graphql.introspection_enabled: true`. Forge integrations are configured via
+  the platform (`POST /api/v1/orgs/<org>/integrations`), and `githubConnection`
+  reports the caller's first accessible GitHub forge source; the CLI's own
+  GitHub App flow (`dagger cloud integration create github`, unmapped
+  `checks on`) is a client-side Dagger Cloud app and is not usable on
+  self-hosted instances.
 - **OTLP read-back.** `GET /v1/{traces,logs,metrics}/:traceID` streams framed
   binary `application/vnd.dagger.otlp.stream` data for `dagger trace` and
   `dagger agent -r`.

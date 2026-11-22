@@ -135,5 +135,36 @@ and repos).
 
 Shared helpers on the resolver root: `requireAuthenticated` (uniform
 `unauthenticated`), `resolveAccessibleOrg` (ID then slug, uniform `forbidden`
-for missing-or-inaccessible), and `accessibleOrgs` (org-scoped token → its org;
-global admin → all; else direct + group-derived memberships).
+for missing-or-inaccessible), `accessibleOrgs` (org-scoped token → its org;
+global admin → all; else direct + group-derived memberships), and `scopedOrgs`
+(scopes a resolver to its optional org argument when provided).
+
+## Follow-up (2026-11-22 — forge-source semantics for `githubConnection`)
+
+Live testing of the CLI v1.0.0-beta.28 against a self-hosted instance exposed
+two integration semantics that diverge from the Dagger Cloud client
+expectations; both are fixed here:
+
+- **`Query.githubConnection` is keyed on forge sources, not the login method.**
+  It now returns a `GitHubConnection` iff the caller can access at least one org
+  with a GitHub forge source (`github` login = the owner segment of the source
+  repo, `connectedAt` = the first such source's creation time, deterministic
+  order: accessible orgs, then sources per org); otherwise `null`. The previous
+  `OAuthProvider == "github"` check conflated a user's login provider with an
+  org's integration.
+- **`Query.sourceRepositories` scopes by its `org` argument** (resolved once via
+  `resolveAccessibleOrg`), so a multi-org caller passing one org never sees
+  another org's sources. `User.checks(first:)` caps **globally** across all
+  accessible orgs (running total), not per org.
+
+On self-hosted, GitHub/GitLab integrations are configured via the platform
+(UI or `POST /api/v1/orgs/<org>/integrations`; the webhook receiver is
+`POST /v1/webhooks/<provider>/<sourceID>`). `githubConnection` therefore
+reflects **configured GitHub forge sources**, not a linked OAuth account.
+The CLI's own GitHub App flow — `dagger cloud integration create github` and an
+unmapped `dagger cloud checks on` — falls back client-side to the real Dagger
+Cloud OAuth app (a hardcoded app URL) and is **not usable** on self-hosted
+instances. Once a repo is mapped by a forge source, `dagger cloud checks
+on`/`status`/`list` and `dagger cloud integration list` work. `dagger cloud
+checks off` (`updateOrgRepoSettings`) returns a clear self-hosted error because
+check triggers are managed by the forge source, not by per-repo settings.

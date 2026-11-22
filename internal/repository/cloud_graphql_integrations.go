@@ -236,7 +236,7 @@ func (u *graphqlUser) Checks(ctx context.Context, args struct {
 	}
 	nodes := make([]*graphqlCheckCommit, 0)
 	for _, org := range orgs {
-		if u.root.checks == nil {
+		if u.root.checks == nil || len(nodes) >= limit {
 			break
 		}
 		rows, err := u.root.checks.List(ctx, &domain.CheckRunFilter{OrgID: org.ID, Limit: limit})
@@ -244,6 +244,9 @@ func (u *graphqlUser) Checks(ctx context.Context, args struct {
 			return nil, err
 		}
 		for _, rec := range rows {
+			if len(nodes) >= limit {
+				break
+			}
 			if args.Repos != nil && len(*args.Repos) > 0 && !repoFilterMatches(*args.Repos, rec.Repo) {
 				continue
 			}
@@ -478,24 +481,51 @@ func (r *graphqlRoot) sourceConfigURL(src *domain.ForgeSource) string {
 	}
 }
 
-// GithubConnection returns the linked GitHub login for a GitHub-authenticated
-// user, or null.
+// GithubConnection reports the caller's connected GitHub forge source as a
+// GitHubConnection, or null when the caller cannot access any org with a
+// GitHub forge source. The login is the owner segment of the source's repo and
+// connectedAt is the first such source's creation time (deterministic order:
+// accessible orgs, then sources per org).
 func (r *graphqlRoot) GithubConnection(ctx context.Context) (*graphqlGitHubConnection, error) {
-	id, err := r.requireAuthenticated(ctx)
-	if err != nil {
+	if _, err := r.requireAuthenticated(ctx); err != nil {
 		return nil, err
 	}
-	u, err := r.users.Get(ctx, id.UserID)
-	if err != nil {
-		return nil, err
-	}
-	if u.OAuthProvider != "github" {
+	if r.forgeSources == nil {
 		return nil, nil
 	}
-	return &graphqlGitHubConnection{
-		githubLogin: u.Username,
-		connectedAt: u.CreatedAt.UTC().Format(time.RFC3339),
-	}, nil
+	orgs, err := r.accessibleOrgs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, org := range orgs {
+		sources, err := r.forgeSources.ListByOrg(ctx, org.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, src := range sources {
+			if src.Provider != domain.ForgeGitHub {
+				continue
+			}
+			return &graphqlGitHubConnection{
+				githubLogin: githubLoginForSource(org, src),
+				connectedAt: src.CreatedAt.UTC().Format(time.RFC3339),
+			}, nil
+		}
+	}
+	return nil, nil
+}
+
+// githubLoginForSource derives the GitHub login for a forge source: the owner
+// segment of the source repo, falling back to the raw repo and then the org
+// name when the repo carries no owner segment.
+func githubLoginForSource(org *domain.Org, src *domain.ForgeSource) string {
+	if owner, _, found := strings.Cut(src.Repo, "/"); found {
+		return owner
+	}
+	if src.Repo != "" {
+		return src.Repo
+	}
+	return org.Name
 }
 
 // GithubOAuthURL is rejected: self-hosted deployments configure forge
@@ -514,14 +544,9 @@ func (r *graphqlRoot) SourceRepositories(ctx context.Context, args struct {
 	InstallationID graphql.ID
 	Org            *graphql.ID
 }) ([]*graphqlSourceRepository, error) {
-	orgs, err := r.accessibleOrgs(ctx)
+	orgs, err := r.scopedOrgs(ctx, args.Org)
 	if err != nil {
 		return nil, err
-	}
-	if args.Org != nil {
-		if _, err := r.resolveAccessibleOrg(ctx, string(*args.Org)); err != nil {
-			return nil, err
-		}
 	}
 	if r.forgeSources == nil {
 		return []*graphqlSourceRepository{}, nil

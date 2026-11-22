@@ -620,6 +620,30 @@ func TestParityUserChecks(t *testing.T) {
 	}
 }
 
+func TestParityUserChecksGlobalCap(t *testing.T) {
+	e := newParityEnv(t, false)
+	other := &domain.Org{ID: "beta", Name: "beta", DisplayName: "Beta", Features: domain.DefaultOrgFeatures, CreatedAt: time.Now().UTC()}
+	if err := e.orgRepo.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.orgRepo.SetMember(context.Background(), "beta", e.user.ID, domain.OrgMember); err != nil {
+		t.Fatal(err)
+	}
+	for i := range 3 {
+		seedCheckRun(t, e.checks, &domain.CheckRunRecord{ID: fmt.Sprintf("check-a%d", i), OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s", Status: "success", CreatedAt: time.Now().UTC()})
+		seedCheckRun(t, e.checks, &domain.CheckRunRecord{ID: fmt.Sprintf("check-b%d", i), OrgID: "beta", Provider: domain.ForgeGitHub, Repo: "beta/api", SHA: "s", Status: "success", CreatedAt: time.Now().UTC()})
+	}
+	// first (2) is smaller than each org's per-org total (3): the cap is global.
+	res := execJSON(t, e.g, e.ctx(), `{ user { checks(first: 2) { nodes { repo } } } }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	nodes := res["data"].(map[string]any)["user"].(map[string]any)["checks"].(map[string]any)["nodes"].([]any)
+	if len(nodes) != 2 {
+		t.Fatalf("global cap nodes = %d, want 2: %v", len(nodes), nodes)
+	}
+}
+
 func TestParityModuleChecks(t *testing.T) {
 	e := newParityEnv(t, false)
 	seedCheckRun(t, e.checks, &domain.CheckRunRecord{ID: "check-mod", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/mod", SHA: "abc123", Ref: "refs/heads/main", Status: "success", CreatedAt: time.Now().UTC()})
@@ -745,24 +769,36 @@ func TestParitySources(t *testing.T) {
 
 func TestParityGithubConnection(t *testing.T) {
 	e := newParityEnv(t, false)
-	// non-github user -> null
+	// no GitHub forge source in any accessible org -> null
 	res := execJSON(t, e.g, e.ctx(), `{ githubConnection { githubLogin connectedAt } }`, nil)
 	if res["data"].(map[string]any)["githubConnection"] != nil {
-		t.Fatalf("non-github connection must be null: %v", res)
+		t.Fatalf("no-source connection must be null: %v", res)
 	}
-	// a github-authenticated user sees their linked login
-	ghUser := &domain.User{ID: newID(), Username: "gh-user", Role: domain.RoleUser, OAuthProvider: "github", OAuthID: "123"}
-	if err := NewUserRepo(e.store).Create(context.Background(), ghUser); err != nil {
-		t.Fatal(err)
-	}
-	if err := e.orgRepo.SetMember(context.Background(), "acme", ghUser.ID, domain.OrgMember); err != nil {
-		t.Fatal(err)
-	}
-	ghCtx := WithGraphQLIdentity(context.Background(), GraphQLIdentity{UserID: ghUser.ID})
-	res = execJSON(t, e.g, ghCtx, `{ githubConnection { githubLogin connectedAt } }`, nil)
+	// a GitHub forge source in an accessible org -> derived connection
+	at := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-gh", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "disaster37/api", CreatedAt: at})
+	res = execJSON(t, e.g, e.ctx(), `{ githubConnection { githubLogin connectedAt } }`, nil)
 	conn := res["data"].(map[string]any)["githubConnection"].(map[string]any)
-	if conn["githubLogin"] != "gh-user" {
+	if conn["githubLogin"] != "disaster37" {
 		t.Fatalf("githubLogin = %v", conn)
+	}
+	if conn["connectedAt"] != at.Format(time.RFC3339) {
+		t.Fatalf("connectedAt = %v", conn)
+	}
+}
+
+func TestParityGithubConnectionForgeScoping(t *testing.T) {
+	e := newParityEnv(t, false)
+	// Non-GitHub sources and an inaccessible org's GitHub source must not leak.
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-gl", OrgID: "acme", Provider: domain.ForgeGitLab, Repo: "group/proj"})
+	other := &domain.Org{ID: "beta", Name: "beta", DisplayName: "Beta", Features: domain.DefaultOrgFeatures, CreatedAt: time.Now().UTC()}
+	if err := e.orgRepo.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-gh-beta", OrgID: "beta", Provider: domain.ForgeGitHub, Repo: "other/repo"})
+	res := execJSON(t, e.g, e.ctx(), `{ githubConnection { githubLogin } }`, nil)
+	if res["data"].(map[string]any)["githubConnection"] != nil {
+		t.Fatalf("inaccessible org's source must not leak: %v", res)
 	}
 }
 
@@ -790,6 +826,28 @@ func TestParitySourceRepositories(t *testing.T) {
 	res = execJSON(t, e.g, e.ctx(), `{ sourceRepositories(installationId: "nope") { repository } }`, nil)
 	if len(res["data"].(map[string]any)["sourceRepositories"].([]any)) != 0 {
 		t.Fatalf("unknown installation must be empty: %v", res)
+	}
+}
+
+func TestParitySourceRepositoriesOrgScoped(t *testing.T) {
+	e := newParityEnv(t, false)
+	other := &domain.Org{ID: "beta", Name: "beta", DisplayName: "Beta", Features: domain.DefaultOrgFeatures, CreatedAt: time.Now().UTC()}
+	if err := e.orgRepo.Create(context.Background(), other); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.orgRepo.SetMember(context.Background(), "beta", e.user.ID, domain.OrgMember); err != nil {
+		t.Fatal(err)
+	}
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-beta", OrgID: "beta", Provider: domain.ForgeGitHub, Repo: "beta/api", InstallationID: "111"})
+	// An unscoped call sees the other org's source...
+	res := execJSON(t, e.g, e.ctx(), `{ sourceRepositories(installationId: "111") { repository claimedByOrgName } }`, nil)
+	if len(res["data"].(map[string]any)["sourceRepositories"].([]any)) != 1 {
+		t.Fatalf("unscoped sourceRepositories = %v", res)
+	}
+	// ...but scoping to acme must not expose beta's source.
+	res = execJSON(t, e.g, e.ctx(), `{ sourceRepositories(installationId: "111", org: "acme") { repository } }`, nil)
+	if len(res["data"].(map[string]any)["sourceRepositories"].([]any)) != 0 {
+		t.Fatalf("org-scoped sourceRepositories must not leak: %v", res)
 	}
 }
 

@@ -266,6 +266,20 @@ func (r *graphqlRoot) accessibleOrgs(ctx context.Context) ([]*domain.Org, error)
 	return r.userOrgs(ctx, id.UserID)
 }
 
+// scopedOrgs resolves the orgs a resolver may act on: when an org argument is
+// supplied it must be accessible (anti-enumeration via resolveAccessibleOrg)
+// and becomes the sole scope; otherwise all accessible orgs are returned.
+func (r *graphqlRoot) scopedOrgs(ctx context.Context, rawOrg *graphql.ID) ([]*domain.Org, error) {
+	if rawOrg == nil {
+		return r.accessibleOrgs(ctx)
+	}
+	org, err := r.resolveAccessibleOrg(ctx, string(*rawOrg))
+	if err != nil {
+		return nil, err
+	}
+	return []*domain.Org{org}, nil
+}
+
 func (r *graphqlRoot) User(ctx context.Context) (*graphqlUser, error) {
 	id, err := r.requireAuthenticated(ctx)
 	if err != nil {
