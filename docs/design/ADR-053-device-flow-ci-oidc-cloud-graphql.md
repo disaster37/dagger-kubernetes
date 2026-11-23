@@ -168,3 +168,15 @@ instances. Once a repo is mapped by a forge source, `dagger cloud checks
 on`/`status`/`list` and `dagger cloud integration list` work. `dagger cloud
 checks off` (`updateOrgRepoSettings`) returns a clear self-hosted error because
 check triggers are managed by the forge source, not by per-repo settings.
+
+## Follow-up (2026-11-23 — webhook secret handling)
+
+Creating a forge integration without a webhook secret registered the remote
+webhook with an empty secret; the forge then sent unsigned deliveries and
+`verifyHMACSHA256` failed closed, so every delivery/ping returned 401. Fixed by
+auto-generating a 32-byte hex secret when none is supplied, sealing that same
+value, and passing it to `RegisterWebhook`. The previously dead
+`forge.webhook_secret` config is now wired as the fallback HMAC secret for
+sources stored without one (a non-empty per-source secret always wins; both
+empty stays fail-closed). Deleting a forge source still does not remove the
+remote webhook — that remains a known follow-up.

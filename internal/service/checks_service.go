@@ -25,27 +25,30 @@ type CompleteReportInput struct {
 
 // ChecksService verifies forge webhooks and dispatches Cloud Checks runs.
 type ChecksService struct {
-	sources   domain.ForgeSourceRepository
-	secrets   *SecretService
-	projects  *ProjectService
-	orgs      *OrgService
-	runner    domain.CheckJobRunner
-	checkRuns domain.CheckRunRepository
-	workflows *WorkflowService
-	providers map[domain.ForgeKind]domain.ForgeProvider
-	publicURL string
-	logger    *logrus.Logger
+	sources       domain.ForgeSourceRepository
+	secrets       *SecretService
+	projects      *ProjectService
+	orgs          *OrgService
+	runner        domain.CheckJobRunner
+	checkRuns     domain.CheckRunRepository
+	workflows     *WorkflowService
+	providers     map[domain.ForgeKind]domain.ForgeProvider
+	publicURL     string
+	webhookSecret string
+	logger        *logrus.Logger
 }
 
-// NewChecksService returns a ChecksService.
-func NewChecksService(sources domain.ForgeSourceRepository, secrets *SecretService, projects *ProjectService, orgs *OrgService, runner domain.CheckJobRunner, checkRuns domain.CheckRunRepository, workflows *WorkflowService, providers []domain.ForgeProvider, publicURL string, logger *logrus.Logger) *ChecksService {
+// NewChecksService returns a ChecksService. webhookSecret is the fallback HMAC
+// secret used to verify deliveries for sources that have none.
+func NewChecksService(sources domain.ForgeSourceRepository, secrets *SecretService, projects *ProjectService, orgs *OrgService, runner domain.CheckJobRunner, checkRuns domain.CheckRunRepository, workflows *WorkflowService, providers []domain.ForgeProvider, publicURL, webhookSecret string, logger *logrus.Logger) *ChecksService {
 	m := make(map[domain.ForgeKind]domain.ForgeProvider, len(providers))
 	for _, p := range providers {
 		m[p.Kind()] = p
 	}
 	return &ChecksService{
 		sources: sources, secrets: secrets, projects: projects, orgs: orgs, runner: runner,
-		checkRuns: checkRuns, workflows: workflows, providers: m, publicURL: publicURL, logger: logger,
+		checkRuns: checkRuns, workflows: workflows, providers: m, publicURL: publicURL,
+		webhookSecret: webhookSecret, logger: logger,
 	}
 }
 
@@ -66,6 +69,11 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 	secret, err := s.secrets.OpenRaw(domain.SecretScopeOrg, src.OrgID, src.WebhookSecretCiphertext)
 	if err != nil {
 		return nil, fmt.Errorf("open webhook secret: %w", err)
+	}
+	// A non-empty per-source secret always wins; the configured fallback only
+	// covers sources stored without one. Both empty stays fail-closed.
+	if secret == "" {
+		secret = s.webhookSecret
 	}
 	if !p.VerifyWebhook(src, secret, headers, body) {
 		return nil, fmt.Errorf("%w: invalid webhook signature", domain.ErrForbidden)

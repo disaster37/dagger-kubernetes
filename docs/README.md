@@ -1084,6 +1084,11 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
 - **Cloud Checks.** Configure a forge under
   `/api/v1/orgs/<org>/integrations`, then webhooks at
   `/v1/webhooks/<provider>/<sourceID>` dispatch `batch/v1` check Jobs. The
+  webhook secret is auto-generated when omitted, so the remote webhook and the
+  sealed value always agree; `forge.webhook_secret` is the fallback HMAC secret
+  used only for sources stored without one (a per-source secret always wins).
+  Deleting a forge source does **not** yet remove the remote webhook — delete it
+  in the forge settings manually (known follow-up). The
   runner receives `DAGGER_CLOUD_TOKEN`/`DAGGER_KUBERNETES_TOKEN` and a
   per-run `DAGGER_RUN_TOKEN` from an ephemeral `check-env-*` Secret (never
   argv). The `/load` and `/complete` callbacks require the per-run

@@ -28,6 +28,19 @@ func (f *fakeForgeProvider) DeleteWebhook(context.Context, *domain.ForgeSource, 
 func (f *fakeForgeProvider) VerifyWebhook(*domain.ForgeSource, string, map[string]string, []byte) bool {
 	return true
 }
+
+// recordingForgeProvider captures the secret handed to VerifyWebhook so tests
+// can assert fallback selection.
+type recordingForgeProvider struct {
+	fakeForgeProvider
+	gotSecret string
+	accept    bool
+}
+
+func (r *recordingForgeProvider) VerifyWebhook(_ *domain.ForgeSource, secret string, _ map[string]string, _ []byte) bool {
+	r.gotSecret = secret
+	return r.accept
+}
 func (f *fakeForgeProvider) SetCommitStatus(_ context.Context, _ *domain.ForgeSource, _ string, run *domain.CheckRun) error {
 	f.statuses = append(f.statuses, run)
 	return nil
@@ -52,6 +65,10 @@ func (f *fakeCheckRunner) JobStatus(context.Context, string) (domain.JobState, e
 }
 
 func newChecksServiceForTest(t *testing.T) (*ChecksService, *fakeForgeProvider, *fakeCheckRunner, *repository.RaftStore) {
+	return newChecksServiceForTestWithSecret(t, "")
+}
+
+func newChecksServiceForTestWithSecret(t *testing.T, fallbackSecret string) (*ChecksService, *fakeForgeProvider, *fakeCheckRunner, *repository.RaftStore) {
 	t.Helper()
 	store, err := repository.NewInmemRaftStore("checks-test", testLogger(), 5*time.Second)
 	if err != nil {
@@ -78,7 +95,7 @@ func newChecksServiceForTest(t *testing.T) (*ChecksService, *fakeForgeProvider, 
 	runner := &fakeCheckRunner{}
 	checkRuns := repository.NewCheckRunRepo(store)
 	workflowSvc := NewWorkflowService(repository.NewWorkflowRepo(store), repository.NewEnvironmentRepo(store), orgsSvc, projectsSvc, sources, &fakeWorkflowParser{wf: &domain.Workflow{Name: "release", AfterChecks: true, On: domain.WorkflowTriggers{Push: true}, Jobs: map[string]domain.WorkflowJob{"build": {Call: "build"}}}}, &fakeEvaluator{}, &fakeArtifactStore{}, &fakeWorkflowRunner{}, secretSvc, WorkflowServiceConfig{}, logger)
-	svc := NewChecksService(sources, secretSvc, projectsSvc, orgsSvc, runner, checkRuns, workflowSvc, []domain.ForgeProvider{provider}, "https://example.com", logger)
+	svc := NewChecksService(sources, secretSvc, projectsSvc, orgsSvc, runner, checkRuns, workflowSvc, []domain.ForgeProvider{provider}, "https://example.com", fallbackSecret, logger)
 	return svc, provider, runner, store
 }
 
@@ -242,5 +259,76 @@ func TestChecksServiceRejectsCrossOrgLoad(t *testing.T) {
 	records, _ := svc.List(context.Background(), &domain.CheckRunFilter{OrgID: "acme"})
 	if _, err := svc.RecordLoad(context.Background(), "other", records[0].ID, LoadReportInput{}); err == nil {
 		t.Fatal("cross-org load must be forbidden")
+	}
+}
+
+// newChecksServiceWithRecordingProvider builds a ChecksService whose provider
+// records the secret passed to VerifyWebhook. sourceSecret is sealed onto the
+// seeded source ("" stores an empty ciphertext).
+func newChecksServiceWithRecordingProvider(t *testing.T, fallbackSecret, sourceSecret string) (*ChecksService, *recordingForgeProvider, *repository.RaftStore) {
+	t.Helper()
+	store, err := repository.NewInmemRaftStore("checks-fallback-test", testLogger(), 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.WaitForLeader(ctx); err != nil {
+		t.Fatal(err)
+	}
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	orgRepo := repository.NewOrgRepo(store)
+	if err := orgRepo.Create(ctx, &domain.Org{ID: "acme", Name: "acme", DisplayName: "Acme"}); err != nil {
+		t.Fatal(err)
+	}
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logger)
+	tokensSvc := NewTokenService(repository.NewTokenRepo(store), logger, []byte("0123456789abcdef0123456789abcdef"))
+	orgsSvc := NewOrgService(orgRepo, repository.NewGroupRepo(store), tokensSvc, logger)
+	projectsSvc := NewProjectService(repository.NewProjectRepo(store), repository.NewGroupRepo(store), logger)
+	sources := repository.NewForgeSourceRepo(store)
+	provider := &recordingForgeProvider{fakeForgeProvider: fakeForgeProvider{kind: domain.ForgeGitHub}, accept: true}
+	checkRuns := repository.NewCheckRunRepo(store)
+	tokenCT, _ := secretSvc.SealRaw(domain.SecretScopeOrg, "acme", "forge-token")
+	secretCT, _ := secretSvc.SealRaw(domain.SecretScopeOrg, "acme", sourceSecret)
+	src := &domain.ForgeSource{ID: "src-1", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/repo", TokenCiphertext: tokenCT, WebhookSecretCiphertext: secretCT}
+	if err := sources.Upsert(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	svc := NewChecksService(sources, secretSvc, projectsSvc, orgsSvc, &fakeCheckRunner{}, checkRuns, nil, []domain.ForgeProvider{provider}, "https://example.com", fallbackSecret, logger)
+	return svc, provider, store
+}
+
+func TestChecksServiceWebhookSecretFallback(t *testing.T) {
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo"}}`)
+	headers := map[string]string{"X-GitHub-Event": "push"}
+	cases := []struct {
+		name          string
+		fallback      string
+		sourceSecret  string
+		wantSecret    string
+		wantVerifyErr bool
+	}{
+		{name: "fallback used when source secret empty", fallback: "fallback-secret", sourceSecret: "", wantSecret: "fallback-secret"},
+		{name: "source secret wins over fallback", fallback: "fallback-secret", sourceSecret: "source-secret", wantSecret: "source-secret"},
+		{name: "both empty fails closed", fallback: "", sourceSecret: "", wantSecret: "", wantVerifyErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, provider, _ := newChecksServiceWithRecordingProvider(t, tc.fallback, tc.sourceSecret)
+			provider.accept = !tc.wantVerifyErr
+			_, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", headers, body)
+			if tc.wantVerifyErr {
+				if err == nil {
+					t.Fatal("expected verification failure when both secrets are empty")
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if provider.gotSecret != tc.wantSecret {
+				t.Fatalf("VerifyWebhook secret = %q, want %q", provider.gotSecret, tc.wantSecret)
+			}
+		})
 	}
 }

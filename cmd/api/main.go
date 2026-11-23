@@ -520,7 +520,7 @@ func run(c *cli.Context) error {
 		service.WorkflowServiceConfig{DefaultTimeout: cfg.Workflows.DefaultTimeout, MaxParallel: cfg.Workflows.MaxParallel},
 		logger,
 	)
-	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, logger)
+	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, cfg.Forge.WebhookSecret, logger)
 	cloudGraphQL.WithForgeSources(forgeSourceRepo).WithProjects(projectRepo).WithPublicURL(cfg.Server.PublicURL)
 	if cfg.Checks.Enabled {
 		cloudGraphQL.WithCheckRerunner(checksSvc.Rerun)

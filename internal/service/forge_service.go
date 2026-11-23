@@ -2,6 +2,8 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -57,7 +59,18 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 	if err != nil {
 		return nil, err
 	}
-	secretCT, err := s.secrets.SealRaw(domain.SecretScopeOrg, in.OrgID, in.WebhookSecret)
+	// Registering a webhook with an empty secret makes the forge send unsigned
+	// deliveries, which fail closed on verification. Auto-generate one so the
+	// remote webhook and the sealed value always agree.
+	webhookSecret := in.WebhookSecret
+	if webhookSecret == "" {
+		webhookSecret, err = forgeRandomHex(32)
+		if err != nil {
+			return nil, fmt.Errorf("generate webhook secret: %w", err)
+		}
+		s.logger.WithField("source_id", id).Info("generated webhook secret for forge source")
+	}
+	secretCT, err := s.secrets.SealRaw(domain.SecretScopeOrg, in.OrgID, webhookSecret)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +84,19 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 		return nil, err
 	}
 	callback := fmt.Sprintf("%s/v1/webhooks/%s/%s", s.publicURL, in.Provider, id)
-	if _, err := s.providers[in.Provider].RegisterWebhook(ctx, src, in.Token, callback, in.WebhookSecret); err != nil {
+	if _, err := s.providers[in.Provider].RegisterWebhook(ctx, src, in.Token, callback, webhookSecret); err != nil {
 		s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook registration failed")
 	}
 	return src, nil
+}
+
+// forgeRandomHex returns n random bytes hex-encoded.
+func forgeRandomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // List returns an org's forge sources.

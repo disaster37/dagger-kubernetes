@@ -90,7 +90,7 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 
 	workflowSvc := service.NewWorkflowService(workflowRepo, envRepo, orgsSvc, projectsSvc, forgeRepo, repository.NewWorkflowFileParser(), repository.NewWorkflowExprEvaluator(), nil, flowRunner, secretSvc, service.WorkflowServiceConfig{DefaultTimeout: time.Minute, MaxParallel: 1}, logger)
 	forgeProviders := []domain.ForgeProvider{repository.NewGitHubForge(""), repository.NewGitLabForge(""), repository.NewGiteaForge("")}
-	checksSvc := service.NewChecksService(forgeRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, "https://example.com", logger)
+	checksSvc := service.NewChecksService(forgeRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, "https://example.com", "", logger)
 	graphql.WithForgeSources(forgeRepo).WithProjects(projectRepo).WithPublicURL("https://example.com")
 	if checkRunner != nil {
 		graphql.WithCheckRerunner(checksSvc.Rerun)
