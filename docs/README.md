@@ -1099,7 +1099,20 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   hold in `waiting_approval` and never receive secrets; an org member may
   approve a secretless run, while only `org_admin`/global `admin` may opt into
   `include_secrets`. Crashed/timed-out Jobs are reconciled to `failed` and
-  reported back to the forge.
+  reported back to the forge. Only actionable deliveries (push, tag,
+  pull/merge request, release) create runs; `ping`, `workflow_run`, deleted
+  refs, and unsupported actions are acknowledged with
+  `200 {"status":"ignored","reason":...,"event":...}` and write nothing.
+  `checks.enabled: false` gates dispatch entirely (webhooks verify the
+  signature then return `ignored{checks_disabled}`; REST rerun/approve return
+  `400`; reads stay `200`). The runner Job image defaults to the supervisor
+  image (`checks.job_image`; `checks.job_image_pull_secrets` defaults to
+  `supervisor.image.pullSecrets`), and Jobs are created in
+  `checks.namespace`/`fleet.namespace` (the release namespace, where the RBAC
+  lives). A dispatch failure marks the run `failed` and reports
+  `CheckFailure`; a rerun replaces the terminal Job and its env Secret.
+  `DELETE /api/v1/checks/runs/:id` (org admin or global admin) removes a run
+  and is idempotent.
 - **Workflows.** `.dagger/workflows/*.y{a,}ml` supports `call:` jobs,
   cross-repo `trigger:` jobs (`wait` + `timeout`), typed `workflow_dispatch`
   inputs, `robfig/cron` schedules, `on: artifact` listeners, artifacts, and
@@ -1107,7 +1120,11 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   `org_admin`/approver-group RBAC, `prevent_self_approval`, and
   `approval_timeout`, then resumes the DAG. Workflow job completion callbacks
   use the same per-run `X-Dagger-Run-Token` credential as checks. Arbitrary
-  host-shell `run:` steps are intentionally unsupported.
+  host-shell `run:` steps are intentionally unsupported. `workflows.enabled:
+  false` gates run creation (`Start`/`Dispatch`/`OnChecksSucceeded`); reads
+  stay `200`. Workflow Jobs use `workflows.job_image` /
+  `workflows.job_image_pull_secrets` and `workflows.namespace` (default
+  `fleet.namespace`).
 - **Environment secrets.** Secrets are scoped `org`, `project`, or
   `environment` (`<orgID>/<envName>`). Resolution precedence is
   `org/env > project > org`; environment secrets are only injected into a job

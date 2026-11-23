@@ -783,6 +783,20 @@ subchart values.
 | `supervisor.config.logFormat` | string | `"json"` | Supervisor log format (json, text). |
 | `supervisor.config.otel.otlpEndpoint` | string | `""` | Supervisor OTLP export endpoint (empty disables). |
 | `supervisor.config.otel.ingestMaxBodySize` | int | `67108864` | OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). Keep the ingress `proxyBodySize` and the collector `max_request_body_size` at least this large. |
+| `supervisor.config.checks.enabled` | bool | `false` | Enable Cloud Checks (ADR-056). |
+| `supervisor.config.checks.namespace` | string | `""` | Namespace for check-run Jobs (empty = release namespace). |
+| `supervisor.config.checks.jobImage` | string | `""` | Runner image for check Jobs (empty = supervisor image `<repo>:<tag>`). |
+| `supervisor.config.checks.jobImagePullSecrets` | array | `[]` | Image pull secrets for check-runner Job pods (empty = `supervisor.image.pullSecrets`). |
+| `supervisor.config.checks.timeout` | string | `"30m"` | Per-check-run Job timeout. |
+| `supervisor.config.checks.githubOidcIssuer` | string | `"https://token.actions.githubusercontent.com"` | GitHub Actions OIDC issuer URL. |
+| `supervisor.config.checks.gitlabOidcIssuer` | string | `"https://gitlab.com"` | Default GitLab CI OIDC issuer URL. |
+| `supervisor.config.checks.oidcAudience` | string | `"dagger-kubernetes"` | Expected audience of CI OIDC ID tokens. |
+| `supervisor.config.workflows.enabled` | bool | `false` | Enable Dagger-native CD workflows (ADR-057). |
+| `supervisor.config.workflows.namespace` | string | `""` | Namespace for workflow Jobs (empty = release namespace). |
+| `supervisor.config.workflows.jobImage` | string | `""` | Runner image for workflow Jobs (empty = supervisor image `<repo>:<tag>`). |
+| `supervisor.config.workflows.jobImagePullSecrets` | array | `[]` | Image pull secrets for workflow Job pods (empty = `supervisor.image.pullSecrets`). |
+| `supervisor.config.workflows.defaultTimeout` | string | `"30m"` | Default workflow job timeout when a job declares none. |
+| `supervisor.config.workflows.maxParallel` | int | `8` | Max concurrently running jobs in one workflow run. |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 | `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |

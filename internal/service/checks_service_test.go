@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,6 +18,7 @@ type fakeForgeProvider struct {
 	kind      domain.ForgeKind
 	statuses  []*domain.CheckRun
 	checkRuns []*domain.CheckRun
+	accept    bool
 }
 
 func (f *fakeForgeProvider) Kind() domain.ForgeKind { return f.kind }
@@ -26,7 +29,7 @@ func (f *fakeForgeProvider) DeleteWebhook(context.Context, *domain.ForgeSource, 
 	return nil
 }
 func (f *fakeForgeProvider) VerifyWebhook(*domain.ForgeSource, string, map[string]string, []byte) bool {
-	return true
+	return f.accept
 }
 
 // recordingForgeProvider captures the secret handed to VerifyWebhook so tests
@@ -91,7 +94,7 @@ func newChecksServiceForTestWithSecret(t *testing.T, fallbackSecret string) (*Ch
 	orgsSvc := NewOrgService(orgRepo, repository.NewGroupRepo(store), tokensSvc, logger)
 	projectsSvc := NewProjectService(repository.NewProjectRepo(store), repository.NewGroupRepo(store), logger)
 	sources := repository.NewForgeSourceRepo(store)
-	provider := &fakeForgeProvider{kind: domain.ForgeGitHub}
+	provider := &fakeForgeProvider{kind: domain.ForgeGitHub, accept: true}
 	runner := &fakeCheckRunner{}
 	checkRuns := repository.NewCheckRunRepo(store)
 	workflowSvc := NewWorkflowService(repository.NewWorkflowRepo(store), repository.NewEnvironmentRepo(store), orgsSvc, projectsSvc, sources, &fakeWorkflowParser{wf: &domain.Workflow{Name: "release", AfterChecks: true, On: domain.WorkflowTriggers{Push: true}, Jobs: map[string]domain.WorkflowJob{"build": {Call: "build"}}}}, &fakeEvaluator{}, &fakeArtifactStore{}, &fakeWorkflowRunner{}, secretSvc, WorkflowServiceConfig{}, logger)
@@ -115,12 +118,12 @@ func TestChecksServiceNonForkWebhookDispatches(t *testing.T) {
 	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
 	seedForgeSource(t, store, secretSvc)
 	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo","default_branch":"main"}}`)
-	ev, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body)
+	res, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ev.SHA != "abc123" || ev.DefaultBranch != "main" {
-		t.Fatalf("event = %+v", ev)
+	if res.Event == nil || res.Event.SHA != "abc123" || res.Event.DefaultBranch != "main" {
+		t.Fatalf("result = %+v", res)
 	}
 	if len(runner.runs) != 1 {
 		t.Fatalf("runner runs = %d", len(runner.runs))
@@ -148,11 +151,11 @@ func TestChecksServiceForkHoldsUntilApproval(t *testing.T) {
 	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
 	seedForgeSource(t, store, secretSvc)
 	body := []byte(`{"ref":"refs/pull/1/head","after":"abc123","repository":{"full_name":"acme/repo"},"pull_request":{"number":1,"head":{"sha":"abc123","repo":{"id":1}},"base":{"repo":{"id":2}}}}`)
-	ev, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "pull_request"}, body)
+	res, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "pull_request"}, body)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ev.IsFork {
+	if res.Event == nil || !res.Event.IsFork {
 		t.Fatal("expected fork event")
 	}
 	if len(runner.runs) != 0 {
@@ -331,4 +334,268 @@ func TestChecksServiceWebhookSecretFallback(t *testing.T) {
 			}
 		})
 	}
+}
+
+// failingCheckRunner fails every dispatch to exercise the failDispatch path.
+type failingCheckRunner struct {
+	fakeCheckRunner
+	err error
+}
+
+func (f *failingCheckRunner) Run(context.Context, *domain.CheckRunSpec) error { return f.err }
+
+func TestChecksServiceIgnoresNonActionableEvents(t *testing.T) {
+	cases := []struct {
+		name     string
+		headers  map[string]string
+		body     string
+		wantReas string
+	}{
+		{name: "ping", headers: map[string]string{"X-GitHub-Event": "ping"}, body: `{"zen":"hi"}`, wantReas: "ping"},
+		{name: "workflow_run", headers: map[string]string{"X-GitHub-Event": "workflow_run"}, body: `{"action":"completed"}`, wantReas: "unsupported_event"},
+		{name: "deleted ref", headers: map[string]string{"X-GitHub-Event": "push"}, body: `{"ref":"refs/heads/gone","after":"0000000000000000000000000000000000000000","repository":{"full_name":"acme/repo"}}`, wantReas: "ref_deleted"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, provider, runner, store := newChecksServiceForTest(t)
+			secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+			seedForgeSource(t, store, secretSvc)
+			res, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", tc.headers, []byte(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !res.Ignored || res.Reason != tc.wantReas {
+				t.Fatalf("result = %+v, want ignored %q", res, tc.wantReas)
+			}
+			if len(runner.runs) != 0 {
+				t.Fatalf("ignored delivery must not dispatch: %d runs", len(runner.runs))
+			}
+			if len(provider.statuses) != 0 || len(provider.checkRuns) != 0 {
+				t.Fatal("ignored delivery must not report to the forge")
+			}
+			records, _ := svc.List(context.Background(), &domain.CheckRunFilter{OrgID: "acme"})
+			if len(records) != 0 {
+				t.Fatalf("ignored delivery must not create records: %+v", records)
+			}
+		})
+	}
+}
+
+func TestChecksServiceInvalidSignatureForbidden(t *testing.T) {
+	svc, provider, _, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	provider.accept = false
+	body := []byte(`{"ref":"refs/heads/main","after":"abc","repository":{"full_name":"acme/repo"}}`)
+	_, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body)
+	if !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestChecksServiceDisabled(t *testing.T) {
+	svc, provider, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	svc.WithEnabled(false)
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo"}}`)
+	res, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Ignored || res.Reason != "checks_disabled" {
+		t.Fatalf("result = %+v, want checks_disabled", res)
+	}
+	if len(runner.runs) != 0 {
+		t.Fatal("disabled service must not dispatch")
+	}
+	if len(provider.statuses) != 0 {
+		t.Fatal("disabled service must not report to the forge")
+	}
+	records, _ := svc.List(context.Background(), &domain.CheckRunFilter{OrgID: "acme"})
+	if len(records) != 0 {
+		t.Fatalf("disabled service must not create records: %+v", records)
+	}
+	if _, err := svc.Rerun(context.Background(), "check-src-1-abc123"); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("rerun err = %v, want ErrValidation", err)
+	}
+	if _, err := svc.ApproveForkRun(context.Background(), "check-src-1-abc123", "u", false, true); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("approve err = %v, want ErrValidation", err)
+	}
+}
+
+func TestChecksServiceDispatchFailureMarksFailed(t *testing.T) {
+	svc, provider, _, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	svc.runner = &failingCheckRunner{err: errors.New("boom")}
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo"}}`)
+	_, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body)
+	if err == nil {
+		t.Fatal("dispatch failure must surface an error")
+	}
+	records, _ := svc.List(context.Background(), &domain.CheckRunFilter{OrgID: "acme"})
+	if len(records) != 1 || records[0].Status != "failed" || records[0].Error == "" {
+		t.Fatalf("record must be failed with an error: %+v", records)
+	}
+	foundFailure := false
+	for _, s := range provider.statuses {
+		if s.State == domain.CheckFailure {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("forge must see a failure status: %+v", provider.statuses)
+	}
+}
+
+func TestChecksServiceDuplicateDeliveryIdempotent(t *testing.T) {
+	svc, _, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo"}}`)
+	headers := map[string]string{"X-GitHub-Event": "push"}
+	if _, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", headers, body); err != nil {
+		t.Fatal(err)
+	}
+	firstToken := runner.runs[0].RunToken
+	if _, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", headers, body); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.runs) != 1 {
+		t.Fatalf("duplicate delivery must not re-dispatch: %d runs", len(runner.runs))
+	}
+	record, err := svc.Get(context.Background(), runner.runs[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !VerifyRunToken(record.RunTokenHash, firstToken) {
+		t.Fatal("duplicate delivery must not rotate the run token")
+	}
+}
+
+func TestChecksServiceDeleteIdempotent(t *testing.T) {
+	svc, _, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo"}}`)
+	if _, err := svc.HandleWebhook(context.Background(), domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body); err != nil {
+		t.Fatal(err)
+	}
+	id := runner.runs[0].ID
+	if err := svc.Delete(context.Background(), id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Get(context.Background(), id); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("get after delete err = %v, want ErrNotFound", err)
+	}
+	if err := svc.Delete(context.Background(), id); err != nil {
+		t.Fatalf("second delete must be idempotent: %v", err)
+	}
+}
+
+func TestChecksServiceReconcilerTimeoutUnknownJob(t *testing.T) {
+	svc, provider, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	checkRuns := newFakeCheckRunRepo()
+	svc.checkRuns = checkRuns
+	runner.status = domain.JobStateUnknown
+
+	// A record stuck running with an unknown Job for > 5m is failed.
+	stale := &domain.CheckRunRecord{
+		ID: "check-stale", OrgID: "acme", SourceID: "src-1", Provider: domain.ForgeGitHub,
+		Repo: "acme/repo", SHA: "abc", Status: "running",
+		CreatedAt: time.Now().UTC().Add(-10 * time.Minute), UpdatedAt: time.Now().UTC().Add(-6 * time.Minute),
+	}
+	if err := checkRuns.Upsert(context.Background(), stale); err != nil {
+		t.Fatal(err)
+	}
+	// A record running for < 5m with an unknown Job is left untouched.
+	fresh := &domain.CheckRunRecord{
+		ID: "check-fresh", OrgID: "acme", SourceID: "src-1", Provider: domain.ForgeGitHub,
+		Repo: "acme/repo", SHA: "def", Status: "running",
+		CreatedAt: time.Now().UTC().Add(-10 * time.Minute), UpdatedAt: time.Now().UTC().Add(-4 * time.Minute),
+	}
+	if err := checkRuns.Upsert(context.Background(), fresh); err != nil {
+		t.Fatal(err)
+	}
+
+	svc.reconcile(context.Background())
+
+	updated, err := svc.Get(context.Background(), "check-stale")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != "failed" || updated.Error == "" {
+		t.Fatalf("timed-out record = %+v", updated)
+	}
+	untouched, err := svc.Get(context.Background(), "check-fresh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Status != "running" {
+		t.Fatalf("fresh record must stay running: %+v", untouched)
+	}
+	foundFailure := false
+	for _, s := range provider.statuses {
+		if s.State == domain.CheckFailure {
+			foundFailure = true
+		}
+	}
+	if !foundFailure {
+		t.Fatalf("forge must see a failure status: %+v", provider.statuses)
+	}
+}
+
+// fakeCheckRunRepo is an in-memory CheckRunRepository that preserves the
+// caller-supplied UpdatedAt (the Raft repo always stamps it), so the
+// reconciler-timeout test can seed a stale record.
+type fakeCheckRunRepo struct {
+	mu      sync.Mutex
+	records map[string]*domain.CheckRunRecord
+}
+
+func newFakeCheckRunRepo() *fakeCheckRunRepo {
+	return &fakeCheckRunRepo{records: map[string]*domain.CheckRunRecord{}}
+}
+
+func (f *fakeCheckRunRepo) Upsert(_ context.Context, r *domain.CheckRunRecord) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := *r
+	f.records[r.ID] = &cp
+	return nil
+}
+
+func (f *fakeCheckRunRepo) Get(_ context.Context, id string) (*domain.CheckRunRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rec, ok := f.records[id]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	cp := *rec
+	return &cp, nil
+}
+
+func (f *fakeCheckRunRepo) List(_ context.Context, filter *domain.CheckRunFilter) ([]*domain.CheckRunRecord, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var out []*domain.CheckRunRecord
+	for _, rec := range f.records {
+		if filter != nil && filter.Status != "" && rec.Status != filter.Status {
+			continue
+		}
+		cp := *rec
+		out = append(out, &cp)
+	}
+	return out, nil
+}
+
+func (f *fakeCheckRunRepo) Delete(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.records, id)
+	return nil
 }

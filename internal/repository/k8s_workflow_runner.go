@@ -23,27 +23,31 @@ type K8sWorkflowRunner struct {
 	serverURL          string
 	internalControlURL string
 	caSecret           string
+	imagePullSecrets   []string
 }
 
 var _ domain.WorkflowJobRunner = (*K8sWorkflowRunner)(nil)
 
 // NewK8sWorkflowRunner returns a K8sWorkflowRunner.
 func NewK8sWorkflowRunner(clientset kubernetes.Interface, namespace, image string, timeout time.Duration, serverURL, internalControlURL, caSecret string) *K8sWorkflowRunner {
-	if namespace == "" {
-		namespace = "dagger-kubernetes"
-	}
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
 	}
 	return &K8sWorkflowRunner{
 		clientset:          clientset,
-		namespace:          namespace,
+		namespace:          resolvePodNamespace(namespace),
 		image:              image,
 		timeout:            timeout,
 		serverURL:          serverURL,
 		internalControlURL: internalControlURL,
 		caSecret:           caSecret,
 	}
+}
+
+// WithImagePullSecrets attaches the given image pull secrets to every Job pod.
+func (r *K8sWorkflowRunner) WithImagePullSecrets(secrets []string) *K8sWorkflowRunner {
+	r.imagePullSecrets = secrets
+	return r
 }
 
 // controlURL returns the in-cluster supervisor URL when configured, so jobs
@@ -85,10 +89,33 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: r.namespace, Labels: labels},
 		StringData: stringData,
 	}
-	if _, err := r.clientset.CoreV1().Secrets(r.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return nil, fmt.Errorf("create workflow env secret: %w", err)
+	// A rerun replaces the terminal Job and refreshes the env Secret so the
+	// current run token takes effect; a first dispatch creates both.
+	if _, err := r.clientset.BatchV1().Jobs(r.namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+		propagation := metav1.DeletePropagationBackground
+		if err := r.clientset.BatchV1().Jobs(r.namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("delete rerun workflow job: %w", err)
+		}
+		if err := r.clientset.CoreV1().Secrets(r.namespace).Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return nil, fmt.Errorf("delete rerun workflow env secret: %w", err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("get workflow job: %w", err)
 	}
-	args := make([]string, 0, 19+len(spec.Flags))
+	if _, err := r.clientset.CoreV1().Secrets(r.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("create workflow env secret: %w", err)
+		}
+		existing, gerr := r.clientset.CoreV1().Secrets(r.namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if gerr != nil {
+			return nil, fmt.Errorf("get workflow env secret: %w", gerr)
+		}
+		existing.StringData = stringData
+		if _, uerr := r.clientset.CoreV1().Secrets(r.namespace).Update(ctx, existing, metav1.UpdateOptions{}); uerr != nil {
+			return nil, fmt.Errorf("update workflow env secret: %w", uerr)
+		}
+	}
+	args := make([]string, 0, 21+len(spec.Flags))
 	args = append(args,
 		"workflow-runner",
 		"--run-id", spec.RunID,
@@ -101,6 +128,9 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 		"--ref", spec.Ref,
 		"--server", r.controlURL(),
 	)
+	if spec.CloneURL != "" {
+		args = append(args, "--clone-url", spec.CloneURL)
+	}
 	args = append(args, spec.Flags...)
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: r.namespace, Labels: labels},
@@ -111,7 +141,9 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:                corev1.RestartPolicyNever,
+					AutomountServiceAccountToken: boolPtr(false),
+					ImagePullSecrets:             imagePullSecrets(r.imagePullSecrets),
 					Containers: []corev1.Container{{
 						Name:    "workflow-job",
 						Image:   r.image,
@@ -127,8 +159,12 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 	}
 	if r.caSecret != "" {
 		job.Spec.Template.Spec.Volumes = []corev1.Volume{{
-			Name:         "minting-ca",
-			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: r.caSecret}},
+			Name: "minting-ca",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: r.caSecret,
+				// Project only the public CA cert; never the signing key.
+				Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+			}},
 		}}
 		job.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
 			Name: "minting-ca", MountPath: "/etc/dagger-kubernetes/ca", ReadOnly: true,

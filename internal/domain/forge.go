@@ -2,6 +2,9 @@ package domain
 
 import (
 	"context"
+	"fmt"
+	"net/url"
+	"strings"
 	"time"
 )
 
@@ -37,6 +40,69 @@ type ForgeSourceRepository interface {
 	Get(ctx context.Context, id string) (*ForgeSource, error)
 	ListByOrg(ctx context.Context, orgID string) ([]*ForgeSource, error)
 	Delete(ctx context.Context, id string) error
+}
+
+// ForgeCloneURL derives the HTTPS git clone URL for a repository from the
+// provider's API base URL. It is idempotent: a repo that is already a full URL
+// (or already carries the .git suffix) is returned unchanged.
+func ForgeCloneURL(provider ForgeKind, baseURL, repo string) string {
+	if repo == "" {
+		return ""
+	}
+	if strings.Contains(repo, "://") {
+		return repo
+	}
+	host := forgeHost(provider, baseURL)
+	if host == "" {
+		return repo
+	}
+	return fmt.Sprintf("https://%s/%s.git", host, strings.TrimSuffix(repo, ".git"))
+}
+
+// forgeHost extracts the git host from a provider API base URL. A missing base
+// falls back to the provider's public SaaS host (github.com, gitlab.com,
+// gitea.com) so the clone URL is never malformed; Gitea's public host is
+// gitea.com (the canonical hosted instance).
+func forgeHost(provider ForgeKind, baseURL string) string {
+	base := strings.TrimSuffix(strings.TrimSpace(baseURL), "/")
+	switch provider {
+	case ForgeGitHub:
+		if base == "" || base == "https://api.github.com" {
+			return "github.com"
+		}
+		// GHES: https://<host>/api/v3 -> <host>
+		return hostFromURL(strings.TrimSuffix(base, "/api/v3"))
+	case ForgeGitLab:
+		if base == "" {
+			return "gitlab.com"
+		}
+		// https://<host>/api/v4 -> <host>
+		return hostFromURL(strings.TrimSuffix(base, "/api/v4"))
+	case ForgeGitea:
+		if base == "" {
+			return "gitea.com"
+		}
+		// https://<host>/api/v1 -> <host>
+		return hostFromURL(strings.TrimSuffix(base, "/api/v1"))
+	default:
+		return ""
+	}
+}
+
+// hostFromURL returns the host[:port] of a URL, falling back to the trimmed
+// input when it is not a parseable URL.
+func hostFromURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	if !strings.Contains(raw, "://") {
+		return raw
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return raw
+	}
+	return u.Host
 }
 
 // WebhookEvent is the normalized forge webhook payload.
@@ -168,6 +234,7 @@ type CheckRunSpec struct {
 	Token         string
 	RunToken      string
 	CloneToken    string
+	CloneURL      string
 	Event         string
 	Secrets       map[string]string
 }

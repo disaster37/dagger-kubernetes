@@ -11,7 +11,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -55,9 +54,9 @@ func runWorkflowRunner(c *cli.Context) error {
 		defer func() { _ = os.RemoveAll(dir) }()
 		workdir = dir
 	}
-	cloneURL := c.String("clone-url")
+	cloneURL := resolveCloneURL(c.String("repo"), c.String("clone-url"))
 	if cloneURL == "" {
-		cloneURL = fmt.Sprintf("https://%s", c.String("repo"))
+		return fmt.Errorf("cannot derive clone URL from repo %q; pass --clone-url", c.String("repo"))
 	}
 	if err := cloneRepo(ctx, cloneURL, c.String("sha"), c.String("ref"), workdir); err != nil {
 		return err
@@ -70,21 +69,14 @@ func runWorkflowRunner(c *cli.Context) error {
 			return err
 		}
 	}
-	env := append(os.Environ(),
-		fmt.Sprintf("DAGGER_CLOUD_URL=%s", server),
-		fmt.Sprintf("DAGGER_CLOUD_TOKEN=%s", token),
-		"DAGGER_ENGINE=cloud",
-	)
-	if _, err := exec.LookPath("dagger"); err != nil {
-		binDir, cleanup, perr := provisionCLI(ctx, server, token, "", runtime.GOOS, runtime.GOARCH)
-		if perr != nil {
-			return fmt.Errorf("provision dagger cli: %w", perr)
-		}
-		defer cleanup()
-		env = append(env, fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+	daggerBin, binExtraEnv, binCleanup, err := resolveDaggerBin(ctx, server, token)
+	if err != nil {
+		return err
 	}
+	defer binCleanup()
+	env := append(runnerEnv(server, token, c.String("org")), binExtraEnv...)
 	args := strings.Fields(c.String("call"))
-	cmd := exec.CommandContext(ctx, "dagger", append([]string{"call"}, args...)...) // #nosec G204 -- call expression comes from the repository's own workflow
+	cmd := exec.CommandContext(ctx, daggerBin, append([]string{"call"}, args...)...) // #nosec G204 -- call expression comes from the repository's own workflow
 	cmd.Dir = workdir
 	cmd.Env = env
 	cmd.Stdout = os.Stdout

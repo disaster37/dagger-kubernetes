@@ -640,6 +640,8 @@ type ChecksConfig struct {
 	Namespace string `mapstructure:"namespace"`
 	// JobImage is the runner image used for check Jobs.
 	JobImage string `mapstructure:"job_image"`
+	// JobImagePullSecrets are image pull secrets attached to check-run Job pods.
+	JobImagePullSecrets []string `mapstructure:"job_image_pull_secrets"`
 	// Timeout bounds a single check-run Job.
 	Timeout time.Duration `mapstructure:"timeout"`
 	// GitHubOIDCIssuer is the GitHub Actions OIDC issuer URL.
@@ -657,6 +659,8 @@ type WorkflowConfig struct {
 	Namespace string `mapstructure:"namespace"`
 	// JobImage is the runner image used for workflow Jobs.
 	JobImage string `mapstructure:"job_image"`
+	// JobImagePullSecrets are image pull secrets attached to workflow Job pods.
+	JobImagePullSecrets []string `mapstructure:"job_image_pull_secrets"`
 	// DefaultTimeout bounds a workflow job when it declares no timeout.
 	DefaultTimeout time.Duration `mapstructure:"default_timeout"`
 	// MaxParallel bounds concurrently running jobs in one workflow run.

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -403,5 +404,30 @@ func TestWorkflowServiceForkRunNeverReceivesSecrets(t *testing.T) {
 	}
 	if runner.calls != 0 {
 		t.Fatalf("fork job must not execute: calls=%d", runner.calls)
+	}
+}
+
+func TestWorkflowServiceDisabledGatesRunCreation(t *testing.T) {
+	wf := &domain.Workflow{Name: "release", Jobs: map[string]domain.WorkflowJob{"build": {Call: "build"}}}
+	runner := &fakeWorkflowRunner{}
+	svc, _ := newWorkflowServiceForTest(t, wf, runner, &fakeEnvRepo{envs: map[string]*domain.Environment{}})
+	svc.WithEnabled(false)
+	if svc.Enabled() {
+		t.Fatal("Enabled must be false")
+	}
+	if _, err := svc.Start(context.Background(), StartWorkflowInput{Workflow: wf, OrgID: "acme", ProjectID: "p1"}); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("Start err = %v, want ErrValidation", err)
+	}
+	if _, err := svc.Dispatch(context.Background(), "acme", "p1", "release", "refs/heads/main", nil, nil); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("Dispatch err = %v, want ErrValidation", err)
+	}
+	if err := svc.OnChecksSucceeded(context.Background(), &domain.CheckRunRecord{OrgID: "acme", ProjectID: "p1"}); err != nil {
+		t.Fatalf("OnChecksSucceeded err = %v, want nil", err)
+	}
+	if err := svc.OnArtifactPublished(context.Background(), "acme", "p1", "run-1", "art", "key"); err != nil {
+		t.Fatalf("OnArtifactPublished err = %v, want nil", err)
+	}
+	if runner.calls != 0 {
+		t.Fatalf("disabled service must not dispatch: calls=%d", runner.calls)
 	}
 }

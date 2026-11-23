@@ -2,7 +2,9 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	"github.com/sirupsen/logrus"
@@ -35,7 +37,17 @@ type ChecksService struct {
 	providers     map[domain.ForgeKind]domain.ForgeProvider
 	publicURL     string
 	webhookSecret string
+	enabled       atomic.Bool
 	logger        *logrus.Logger
+}
+
+// WebhookResult is the outcome of one forge delivery. Ignored deliveries carry
+// a reason and no event; accepted deliveries carry the parsed event.
+type WebhookResult struct {
+	Event    *domain.WebhookEvent
+	Ignored  bool
+	Reason   string
+	RawEvent string
 }
 
 // NewChecksService returns a ChecksService. webhookSecret is the fallback HMAC
@@ -45,16 +57,29 @@ func NewChecksService(sources domain.ForgeSourceRepository, secrets *SecretServi
 	for _, p := range providers {
 		m[p.Kind()] = p
 	}
-	return &ChecksService{
+	svc := &ChecksService{
 		sources: sources, secrets: secrets, projects: projects, orgs: orgs, runner: runner,
 		checkRuns: checkRuns, workflows: workflows, providers: m, publicURL: publicURL,
 		webhookSecret: webhookSecret, logger: logger,
 	}
+	svc.enabled.Store(true)
+	return svc
 }
+
+// WithEnabled gates check-run creation and dispatch. Reads always work.
+func (s *ChecksService) WithEnabled(enabled bool) *ChecksService {
+	s.enabled.Store(enabled)
+	return s
+}
+
+// Enabled reports whether Cloud Checks dispatch is enabled.
+func (s *ChecksService) Enabled() bool { return s.enabled.Load() }
 
 // HandleWebhook verifies and dispatches a forge webhook. HMAC failures return
 // ErrForbidden and must never be recorded as token failures (shared NAT IPs).
-func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.ForgeKind, sourceID string, headers map[string]string, body []byte) (*domain.WebhookEvent, error) {
+// The ordering is fail-closed: load source, verify signature, honour the
+// enabled gate, then classify before any project/record/dispatch/forge write.
+func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.ForgeKind, sourceID string, headers map[string]string, body []byte) (*WebhookResult, error) {
 	src, err := s.sources.Get(ctx, sourceID)
 	if err != nil {
 		return nil, err
@@ -78,10 +103,18 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 	if !p.VerifyWebhook(src, secret, headers, body) {
 		return nil, fmt.Errorf("%w: invalid webhook signature", domain.ErrForbidden)
 	}
-	ev, err := domain.ParseForgeWebhook(provider, forgeEventName(provider, headers), body)
+	rawEvent := forgeEventName(provider, headers)
+	if !s.enabled.Load() {
+		return &WebhookResult{Ignored: true, Reason: "checks_disabled", RawEvent: rawEvent}, nil
+	}
+	disposition, err := domain.ClassifyAndParseForgeWebhook(provider, rawEvent, body)
 	if err != nil {
 		return nil, err
 	}
+	if !disposition.Accepted {
+		return &WebhookResult{Ignored: true, Reason: disposition.Reason, RawEvent: disposition.RawEvent}, nil
+	}
+	ev := disposition.Event
 	if ev.Repo == "" {
 		ev.Repo = src.Repo
 	}
@@ -113,7 +146,12 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 	if ev.IsFork {
 		record.Status = "waiting_approval"
 	}
+	// A duplicate delivery for an already-active run is an idempotent no-op: it
+	// must not rotate the run token or re-dispatch the Job (webhook replays).
 	if s.checkRuns != nil {
+		if existing, gerr := s.checkRuns.Get(ctx, record.ID); gerr == nil && existing.Status == "running" {
+			return &WebhookResult{Event: ev, RawEvent: rawEvent}, nil
+		}
 		if err := s.checkRuns.Upsert(ctx, record); err != nil {
 			return nil, err
 		}
@@ -128,12 +166,30 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 			"sha":       ev.SHA,
 			"pr":        ev.PRNumber,
 		}).Info("fork PR check run held for approval")
-		return ev, nil
+		return &WebhookResult{Event: ev, RawEvent: rawEvent}, nil
 	}
 	if err := s.dispatchCheckJob(ctx, src, record); err != nil {
-		return ev, err
+		s.failDispatch(ctx, src, record, err)
+		return &WebhookResult{Event: ev, RawEvent: rawEvent}, err
 	}
-	return ev, nil
+	return &WebhookResult{Event: ev, RawEvent: rawEvent}, nil
+}
+
+// failDispatch transitions a run to "failed" after a dispatch error so it is
+// never stranded in "running", and reports the failure to the forge.
+func (s *ChecksService) failDispatch(ctx context.Context, src *domain.ForgeSource, record *domain.CheckRunRecord, cause error) {
+	record.Status = "failed"
+	record.Error = cause.Error()
+	record.UpdatedAt = time.Now().UTC()
+	if s.checkRuns != nil {
+		if err := s.checkRuns.Upsert(ctx, record); err != nil {
+			s.logger.WithError(err).Warn("persist failed dispatch state failed")
+		}
+	}
+	s.reportToForge(ctx, src, &domain.CheckRun{
+		Name: "dagger/checks", HeadSHA: record.SHA, State: domain.CheckFailure,
+		Title: "Dagger checks failed to dispatch", DetailsURL: fmt.Sprintf("%s/checks", s.publicURL),
+	})
 }
 
 // dispatchCheckJob resolves credentials/secrets and launches the check Job.
@@ -170,6 +226,7 @@ func (s *ChecksService) dispatchCheckJob(ctx context.Context, src *domain.ForgeS
 		DefaultBranch: record.DefaultBranch, TargetBranch: record.TargetBranch, Tag: record.Tag,
 		PRNumber: record.PRNumber, IsFork: record.IsFork, IsRelease: record.IsRelease,
 		Event: record.Event, Token: token, RunToken: runToken, CloneToken: cloneToken, Secrets: secrets,
+		CloneURL: domain.ForgeCloneURL(src.Provider, src.BaseURL, record.Repo),
 	}
 	return s.runner.Run(ctx, spec)
 }
@@ -263,6 +320,9 @@ func (s *ChecksService) RecordComplete(ctx context.Context, callerOrgID, runID s
 
 // ApproveForkRun releases a fork-PR hold and launches the Job.
 func (s *ChecksService) ApproveForkRun(ctx context.Context, runID, approverUserID string, includeSecrets, callerIsOrgAdmin bool) (*domain.CheckRunRecord, error) {
+	if !s.enabled.Load() {
+		return nil, fmt.Errorf("%w: cloud checks are disabled (checks.enabled is false)", domain.ErrValidation)
+	}
 	record, err := s.checkRuns.Get(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -294,6 +354,9 @@ func (s *ChecksService) ApproveForkRun(ctx context.Context, runID, approverUserI
 
 // Rerun resets a run and re-dispatches it.
 func (s *ChecksService) Rerun(ctx context.Context, runID string) (*domain.CheckRunRecord, error) {
+	if !s.enabled.Load() {
+		return nil, fmt.Errorf("%w: cloud checks are disabled (checks.enabled is false)", domain.ErrValidation)
+	}
 	record, err := s.checkRuns.Get(ctx, runID)
 	if err != nil {
 		return nil, err
@@ -334,6 +397,11 @@ func (s *ChecksService) StartReconciler(ctx context.Context, isLeader func() boo
 	}
 }
 
+// reconcileTimeout bounds how long a record may stay "running" with an unknown
+// Job before the reconciler marks it failed (a Job that never appeared, or a
+// lost Job after a crash).
+const reconcileTimeout = 5 * time.Minute
+
 func (s *ChecksService) reconcile(ctx context.Context) {
 	if s.runner == nil || s.checkRuns == nil {
 		return
@@ -343,24 +411,37 @@ func (s *ChecksService) reconcile(ctx context.Context) {
 		s.logger.WithError(err).Warn("check reconciler list failed")
 		return
 	}
+	now := time.Now().UTC()
 	for _, record := range records {
 		state, err := s.runner.JobStatus(ctx, record.ID)
-		if err != nil || state != domain.JobStateFailed {
+		if err != nil {
 			continue
 		}
-		record.Status = "failed"
-		record.Error = "check job failed or timed out"
-		record.UpdatedAt = time.Now().UTC()
-		if err := s.checkRuns.Upsert(ctx, record); err != nil {
-			s.logger.WithError(err).Warn("check reconciler update failed")
-			continue
+		switch {
+		case state == domain.JobStateFailed:
+			s.failReconciled(ctx, record, "check job failed or timed out")
+		case state == domain.JobStateUnknown && now.Sub(record.UpdatedAt) > reconcileTimeout:
+			// A record stuck "running" with no Job is a lost dispatch (or a
+			// Job that never appeared); fail it so it is never stranded.
+			s.failReconciled(ctx, record, "check job not found (reconciler timeout)")
 		}
-		if src, err := s.sources.Get(ctx, record.SourceID); err == nil {
-			s.reportToForge(ctx, src, &domain.CheckRun{
-				Name: "dagger/checks", HeadSHA: record.SHA, State: domain.CheckFailure,
-				Title: "Dagger checks failed", DetailsURL: fmt.Sprintf("%s/checks", s.publicURL),
-			})
-		}
+	}
+}
+
+// failReconciled transitions a run to failed and reports CheckFailure.
+func (s *ChecksService) failReconciled(ctx context.Context, record *domain.CheckRunRecord, reason string) {
+	record.Status = "failed"
+	record.Error = reason
+	record.UpdatedAt = time.Now().UTC()
+	if err := s.checkRuns.Upsert(ctx, record); err != nil {
+		s.logger.WithError(err).Warn("check reconciler update failed")
+		return
+	}
+	if src, err := s.sources.Get(ctx, record.SourceID); err == nil {
+		s.reportToForge(ctx, src, &domain.CheckRun{
+			Name: "dagger/checks", HeadSHA: record.SHA, State: domain.CheckFailure,
+			Title: "Dagger checks failed", DetailsURL: fmt.Sprintf("%s/checks", s.publicURL),
+		})
 	}
 }
 
@@ -420,4 +501,13 @@ func (s *ChecksService) List(ctx context.Context, f *domain.CheckRunFilter) ([]*
 // Get returns one check run.
 func (s *ChecksService) Get(ctx context.Context, id string) (*domain.CheckRunRecord, error) {
 	return s.checkRuns.Get(ctx, id)
+}
+
+// Delete removes one check run. It is idempotent: deleting an already-absent
+// run is not an error.
+func (s *ChecksService) Delete(ctx context.Context, id string) error {
+	if err := s.checkRuns.Delete(ctx, id); err != nil && !errors.Is(err, domain.ErrNotFound) {
+		return err
+	}
+	return nil
 }

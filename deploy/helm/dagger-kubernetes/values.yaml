@@ -453,18 +453,34 @@ supervisor:
       ingestMaxBodySize: 67108864
       maxInflightBytes: 268435456
     checks:
+## @param supervisor.config.checks.enabled Enable Cloud Checks (ADR-056).
       enabled: false
+## @param supervisor.config.checks.namespace Namespace for check-run Jobs (empty = release namespace).
       namespace: ""
-      jobImage: "ghcr.io/dagger/dagger:latest"
+## @param supervisor.config.checks.jobImage Runner image for check Jobs (empty = supervisor image `<repo>:<tag>`).
+      jobImage: ""
+## @param supervisor.config.checks.jobImagePullSecrets Image pull secrets for check-runner Job pods (empty = supervisor.image.pullSecrets).
+      jobImagePullSecrets: []
+## @param supervisor.config.checks.timeout Per-check-run Job timeout.
       timeout: "30m"
+## @param supervisor.config.checks.githubOidcIssuer GitHub Actions OIDC issuer URL.
       githubOidcIssuer: "https://token.actions.githubusercontent.com"
+## @param supervisor.config.checks.gitlabOidcIssuer Default GitLab CI OIDC issuer URL.
       gitlabOidcIssuer: "https://gitlab.com"
+## @param supervisor.config.checks.oidcAudience Expected audience of CI OIDC ID tokens.
       oidcAudience: "dagger-kubernetes"
     workflows:
+## @param supervisor.config.workflows.enabled Enable Dagger-native CD workflows (ADR-057).
       enabled: false
+## @param supervisor.config.workflows.namespace Namespace for workflow Jobs (empty = release namespace).
       namespace: ""
-      jobImage: "ghcr.io/dagger/dagger:latest"
+## @param supervisor.config.workflows.jobImage Runner image for workflow Jobs (empty = supervisor image `<repo>:<tag>`).
+      jobImage: ""
+## @param supervisor.config.workflows.jobImagePullSecrets Image pull secrets for workflow Job pods (empty = supervisor.image.pullSecrets).
+      jobImagePullSecrets: []
+## @param supervisor.config.workflows.defaultTimeout Default workflow job timeout when a job declares none.
       defaultTimeout: "30m"
+## @param supervisor.config.workflows.maxParallel Max concurrently running jobs in one workflow run.
       maxParallel: 8
     forge:
       githubApiUrl: "https://api.github.com"

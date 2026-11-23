@@ -35,6 +35,24 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     --mount=type=cache,target=/root/.cache/go-build \
     go build -trimpath -ldflags "-s -w" -o /out/dagger-kubernetes-ci ./cmd/ci/
 
+# ---------- Runner (Cloud Checks / workflow Jobs) ----------
+# Separate stage so the supervisor image stays the final/default target. The
+# runner needs git (clone) and the CI wrapper; the dagger CLI is provisioned
+# on demand from the supervisor unless DAGGER_CLI_VERSION is set to pre-bake it.
+FROM alpine:3.21 AS runner
+ARG DAGGER_CLI_VERSION=""
+RUN apk add --no-cache ca-certificates tzdata git \
+    && update-ca-certificates \
+    && addgroup -S dagger && adduser -S -G dagger -u 10001 dagger
+RUN if [ -n "$DAGGER_CLI_VERSION" ]; then \
+      apk add --no-cache curl; \
+      curl -fsSL https://dl.dagger.io/dagger/install.sh | DAGGER_VERSION="$DAGGER_CLI_VERSION" sh; \
+      apk del curl; \
+    fi
+COPY --from=ci-builder /out/dagger-kubernetes-ci /usr/local/bin/dagger-kubernetes-ci
+USER dagger
+ENTRYPOINT ["/usr/local/bin/dagger-kubernetes-ci"]
+
 # ---------- Runtime ----------
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata git \

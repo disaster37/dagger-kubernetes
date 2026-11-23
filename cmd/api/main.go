@@ -259,8 +259,9 @@ func run(c *cli.Context) error {
 	}
 	forgeSvc := service.NewForgeService(forgeSourceRepo, secretSvc, forgeProviders, cfg.Server.PublicURL, logger)
 	var checkRunner domain.CheckJobRunner
-	if clientset != nil {
-		checkRunner = repository.NewK8sJobRunner(clientset, cfg.Checks.Namespace, cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret)
+	if cfg.Checks.Enabled && clientset != nil {
+		checkRunner = repository.NewK8sJobRunner(clientset, effectiveNamespace(cfg.Checks.Namespace, cfg.Fleet.Namespace), cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
+			WithImagePullSecrets(cfg.Checks.JobImagePullSecrets)
 	}
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
@@ -508,8 +509,9 @@ func run(c *cli.Context) error {
 		artifactStore = repository.NewS3ArtifactStore(s3Client, cfg.Cache.S3.Bucket, "")
 	}
 	var workflowRunner domain.WorkflowJobRunner
-	if clientset != nil {
-		workflowRunner = repository.NewK8sWorkflowRunner(clientset, cfg.Workflows.Namespace, cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret)
+	if cfg.Workflows.Enabled && clientset != nil {
+		workflowRunner = repository.NewK8sWorkflowRunner(clientset, effectiveNamespace(cfg.Workflows.Namespace, cfg.Fleet.Namespace), cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
+			WithImagePullSecrets(cfg.Workflows.JobImagePullSecrets)
 	}
 	envRepo := repository.NewEnvironmentRepo(raftStore)
 	workflowRepo := repository.NewWorkflowRepo(raftStore)
@@ -519,8 +521,9 @@ func run(c *cli.Context) error {
 		artifactStore, workflowRunner, secretSvc,
 		service.WorkflowServiceConfig{DefaultTimeout: cfg.Workflows.DefaultTimeout, MaxParallel: cfg.Workflows.MaxParallel},
 		logger,
-	)
-	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, cfg.Forge.WebhookSecret, logger)
+	).WithEnabled(cfg.Workflows.Enabled)
+	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, cfg.Forge.WebhookSecret, logger).
+		WithEnabled(cfg.Checks.Enabled)
 	cloudGraphQL.WithForgeSources(forgeSourceRepo).WithProjects(projectRepo).WithPublicURL(cfg.Server.PublicURL)
 	if cfg.Checks.Enabled {
 		cloudGraphQL.WithCheckRerunner(checksSvc.Rerun)
@@ -682,11 +685,15 @@ func run(c *cli.Context) error {
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
 	go otlpStreamSvc.Start(ctx)
-	go checksSvc.StartReconciler(ctx, raftStore.IsLeader)
+	if cfg.Checks.Enabled {
+		go checksSvc.StartReconciler(ctx, raftStore.IsLeader)
+	}
 	if remoteCacheSvc != nil {
 		go remoteCacheSvc.Start(ctx, raftStore.IsLeader)
 	}
-	go workflowSvc.StartScheduler(ctx, raftStore.IsLeader)
+	if cfg.Workflows.Enabled {
+		go workflowSvc.StartScheduler(ctx, raftStore.IsLeader)
+	}
 
 	stopMetricsRecorder := func() {}
 	if metricsRecorder != nil {
@@ -1227,6 +1234,15 @@ func raftDiscoveryConfig(cfg *domain.Config) discovery.Config {
 		ClusterDomain:   cfg.Raft.ClusterDomain,
 		RaftPort:        raftPortFromBindAddr(cfg.Raft.BindAddr),
 	}
+}
+
+// effectiveNamespace returns the specific namespace when set, else the fleet
+// namespace (matching initRaftStore's fallback).
+func effectiveNamespace(specific, fleet string) string {
+	if specific != "" {
+		return specific
+	}
+	return fleet
 }
 
 // raftPortFromBindAddr returns the port from bind_addr, defaulting to 8081.

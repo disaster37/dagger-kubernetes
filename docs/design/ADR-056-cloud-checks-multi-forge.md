@@ -46,3 +46,48 @@ auto-banning shared NAT egress IPs.
   `CheckFailure`.
 - Org-scoped `dag_<org>_` tokens are admitted by `QuotaService` against the
   org's groups (or fleet capacity for a fresh org).
+
+## Update — enable-checks end-to-end (event policy, gating, runner hardening)
+Live validation surfaced several gaps between the design and a working
+push → check-run → `dagger call` flow. This update closes them.
+
+- **Webhook event policy.** Deliveries are classified before any write.
+  `domain.ClassifyAndParseForgeWebhook` returns a `WebhookDisposition`:
+  actionable (push/tag/PR/release with a supported action) or ignored with a
+  reason (`ping`, `unsupported_event`, `unsupported_action`, `ref_deleted`).
+  Ignored deliveries return `200 {"status":"ignored","reason":...,"event":...}`
+  and never touch projects, records, dispatch, or the forge. GitHub hooks are
+  registered for `["push","pull_request","release"]` (push covers branch+tag),
+  matching Gitea/GitLab; the handler-side classifier stays authoritative for
+  pre-existing `["*"]` hooks.
+- **`checks.enabled` / `workflows.enabled` gating.** `ChecksService` and
+  `WorkflowService` default to enabled and expose `WithEnabled`. When checks
+  are disabled the webhook verifies the signature then returns
+  `ignored{checks_disabled}` with zero writes, and REST rerun/approve return
+  `400`; reads stay `200`. When workflows are disabled run creation is gated
+  in `Start`/`Dispatch`/`OnChecksSucceeded`; reads stay. The reconciler and
+  scheduler only start when their subsystem is enabled.
+- **Namespace fallback chain.** `resolvePodNamespace` resolves the runner
+  namespace as configured → `POD_NAMESPACE` → the projected ServiceAccount
+  namespace file → `dagger-kubernetes`. `cmd/api` passes
+  `effectiveNamespace(checks|workflows.namespace, fleet.namespace)` so the
+  runner lands in the release namespace (where its RBAC lives) by default.
+- **Runner image + fixes.** A dedicated `runner` Dockerfile stage ships
+  `git`, `ca-certificates`, and `dagger-kubernetes-ci` (the Dagger CLI is
+  provisioned on demand). The runner image defaults to the supervisor image.
+  Four correctness fixes: (A) `domain.ForgeCloneURL` derives the HTTPS clone
+  URL from the provider/base URL and is passed as `--clone-url` (a bare
+  `owner/repo` never becomes `https://owner/repo`); (B) the runner resolves the
+  absolute `dagger` path (exec.LookPath ignores `cmd.Env`) and builds the CLI
+  download URL from the supervisor URL to avoid hairpin NAT; (C) both
+  `DAGGER_ENGINE=cloud` and `_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self`
+  are set (0.21.x ignores the former), plus live-trace and `DAGGER_ORG` vars;
+  (D) the minting-CA volume projects only `ca.crt` (never `ca.key`) and Job
+  pods set `AutomountServiceAccountToken=false`.
+- **Failed-dispatch transition.** A dispatch error transitions the record to
+  `failed` with the error and reports `CheckFailure` to the forge, so a run is
+  never stranded in `running`. A duplicate delivery for an already-active run
+  is an idempotent no-op (no token rotation, no re-dispatch). A rerun replaces
+  the terminal Job and its env Secret so the fresh run token takes effect.
+- **DELETE endpoint.** `DELETE /api/v1/checks/runs/:id` (org admin or global
+  admin) removes a run and is idempotent (`204`).

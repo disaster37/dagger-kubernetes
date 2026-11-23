@@ -258,16 +258,32 @@ data:
 {{- end }}
     checks:
       enabled: {{ .Values.supervisor.config.checks.enabled }}
-      namespace: {{ .Values.supervisor.config.checks.namespace | quote }}
-      job_image: {{ .Values.supervisor.config.checks.jobImage | quote }}
+      namespace: {{ default (include "dagger-kubernetes.namespace" .) .Values.supervisor.config.checks.namespace | quote }}
+      job_image: {{ default (printf "%s:%s" .Values.supervisor.image.repository (.Values.supervisor.image.tag | default .Chart.AppVersion)) .Values.supervisor.config.checks.jobImage | quote }}
+      job_image_pull_secrets:
+        {{- $checksPullSecrets := .Values.supervisor.config.checks.jobImagePullSecrets | default .Values.supervisor.image.pullSecrets }}
+        {{- if $checksPullSecrets }}
+        {{- range $checksPullSecrets }}
+        - {{ .name | quote }}
+        {{- end }}
+        {{- else }} []
+        {{- end }}
       timeout: {{ .Values.supervisor.config.checks.timeout | quote }}
       github_oidc_issuer: {{ .Values.supervisor.config.checks.githubOidcIssuer | quote }}
       gitlab_oidc_issuer: {{ .Values.supervisor.config.checks.gitlabOidcIssuer | quote }}
       oidc_audience: {{ .Values.supervisor.config.checks.oidcAudience | quote }}
     workflows:
       enabled: {{ .Values.supervisor.config.workflows.enabled }}
-      namespace: {{ .Values.supervisor.config.workflows.namespace | quote }}
-      job_image: {{ .Values.supervisor.config.workflows.jobImage | quote }}
+      namespace: {{ default (include "dagger-kubernetes.namespace" .) .Values.supervisor.config.workflows.namespace | quote }}
+      job_image: {{ default (printf "%s:%s" .Values.supervisor.image.repository (.Values.supervisor.image.tag | default .Chart.AppVersion)) .Values.supervisor.config.workflows.jobImage | quote }}
+      job_image_pull_secrets:
+        {{- $workflowsPullSecrets := .Values.supervisor.config.workflows.jobImagePullSecrets | default .Values.supervisor.image.pullSecrets }}
+        {{- if $workflowsPullSecrets }}
+        {{- range $workflowsPullSecrets }}
+        - {{ .name | quote }}
+        {{- end }}
+        {{- else }} []
+        {{- end }}
       default_timeout: {{ .Values.supervisor.config.workflows.defaultTimeout | quote }}
       max_parallel: {{ .Values.supervisor.config.workflows.maxParallel }}
     forge:

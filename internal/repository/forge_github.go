@@ -38,7 +38,10 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	body, err := jsonBody(map[string]any{
 		"name":   "web",
 		"active": true,
-		"events": []string{"*"},
+		// Narrow to the events Cloud Checks acts on (push covers branch + tag);
+		// the handler-side classifier stays authoritative for pre-existing ["*"]
+		// hooks.
+		"events": []string{"push", "pull_request", "release"},
 		"config": map[string]string{"url": callbackURL, "content_type": "json", "secret": secret},
 	})
 	if err != nil {

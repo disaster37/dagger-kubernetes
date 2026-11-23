@@ -882,6 +882,7 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.POST("/v1/webhooks/:provider/:sourceID", s.handleForgeWebhook)
 	h.GET("/api/v1/orgs/:org/checks", s.handleOrgChecksList)
 	h.GET("/api/v1/checks/runs/:id", s.handleCheckRunGet)
+	h.DELETE("/api/v1/checks/runs/:id", s.handleCheckRunDelete)
 	h.POST("/api/v1/checks/runs/:id/approve", s.handleCheckRunApprove)
 	h.POST("/api/v1/checks/runs/:id/rerun", s.handleCheckRunRerun)
 	h.POST("/api/v1/checks/runs/:id/load", s.handleCheckRunLoad)

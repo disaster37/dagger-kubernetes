@@ -104,7 +104,7 @@ func (s *Server) handleForgeWebhook(ctx context.Context, c *app.RequestContext) 
 		"X-Gitea-Event":       string(c.Request.Header.Peek("X-Gitea-Event")),
 	}
 	provider := domain.ForgeKind(c.Param("provider"))
-	ev, err := s.checks.HandleWebhook(ctx, provider, c.Param("sourceID"), headers, body)
+	res, err := s.checks.HandleWebhook(ctx, provider, c.Param("sourceID"), headers, body)
 	if err != nil {
 		if errors.Is(err, domain.ErrForbidden) {
 			s.metrics.WebhookSignatureInvalid.WithLabelValues(string(provider)).Inc()
@@ -114,7 +114,13 @@ func (s *Server) handleForgeWebhook(ctx context.Context, c *app.RequestContext) 
 		s.writeServiceError(c, err)
 		return
 	}
-	writeJSON(c, ev)
+	if res.Ignored {
+		c.JSON(consts.StatusOK, map[string]string{
+			"status": "ignored", "reason": res.Reason, "event": res.RawEvent,
+		})
+		return
+	}
+	writeJSON(c, res.Event)
 }
 
 type secretRequest struct {
@@ -323,6 +329,10 @@ type approveCheckRequest struct {
 
 // handleCheckRunApprove releases a fork-PR hold (org member/admin).
 func (s *Server) handleCheckRunApprove(ctx context.Context, c *app.RequestContext) {
+	if s.checks != nil && !s.checks.Enabled() {
+		writeError(c, consts.StatusBadRequest, "cloud checks are disabled (checks.enabled is false)")
+		return
+	}
 	record, ok := s.loadCheckRunForCaller(ctx, c)
 	if !ok {
 		return
@@ -343,6 +353,10 @@ func (s *Server) handleCheckRunApprove(ctx context.Context, c *app.RequestContex
 
 // handleCheckRunRerun re-dispatches a check run (org member/admin).
 func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext) {
+	if s.checks != nil && !s.checks.Enabled() {
+		writeError(c, consts.StatusBadRequest, "cloud checks are disabled (checks.enabled is false)")
+		return
+	}
 	record, ok := s.loadCheckRunForCaller(ctx, c)
 	if !ok {
 		return
@@ -353,6 +367,25 @@ func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext)
 		return
 	}
 	writeJSON(c, updated)
+}
+
+// handleCheckRunDelete removes a check run (org admin or global admin).
+// Idempotent: deleting an already-absent run returns 204.
+func (s *Server) handleCheckRunDelete(ctx context.Context, c *app.RequestContext) {
+	record, ok := s.loadCheckRunForCaller(ctx, c)
+	if !ok {
+		return
+	}
+	id := identityOf(c)
+	if !id.IsAdmin() && (s.orgs == nil || !s.orgs.IsOrgAdmin(ctx, record.OrgID, id.UserID)) {
+		writeError(c, consts.StatusForbidden, "forbidden")
+		return
+	}
+	if err := s.checks.Delete(ctx, record.ID); err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	c.SetStatusCode(consts.StatusNoContent)
 }
 
 // runTokenHeader carries the per-run callback credential.

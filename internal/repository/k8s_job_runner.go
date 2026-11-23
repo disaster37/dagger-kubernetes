@@ -31,19 +31,23 @@ type K8sJobRunner struct {
 	serverURL          string
 	internalControlURL string
 	caSecret           string
+	imagePullSecrets   []string
 }
 
 var _ domain.CheckJobRunner = (*K8sJobRunner)(nil)
 
 // NewK8sJobRunner returns a K8sJobRunner.
 func NewK8sJobRunner(clientset kubernetes.Interface, namespace, image string, timeout time.Duration, serverURL, internalControlURL, caSecret string) *K8sJobRunner {
-	if namespace == "" {
-		namespace = "dagger-kubernetes"
-	}
 	if timeout <= 0 {
 		timeout = 30 * time.Minute
 	}
-	return &K8sJobRunner{clientset: clientset, namespace: namespace, image: image, timeout: timeout, serverURL: serverURL, internalControlURL: internalControlURL, caSecret: caSecret}
+	return &K8sJobRunner{clientset: clientset, namespace: resolvePodNamespace(namespace), image: image, timeout: timeout, serverURL: serverURL, internalControlURL: internalControlURL, caSecret: caSecret}
+}
+
+// WithImagePullSecrets attaches the given image pull secrets to every Job pod.
+func (r *K8sJobRunner) WithImagePullSecrets(secrets []string) *K8sJobRunner {
+	r.imagePullSecrets = secrets
+	return r
 }
 
 func refHash(ref string) string {
@@ -58,7 +62,9 @@ func (r *K8sJobRunner) controlURL() string {
 	return r.serverURL
 }
 
-// Run creates a check-run Job. A Job with the same check-run ID is idempotent.
+// Run creates a check-run Job. A Job with the same check-run ID is idempotent
+// unless it is a rerun, in which case the existing Job and its env Secret are
+// replaced so the fresh run token takes effect.
 func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error {
 	if r.clientset == nil {
 		return fmt.Errorf("check job runner: no kubernetes client")
@@ -84,8 +90,34 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: r.namespace, Labels: labels},
 		StringData: stringData,
 	}
-	if _, err := r.clientset.CoreV1().Secrets(r.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil && !apierrors.IsAlreadyExists(err) {
-		return fmt.Errorf("create check env secret: %w", err)
+	// A rerun must replace the terminal Job (TTLSecondsAfterFinished may have
+	// left it in place) and refresh the env Secret so DAGGER_RUN_TOKEN is
+	// current; a first dispatch simply creates both.
+	rerun := false
+	if _, err := r.clientset.BatchV1().Jobs(r.namespace).Get(ctx, name, metav1.GetOptions{}); err == nil {
+		rerun = true
+		propagation := metav1.DeletePropagationBackground
+		if err := r.clientset.BatchV1().Jobs(r.namespace).Delete(ctx, name, metav1.DeleteOptions{PropagationPolicy: &propagation}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete rerun check job: %w", err)
+		}
+		if err := r.clientset.CoreV1().Secrets(r.namespace).Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("delete rerun check env secret: %w", err)
+		}
+	} else if !apierrors.IsNotFound(err) {
+		return fmt.Errorf("get check job: %w", err)
+	}
+	if _, err := r.clientset.CoreV1().Secrets(r.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+		if !apierrors.IsAlreadyExists(err) {
+			return fmt.Errorf("create check env secret: %w", err)
+		}
+		existing, gerr := r.clientset.CoreV1().Secrets(r.namespace).Get(ctx, secretName, metav1.GetOptions{})
+		if gerr != nil {
+			return fmt.Errorf("get check env secret: %w", gerr)
+		}
+		existing.StringData = stringData
+		if _, uerr := r.clientset.CoreV1().Secrets(r.namespace).Update(ctx, existing, metav1.UpdateOptions{}); uerr != nil {
+			return fmt.Errorf("update check env secret: %w", uerr)
+		}
 	}
 
 	args := []string{
@@ -102,6 +134,9 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		"--tag", spec.Tag,
 		"--server", serverURL,
 	}
+	if spec.CloneURL != "" {
+		args = append(args, "--clone-url", spec.CloneURL)
+	}
 	if spec.PRNumber > 0 {
 		args = append(args, "--pr", fmt.Sprintf("%d", spec.PRNumber))
 	}
@@ -117,7 +152,9 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{Labels: labels},
 				Spec: corev1.PodSpec{
-					RestartPolicy: corev1.RestartPolicyNever,
+					RestartPolicy:                corev1.RestartPolicyNever,
+					AutomountServiceAccountToken: boolPtr(false),
+					ImagePullSecrets:             imagePullSecrets(r.imagePullSecrets),
 					Containers: []corev1.Container{{
 						Name:    "check-runner",
 						Image:   r.image,
@@ -133,8 +170,12 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 	}
 	if r.caSecret != "" {
 		job.Spec.Template.Spec.Volumes = []corev1.Volume{{
-			Name:         "minting-ca",
-			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: r.caSecret}},
+			Name: "minting-ca",
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: r.caSecret,
+				// Project only the public CA cert; never the signing key.
+				Items: []corev1.KeyToPath{{Key: "ca.crt", Path: "ca.crt"}},
+			}},
 		}}
 		job.Spec.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{
 			Name: "minting-ca", MountPath: "/etc/dagger-kubernetes/ca", ReadOnly: true,
@@ -145,12 +186,13 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 			// SSL_CERT_FILE would REPLACE the system bundle.
 			corev1.EnvVar{Name: "SSL_CERT_DIR", Value: "/etc/ssl/certs:/etc/dagger-kubernetes/ca"})
 	}
-	created, err := r.clientset.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{})
+	created, err := r.createCheckJob(ctx, job, name, rerun)
 	if err != nil {
-		if apierrors.IsAlreadyExists(err) {
-			return nil
-		}
-		return fmt.Errorf("create check job: %w", err)
+		return err
+	}
+	if created == nil {
+		// First dispatch hit an existing Job (idempotent replay): nothing to own.
+		return nil
 	}
 	// Own the Secret by the Job so Kubernetes garbage-collects it with the Job.
 	secret.OwnerReferences = []metav1.OwnerReference{{
@@ -163,6 +205,37 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		return fmt.Errorf("own check env secret: %w", err)
 	}
 	return nil
+}
+
+// createCheckJob creates the Job. On a rerun a transient AlreadyExists (the
+// deleted Job still propagating) is retried once after a short wait; a
+// persistent AlreadyExists is an explicit error rather than a silent success
+// that would mask a failed replacement. A first dispatch treats AlreadyExists
+// as an idempotent replay and returns (nil, nil).
+func (r *K8sJobRunner) createCheckJob(ctx context.Context, job *batchv1.Job, name string, rerun bool) (*batchv1.Job, error) {
+	created, err := r.clientset.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err == nil {
+		return created, nil
+	}
+	if !apierrors.IsAlreadyExists(err) {
+		return nil, fmt.Errorf("create check job: %w", err)
+	}
+	if !rerun {
+		return nil, nil
+	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-time.After(2 * time.Second):
+	}
+	created, err = r.clientset.BatchV1().Jobs(r.namespace).Create(ctx, job, metav1.CreateOptions{})
+	if err != nil {
+		if apierrors.IsAlreadyExists(err) {
+			return nil, fmt.Errorf("rerun check job %s still exists after delete: %w", name, err)
+		}
+		return nil, fmt.Errorf("create check job: %w", err)
+	}
+	return created, nil
 }
 
 // CancelSuperseded deletes active Jobs for the same project/ref.
@@ -212,3 +285,19 @@ func (r *K8sJobRunner) JobStatus(ctx context.Context, runID string) (domain.JobS
 
 func int64Ptr(v int64) *int64 { return &v }
 func int32Ptr(v int32) *int32 { return &v }
+func boolPtr(v bool) *bool    { return &v }
+
+// imagePullSecrets converts secret names into the PodSpec reference list.
+func imagePullSecrets(names []string) []corev1.LocalObjectReference {
+	if len(names) == 0 {
+		return nil
+	}
+	refs := make([]corev1.LocalObjectReference, 0, len(names))
+	for _, name := range names {
+		if name == "" {
+			continue
+		}
+		refs = append(refs, corev1.LocalObjectReference{Name: name})
+	}
+	return refs
+}

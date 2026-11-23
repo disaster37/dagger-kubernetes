@@ -191,6 +191,7 @@ type WorkflowCallSpec struct {
 	Token         string
 	RunToken      string
 	CloneToken    string
+	CloneURL      string
 	Flags         []string
 	Artifacts     []WorkflowArtifact
 	UsesArtifacts []string

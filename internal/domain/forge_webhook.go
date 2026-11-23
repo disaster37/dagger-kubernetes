@@ -6,6 +6,16 @@ import (
 	"strings"
 )
 
+// WebhookDisposition is the classification of one forge delivery: whether it is
+// actionable, the reason when it is not, the raw provider event name, and the
+// parsed event for accepted deliveries.
+type WebhookDisposition struct {
+	Accepted bool
+	Reason   string
+	RawEvent string
+	Event    *WebhookEvent
+}
+
 // ParseForgeWebhook normalizes a provider webhook payload into WebhookEvent.
 func ParseForgeWebhook(provider ForgeKind, event string, body []byte) (*WebhookEvent, error) {
 	switch provider {
@@ -17,6 +27,186 @@ func ParseForgeWebhook(provider ForgeKind, event string, body []byte) (*WebhookE
 		return parseGiteaWebhook(event, body)
 	default:
 		return nil, fmt.Errorf("unsupported forge %q", provider)
+	}
+}
+
+// ClassifyAndParseForgeWebhook decides whether a delivery is actionable before
+// parsing it. Non-actionable deliveries carry a reason and never produce an
+// event, so callers can ACK them without any project/record/dispatch write.
+func ClassifyAndParseForgeWebhook(provider ForgeKind, rawEvent string, body []byte) (*WebhookDisposition, error) {
+	switch provider {
+	case ForgeGitHub, ForgeGitea:
+		return classifyGitStyleWebhook(provider, rawEvent, body)
+	case ForgeGitLab:
+		return classifyGitLabWebhook(rawEvent, body)
+	default:
+		return nil, fmt.Errorf("unsupported forge %q", provider)
+	}
+}
+
+// classifyGitStyleWebhook classifies GitHub/Gitea deliveries (shared payload
+// shape) and parses accepted events.
+func classifyGitStyleWebhook(provider ForgeKind, rawEvent string, body []byte) (*WebhookDisposition, error) {
+	d := &WebhookDisposition{RawEvent: rawEvent}
+	switch rawEvent {
+	case "ping":
+		d.Reason = "ping"
+		return d, nil
+	case "push":
+		var payload struct {
+			Ref   string `json:"ref"`
+			After string `json:"after"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode %s webhook: %w", provider, err)
+		}
+		if isDeletedRef(payload.Ref, payload.After) {
+			d.Reason = "ref_deleted"
+			return d, nil
+		}
+	case "pull_request":
+		var payload struct {
+			Action      string `json:"action"`
+			PullRequest struct {
+				Head struct {
+					SHA string `json:"sha"`
+				} `json:"head"`
+			} `json:"pull_request"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode %s webhook: %w", provider, err)
+		}
+		if !pullRequestActionAllowed(payload.Action) || payload.PullRequest.Head.SHA == "" {
+			d.Reason = "unsupported_action"
+			return d, nil
+		}
+	case "release":
+		var payload struct {
+			Action  string `json:"action"`
+			Release struct {
+				TagName string `json:"tag_name"`
+			} `json:"release"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode %s webhook: %w", provider, err)
+		}
+		if !releaseActionAllowed(payload.Action) || payload.Release.TagName == "" {
+			d.Reason = "unsupported_action"
+			return d, nil
+		}
+	default:
+		d.Reason = "unsupported_event"
+		return d, nil
+	}
+	ev, err := ParseForgeWebhook(provider, rawEvent, body)
+	if err != nil {
+		return nil, err
+	}
+	if rawEvent == "release" && ev.Tag != "" {
+		ev.Ref = fmt.Sprintf("refs/tags/%s", ev.Tag)
+	}
+	d.Accepted = true
+	d.Event = ev
+	return d, nil
+}
+
+// classifyGitLabWebhook classifies GitLab deliveries and parses accepted ones.
+func classifyGitLabWebhook(rawEvent string, body []byte) (*WebhookDisposition, error) {
+	d := &WebhookDisposition{RawEvent: rawEvent}
+	switch rawEvent {
+	case "Push Hook", "Tag Push Hook":
+		var payload struct {
+			Ref   string `json:"ref"`
+			After string `json:"after"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode gitlab webhook: %w", err)
+		}
+		if isDeletedRef(payload.Ref, payload.After) {
+			d.Reason = "ref_deleted"
+			return d, nil
+		}
+	case "Merge Request Hook":
+		var payload struct {
+			ObjectAttributes struct {
+				Action string `json:"action"`
+			} `json:"object_attributes"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode gitlab webhook: %w", err)
+		}
+		if !mergeRequestActionAllowed(payload.ObjectAttributes.Action) {
+			d.Reason = "unsupported_action"
+			return d, nil
+		}
+	case "Release Hook":
+		var payload struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal(body, &payload); err != nil {
+			return nil, fmt.Errorf("decode gitlab webhook: %w", err)
+		}
+		if payload.Action != "" && payload.Action != "create" {
+			d.Reason = "unsupported_action"
+			return d, nil
+		}
+	default:
+		d.Reason = "unsupported_event"
+		return d, nil
+	}
+	ev, err := ParseForgeWebhook(ForgeGitLab, rawEvent, body)
+	if err != nil {
+		return nil, err
+	}
+	d.Accepted = true
+	d.Event = ev
+	return d, nil
+}
+
+// isDeletedRef reports whether a push deletes its ref (branch/tag removal).
+func isDeletedRef(ref, after string) bool {
+	return after == "" || isAllZeroSHA(after) || ref == ""
+}
+
+func isAllZeroSHA(s string) bool {
+	for _, c := range s {
+		if c != '0' {
+			return false
+		}
+	}
+	return s != ""
+}
+
+// pullRequestActionAllowed reports whether a GitHub/Gitea pull_request action
+// should trigger checks. "" is accepted to preserve synthetic fixtures.
+func pullRequestActionAllowed(action string) bool {
+	switch action {
+	case "", "opened", "synchronize", "synchronized", "reopened":
+		return true
+	default:
+		return false
+	}
+}
+
+// releaseActionAllowed reports whether a GitHub/Gitea release action should
+// trigger checks. "" is accepted to preserve synthetic fixtures.
+func releaseActionAllowed(action string) bool {
+	switch action {
+	case "", "published", "created":
+		return true
+	default:
+		return false
+	}
+}
+
+// mergeRequestActionAllowed reports whether a GitLab merge-request action should
+// trigger checks.
+func mergeRequestActionAllowed(action string) bool {
+	switch action {
+	case "open", "update", "reopen":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -110,6 +300,8 @@ func parseGitLabWebhook(event string, body []byte) (*WebhookEvent, error) {
 		ev.SHA = payload.CheckoutSHA
 	}
 	switch payload.ObjectKind {
+	case "push":
+		ev.Event = "push"
 	case "merge_request":
 		ev.Event = "pull_request"
 		ev.PRNumber = payload.ObjectAttributes.IID

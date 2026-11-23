@@ -1961,3 +1961,114 @@ func TestValidateImageCacheConfig(t *testing.T) {
 		})
 	}
 }
+
+func TestValidateChecksAndWorkflowsConfig(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{
+			Checks:    domain.ChecksConfig{Enabled: true, JobImage: "ghcr.io/acme/runner:latest", Timeout: time.Minute},
+			Workflows: domain.WorkflowConfig{Enabled: true, JobImage: "ghcr.io/acme/runner:latest", DefaultTimeout: time.Minute, MaxParallel: 1},
+		}
+	}
+	tests := []struct {
+		name    string
+		mut     func(c *domain.Config)
+		wantErr string
+	}{
+		{name: "valid", mut: func(c *domain.Config) {}},
+		{name: "checks disabled skips", mut: func(c *domain.Config) {
+			c.Checks.Enabled = false
+			c.Checks.JobImage = ""
+			c.Checks.Timeout = 0
+		}},
+		{name: "checks empty job_image", mut: func(c *domain.Config) {
+			c.Checks.JobImage = ""
+		}, wantErr: "checks.job_image must not be empty"},
+		{name: "checks zero timeout", mut: func(c *domain.Config) {
+			c.Checks.Timeout = 0
+		}, wantErr: "checks.timeout must be > 0"},
+		{name: "workflows disabled skips", mut: func(c *domain.Config) {
+			c.Workflows.Enabled = false
+			c.Workflows.JobImage = ""
+			c.Workflows.DefaultTimeout = 0
+		}},
+		{name: "workflows empty job_image", mut: func(c *domain.Config) {
+			c.Workflows.JobImage = ""
+		}, wantErr: "workflows.job_image must not be empty"},
+		{name: "workflows zero default_timeout", mut: func(c *domain.Config) {
+			c.Workflows.DefaultTimeout = 0
+		}, wantErr: "workflows.default_timeout must be > 0"},
+		{name: "workflows negative max_parallel", mut: func(c *domain.Config) {
+			c.Workflows.MaxParallel = -1
+		}, wantErr: "workflows.max_parallel must be >= 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mut(cfg)
+			err := validateChecksConfig(cfg)
+			if err == nil {
+				err = validateWorkflowsConfig(cfg)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadChecksAndWorkflowsDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Checks.JobImage != "ghcr.io/disaster37/dagger-kubernetes:latest" {
+		t.Fatalf("checks.job_image default = %q", cfg.Checks.JobImage)
+	}
+	if cfg.Workflows.JobImage != "ghcr.io/disaster37/dagger-kubernetes:latest" {
+		t.Fatalf("workflows.job_image default = %q", cfg.Workflows.JobImage)
+	}
+	if len(cfg.Checks.JobImagePullSecrets) != 0 || len(cfg.Workflows.JobImagePullSecrets) != 0 {
+		t.Fatal("job_image_pull_secrets must default to empty")
+	}
+}
+
+// TestLoadJobImagePullSecretsStringList locks the config contract with the Helm
+// template: job_image_pull_secrets is a plain string list of pull-secret NAMES
+// (not the Kubernetes {name: ...} object shape). A non-empty list must decode.
+func TestLoadJobImagePullSecretsStringList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.app.yaml")
+	content := []byte(`checks:
+  enabled: true
+  job_image: "ghcr.io/acme/runner:latest"
+  job_image_pull_secrets:
+    - "ghcr-pull"
+    - "other-pull"
+  timeout: "30m"
+workflows:
+  enabled: true
+  job_image: "ghcr.io/acme/runner:latest"
+  job_image_pull_secrets:
+    - "ghcr-pull"
+  default_timeout: "30m"
+  max_parallel: 4
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Checks.JobImagePullSecrets) != 2 || cfg.Checks.JobImagePullSecrets[0] != "ghcr-pull" || cfg.Checks.JobImagePullSecrets[1] != "other-pull" {
+		t.Fatalf("checks.job_image_pull_secrets = %v", cfg.Checks.JobImagePullSecrets)
+	}
+	if len(cfg.Workflows.JobImagePullSecrets) != 1 || cfg.Workflows.JobImagePullSecrets[0] != "ghcr-pull" {
+		t.Fatalf("workflows.job_image_pull_secrets = %v", cfg.Workflows.JobImagePullSecrets)
+	}
+}

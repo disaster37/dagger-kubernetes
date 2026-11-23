@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/robfig/cron/v3"
@@ -56,6 +57,7 @@ type WorkflowService struct {
 	runner    domain.WorkflowJobRunner
 	secrets   *SecretService
 	cfg       WorkflowServiceConfig
+	enabled   atomic.Bool
 	logger    *logrus.Logger
 
 	mu        sync.Mutex
@@ -80,19 +82,33 @@ func NewWorkflowService(
 	cfg WorkflowServiceConfig,
 	logger *logrus.Logger,
 ) *WorkflowService {
-	return &WorkflowService{
+	svc := &WorkflowService{
 		repo: repo, envs: envs, orgs: orgs, projects: projects, sources: sources,
 		parser: parser, evaluator: evaluator, artifacts: artifacts, runner: runner,
 		secrets: secrets, cfg: cfg, logger: logger,
 		runs: make(map[string]*domain.WorkflowRun), runTokens: make(map[string]string),
 		lastCron: make(map[string]string),
 	}
+	svc.enabled.Store(true)
+	return svc
 }
+
+// WithEnabled gates workflow run creation. Reads always work.
+func (s *WorkflowService) WithEnabled(enabled bool) *WorkflowService {
+	s.enabled.Store(enabled)
+	return s
+}
+
+// Enabled reports whether workflow execution is enabled.
+func (s *WorkflowService) Enabled() bool { return s.enabled.Load() }
 
 // Start validates inputs, creates a run atomically, and advances its DAG.
 //
 //nolint:gocritic // StartWorkflowInput is passed by value to keep the public API stable
 func (s *WorkflowService) Start(ctx context.Context, in StartWorkflowInput) (*domain.WorkflowRun, error) {
+	if !s.enabled.Load() {
+		return nil, fmt.Errorf("%w: workflows are disabled (workflows.enabled is false)", domain.ErrValidation)
+	}
 	if in.Workflow == nil {
 		return nil, fmt.Errorf("%w: workflow is required", domain.ErrValidation)
 	}
@@ -298,11 +314,13 @@ func (s *WorkflowService) executeJob(ctx context.Context, run *domain.WorkflowRu
 		token, _ = s.orgs.EnsureToken(ctx, run.OrgID)
 	}
 	cloneToken := ""
+	cloneURL := ""
 	if s.sources != nil && s.secrets != nil {
 		if srcs, err := s.sources.ListByOrg(ctx, run.OrgID); err == nil {
 			for _, src := range srcs {
 				if src.Repo == run.Git.Repo {
 					cloneToken, _ = s.secrets.OpenRaw(domain.SecretScopeOrg, src.OrgID, src.TokenCiphertext)
+					cloneURL = domain.ForgeCloneURL(src.Provider, src.BaseURL, run.Git.Repo)
 					break
 				}
 			}
@@ -317,7 +335,7 @@ func (s *WorkflowService) executeJob(ctx context.Context, run *domain.WorkflowRu
 		RunID: run.ID, OrgID: run.OrgID, ProjectID: run.ProjectID, JobName: name,
 		Call: call, Environment: job.Environment, Timeout: job.Timeout,
 		Secrets: resolvedSecrets, Repo: run.Git.Repo, SHA: run.Git.SHA, Ref: run.Git.Ref,
-		Token: token, RunToken: runToken, CloneToken: cloneToken, Artifacts: job.Artifacts, UsesArtifacts: job.UsesArtifacts,
+		Token: token, RunToken: runToken, CloneToken: cloneToken, CloneURL: cloneURL, Artifacts: job.Artifacts, UsesArtifacts: job.UsesArtifacts,
 	}
 	captured, err := s.runner.RunCall(ctx, spec)
 	if err != nil {
@@ -545,6 +563,9 @@ func (s *WorkflowService) envCfg(ctx context.Context, orgID, name string) (*doma
 
 // OnCommitLoaded syncs the catalog and starts pre-check workflows.
 func (s *WorkflowService) OnCommitLoaded(ctx context.Context, record *domain.CheckRunRecord) error {
+	if !s.enabled.Load() {
+		return nil
+	}
 	defs, workflows, err := s.parseWorkflowFiles(record)
 	if err != nil {
 		return err
@@ -575,6 +596,9 @@ func (s *WorkflowService) OnCommitLoaded(ctx context.Context, record *domain.Che
 
 // OnChecksSucceeded starts after_checks workflows.
 func (s *WorkflowService) OnChecksSucceeded(ctx context.Context, record *domain.CheckRunRecord) error {
+	if !s.enabled.Load() {
+		return nil
+	}
 	_, workflows, err := s.parseWorkflowFiles(record)
 	if err != nil {
 		return err
@@ -791,6 +815,9 @@ func (s *WorkflowService) GetRun(ctx context.Context, runID string) (*domain.Wor
 
 // Dispatch starts a workflow_dispatch run from the indexed catalog.
 func (s *WorkflowService) Dispatch(ctx context.Context, orgID, projectID, workflowName, ref string, inputs map[string]any, caller *domain.Identity) (*domain.WorkflowRun, error) {
+	if !s.enabled.Load() {
+		return nil, fmt.Errorf("%w: workflows are disabled (workflows.enabled is false)", domain.ErrValidation)
+	}
 	if s.repo == nil {
 		return nil, domain.ErrNotFound
 	}
@@ -1117,7 +1144,7 @@ func (s *WorkflowService) CompleteJob(ctx context.Context, runID, jobName string
 // OnArtifactPublished starts workflows whose on: artifact trigger matches the
 // published artifact name.
 func (s *WorkflowService) OnArtifactPublished(ctx context.Context, orgID, projectID, runID, name, key string) error {
-	if s.repo == nil {
+	if !s.enabled.Load() || s.repo == nil {
 		return nil
 	}
 	defs, err := s.repo.ListDefs(ctx, orgID, projectID)

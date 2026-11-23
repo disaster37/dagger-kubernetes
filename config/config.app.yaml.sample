@@ -525,7 +525,8 @@ otel:
 checks:
   enabled: false
   namespace: ""                           # empty = fleet.namespace
-  job_image: "ghcr.io/dagger/dagger:latest"
+  job_image: "ghcr.io/disaster37/dagger-kubernetes:latest"
+  job_image_pull_secrets: []              # image pull secrets for check-runner Job pods
   timeout: "30m"
   github_oidc_issuer: "https://token.actions.githubusercontent.com"
   gitlab_oidc_issuer: "https://gitlab.com"
@@ -535,7 +536,8 @@ checks:
 workflows:
   enabled: false
   namespace: ""                           # empty = fleet.namespace
-  job_image: "ghcr.io/dagger/dagger:latest"
+  job_image: "ghcr.io/disaster37/dagger-kubernetes:latest"
+  job_image_pull_secrets: []              # image pull secrets for workflow Job pods
   default_timeout: "30m"
   max_parallel: 8
 

@@ -364,7 +364,8 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 
 	v.SetDefault("checks.enabled", false)
 	v.SetDefault("checks.namespace", "")
-	v.SetDefault("checks.job_image", "ghcr.io/dagger/dagger:latest")
+	v.SetDefault("checks.job_image", "ghcr.io/disaster37/dagger-kubernetes:latest")
+	v.SetDefault("checks.job_image_pull_secrets", []string{})
 	v.SetDefault("checks.timeout", 30*time.Minute)
 	v.SetDefault("checks.github_oidc_issuer", "https://token.actions.githubusercontent.com")
 	v.SetDefault("checks.gitlab_oidc_issuer", "https://gitlab.com")
@@ -372,7 +373,8 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 
 	v.SetDefault("workflows.enabled", false)
 	v.SetDefault("workflows.namespace", "")
-	v.SetDefault("workflows.job_image", "ghcr.io/dagger/dagger:latest")
+	v.SetDefault("workflows.job_image", "ghcr.io/disaster37/dagger-kubernetes:latest")
+	v.SetDefault("workflows.job_image_pull_secrets", []string{})
 	v.SetDefault("workflows.default_timeout", 30*time.Minute)
 	v.SetDefault("workflows.max_parallel", 8)
 
@@ -1027,6 +1029,9 @@ func validateWorkflowsConfig(cfg *domain.Config) error {
 	}
 	if cfg.Workflows.DefaultTimeout <= 0 {
 		return fmt.Errorf("workflows.default_timeout must be > 0 when workflows.enabled is true")
+	}
+	if cfg.Workflows.JobImage == "" {
+		return fmt.Errorf("workflows.job_image must not be empty when workflows.enabled is true")
 	}
 	if cfg.Workflows.MaxParallel < 0 {
 		return fmt.Errorf("workflows.max_parallel must be >= 0")

@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -58,6 +59,43 @@ func githubHookJSON(id int64, callbackURL string) string {
 // url), locking the config.url branch of hookURL.
 func giteaHookJSON(id int64, callbackURL string) string {
 	return fmt.Sprintf(`{"id":%d,"config":{"url":%q}}`, id, callbackURL)
+}
+
+// TestGitHubRegisterWebhookNarrowsEvents locks the Cloud Checks event policy:
+// the GitHub hook must subscribe only to push/pull_request/release, not "*".
+func TestGitHubRegisterWebhookNarrowsEvents(t *testing.T) {
+	var body []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":42}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	p := NewGitHubForge(srv.URL)
+	src := &domain.ForgeSource{ID: "src-1", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/repo", BaseURL: srv.URL}
+	id, err := p.RegisterWebhook(context.Background(), src, "token", "https://example.com/v1/webhooks/github/src-1", "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "42" {
+		t.Fatalf("hook id = %q, want 42", id)
+	}
+	var payload struct {
+		Events []string `json:"events"`
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"push", "pull_request", "release"}
+	if len(payload.Events) != len(want) {
+		t.Fatalf("events = %v, want %v", payload.Events, want)
+	}
+	for i := range want {
+		if payload.Events[i] != want[i] {
+			t.Fatalf("events = %v, want %v", payload.Events, want)
+		}
+	}
 }
 
 func TestForgeProvidersDeleteWebhookByURL(t *testing.T) {

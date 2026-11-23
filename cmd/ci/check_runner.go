@@ -11,7 +11,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -77,9 +76,9 @@ func runCheckRunner(c *cli.Context) error {
 		defer func() { _ = os.RemoveAll(dir) }()
 		workdir = dir
 	}
-	cloneURL := c.String("clone-url")
+	cloneURL := resolveCloneURL(c.String("repo"), c.String("clone-url"))
 	if cloneURL == "" {
-		cloneURL = fmt.Sprintf("https://%s", c.String("repo"))
+		return fmt.Errorf("cannot derive clone URL from repo %q; pass --clone-url", c.String("repo"))
 	}
 	if err := cloneRepo(ctx, cloneURL, c.String("sha"), c.String("ref"), workdir); err != nil {
 		return err
@@ -90,22 +89,15 @@ func runCheckRunner(c *cli.Context) error {
 	runToken := c.String("run-token")
 	runID := c.String("run-id")
 
-	env := append(os.Environ(),
-		fmt.Sprintf("DAGGER_CLOUD_URL=%s", server),
-		fmt.Sprintf("DAGGER_CLOUD_TOKEN=%s", token),
-		"DAGGER_ENGINE=cloud",
-	)
-	if _, err := exec.LookPath("dagger"); err != nil {
-		binDir, cleanup, perr := provisionCLI(ctx, server, token, "", runtime.GOOS, runtime.GOARCH)
-		if perr != nil {
-			return fmt.Errorf("provision dagger cli: %w", perr)
-		}
-		defer cleanup()
-		env = append(env, fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+	daggerBin, binExtraEnv, binCleanup, err := resolveDaggerBin(ctx, server, token)
+	if err != nil {
+		return err
 	}
+	defer binCleanup()
+	env := append(runnerEnv(server, token, c.String("org")), binExtraEnv...)
 
 	workflowFiles, contextFiles := scanWorkflowFiles(workdir)
-	checks, err := listChecks(ctx, workdir, env)
+	checks, err := listChecks(ctx, daggerBin, workdir, env)
 	if err != nil {
 		// A repository without a Dagger module has zero checks; treat a
 		// missing module as a valid GitOps-only result.
@@ -123,7 +115,7 @@ func runCheckRunner(c *cli.Context) error {
 	var runErr error
 	for _, check := range checks {
 		fmt.Printf("running check %s\n", check)
-		result := runCheck(ctx, workdir, env, check)
+		result := runCheck(ctx, daggerBin, workdir, env, check)
 		results = append(results, result)
 		if result.State != "success" && runErr == nil {
 			runErr = fmt.Errorf("check %s failed", check)
@@ -142,7 +134,7 @@ func runCheckRunner(c *cli.Context) error {
 }
 
 // runCheck executes one check and captures its trace ID and terminal state.
-func runCheck(ctx context.Context, dir string, env []string, check string) checkResult {
+func runCheck(ctx context.Context, daggerBin, dir string, env []string, check string) checkResult {
 	traceFile, err := os.CreateTemp("", "dagger-trace-*")
 	if err != nil {
 		return checkResult{Name: check, State: "failure", Summary: err.Error()}
@@ -151,7 +143,7 @@ func runCheck(ctx context.Context, dir string, env []string, check string) check
 	_ = traceFile.Close()
 	defer func() { _ = os.Remove(tracePath) }()
 
-	cmd := exec.CommandContext(ctx, "dagger", "check", check) // #nosec G204 -- check names come from the repository's own dagger module
+	cmd := exec.CommandContext(ctx, daggerBin, "check", check) // #nosec G204 -- check names come from the repository's own dagger module
 	cmd.Dir = dir
 	cmd.Env = append(append([]string(nil), env...), fmt.Sprintf("DAGGER_KUBERNETES_TRACE_ID_FILE=%s", tracePath))
 	cmd.Stdout = os.Stdout
@@ -296,8 +288,8 @@ func gitAuthEnv() (env []string, cleanup func(), err error) {
 }
 
 // listChecks runs `dagger check -l` and parses one check name per line.
-func listChecks(ctx context.Context, dir string, env []string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, "dagger", "check", "-l")
+func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]string, error) {
+	cmd := exec.CommandContext(ctx, daggerBin, "check", "-l")
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.Output()

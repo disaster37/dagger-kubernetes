@@ -84,6 +84,16 @@ var helmTemplateMatrix = []helmVariant{
 			`relay: |`,
 			`- key: relay`,
 			`path: relay.yaml`,
+			`job_image: "ghcr.io/disaster37/dagger-kubernetes:`,
+			`job_image_pull_secrets: []`,
+		},
+	},
+	{
+		// Pull secrets render as a plain string list of names (the config
+		// contract), derived from supervisor.image.pullSecrets[].name.
+		sets: []string{"--set", "supervisor.image.pullSecrets[0].name=ghcr-pull"},
+		expect: []string{
+			"job_image_pull_secrets:\n        - \"ghcr-pull\"",
 		},
 	},
 	{sets: []string{"--set", "supervisor.enabled=false"}},

@@ -615,7 +615,13 @@ func provisionCLI(ctx context.Context, serverURL, token, version, osName, arch s
 		if err := getJSON(ctx, latestURL, token, &latest); err != nil {
 			return "", nil, fmt.Errorf("resolve latest cli version: %w", err)
 		}
-		downloadURL = latest.URL
+		if latest.Version == "" {
+			return "", nil, fmt.Errorf("resolve latest cli version: empty version")
+		}
+		// Build the download URL from the server URL (not latest.URL) so the
+		// runner dials the supervisor it already reaches, avoiding a hairpin
+		// NAT round-trip through the public ingress.
+		downloadURL = fmt.Sprintf("%s/api/v1/cli/%s?os=%s&arch=%s", serverURL, latest.Version, osName, arch)
 	} else {
 		downloadURL = fmt.Sprintf("%s/api/v1/cli/%s?os=%s&arch=%s", serverURL, version, osName, arch)
 	}

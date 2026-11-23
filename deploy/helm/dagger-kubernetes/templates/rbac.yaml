@@ -41,9 +41,10 @@ rules:
     resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
   # Secrets: the supervisor mints per-engine client certs from the minting
-  # CA and may store them in Secrets. It never needs to delete Secrets
-  # (the owning StatefulSet/namespace lifecycle cleans them up), so `delete`
-  # is intentionally omitted to limit blast radius (CWE-269).
+  # CA and stores them in Secrets. It also creates/updates/deletes the
+  # per-run check/workflow env Secrets (and replaces them on rerun), so
+  # `delete` is required (CWE-269 blast radius is bounded by the namespaced
+  # Role unless supervisor.serviceAccount.clusterScope is enabled).
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
