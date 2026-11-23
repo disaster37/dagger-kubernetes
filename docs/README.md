@@ -1087,8 +1087,10 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   webhook secret is auto-generated when omitted, so the remote webhook and the
   sealed value always agree; `forge.webhook_secret` is the fallback HMAC secret
   used only for sources stored without one (a per-source secret always wins).
-  Deleting a forge source does **not** yet remove the remote webhook — delete it
-  in the forge settings manually (known follow-up). The
+  Deleting a forge source best-effort removes its remote webhook by matching the
+  callback URL, and creating one pre-cleans any stale hook with the same URL;
+  cleanup needs the stored token to still be valid, otherwise delete the hook
+  manually in the forge settings. The
   runner receives `DAGGER_CLOUD_TOKEN`/`DAGGER_KUBERNETES_TOKEN` and a
   per-run `DAGGER_RUN_TOKEN` from an ephemeral `check-env-*` Secret (never
   argv). The `/load` and `/complete` callbacks require the per-run

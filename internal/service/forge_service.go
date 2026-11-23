@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -84,6 +85,11 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 		return nil, err
 	}
 	callback := fmt.Sprintf("%s/v1/webhooks/%s/%s", s.publicURL, in.Provider, id)
+	// Clear any stale hook with the same callback URL before registering, so a
+	// recreate does not leave duplicates and pre-fix orphans are cleaned up.
+	if err := s.providers[in.Provider].DeleteWebhook(ctx, src, in.Token, ""); err != nil {
+		s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook pre-clean failed")
+	}
 	if _, err := s.providers[in.Provider].RegisterWebhook(ctx, src, in.Token, callback, webhookSecret); err != nil {
 		s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook registration failed")
 	}
@@ -104,7 +110,23 @@ func (s *ForgeService) List(ctx context.Context, orgID string) ([]*domain.ForgeS
 	return s.sources.ListByOrg(ctx, orgID)
 }
 
-// Delete removes a source.
+// Delete removes a source and best-effort removes its remote webhook.
 func (s *ForgeService) Delete(ctx context.Context, id string) error {
+	src, err := s.sources.Get(ctx, id)
+	if err != nil {
+		if errors.Is(err, domain.ErrNotFound) {
+			// Already gone: keep delete idempotent (nothing to clean up).
+			return nil
+		}
+		return err
+	}
+	if p, ok := s.providers[src.Provider]; ok {
+		token, err := s.secrets.OpenRaw(domain.SecretScopeOrg, src.OrgID, src.TokenCiphertext)
+		if err != nil {
+			s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook cleanup failed")
+		} else if err := p.DeleteWebhook(ctx, src, token, ""); err != nil {
+			s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook cleanup failed")
+		}
+	}
 	return s.sources.Delete(ctx, id)
 }

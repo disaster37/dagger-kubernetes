@@ -178,5 +178,14 @@ auto-generating a 32-byte hex secret when none is supplied, sealing that same
 value, and passing it to `RegisterWebhook`. The previously dead
 `forge.webhook_secret` config is now wired as the fallback HMAC secret for
 sources stored without one (a non-empty per-source secret always wins; both
-empty stays fail-closed). Deleting a forge source still does not remove the
-remote webhook — that remains a known follow-up.
+empty stays fail-closed).
+
+Deleting a forge source now also best-effort removes its remote webhook:
+`ForgeService.Delete` opens the stored token and calls the provider's
+`DeleteWebhook` with an empty ID, which lists the repo's hooks and deletes every
+one whose configured URL ends with `/v1/webhooks/<provider>/<sourceID>`
+(suffix-only, since the public base URL is unknown to the provider). Creating a
+source pre-cleans any stale hook with the same callback URL, so recreates do not
+duplicate and pre-fix orphans are cleaned up. Cleanup requires the stored token
+to still be valid; otherwise the hook must be deleted manually in the forge
+settings.

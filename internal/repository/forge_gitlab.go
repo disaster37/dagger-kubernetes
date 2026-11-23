@@ -60,8 +60,14 @@ func (g *GitLabForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 }
 
 func (g *GitLabForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/projects/%s/hooks/%s", g.apiBase(source), g.projectPath(source.Repo), webhookID), "PRIVATE-TOKEN", token, nil, "")
-	return err
+	if webhookID != "" {
+		_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/projects/%s/hooks/%s", g.apiBase(source), g.projectPath(source.Repo), webhookID), "PRIVATE-TOKEN", token, nil, "")
+		return err
+	}
+	listURL := fmt.Sprintf("%s/projects/%s/hooks", g.apiBase(source), g.projectPath(source.Repo))
+	return deleteMatchingHooks(ctx, listURL, "PRIVATE-TOKEN", token, source, func(id int64) string {
+		return fmt.Sprintf("%s/projects/%s/hooks/%d", g.apiBase(source), g.projectPath(source.Repo), id)
+	})
 }
 
 func (g *GitLabForge) VerifyWebhook(_ *domain.ForgeSource, secret string, headers map[string]string, _ []byte) bool {

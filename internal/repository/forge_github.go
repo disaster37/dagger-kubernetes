@@ -56,8 +56,15 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 }
 
 func (g *GitHubForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
-	_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiBase(source), source.Repo, webhookID), "Authorization", fmt.Sprintf("Bearer %s", token), nil, "")
-	return err
+	auth := fmt.Sprintf("Bearer %s", token)
+	if webhookID != "" {
+		_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiBase(source), source.Repo, webhookID), "Authorization", auth, nil, "")
+		return err
+	}
+	listURL := fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), source.Repo)
+	return deleteMatchingHooks(ctx, listURL, "Authorization", auth, source, func(id int64) string {
+		return fmt.Sprintf("%s/repos/%s/hooks/%d", g.apiBase(source), source.Repo, id)
+	})
 }
 
 func (g *GitHubForge) VerifyWebhook(_ *domain.ForgeSource, secret string, headers map[string]string, body []byte) bool {

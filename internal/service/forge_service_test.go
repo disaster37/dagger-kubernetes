@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"io"
 	"testing"
 
@@ -11,11 +12,18 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
-// capturingForgeProvider records the secret passed to RegisterWebhook.
+// errForgeTest is an injected provider failure.
+var errForgeTest = errors.New("forge test error")
+
+// capturingForgeProvider records the secret passed to RegisterWebhook and the
+// DeleteWebhook calls, with optional error injection.
 type capturingForgeProvider struct {
 	kind          domain.ForgeKind
 	registerCalls int
 	gotSecret     string
+	deleteCalls   int
+	gotDeleteID   string
+	deleteErr     error
 }
 
 func (c *capturingForgeProvider) Kind() domain.ForgeKind { return c.kind }
@@ -24,8 +32,10 @@ func (c *capturingForgeProvider) RegisterWebhook(_ context.Context, _ *domain.Fo
 	c.gotSecret = secret
 	return "1", nil
 }
-func (c *capturingForgeProvider) DeleteWebhook(context.Context, *domain.ForgeSource, string, string) error {
-	return nil
+func (c *capturingForgeProvider) DeleteWebhook(_ context.Context, _ *domain.ForgeSource, _, webhookID string) error {
+	c.deleteCalls++
+	c.gotDeleteID = webhookID
+	return c.deleteErr
 }
 func (c *capturingForgeProvider) VerifyWebhook(*domain.ForgeSource, string, map[string]string, []byte) bool {
 	return true
@@ -92,5 +102,92 @@ func TestForgeServiceCreateSourceWebhookSecret(t *testing.T) {
 				t.Fatalf("sealed secret = %q, want registered %q", opened, provider.gotSecret)
 			}
 		})
+	}
+}
+
+func TestForgeServiceCreateSourcePreCleansWebhook(t *testing.T) {
+	svc, provider, _, _ := newForgeServiceForTest(t)
+	if _, err := svc.CreateSource(context.Background(), &ForgeSourceInput{
+		OrgID: "acme", Repo: "acme/repo", Provider: domain.ForgeGitHub, Token: "forge-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if provider.deleteCalls != 1 {
+		t.Fatalf("DeleteWebhook calls = %d, want 1 pre-clean", provider.deleteCalls)
+	}
+	if provider.gotDeleteID != "" {
+		t.Fatalf("pre-clean should look up by URL, got id %q", provider.gotDeleteID)
+	}
+	if provider.registerCalls != 1 {
+		t.Fatalf("RegisterWebhook calls = %d", provider.registerCalls)
+	}
+}
+
+func TestForgeServiceCreateSourcePreCleanFailureStillRegisters(t *testing.T) {
+	svc, provider, _, _ := newForgeServiceForTest(t)
+	provider.deleteErr = errForgeTest
+	if _, err := svc.CreateSource(context.Background(), &ForgeSourceInput{
+		OrgID: "acme", Repo: "acme/repo", Provider: domain.ForgeGitHub, Token: "forge-token",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if provider.registerCalls != 1 {
+		t.Fatalf("RegisterWebhook calls = %d, want 1 despite pre-clean failure", provider.registerCalls)
+	}
+}
+
+func TestForgeServiceDeleteCleansRemoteWebhook(t *testing.T) {
+	cases := []struct {
+		name      string
+		deleteErr error
+	}{
+		{name: "cleanup succeeds"},
+		{name: "cleanup failure still deletes locally", deleteErr: errForgeTest},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, provider, _, sources := newForgeServiceForTest(t)
+			src, err := svc.CreateSource(context.Background(), &ForgeSourceInput{
+				OrgID: "acme", Repo: "acme/repo", Provider: domain.ForgeGitHub, Token: "forge-token",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			provider.deleteCalls = 0
+			provider.deleteErr = tc.deleteErr
+			if err := svc.Delete(context.Background(), src.ID); err != nil {
+				t.Fatalf("Delete: %v", err)
+			}
+			if provider.deleteCalls != 1 {
+				t.Fatalf("DeleteWebhook calls = %d, want 1", provider.deleteCalls)
+			}
+			if provider.gotDeleteID != "" {
+				t.Fatalf("delete should look up by URL, got id %q", provider.gotDeleteID)
+			}
+			if _, err := sources.Get(context.Background(), src.ID); err == nil {
+				t.Fatal("source must be deleted locally even when cleanup fails")
+			}
+		})
+	}
+}
+
+func TestForgeServiceDeleteIsIdempotent(t *testing.T) {
+	svc, provider, _, _ := newForgeServiceForTest(t)
+	src, err := svc.CreateSource(context.Background(), &ForgeSourceInput{
+		OrgID: "acme", Repo: "acme/repo", Provider: domain.ForgeGitHub, Token: "forge-token",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.Delete(context.Background(), src.ID); err != nil {
+		t.Fatalf("first Delete: %v", err)
+	}
+	provider.deleteCalls = 0
+	// A second delete of a missing source must be a no-op success, not 404.
+	if err := svc.Delete(context.Background(), src.ID); err != nil {
+		t.Fatalf("second Delete must be idempotent, got %v", err)
+	}
+	if provider.deleteCalls != 0 {
+		t.Fatalf("cleanup must not run for a missing source, got %d calls", provider.deleteCalls)
 	}
 }
