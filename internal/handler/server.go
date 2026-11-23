@@ -739,8 +739,35 @@ func (s *Server) controlTLSConfig() (*tls.Config, error) {
 	if cfg.MinVersion == 0 {
 		cfg.MinVersion = tls.VersionTLS12
 	}
-	// Preserve the public certificate callback and layer internal-SNI routing.
+	// Preserve the public certificate callbacks and layer internal-SNI routing.
+	//
+	// GetConfigForClient precedence pitfall: Go's TLS stack calls
+	// GetConfigForClient FIRST and, when it returns a non-nil config, uses that
+	// config for the rest of the handshake — the outer GetCertificate is never
+	// consulted. A dynamic provider's ServerTLSConfig() sets GetConfigForClient
+	// (see DynamicTLSProvider.ServerTLSConfig), so wrapping only GetCertificate
+	// would leave internal SNIs served the public (Let's Encrypt) certificate
+	// and fail in-cluster verification. We therefore wrap GetConfigForClient
+	// too, mirroring serveTLSConn.
 	publicGetCert := cfg.GetCertificate
+	publicGetConfigForClient := cfg.GetConfigForClient
+	cfg.GetConfigForClient = func(hello *tls.ClientHelloInfo) (*tls.Config, error) {
+		if s.matchesInternalSNI(hello.ServerName) {
+			if cert, err := s.internalCert(); err == nil {
+				// Server-auth only: the public control listener must not
+				// require client certificates (unlike the data plane).
+				return &tls.Config{
+					Certificates: []tls.Certificate{*cert},
+					MinVersion:   tls.VersionTLS12,
+				}, nil
+			}
+		}
+		if publicGetConfigForClient != nil {
+			return publicGetConfigForClient(hello)
+		}
+		// Fall through to the outer config (its GetCertificate wrapper below).
+		return nil, nil
+	}
 	cfg.GetCertificate = func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
 		if s.matchesInternalSNI(hello.ServerName) {
 			if cert, err := s.internalCert(); err == nil {
