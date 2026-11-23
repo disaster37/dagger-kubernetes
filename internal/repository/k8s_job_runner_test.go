@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -97,6 +98,38 @@ func TestK8sJobRunnerRunCreatesJobAndSecret(t *testing.T) {
 	}
 	if len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].Kind != "Job" {
 		t.Fatalf("secret must be owned by the Job: %+v", secret.OwnerReferences)
+	}
+}
+
+// TestK8sJobRunnerLongIDHashesLabel guards the K8s 63-char label-value cap: a
+// raw check-run ID (check-<sourceID>-<sha>) exceeds it for long source IDs, so
+// the label must be hashed (and the Job/Secret names use the hashed form).
+func TestK8sJobRunnerLongIDHashesLabel(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	r := NewK8sJobRunner(cs, "ns", "runner:latest", time.Minute, "https://example.com", "", "")
+	longID := "check-" + strings.Repeat("s", 50) + "-" + strings.Repeat("a", 40)
+	if len(longID) <= 63 {
+		t.Fatalf("fixture id must exceed 63 chars, got %d", len(longID))
+	}
+	spec := &domain.CheckRunSpec{ID: longID, ProjectID: "proj-1", Ref: "refs/heads/main"}
+	if err := r.Run(context.Background(), spec); err != nil {
+		t.Fatalf("Run with long id: %v", err)
+	}
+	name := "check-" + refHash(longID)
+	job, err := cs.BatchV1().Jobs("ns").Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job %q must exist: %v", name, err)
+	}
+	got := job.Labels[checkRunIDLabel]
+	if got != refHash(longID) {
+		t.Fatalf("check-run-id label = %q, want refHash %q", got, refHash(longID))
+	}
+	if len(got) > 63 {
+		t.Fatalf("check-run-id label length = %d, want <= 63", len(got))
+	}
+	// Secret name must be the hashed form too.
+	if _, err := cs.CoreV1().Secrets("ns").Get(context.Background(), "check-env-"+refHash(longID), metav1.GetOptions{}); err != nil {
+		t.Fatalf("hashed secret name missing: %v", err)
 	}
 }
 

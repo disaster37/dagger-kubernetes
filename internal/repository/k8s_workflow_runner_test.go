@@ -2,6 +2,7 @@ package repository
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,34 @@ func TestK8sWorkflowRunnerRunCallCreatesJobAndSecret(t *testing.T) {
 	}
 	if secret.StringData["DAGGER_RUN_TOKEN"] != "run" {
 		t.Fatalf("secret run token = %q", secret.StringData["DAGGER_RUN_TOKEN"])
+	}
+}
+
+// TestK8sWorkflowRunnerLongRunIDHashesLabel guards the K8s 63-char label-value
+// cap for the workflow-run label: a raw run ID (<projectID>-<slug>-<n>) can
+// exceed it for long workflow names, so the label must be hashed.
+func TestK8sWorkflowRunnerLongRunIDHashesLabel(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	r := NewK8sWorkflowRunner(cs, "ns", "img", time.Minute, "https://example.com", "", "")
+	longRunID := strings.Repeat("p", 32) + "-" + strings.Repeat("w", 40) + "-1"
+	if len(longRunID) <= 63 {
+		t.Fatalf("fixture run id must exceed 63 chars, got %d", len(longRunID))
+	}
+	spec := &domain.WorkflowCallSpec{RunID: longRunID, JobName: "build", Call: "build"}
+	if _, err := r.RunCall(context.Background(), spec); err != nil {
+		t.Fatalf("RunCall with long run id: %v", err)
+	}
+	name := "workflow-" + refHash(longRunID) + "-" + refHash(spec.JobName)
+	job, err := cs.BatchV1().Jobs("ns").Get(context.Background(), name, metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("job %q must exist: %v", name, err)
+	}
+	got := job.Labels["dagger-kubernetes.io/workflow-run"]
+	if got != refHash(longRunID) {
+		t.Fatalf("workflow-run label = %q, want refHash %q", got, refHash(longRunID))
+	}
+	if len(got) > 63 {
+		t.Fatalf("workflow-run label length = %d, want <= 63", len(got))
 	}
 }
 

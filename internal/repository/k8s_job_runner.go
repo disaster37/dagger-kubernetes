@@ -71,7 +71,10 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 	}
 	name := fmt.Sprintf("check-%s", refHash(spec.ID))
 	labels := map[string]string{
-		checkRunIDLabel:      spec.ID,
+		// K8s label values are capped at 63 chars; the raw check-run ID
+		// (check-<sourceID>-<sha>) exceeds that for long source IDs. The label
+		// is never used as a selector, so hash it like the Job/Secret names.
+		checkRunIDLabel:      refHash(spec.ID),
 		checkRunProjectLabel: spec.ProjectID,
 		checkRunRefLabel:     refHash(spec.Ref),
 	}

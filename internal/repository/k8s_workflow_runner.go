@@ -72,7 +72,10 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 		timeout = r.timeout
 	}
 	labels := map[string]string{
-		"dagger-kubernetes.io/workflow-run": spec.RunID,
+		// K8s label values are capped at 63 chars; the run ID
+		// (<projectID>-<slug>-<n>) can exceed that for long workflow names. The
+		// label is never used as a selector, so hash it like the Job name.
+		"dagger-kubernetes.io/workflow-run": refHash(spec.RunID),
 		"dagger-kubernetes.io/workflow-job": refHash(spec.JobName),
 	}
 	secretName := fmt.Sprintf("workflow-env-%s-%s", refHash(spec.RunID), refHash(spec.JobName))

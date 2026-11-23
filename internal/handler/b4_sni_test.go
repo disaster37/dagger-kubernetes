@@ -197,6 +197,89 @@ func TestControlTLSConfigStaticKeypairInternalSNI(t *testing.T) {
 	}
 }
 
+// TestControlTLSConfigInternalSNIFallsBackWhenNoInternalCert covers the
+// internalCert() failure branch: an internal SNI with no configured internal
+// cert must fall back to the public certificate. With a dynamic provider the
+// GetConfigForClient wrapper delegates to the provider's original
+// GetConfigForClient; with the static keypair it returns (nil, nil) so the
+// handshake falls through to the outer GetCertificate wrapper.
+func TestControlTLSConfigInternalSNIFallsBackWhenNoInternalCert(t *testing.T) {
+	t.Run("dynamic provider delegates to public GetConfigForClient", func(t *testing.T) {
+		publicLeaf := selfSignedLeaf(t, "data.example.com")
+		provider := rafttransport.NewDynamicTLSProvider(publicLeaf, nil, nil, false)
+		s := internalServer("https://rel-control.ns.svc:80", "rel-data.ns.svc:443", 0)
+		s.cfg.ControlTLSProvider = provider
+		// No InternalTLSCert/InternalTLSProvider: internalCert() fails.
+		cfg, err := s.controlTLSConfig()
+		if err != nil {
+			t.Fatalf("controlTLSConfig: %v", err)
+		}
+		if cfg == nil || cfg.GetConfigForClient == nil {
+			t.Fatal("controlTLSConfig must wrap GetConfigForClient")
+		}
+		got, err := cfg.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "rel-control.ns.svc"})
+		if err != nil {
+			t.Fatalf("GetConfigForClient(internal): %v", err)
+		}
+		if got == nil {
+			t.Fatal("internal SNI must delegate to the provider's GetConfigForClient")
+		}
+		if got.GetCertificate == nil {
+			t.Fatal("delegated config must carry the provider's GetCertificate")
+		}
+		leaf, err := got.GetCertificate(&tls.ClientHelloInfo{ServerName: "rel-control.ns.svc"})
+		if err != nil {
+			t.Fatalf("provider GetCertificate: %v", err)
+		}
+		parsed, err := x509.ParseCertificate(leaf.Certificate[0])
+		if err != nil {
+			t.Fatalf("parse leaf: %v", err)
+		}
+		if parsed.Subject.CommonName != "data.example.com" {
+			t.Fatalf("fallback cert CN = %q, want the public data.example.com", parsed.Subject.CommonName)
+		}
+	})
+
+	t.Run("static keypair returns nil and falls through to GetCertificate", func(t *testing.T) {
+		publicLeaf := selfSignedLeaf(t, "data.example.com")
+		dir := t.TempDir()
+		certPath := filepath.Join(dir, "tls.crt")
+		keyPath := filepath.Join(dir, "tls.key")
+		writeLeaf(t, certPath, keyPath, &publicLeaf)
+
+		s := internalServer("https://rel-control.ns.svc:80", "rel-data.ns.svc:443", 0)
+		s.cfg.CertPath = certPath
+		s.cfg.KeyPath = keyPath
+		// No InternalTLSCert/InternalTLSProvider: internalCert() fails.
+		cfg, err := s.controlTLSConfig()
+		if err != nil {
+			t.Fatalf("controlTLSConfig: %v", err)
+		}
+		if cfg == nil || cfg.GetConfigForClient == nil {
+			t.Fatal("controlTLSConfig must wrap GetConfigForClient")
+		}
+		got, err := cfg.GetConfigForClient(&tls.ClientHelloInfo{ServerName: "rel-control.ns.svc"})
+		if err != nil {
+			t.Fatalf("GetConfigForClient(internal): %v", err)
+		}
+		if got != nil {
+			t.Fatal("static path with no internal cert must return (nil, nil) to fall through")
+		}
+		// The outer GetCertificate wrapper must then serve the public leaf.
+		leaf, err := cfg.GetCertificate(&tls.ClientHelloInfo{ServerName: "rel-control.ns.svc"})
+		if err != nil {
+			t.Fatalf("GetCertificate(internal): %v", err)
+		}
+		parsed, err := x509.ParseCertificate(leaf.Certificate[0])
+		if err != nil {
+			t.Fatalf("parse leaf: %v", err)
+		}
+		if parsed.Subject.CommonName != "data.example.com" {
+			t.Fatalf("fallback cert CN = %q, want the public data.example.com", parsed.Subject.CommonName)
+		}
+	})
+}
+
 // TestMatchesInternalSNIExactForms verifies that only the EXACT configured
 // internal host forms are treated as internal SNIs: an arbitrary ".svc" name
 // that is not the configured control/data host must fall back to the public
