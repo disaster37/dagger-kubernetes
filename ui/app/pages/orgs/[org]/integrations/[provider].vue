@@ -21,7 +21,7 @@
         <UFormField label="Repository (owner/repo)"><UInput v-model="repo" class="w-full" /></UFormField>
         <UFormField label="API base URL (optional)"><UInput v-model="baseUrl" class="w-full" placeholder="https://api.github.com" /></UFormField>
         <UFormField label="Access token"><UInput v-model="token" type="password" class="w-full" /></UFormField>
-        <UFormField label="Webhook secret" help="Leave empty to auto-generate (recommended)."><UInput v-model="secret" type="password" class="w-full" /></UFormField>
+        <UFormField label="Webhook secret" help="Auto-generated if empty."><UInput v-model="secret" type="password" class="w-full" placeholder="auto-generated" /></UFormField>
         <div v-if="provider === 'github'" class="grid gap-3 md:grid-cols-2">
           <UFormField label="GitHub App ID (optional)"><UInput v-model="appID" class="w-full" /></UFormField>
           <UFormField label="Installation ID (optional)"><UInput v-model="installationID" class="w-full" /></UFormField>
