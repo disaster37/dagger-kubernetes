@@ -115,6 +115,32 @@ func TestGitHubForgeEscapesPathSegments(t *testing.T) {
 	}
 }
 
+// TestForgeRequestRefusesCrossHostRedirect locks the credential-leak guard: a
+// cross-host redirect must NOT carry the Authorization header to the target
+// (CWE-601/CWE-918).
+func TestForgeRequestRefusesCrossHostRedirect(t *testing.T) {
+	var forwardedAuth string
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		forwardedAuth = r.Header.Get("Authorization")
+		_, _ = io.WriteString(w, `{}`)
+	}))
+	t.Cleanup(target.Close)
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/repos/acme/repo", http.StatusFound)
+	}))
+	t.Cleanup(origin.Close)
+
+	// The two servers bind different ports, so the redirect crosses hosts and
+	// must be refused rather than followed (which would leak the token).
+	if _, err := forgeRequest(context.Background(), http.MethodGet, origin.URL+"/repos/acme/repo", "Authorization", "Bearer github_pat_secret", nil, ""); err == nil {
+		t.Fatal("cross-host redirect must not be followed")
+	}
+	if forwardedAuth != "" {
+		t.Fatalf("authorization header leaked to redirect target: %q", forwardedAuth)
+	}
+}
+
 func TestForgeProvidersDeleteWebhookByURL(t *testing.T) {
 	const repo = "acme/repo"
 	cases := []struct {

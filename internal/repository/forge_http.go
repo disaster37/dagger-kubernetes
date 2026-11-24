@@ -18,8 +18,21 @@ import (
 )
 
 // forgeHTTPClient is the shared outbound HTTP client for forge APIs (ADR-007:
-// outbound net/http lives in repository).
-var forgeHTTPClient = &http.Client{Timeout: 30 * time.Second}
+// outbound net/http lives in repository). Cross-host redirects are refused so
+// the Authorization header (a plaintext forge token) is never forwarded to a
+// different host (CWE-601/CWE-918); same-host redirects are capped at 3 hops.
+var forgeHTTPClient = &http.Client{
+	Timeout: 30 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 3 {
+			return http.ErrUseLastResponse
+		}
+		if len(via) > 0 && (req.URL.Scheme != via[0].URL.Scheme || req.URL.Host != via[0].URL.Host) {
+			return http.ErrUseLastResponse
+		}
+		return nil
+	},
+}
 
 // forgeRequest performs an authenticated JSON/form request and returns the
 // response body.
