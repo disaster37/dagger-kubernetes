@@ -112,16 +112,16 @@ type CheckCommitTagRef { name: String! url: String! }
 type CheckCommitBranchRef { name: String! url: String! }
 type CheckCommitPullRequestRef { number: Int! url: String! title: String! state: String! integrationCommit: String! }
 type Check { id: ID! name: String! status: String! startedAt: Time endTime: Time duration: Int traceId: String! spanId: String! moduleRef: String! moduleVersion: String! internal: Boolean! }
-type Source { id: ID! name: String! type: String! configuredAt: String! orgId: ID orgName: String configUrl: String! }
+type Source { id: ID! name: String! type: String! configuredAt: String! orgId: ID orgName: String configUrl: String! repositories: [SourceRepository!]! }
 type SourceRepository { repository: String! selected: Boolean! eligible: Boolean! claimedByOrgName: String }
 type UserRepository { ref: String! settings: RepoSettings mappedSource: MappedSource }
 type MappedSource { provider: String! sourceName: String! installationId: String! configUrl: String! org: Org }
-type GitHubConnection { githubLogin: String! connectedAt: String! }
+type GitHubConnection { githubLogin: String! connectedAt: String! scopes: [String!]! status: String! }
 type GitLabSource { id: ID! instanceURL: String! namespacePath: String! access(org: ID!): GitLabSourceAccess }
 type GitLabSourceAccess { connectionID: String! }
 type EntireInstallation { id: ID! name: String! manageURL: String! }
 type Repo { name: String! fullName: String! private: Boolean! }
-type RepoSettings { repo: String! isPublic: Boolean! effectiveRunChecksOnDefaultBranch: Boolean! effectiveRunChecksOnPullRequest: Boolean! }
+type RepoSettings { repo: String! isPublic: Boolean! effectiveRunChecksOnDefaultBranch: Boolean! effectiveRunChecksOnPullRequest: Boolean! effectiveRunChecksOnBranchPush: Boolean! }
 input RepoSettingInput { repo: String! isPublic: Boolean sourceId: ID runChecksOnDefaultBranch: Boolean runChecksOnPullRequest: Boolean runChecksOnBranchPush: Boolean }
 `
 
@@ -152,6 +152,30 @@ func (g *CloudGraphQL) WithForgeSources(repo domain.ForgeSourceRepository) *Clou
 // WithProjects wires the project repository used by GetRepos.
 func (g *CloudGraphQL) WithProjects(repo domain.ProjectRepository) *CloudGraphQL {
 	g.root.projects = repo
+	return g
+}
+
+// WithGitHubConnections wires the user-scoped GitHub connection repository.
+func (g *CloudGraphQL) WithGitHubConnections(repo domain.GitHubConnectionRepository) *CloudGraphQL {
+	g.root.githubConns = repo
+	return g
+}
+
+// WithGitHubAccountSources wires the org-scoped GitHub account repository.
+func (g *CloudGraphQL) WithGitHubAccountSources(repo domain.GitHubAccountSourceRepository) *CloudGraphQL {
+	g.root.accountSources = repo
+	return g
+}
+
+// WithRepoSettings wires the per-repo claim/trigger repository.
+func (g *CloudGraphQL) WithRepoSettings(repo domain.RepoSettingRepository) *CloudGraphQL {
+	g.root.repoSettings = repo
+	return g
+}
+
+// WithGitHubIntegrator wires the service-layer GitHub integration adapter.
+func (g *CloudGraphQL) WithGitHubIntegrator(integrator domain.GitHubCloudIntegrator) *CloudGraphQL {
+	g.root.githubIntegrator = integrator
 	return g
 }
 
@@ -196,16 +220,20 @@ func (g *CloudGraphQL) Exec(ctx context.Context, query, operationName string, va
 }
 
 type graphqlRoot struct {
-	users         domain.UserRepository
-	orgs          domain.OrgRepository
-	groups        domain.GroupRepository
-	traces        domain.TraceMetaRepository
-	checks        domain.CheckRunRepository
-	forgeSources  domain.ForgeSourceRepository
-	projects      domain.ProjectRepository
-	publicURL     string
-	orgCreator    OrgCreator
-	checkRerunner CheckRerunner
+	users            domain.UserRepository
+	orgs             domain.OrgRepository
+	groups           domain.GroupRepository
+	traces           domain.TraceMetaRepository
+	checks           domain.CheckRunRepository
+	forgeSources     domain.ForgeSourceRepository
+	projects         domain.ProjectRepository
+	githubConns      domain.GitHubConnectionRepository
+	accountSources   domain.GitHubAccountSourceRepository
+	repoSettings     domain.RepoSettingRepository
+	githubIntegrator domain.GitHubCloudIntegrator
+	publicURL        string
+	orgCreator       OrgCreator
+	checkRerunner    CheckRerunner
 }
 
 // requireAuthenticated returns the caller identity, rejecting requests without
@@ -488,8 +516,17 @@ func (o *graphqlOrg) Name() string      { return o.org.Name }
 func (o *graphqlOrg) CreatedAt() string { return o.org.CreatedAt.UTC().Format(time.RFC3339) }
 
 func (o *graphqlOrg) Features() []*graphqlFeature {
-	out := make([]*graphqlFeature, 0, len(o.org.Features))
-	for _, f := range o.org.Features {
+	seen := make(map[string]bool, len(domain.DefaultOrgFeatures)+len(o.org.Features))
+	names := make([]string, 0, len(domain.DefaultOrgFeatures)+len(o.org.Features))
+	for _, f := range append(append([]string(nil), domain.DefaultOrgFeatures...), o.org.Features...) {
+		if f == "" || seen[f] {
+			continue
+		}
+		seen[f] = true
+		names = append(names, f)
+	}
+	out := make([]*graphqlFeature, 0, len(names))
+	for _, f := range names {
 		out = append(out, &graphqlFeature{name: f})
 	}
 	return out

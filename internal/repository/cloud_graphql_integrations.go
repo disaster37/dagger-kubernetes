@@ -412,26 +412,69 @@ func normalizeRepoTail(repo string) string {
 
 // --- Family F: integrations -------------------------------------------------
 
-// Sources returns the org's configured forge integrations.
+// Sources returns one row per connected GitHub owner plus non-GitHub forge
+// sources.
 func (r *graphqlRoot) Sources(ctx context.Context) ([]*graphqlSource, error) {
 	orgs, err := r.accessibleOrgs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if r.forgeSources == nil {
-		return []*graphqlSource{}, nil
-	}
 	out := make([]*graphqlSource, 0)
 	for _, org := range orgs {
+		coveredOwners := map[string]bool{}
+		if r.accountSources != nil {
+			accounts, err := r.accountSources.ListByOrg(ctx, org.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, acct := range accounts {
+				coveredOwners[strings.ToLower(acct.Owner)] = true
+				out = append(out, &graphqlSource{
+					root: r, id: acct.ID, name: acct.Owner, sourceType: string(domain.ForgeGitHub),
+					configuredAt: acct.CreatedAt.UTC().Format(time.RFC3339),
+					orgID:        stringPtr(org.ID), orgName: stringPtr(org.Name),
+					configURL: r.accountConfigURL(org, acct),
+				})
+			}
+		}
+		if r.forgeSources == nil {
+			continue
+		}
 		sources, err := r.forgeSources.ListByOrg(ctx, org.ID)
 		if err != nil {
 			return nil, err
 		}
+		emittedOwners := map[string]bool{}
 		for _, src := range sources {
+			if src.Provider != domain.ForgeGitHub {
+				out = append(out, r.toGraphQLSource(org, src))
+				continue
+			}
+			owner := strings.ToLower(ownerOfRepo(src.Repo))
+			if src.AccountSourceID != "" || coveredOwners[owner] || emittedOwners[owner] {
+				continue
+			}
+			emittedOwners[owner] = true
 			out = append(out, r.toGraphQLSource(org, src))
 		}
 	}
 	return out, nil
+}
+
+func stringPtr(v string) *string { return &v }
+
+func (r *graphqlRoot) accountConfigURL(org *domain.Org, acct *domain.GitHubAccountSource) string {
+	if acct.InstallationID != "" {
+		return fmt.Sprintf("https://github.com/settings/installations/%s", acct.InstallationID)
+	}
+	if r.publicURL != "" {
+		return fmt.Sprintf("%s/orgs/%s/integrations/github", strings.TrimRight(r.publicURL, "/"), org.Name)
+	}
+	base := strings.TrimRight(acct.BaseURL, "/")
+	if base == "" {
+		base = "https://github.com"
+	}
+	return fmt.Sprintf("%s/%s", base, acct.Owner)
 }
 
 func (r *graphqlRoot) toGraphQLSource(org *domain.Org, src *domain.ForgeSource) *graphqlSource {
@@ -440,6 +483,7 @@ func (r *graphqlRoot) toGraphQLSource(org *domain.Org, src *domain.ForgeSource) 
 		name = src.Repo
 	}
 	s := &graphqlSource{
+		root:         r,
 		id:           src.ID,
 		name:         name,
 		sourceType:   string(src.Provider),
@@ -481,23 +525,50 @@ func (r *graphqlRoot) sourceConfigURL(src *domain.ForgeSource) string {
 	}
 }
 
-// GithubConnection reports the caller's connected GitHub forge source as a
-// GitHubConnection, or null when the caller cannot access any org with a
-// GitHub forge source. The login is the owner segment of the source's repo and
-// connectedAt is the first such source's creation time (deterministic order:
-// accessible orgs, then sources per org).
+// GithubConnection reports the caller's connected GitHub identity. A personal
+// connection wins; org account sources and legacy per-repo forge sources remain
+// backward-compatible fallbacks.
 func (r *graphqlRoot) GithubConnection(ctx context.Context) (*graphqlGitHubConnection, error) {
-	if _, err := r.requireAuthenticated(ctx); err != nil {
+	id, err := r.requireAuthenticated(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if r.forgeSources == nil {
-		return nil, nil
+	if id.UserID != "" && r.githubConns != nil {
+		conn, err := r.githubConns.GetByUser(ctx, id.UserID)
+		if err == nil && conn.Status == domain.GitHubConnectionActive {
+			return &graphqlGitHubConnection{
+				githubLogin: conn.GitHubLogin,
+				connectedAt: conn.ConnectedAt.UTC().Format(time.RFC3339),
+				scopes:      nonNilStrings(conn.Scopes),
+				status:      string(conn.Status),
+			}, nil
+		}
 	}
 	orgs, err := r.accessibleOrgs(ctx)
 	if err != nil {
 		return nil, err
 	}
 	for _, org := range orgs {
+		if r.accountSources != nil {
+			accounts, err := r.accountSources.ListByOrg(ctx, org.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, acct := range accounts {
+				if acct.Status != "" && acct.Status != domain.GitHubConnectionActive {
+					continue
+				}
+				return &graphqlGitHubConnection{
+					githubLogin: acct.Owner,
+					connectedAt: acct.CreatedAt.UTC().Format(time.RFC3339),
+					scopes:      nonNilStrings(acct.Scopes),
+					status:      string(firstNonEmptyStatus(acct.Status)),
+				}, nil
+			}
+		}
+		if r.forgeSources == nil {
+			continue
+		}
 		sources, err := r.forgeSources.ListByOrg(ctx, org.ID)
 		if err != nil {
 			return nil, err
@@ -509,10 +580,26 @@ func (r *graphqlRoot) GithubConnection(ctx context.Context) (*graphqlGitHubConne
 			return &graphqlGitHubConnection{
 				githubLogin: githubLoginForSource(org, src),
 				connectedAt: src.CreatedAt.UTC().Format(time.RFC3339),
+				scopes:      []string{},
+				status:      string(domain.GitHubConnectionActive),
 			}, nil
 		}
 	}
 	return nil, nil
+}
+
+func nonNilStrings(in []string) []string {
+	if in == nil {
+		return []string{}
+	}
+	return in
+}
+
+func firstNonEmptyStatus(status domain.GitHubConnectionStatus) domain.GitHubConnectionStatus {
+	if status == "" {
+		return domain.GitHubConnectionActive
+	}
+	return status
 }
 
 // githubLoginForSource derives the GitHub login for a forge source: the owner
@@ -528,15 +615,30 @@ func githubLoginForSource(org *domain.Org, src *domain.ForgeSource) string {
 	return org.Name
 }
 
-// GithubOAuthURL is rejected: self-hosted deployments configure forge
-// integrations out of band.
+// GithubOAuthURL returns a GitHub authorize URL backed by a replicated
+// single-use state. It remains actionable when the OAuth app is not configured.
 func (r *graphqlRoot) GithubOAuthURL(ctx context.Context, args struct {
 	RedirectURI string
 }) (string, error) {
-	if _, err := r.requireAuthenticated(ctx); err != nil {
+	id, err := r.requireAuthenticated(ctx)
+	if err != nil {
 		return "", err
 	}
-	return "", fmt.Errorf("GitHub OAuth app integration is not configured on this self-hosted deployment; configure forge integrations via /api/v1/orgs/<org>/integrations")
+	if id.UserID == "" {
+		return "", fmt.Errorf("unauthenticated")
+	}
+	if r.githubIntegrator == nil || !r.githubIntegratorOAuthEnabled() {
+		return "", fmt.Errorf("GitHub OAuth app integration is not configured on this self-hosted deployment; configure forge.github.oauth or add integrations via /api/v1/orgs/<org>/integrations")
+	}
+	return r.githubIntegrator.BuildOAuthURL(ctx, id.UserID, "", args.RedirectURI)
+}
+
+// githubIntegratorOAuthEnabled reports whether the wired integrator exposes an
+// OAuth app.
+func (r *graphqlRoot) githubIntegratorOAuthEnabled() bool {
+	type oauthEnabler interface{ OAuthEnabled() bool }
+	enabler, ok := r.githubIntegrator.(oauthEnabler)
+	return ok && enabler.OAuthEnabled()
 }
 
 // SourceRepositories lists the repositories of a forge installation.
@@ -553,6 +655,24 @@ func (r *graphqlRoot) SourceRepositories(ctx context.Context, args struct {
 	}
 	out := make([]*graphqlSourceRepository, 0)
 	for _, org := range orgs {
+		if r.githubIntegrator != nil && r.accountSources != nil {
+			if acct, err := r.accountSources.Get(ctx, string(args.InstallationID)); err == nil && acct.OrgID == org.ID {
+				items, err := r.githubIntegrator.ListSourceRepositories(ctx, org, acct.ID)
+				if err != nil {
+					return nil, err
+				}
+				for _, item := range items {
+					out = append(out, &graphqlSourceRepository{
+						repository: item.Repository, selected: item.Selected, eligible: item.Eligible,
+						claimedByOrgName: item.ClaimedByOrgName,
+					})
+				}
+				continue
+			}
+		}
+		if r.forgeSources == nil {
+			continue
+		}
 		sources, err := r.forgeSources.ListByOrg(ctx, org.ID)
 		if err != nil {
 			return nil, err
@@ -562,6 +682,14 @@ func (r *graphqlRoot) SourceRepositories(ctx context.Context, args struct {
 				continue
 			}
 			claimed := org.Name
+			if r.repoSettings != nil {
+				canonical := canonicalCheckRepo(src.Provider, src.Repo)
+				if setting, err := r.repoSettings.GetByCanonicalRepo(ctx, canonical); err == nil && setting.OrgID != org.ID {
+					if other, err := r.orgs.Get(ctx, setting.OrgID); err == nil {
+						claimed = other.Name
+					}
+				}
+			}
 			out = append(out, &graphqlSourceRepository{
 				repository:       canonicalCheckRepo(src.Provider, src.Repo),
 				selected:         true,
@@ -573,22 +701,72 @@ func (r *graphqlRoot) SourceRepositories(ctx context.Context, args struct {
 	return out, nil
 }
 
-// User.Repositories returns the caller's forge repositories.
+// User.Repositories returns the caller's forge repositories, merging persisted
+// RepoSettings with legacy standalone ForgeSources.
 func (u *graphqlUser) Repositories(ctx context.Context, args struct{ Refs *[]string }) ([]*graphqlUserRepository, error) {
 	orgs, err := u.root.accessibleOrgs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	if u.root.forgeSources == nil {
-		return []*graphqlUserRepository{}, nil
-	}
 	out := make([]*graphqlUserRepository, 0)
 	for _, org := range orgs {
+		coveredSources := map[string]bool{}
+		if u.root.repoSettings != nil {
+			settings, err := u.root.repoSettings.ListByOrg(ctx, org.ID)
+			if err != nil {
+				return nil, err
+			}
+			for _, rs := range settings {
+				coveredSources[rs.ForgeSourceID] = true
+				if args.Refs != nil && len(*args.Refs) > 0 && !repoFilterMatches(*args.Refs, rs.Repo) {
+					continue
+				}
+				repo := &graphqlUserRepository{
+					ref: rs.Repo,
+					settings: &graphqlRepoSettings{
+						repo:                              rs.Repo,
+						isPublic:                          rs.IsPublic,
+						effectiveRunChecksOnDefaultBranch: rs.RunChecksOnDefaultBranch,
+						effectiveRunChecksOnPullRequest:   rs.RunChecksOnPullRequest,
+						effectiveRunChecksOnBranchPush:    rs.RunChecksOnBranchPush,
+					},
+				}
+				if u.root.accountSources != nil {
+					if acct, err := u.root.accountSources.Get(ctx, rs.SourceID); err == nil {
+						repo.mappedSource = &graphqlMappedSource{
+							provider:       strings.ToUpper(string(rs.Provider)),
+							sourceName:     acct.Owner,
+							installationID: rs.SourceID,
+							configURL:      u.root.accountConfigURL(org, acct),
+							org:            &graphqlOrg{root: u.root, org: org},
+						}
+					}
+				}
+				if repo.mappedSource == nil && u.root.forgeSources != nil {
+					if src, err := u.root.forgeSources.Get(ctx, rs.ForgeSourceID); err == nil {
+						repo.mappedSource = &graphqlMappedSource{
+							provider:       strings.ToUpper(string(src.Provider)),
+							sourceName:     ownerOfRepo(src.Repo),
+							installationID: firstNonEmpty(rs.SourceID, src.InstallationID, src.ID),
+							configURL:      u.root.sourceConfigURL(src),
+							org:            &graphqlOrg{root: u.root, org: org},
+						}
+					}
+				}
+				out = append(out, repo)
+			}
+		}
+		if u.root.forgeSources == nil {
+			continue
+		}
 		sources, err := u.root.forgeSources.ListByOrg(ctx, org.ID)
 		if err != nil {
 			return nil, err
 		}
 		for _, src := range sources {
+			if coveredSources[src.ID] {
+				continue
+			}
 			ref := canonicalCheckRepo(src.Provider, src.Repo)
 			if args.Refs != nil && len(*args.Refs) > 0 && !repoFilterMatches(*args.Refs, ref) {
 				continue
@@ -600,6 +778,7 @@ func (u *graphqlUser) Repositories(ctx context.Context, args struct{ Refs *[]str
 					isPublic:                          false,
 					effectiveRunChecksOnDefaultBranch: true,
 					effectiveRunChecksOnPullRequest:   true,
+					effectiveRunChecksOnBranchPush:    true,
 				},
 				mappedSource: &graphqlMappedSource{
 					provider:       strings.ToUpper(string(src.Provider)),
@@ -734,64 +913,149 @@ func (r *graphqlRoot) GetRepos(ctx context.Context) ([]*graphqlRepo, error) {
 	return out, nil
 }
 
-// Org.RepoSettings returns repo visibility settings for the org's sources.
+// Org.RepoSettings returns persisted claims merged with legacy standalone
+// forge sources.
 func (o *graphqlOrg) RepoSettings(ctx context.Context, args struct{ Repo *string }) ([]*graphqlRepoSettings, error) {
+	out := make([]*graphqlRepoSettings, 0)
+	coveredSources := map[string]bool{}
+	if o.root.repoSettings != nil {
+		settings, err := o.root.repoSettings.ListByOrg(ctx, o.org.ID)
+		if err != nil {
+			return nil, err
+		}
+		for _, rs := range settings {
+			coveredSources[rs.ForgeSourceID] = true
+			if args.Repo != nil && *args.Repo != "" && !sameNormalizedRepo(*args.Repo, rs.Repo) {
+				continue
+			}
+			out = append(out, &graphqlRepoSettings{
+				repo: rs.Repo, isPublic: rs.IsPublic,
+				effectiveRunChecksOnDefaultBranch: rs.RunChecksOnDefaultBranch,
+				effectiveRunChecksOnPullRequest:   rs.RunChecksOnPullRequest,
+				effectiveRunChecksOnBranchPush:    rs.RunChecksOnBranchPush,
+			})
+		}
+	}
 	if o.root.forgeSources == nil {
-		return []*graphqlRepoSettings{}, nil
+		return out, nil
 	}
 	sources, err := o.root.forgeSources.ListByOrg(ctx, o.org.ID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]*graphqlRepoSettings, 0)
 	for _, src := range sources {
+		if coveredSources[src.ID] {
+			continue
+		}
 		ref := canonicalCheckRepo(src.Provider, src.Repo)
 		if args.Repo != nil && *args.Repo != "" && !sameNormalizedRepo(*args.Repo, ref) {
 			continue
 		}
 		out = append(out, &graphqlRepoSettings{
-			repo:                              ref,
-			isPublic:                          false,
+			repo: ref, isPublic: false,
 			effectiveRunChecksOnDefaultBranch: true,
 			effectiveRunChecksOnPullRequest:   true,
+			effectiveRunChecksOnBranchPush:    true,
 		})
 	}
 	return out, nil
 }
 
-// UpdateOrgRepoSetting is rejected: repo visibility is managed via forge
-// integrations on self-hosted deployments.
+// UpdateOrgRepoSetting applies one repo claim/trigger mutation.
 func (r *graphqlRoot) UpdateOrgRepoSetting(ctx context.Context, args struct {
 	Org     graphql.ID
 	Setting graphqlRepoSettingInput
 }) (bool, error) {
-	if _, err := r.resolveAccessibleOrg(ctx, string(args.Org)); err != nil {
+	org, err := r.resolveAccessibleOrg(ctx, string(args.Org))
+	if err != nil {
 		return false, err
 	}
-	return false, fmt.Errorf("repository visibility settings are not supported on this self-hosted deployment; manage forge integrations via /api/v1/orgs/<org>/integrations")
+	if r.githubIntegrator == nil {
+		return false, fmt.Errorf("repository visibility settings are not supported on this self-hosted deployment; manage forge integrations via /api/v1/orgs/<org>/integrations")
+	}
+	actorID, isGlobalAdmin, err := r.repoSettingActor(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := r.githubIntegrator.UpdateOrgRepoSettings(ctx, actorID, isGlobalAdmin, org, []domain.RepoSettingMutation{repoSettingMutation(args.Setting)}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// DeleteOrgRepoSetting is rejected: see UpdateOrgRepoSetting.
+// DeleteOrgRepoSetting releases a claim.
 func (r *graphqlRoot) DeleteOrgRepoSetting(ctx context.Context, args struct {
 	Org      graphql.ID
 	RepoName string
 }) (bool, error) {
-	if _, err := r.resolveAccessibleOrg(ctx, string(args.Org)); err != nil {
+	org, err := r.resolveAccessibleOrg(ctx, string(args.Org))
+	if err != nil {
 		return false, err
 	}
-	return false, fmt.Errorf("repository visibility settings are not supported on this self-hosted deployment; manage forge integrations via /api/v1/orgs/<org>/integrations")
+	if r.githubIntegrator == nil {
+		return false, fmt.Errorf("repository visibility settings are not supported on this self-hosted deployment; manage forge integrations via /api/v1/orgs/<org>/integrations")
+	}
+	actorID, isGlobalAdmin, err := r.repoSettingActor(ctx)
+	if err != nil {
+		return false, err
+	}
+	if err := r.githubIntegrator.DeleteOrgRepoSetting(ctx, actorID, isGlobalAdmin, org, args.RepoName); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
-// UpdateOrgRepoSettings is rejected: check triggers are managed via forge
-// integrations on self-hosted deployments.
+// UpdateOrgRepoSettings applies repo claims/trigger mutations in one call.
 func (r *graphqlRoot) UpdateOrgRepoSettings(ctx context.Context, args struct {
 	Org      graphql.ID
 	Settings []graphqlRepoSettingInput
 }) (bool, error) {
-	if _, err := r.resolveAccessibleOrg(ctx, string(args.Org)); err != nil {
+	org, err := r.resolveAccessibleOrg(ctx, string(args.Org))
+	if err != nil {
 		return false, err
 	}
-	return false, fmt.Errorf("repository check triggers are managed via forge integrations on this self-hosted deployment (/api/v1/orgs/<org>/integrations)")
+	if r.githubIntegrator == nil {
+		return false, fmt.Errorf("repository check triggers are managed via forge integrations on this self-hosted deployment (/api/v1/orgs/<org>/integrations)")
+	}
+	actorID, isGlobalAdmin, err := r.repoSettingActor(ctx)
+	if err != nil {
+		return false, err
+	}
+	mutations := make([]domain.RepoSettingMutation, 0, len(args.Settings))
+	for _, setting := range args.Settings {
+		mutations = append(mutations, repoSettingMutation(setting))
+	}
+	if err := r.githubIntegrator.UpdateOrgRepoSettings(ctx, actorID, isGlobalAdmin, org, mutations); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (r *graphqlRoot) repoSettingActor(ctx context.Context) (string, bool, error) {
+	id := graphqlIdentity(ctx)
+	if id.UserID == "" {
+		return "", false, fmt.Errorf("forbidden")
+	}
+	u, err := r.users.Get(ctx, id.UserID)
+	if err != nil {
+		return "", false, fmt.Errorf("forbidden")
+	}
+	return u.ID, u.Role == domain.RoleAdmin, nil
+}
+
+func repoSettingMutation(in graphqlRepoSettingInput) domain.RepoSettingMutation {
+	out := domain.RepoSettingMutation{
+		Repo:                     in.Repo,
+		IsPublic:                 in.IsPublic,
+		RunChecksOnDefaultBranch: in.RunChecksOnDefaultBranch,
+		RunChecksOnPullRequest:   in.RunChecksOnPullRequest,
+		RunChecksOnBranchPush:    in.RunChecksOnBranchPush,
+	}
+	if in.SourceId != nil {
+		sourceID := string(*in.SourceId)
+		out.SourceID = &sourceID
+	}
+	return out
 }
 
 func ownerOfRepo(repo string) string {
@@ -965,6 +1229,7 @@ func (c *graphqlCheck) ModuleVersion() string   { return c.moduleVersion }
 func (c *graphqlCheck) Internal() bool          { return c.internal }
 
 type graphqlSource struct {
+	root         *graphqlRoot
 	id           string
 	name         string
 	sourceType   string
@@ -987,6 +1252,18 @@ func (s *graphqlSource) OrgId() *graphql.ID {
 }
 func (s *graphqlSource) OrgName() *string  { return s.orgName }
 func (s *graphqlSource) ConfigUrl() string { return s.configURL }
+
+// Repositories resolves the source's repositories.
+func (s *graphqlSource) Repositories(ctx context.Context) ([]*graphqlSourceRepository, error) {
+	if s.root == nil || s.orgID == nil {
+		return []*graphqlSourceRepository{}, nil
+	}
+	orgID := graphql.ID(*s.orgID)
+	return s.root.SourceRepositories(ctx, struct {
+		InstallationID graphql.ID
+		Org            *graphql.ID
+	}{InstallationID: graphql.ID(s.id), Org: &orgID})
+}
 
 type graphqlSourceRepository struct {
 	repository       string
@@ -1027,10 +1304,14 @@ func (m *graphqlMappedSource) Org() *graphqlOrg       { return m.org }
 type graphqlGitHubConnection struct {
 	githubLogin string
 	connectedAt string
+	scopes      []string
+	status      string
 }
 
 func (c *graphqlGitHubConnection) GithubLogin() string { return c.githubLogin }
 func (c *graphqlGitHubConnection) ConnectedAt() string { return c.connectedAt }
+func (c *graphqlGitHubConnection) Scopes() []string    { return nonNilStrings(c.scopes) }
+func (c *graphqlGitHubConnection) Status() string      { return c.status }
 
 type graphqlGitLabSource struct {
 	root          *graphqlRoot
@@ -1092,6 +1373,7 @@ type graphqlRepoSettings struct {
 	isPublic                          bool
 	effectiveRunChecksOnDefaultBranch bool
 	effectiveRunChecksOnPullRequest   bool
+	effectiveRunChecksOnBranchPush    bool
 }
 
 func (s *graphqlRepoSettings) Repo() string   { return s.repo }
@@ -1101,6 +1383,9 @@ func (s *graphqlRepoSettings) EffectiveRunChecksOnDefaultBranch() bool {
 }
 func (s *graphqlRepoSettings) EffectiveRunChecksOnPullRequest() bool {
 	return s.effectiveRunChecksOnPullRequest
+}
+func (s *graphqlRepoSettings) EffectiveRunChecksOnBranchPush() bool {
+	return s.effectiveRunChecksOnBranchPush
 }
 
 // graphqlRepoSettingInput is the RepoSettingInput SDL input type.

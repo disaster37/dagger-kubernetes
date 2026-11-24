@@ -1020,3 +1020,255 @@ func TestParityAccessibleOrgsOrgScoped(t *testing.T) {
 		t.Fatalf("org-scoped orgs = %v", orgs)
 	}
 }
+
+// --- Family H: GitHub integration resolvers ---------------------------------
+
+type fakeGitHubIntegrator struct {
+	oauthEnabled  bool
+	buildURL      string
+	items         []domain.SourceRepositoryItem
+	updateErr     error
+	deleteErr     error
+	lastMutations []domain.RepoSettingMutation
+	deletedRepo   string
+}
+
+func (f *fakeGitHubIntegrator) OAuthEnabled() bool { return f.oauthEnabled }
+func (f *fakeGitHubIntegrator) BuildOAuthURL(context.Context, string, string, string) (string, error) {
+	return f.buildURL, nil
+}
+func (f *fakeGitHubIntegrator) ListSourceRepositories(context.Context, *domain.Org, string) ([]domain.SourceRepositoryItem, error) {
+	return f.items, nil
+}
+func (f *fakeGitHubIntegrator) UpdateOrgRepoSettings(_ context.Context, _ string, _ bool, _ *domain.Org, settings []domain.RepoSettingMutation) error {
+	f.lastMutations = settings
+	return f.updateErr
+}
+func (f *fakeGitHubIntegrator) DeleteOrgRepoSetting(_ context.Context, _ string, _ bool, _ *domain.Org, repo string) error {
+	f.deletedRepo = repo
+	return f.deleteErr
+}
+
+func TestParityGithubOAuthURLConfigured(t *testing.T) {
+	e := newParityEnv(t, false)
+	integrator := &fakeGitHubIntegrator{oauthEnabled: true, buildURL: "https://github.com/login/oauth/authorize?state=x"}
+	e.g.WithGitHubIntegrator(integrator)
+	res := execJSON(t, e.g, e.ctx(), `{ githubOAuthURL(redirectURI: "https://example.com/github/callback") }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	if got := res["data"].(map[string]any)["githubOAuthURL"]; got != integrator.buildURL {
+		t.Fatalf("url = %v", got)
+	}
+	integrator.oauthEnabled = false
+	res = execJSON(t, e.g, e.ctx(), `{ githubOAuthURL(redirectURI: "https://example.com/github/callback") }`, nil)
+	msgs := errorMessages(t, res)
+	if len(msgs) == 0 || !strings.Contains(msgs[0], "GitHub OAuth app integration is not configured") {
+		t.Fatalf("disabled message = %v", msgs)
+	}
+}
+
+func TestParityGithubConnectionUserScoped(t *testing.T) {
+	e := newParityEnv(t, false)
+	conns := NewGitHubConnectionRepo(e.store)
+	ctx := context.Background()
+	at := time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC)
+	if err := conns.Upsert(ctx, &domain.UserGitHubConnection{
+		UserID: e.user.ID, GitHubLogin: "alice", BaseURL: "https://api.github.com",
+		Scopes: []string{"repo", "read:org"}, TokenCiphertext: "ct", Status: domain.GitHubConnectionActive,
+		ConnectedAt: at, UpdatedAt: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e.g.WithGitHubConnections(conns)
+	res := execJSON(t, e.g, e.ctx(), `{ githubConnection { githubLogin connectedAt scopes status } }`, nil)
+	conn := res["data"].(map[string]any)["githubConnection"].(map[string]any)
+	if conn["githubLogin"] != "alice" || conn["status"] != "active" || conn["connectedAt"] != at.Format(time.RFC3339) {
+		t.Fatalf("connection = %v", conn)
+	}
+	if scopes := conn["scopes"].([]any); len(scopes) != 2 || scopes[0] != "repo" {
+		t.Fatalf("scopes = %v", scopes)
+	}
+	// A revoked connection must not be reported as connected.
+	revoked := &domain.UserGitHubConnection{UserID: e.user.ID, GitHubLogin: "alice", TokenCiphertext: "ct", Status: domain.GitHubConnectionRevoked, ConnectedAt: at, UpdatedAt: at}
+	if err := conns.Upsert(ctx, revoked); err != nil {
+		t.Fatal(err)
+	}
+	res = execJSON(t, e.g, e.ctx(), `{ githubConnection { githubLogin } }`, nil)
+	if res["data"].(map[string]any)["githubConnection"] != nil {
+		t.Fatalf("revoked connection must fall through: %v", res)
+	}
+}
+
+func TestParitySourcesDedupAccountOwners(t *testing.T) {
+	e := newParityEnv(t, false)
+	accounts := NewGitHubAccountSourceRepo(e.store)
+	ctx := context.Background()
+	at := time.Now().UTC()
+	if err := accounts.Upsert(ctx, &domain.GitHubAccountSource{ID: "ghacct-1", OrgID: "acme", Owner: "Acme", BaseURL: "https://api.github.com", Status: domain.GitHubConnectionActive, CreatedAt: at}); err != nil {
+		t.Fatal(err)
+	}
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-new", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/new", AccountSourceID: "ghacct-1"})
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-old", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/old"})
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-old-2", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/old2"})
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-gl", OrgID: "acme", Provider: domain.ForgeGitLab, Repo: "group/proj"})
+	e.g.WithGitHubAccountSources(accounts)
+	res := execJSON(t, e.g, e.ctx(), `{ sources { id name type } }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	sources := res["data"].(map[string]any)["sources"].([]any)
+	if len(sources) != 2 {
+		t.Fatalf("sources = %v", sources)
+	}
+	ids := map[string]bool{}
+	for _, raw := range sources {
+		ids[raw.(map[string]any)["id"].(string)] = true
+	}
+	for _, want := range []string{"ghacct-1", "src-gl"} {
+		if !ids[want] {
+			t.Fatalf("missing %s in %v", want, ids)
+		}
+	}
+	for _, skipped := range []string{"src-old", "src-old-2", "src-new"} {
+		if ids[skipped] {
+			t.Fatalf("owner-covered source %s must be deduplicated: %v", skipped, ids)
+		}
+	}
+}
+
+func TestParitySourceRepositoriesAccount(t *testing.T) {
+	e := newParityEnv(t, false)
+	accounts := NewGitHubAccountSourceRepo(e.store)
+	ctx := context.Background()
+	if err := accounts.Upsert(ctx, &domain.GitHubAccountSource{ID: "ghacct-1", OrgID: "acme", Owner: "alice", BaseURL: "https://api.github.com", Status: domain.GitHubConnectionActive}); err != nil {
+		t.Fatal(err)
+	}
+	claimed := "other"
+	integrator := &fakeGitHubIntegrator{items: []domain.SourceRepositoryItem{
+		{Repository: "github.com/alice/api", Selected: true, Eligible: true},
+		{Repository: "github.com/alice/other", Eligible: false, ClaimedByOrgName: &claimed},
+	}}
+	e.g.WithGitHubAccountSources(accounts).WithGitHubIntegrator(integrator)
+	res := execJSON(t, e.g, e.ctx(), `{ sourceRepositories(installationId: "ghacct-1", org: "acme") { repository selected eligible claimedByOrgName } }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	repos := res["data"].(map[string]any)["sourceRepositories"].([]any)
+	if len(repos) != 2 {
+		t.Fatalf("repos = %v", repos)
+	}
+	if repos[1].(map[string]any)["claimedByOrgName"] != "other" || repos[1].(map[string]any)["eligible"] != false {
+		t.Fatalf("other repo = %v", repos[1])
+	}
+}
+
+func TestParityPersistedRepoSettingsResolvers(t *testing.T) {
+	e := newParityEnv(t, false)
+	ctx := context.Background()
+	accounts := NewGitHubAccountSourceRepo(e.store)
+	repoSets := NewRepoSettingRepo(e.store)
+	if err := accounts.Upsert(ctx, &domain.GitHubAccountSource{ID: "ghacct-1", OrgID: "acme", Owner: "acme", BaseURL: "https://api.github.com", Status: domain.GitHubConnectionActive}); err != nil {
+		t.Fatal(err)
+	}
+	if err := repoSets.BatchUpsert(ctx, "acme", []domain.RepoSettingWrite{{
+		Setting:     &domain.RepoSetting{OrgID: "acme", Repo: "github.com/acme/api", Provider: domain.ForgeGitHub, SourceID: "ghacct-1", ForgeSourceID: "ghrepo-1", IsPublic: true, RunChecksOnDefaultBranch: true},
+		ForgeSource: &domain.ForgeSource{ID: "ghrepo-1", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", AccountSourceID: "ghacct-1"},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	e.g.WithGitHubAccountSources(accounts).WithRepoSettings(repoSets)
+	res := execJSON(t, e.g, e.ctx(), `{ user { repositories(refs: ["github.com/acme/api"]) { ref settings { repo isPublic effectiveRunChecksOnDefaultBranch effectiveRunChecksOnPullRequest effectiveRunChecksOnBranchPush } mappedSource { provider sourceName installationId configUrl } } } }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	repos := res["data"].(map[string]any)["user"].(map[string]any)["repositories"].([]any)
+	if len(repos) != 1 {
+		t.Fatalf("repositories = %v", repos)
+	}
+	m := repos[0].(map[string]any)
+	settings := m["settings"].(map[string]any)
+	if m["ref"] != "github.com/acme/api" || settings["isPublic"] != true || settings["effectiveRunChecksOnBranchPush"] != false {
+		t.Fatalf("repo = %v", m)
+	}
+	mapped := m["mappedSource"].(map[string]any)
+	if mapped["provider"] != "GITHUB" || mapped["sourceName"] != "acme" || mapped["installationId"] != "ghacct-1" {
+		t.Fatalf("mappedSource = %v", mapped)
+	}
+	if !strings.Contains(mapped["configUrl"].(string), "/orgs/acme/integrations/github") {
+		t.Fatalf("configUrl = %v", mapped["configUrl"])
+	}
+	res = execJSON(t, e.g, e.ctx(), `{ org(name: "acme") { repoSettings { repo isPublic effectiveRunChecksOnDefaultBranch effectiveRunChecksOnPullRequest effectiveRunChecksOnBranchPush } } }`, nil)
+	arr := res["data"].(map[string]any)["org"].(map[string]any)["repoSettings"].([]any)
+	if len(arr) != 1 || arr[0].(map[string]any)["effectiveRunChecksOnDefaultBranch"] != true {
+		t.Fatalf("repoSettings = %v", arr)
+	}
+}
+
+func TestParityUpdateOrgRepoSettingsIntegrator(t *testing.T) {
+	e := newParityEnv(t, false)
+	integrator := &fakeGitHubIntegrator{}
+	e.g.WithGitHubIntegrator(integrator)
+	res := execJSON(t, e.g, e.ctx(), `mutation { updateOrgRepoSettings(org: "acme", settings: [{repo: "github.com/acme/api", sourceId: "ghacct-1", runChecksOnDefaultBranch: true, runChecksOnPullRequest: false}]) }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	if len(integrator.lastMutations) != 1 {
+		t.Fatalf("mutations = %+v", integrator.lastMutations)
+	}
+	m := integrator.lastMutations[0]
+	if m.Repo != "github.com/acme/api" || m.SourceID == nil || *m.SourceID != "ghacct-1" || m.RunChecksOnPullRequest == nil || *m.RunChecksOnPullRequest {
+		t.Fatalf("mutation = %+v", m)
+	}
+	res = execJSON(t, e.g, e.ctx(), `mutation { updateOrgRepoSetting(org: "acme", setting: {repo: "github.com/acme/api", isPublic: true}) }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("single errors: %v", errorMessages(t, res))
+	}
+	res = execJSON(t, e.g, e.ctx(), `mutation { deleteOrgRepoSetting(org: "acme", repoName: "github.com/acme/api") }`, nil)
+	if hasErrors(res) || integrator.deletedRepo != "github.com/acme/api" {
+		t.Fatalf("delete result = %v deleted=%q", res, integrator.deletedRepo)
+	}
+	integrator.updateErr = fmt.Errorf("repository github.com/acme/api does not belong to installation ghacct-2: %w", domain.ErrRepoNotInInstallation)
+	res = execJSON(t, e.g, e.ctx(), `mutation { updateOrgRepoSettings(org: "acme", settings: [{repo: "github.com/acme/api"}]) }`, nil)
+	msgs := errorMessages(t, res)
+	if len(msgs) == 0 || !strings.Contains(msgs[0], "does not belong to installation") {
+		t.Fatalf("error message = %v", msgs)
+	}
+}
+
+func TestParityOrgFeaturesBackfill(t *testing.T) {
+	e := newParityEnv(t, false)
+	empty := &domain.Org{ID: "empty", Name: "empty", DisplayName: "Empty", CreatedAt: time.Now().UTC()}
+	if err := e.orgRepo.Create(context.Background(), empty); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.orgRepo.SetMember(context.Background(), "empty", e.user.ID, domain.OrgMember); err != nil {
+		t.Fatal(err)
+	}
+	res := execJSON(t, e.g, e.ctx(), `{ org(name: "empty") { features { name status } } }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	features := res["data"].(map[string]any)["org"].(map[string]any)["features"].([]any)
+	names := map[string]bool{}
+	for _, raw := range features {
+		names[raw.(map[string]any)["name"].(string)] = true
+	}
+	if !names["CLOUD_CHECKS"] || !names["CLOUD_MODULES"] {
+		t.Fatalf("features = %v", names)
+	}
+}
+
+func TestParitySourcesDedupStandaloneOwners(t *testing.T) {
+	e := newParityEnv(t, false)
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-1", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", InstallationID: "1"})
+	seedForgeSource(t, e.forges, &domain.ForgeSource{ID: "src-2", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/web", InstallationID: "2"})
+	res := execJSON(t, e.g, e.ctx(), `{ sources { id name type } }`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	sources := res["data"].(map[string]any)["sources"].([]any)
+	if len(sources) != 1 || sources[0].(map[string]any)["name"] != "acme" {
+		t.Fatalf("sources = %v", sources)
+	}
+}
