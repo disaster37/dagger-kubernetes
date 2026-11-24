@@ -113,6 +113,56 @@ func seedForgeSource(t *testing.T, store *repository.RaftStore, secretSvc *Secre
 	}
 }
 
+func TestChecksServiceRepoSettingsTriggerGate(t *testing.T) {
+	svc, provider, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	repoSets := repository.NewRepoSettingRepo(store)
+	svc.WithRepoSettings(repoSets)
+	ctx := context.Background()
+	if err := repoSets.BatchUpsert(ctx, "acme", []domain.RepoSettingWrite{{Setting: &domain.RepoSetting{
+		OrgID: "acme", Repo: "github.com/acme/repo", Provider: domain.ForgeGitHub,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo","default_branch":"main"}}`)
+	res, err := svc.HandleWebhook(ctx, domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Ignored || res.Reason != "trigger_disabled" {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(runner.runs) != 0 || len(provider.statuses) != 0 {
+		t.Fatalf("disabled trigger must not dispatch or report: runs=%d statuses=%d", len(runner.runs), len(provider.statuses))
+	}
+	// Re-enable the default-branch trigger. An OAuth/PAT source with an
+	// InstallationID but no AppID must report via commit status, not check-run.
+	if err := repoSets.BatchUpsert(ctx, "acme", []domain.RepoSettingWrite{{Setting: &domain.RepoSetting{
+		OrgID: "acme", Repo: "github.com/acme/repo", Provider: domain.ForgeGitHub,
+		RunChecksOnDefaultBranch: true,
+	}}}); err != nil {
+		t.Fatal(err)
+	}
+	src, err := repository.NewForgeSourceRepo(store).Get(ctx, "src-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	src.InstallationID = "12345"
+	if err := repository.NewForgeSourceRepo(store).Upsert(ctx, src); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.HandleWebhook(ctx, domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body); err != nil {
+		t.Fatal(err)
+	}
+	if len(runner.runs) != 1 {
+		t.Fatalf("runner runs = %d", len(runner.runs))
+	}
+	if len(provider.statuses) == 0 || len(provider.checkRuns) != 0 {
+		t.Fatalf("statuses=%d checkRuns=%d (PAT/OAuth sources must use commit statuses)", len(provider.statuses), len(provider.checkRuns))
+	}
+}
+
 func TestChecksServiceNonForkWebhookDispatches(t *testing.T) {
 	svc, provider, runner, store := newChecksServiceForTest(t)
 	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())

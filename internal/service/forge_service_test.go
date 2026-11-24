@@ -59,6 +59,42 @@ func newForgeServiceForTest(t *testing.T) (*ForgeService, *capturingForgeProvide
 	return svc, provider, secretSvc, sources
 }
 
+func TestForgeServiceGitHubSync(t *testing.T) {
+	store := newServiceStore(t)
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logger)
+	sources := repository.NewForgeSourceRepo(store)
+	accounts := repository.NewGitHubAccountSourceRepo(store)
+	repoSets := repository.NewRepoSettingRepo(store)
+	provider := &capturingForgeProvider{kind: domain.ForgeGitHub}
+	svc := NewForgeService(sources, secretSvc, []domain.ForgeProvider{provider}, "https://example.com", logger).
+		WithGitHubSync(accounts, repoSets)
+	ctx := context.Background()
+	src, err := svc.CreateSource(ctx, &ForgeSourceInput{OrgID: "acme", Repo: "acme/api", Provider: domain.ForgeGitHub, Token: "ghp_token"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantAcct := domain.GitHubAccountSourceID("acme", "https://api.github.com", "acme")
+	if src.AccountSourceID != wantAcct {
+		t.Fatalf("account source id = %q want %q", src.AccountSourceID, wantAcct)
+	}
+	acct, err := accounts.Get(ctx, wantAcct)
+	if err != nil || acct.Owner != "acme" || acct.TokenCiphertext == "" {
+		t.Fatalf("account = %+v err=%v", acct, err)
+	}
+	setting, err := repoSets.Get(ctx, "acme", "github.com/acme/api")
+	if err != nil || setting.SourceID != wantAcct || !setting.RunChecksOnDefaultBranch || !setting.RunChecksOnPullRequest || !setting.RunChecksOnBranchPush {
+		t.Fatalf("setting = %+v err=%v", setting, err)
+	}
+	if err := svc.Delete(ctx, src.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := repoSets.Get(ctx, "acme", "github.com/acme/api"); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("setting must be deleted with the source, err=%v", err)
+	}
+}
+
 func TestForgeServiceCreateSourceWebhookSecret(t *testing.T) {
 	cases := []struct {
 		name         string

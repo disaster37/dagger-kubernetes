@@ -33,6 +33,7 @@ type ChecksService struct {
 	orgs          *OrgService
 	runner        domain.CheckJobRunner
 	checkRuns     domain.CheckRunRepository
+	repoSettings  domain.RepoSettingRepository
 	workflows     *WorkflowService
 	providers     map[domain.ForgeKind]domain.ForgeProvider
 	publicURL     string
@@ -69,6 +70,12 @@ func NewChecksService(sources domain.ForgeSourceRepository, secrets *SecretServi
 // WithEnabled gates check-run creation and dispatch. Reads always work.
 func (s *ChecksService) WithEnabled(enabled bool) *ChecksService {
 	s.enabled.Store(enabled)
+	return s
+}
+
+// WithRepoSettings enables the per-repo trigger gate.
+func (s *ChecksService) WithRepoSettings(repoSettings domain.RepoSettingRepository) *ChecksService {
+	s.repoSettings = repoSettings
 	return s
 }
 
@@ -117,6 +124,16 @@ func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.Forge
 	ev := disposition.Event
 	if ev.Repo == "" {
 		ev.Repo = src.Repo
+	}
+	if s.repoSettings != nil {
+		canonical := domain.CanonicalForgeRepo(provider, src.BaseURL, ev.Repo)
+		setting, err := s.repoSettings.Get(ctx, src.OrgID, canonical)
+		if err != nil && !errors.Is(err, domain.ErrNotFound) {
+			return nil, err
+		}
+		if err == nil && !setting.AllowsWebhookEvent(ev) {
+			return &WebhookResult{Ignored: true, Reason: "trigger_disabled", RawEvent: disposition.RawEvent}, nil
+		}
 	}
 	proj, err := s.projects.GetOrCreateByName(ctx, src.OrgID, ev.Repo)
 	if err != nil {
@@ -456,7 +473,7 @@ func (s *ChecksService) reportToForge(ctx context.Context, src *domain.ForgeSour
 		s.logger.WithError(err).Warn("open forge token failed")
 		return
 	}
-	if src.AppID != "" || src.InstallationID != "" {
+	if src.AppID != "" {
 		err = p.CreateCheckRun(ctx, src, token, run)
 	} else {
 		err = p.SetCommitStatus(ctx, src, token, run)

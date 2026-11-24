@@ -16,11 +16,13 @@ import (
 
 // ForgeService manages forge integrations and their encrypted credentials.
 type ForgeService struct {
-	sources   domain.ForgeSourceRepository
-	secrets   *SecretService
-	providers map[domain.ForgeKind]domain.ForgeProvider
-	publicURL string
-	logger    *logrus.Logger
+	sources      domain.ForgeSourceRepository
+	secrets      *SecretService
+	providers    map[domain.ForgeKind]domain.ForgeProvider
+	accounts     domain.GitHubAccountSourceRepository
+	repoSettings domain.RepoSettingRepository
+	publicURL    string
+	logger       *logrus.Logger
 }
 
 // NewForgeService returns a ForgeService.
@@ -30,6 +32,14 @@ func NewForgeService(sources domain.ForgeSourceRepository, secrets *SecretServic
 		m[p.Kind()] = p
 	}
 	return &ForgeService{sources: sources, secrets: secrets, providers: m, publicURL: strings.TrimSuffix(publicURL, "/"), logger: logger}
+}
+
+// WithGitHubSync enables the account-source + repo-setting mirroring used by
+// the Cloud CLI integration model.
+func (s *ForgeService) WithGitHubSync(accounts domain.GitHubAccountSourceRepository, repoSettings domain.RepoSettingRepository) *ForgeService {
+	s.accounts = accounts
+	s.repoSettings = repoSettings
+	return s
 }
 
 // ForgeSourceInput is the create/update payload.
@@ -56,9 +66,27 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 	if id == "" {
 		id = fmt.Sprintf("%s-%s", in.Provider, strings.ReplaceAll(in.Repo, "/", "-"))
 	}
+	repo := in.Repo
+	if in.Provider == domain.ForgeGitHub {
+		repo = repoTail(in.Repo)
+	}
+	baseURL := in.BaseURL
+	if in.Provider == domain.ForgeGitHub && baseURL == "" {
+		baseURL = "https://api.github.com"
+	}
 	tokenCT, err := s.secrets.SealRaw(domain.SecretScopeOrg, in.OrgID, in.Token)
 	if err != nil {
 		return nil, err
+	}
+	var acct *domain.GitHubAccountSource
+	if in.Provider == domain.ForgeGitHub && in.Token != "" && s.accounts != nil {
+		owner, _ := splitOwnerRepo(repo)
+		if owner != "" {
+			acct, err = s.upsertAccountForSource(ctx, in.OrgID, baseURL, owner, in.Token)
+			if err != nil {
+				return nil, err
+			}
+		}
 	}
 	// Registering a webhook with an empty secret makes the forge send unsigned
 	// deliveries, which fail closed on verification. Auto-generate one so the
@@ -78,11 +106,30 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 	now := time.Now().UTC()
 	src := &domain.ForgeSource{
 		ID: id, OrgID: in.OrgID, ProjectID: in.ProjectID, Provider: in.Provider,
-		BaseURL: in.BaseURL, Repo: in.Repo, TokenCiphertext: tokenCT,
+		BaseURL: baseURL, Repo: repo, TokenCiphertext: tokenCT,
 		WebhookSecretCiphertext: secretCT, CreatedAt: now, UpdatedAt: now,
+	}
+	if acct != nil {
+		src.AccountSourceID = acct.ID
 	}
 	if err := s.sources.Upsert(ctx, src); err != nil {
 		return nil, err
+	}
+	if acct != nil && s.repoSettings != nil {
+		canonical := domain.CanonicalForgeRepo(domain.ForgeGitHub, baseURL, repo)
+		setting := &domain.RepoSetting{
+			OrgID: in.OrgID, Repo: canonical, Provider: domain.ForgeGitHub,
+			SourceID: acct.ID, ForgeSourceID: id,
+			RunChecksOnDefaultBranch: true, RunChecksOnPullRequest: true, RunChecksOnBranchPush: true,
+			CreatedAt: now, UpdatedAt: now,
+		}
+		if existing, err := s.repoSettings.Get(ctx, in.OrgID, canonical); err == nil {
+			setting.CreatedAt = existing.CreatedAt
+			setting.ClaimedByUserID = existing.ClaimedByUserID
+		}
+		if err := s.repoSettings.BatchUpsert(ctx, in.OrgID, []domain.RepoSettingWrite{{Setting: setting}}); err != nil {
+			return nil, err
+		}
 	}
 	callback := fmt.Sprintf("%s/v1/webhooks/%s/%s", s.publicURL, in.Provider, id)
 	// Clear any stale hook with the same callback URL before registering, so a
@@ -103,6 +150,33 @@ func forgeRandomHex(n int) (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// upsertAccountForSource mirrors a per-repo GitHub PAT into the parent
+// org-account model so CLI integration/checks commands see it.
+func (s *ForgeService) upsertAccountForSource(ctx context.Context, orgID, baseURL, owner, token string) (*domain.GitHubAccountSource, error) {
+	acctID := domain.GitHubAccountSourceID(orgID, baseURL, owner)
+	scopeID, err := domain.GitHubOrgAccountScopeID(orgID, acctID)
+	if err != nil {
+		return nil, err
+	}
+	ct, err := s.secrets.SealRaw(domain.SecretScopeGitHubOrgAccount, scopeID, token)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now().UTC()
+	acct := &domain.GitHubAccountSource{
+		ID: acctID, OrgID: orgID, Owner: owner, OwnerType: "PAT", BaseURL: baseURL,
+		TokenCiphertext: ct, Status: domain.GitHubConnectionActive, CreatedAt: now, UpdatedAt: now,
+	}
+	if existing, err := s.accounts.Get(ctx, acctID); err == nil {
+		acct.CreatedAt = existing.CreatedAt
+		acct.ConnectedByUserID = existing.ConnectedByUserID
+	}
+	if err := s.accounts.Upsert(ctx, acct); err != nil {
+		return nil, err
+	}
+	return acct, nil
 }
 
 // List returns an org's forge sources.
@@ -126,6 +200,20 @@ func (s *ForgeService) Delete(ctx context.Context, id string) error {
 			s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook cleanup failed")
 		} else if err := p.DeleteWebhook(ctx, src, token, ""); err != nil {
 			s.logger.WithError(err).WithField("source_id", id).Warn("forge webhook cleanup failed")
+		}
+	}
+	if s.repoSettings != nil {
+		settings, err := s.repoSettings.ListBySource(ctx, id)
+		if err != nil {
+			return err
+		}
+		for _, setting := range settings {
+			if setting.ForgeSourceID != id {
+				continue
+			}
+			if err := s.repoSettings.Delete(ctx, setting.OrgID, setting.Repo, id); err != nil && !errors.Is(err, domain.ErrNotFound) {
+				return err
+			}
 		}
 	}
 	return s.sources.Delete(ctx, id)
