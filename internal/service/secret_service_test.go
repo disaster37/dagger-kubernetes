@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/sirupsen/logrus"
@@ -100,6 +101,78 @@ func TestResolvePrecedence(t *testing.T) {
 	got, err = svc.Resolve(ctx, "acme", "", "", "KEY")
 	if err != nil || got != "org" {
 		t.Fatalf("org precedence = %q err=%v", got, err)
+	}
+}
+
+func TestGitHubTokenScopeIsolation(t *testing.T) {
+	repo := &fakeSecretRepo{secrets: map[string]*domain.Secret{}}
+	svc := NewSecretService(repo, []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	for _, tc := range []struct {
+		name    string
+		scope   domain.SecretScope
+		scopeID string
+	}{
+		{"user", domain.SecretScopeGitHubUser, "user-a"},
+		{"org account", domain.SecretScopeGitHubOrgAccount, "org-a/acct-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ct, err := svc.SealRaw(tc.scope, tc.scopeID, "gho_secret")
+			if err != nil {
+				t.Fatal(err)
+			}
+			pt, err := svc.OpenRaw(tc.scope, tc.scopeID, ct)
+			if err != nil || pt != "gho_secret" {
+				t.Fatalf("round trip = %q err=%v", pt, err)
+			}
+			bad := []struct {
+				scope   domain.SecretScope
+				scopeID string
+			}{
+				{domain.SecretScopeGitHubUser, "user-b"},
+				{domain.SecretScopeOrg, "user-a"},
+				{domain.SecretScopeGitHubOrgAccount, "org-b/acct-1"},
+				{domain.SecretScopeGitHubOrgAccount, "org-a/acct-2"},
+			}
+			for _, other := range bad {
+				if _, err := svc.OpenRaw(other.scope, other.scopeID, ct); err == nil {
+					t.Fatalf("cross-scope open %s/%s must fail", other.scope, other.scopeID)
+				}
+			}
+		})
+	}
+	if _, err := svc.SealRaw(domain.SecretScopeGitHubUser, "bad|scope", "x"); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("delimiter scope id err = %v want ErrValidation", err)
+	}
+}
+
+func TestSealedValueTamperAndMalformedInput(t *testing.T) {
+	repo := &fakeSecretRepo{secrets: map[string]*domain.Secret{}}
+	svc := NewSecretService(repo, []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	ct, err := svc.SealRaw(domain.SecretScopeGitHubUser, "user-a", "gho_secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tampered := []byte(ct)
+	if tampered[len(tampered)-1] == 'A' {
+		tampered[len(tampered)-1] = 'B'
+	} else {
+		tampered[len(tampered)-1] = 'A'
+	}
+	cases := []struct {
+		name       string
+		ciphertext string
+	}{
+		{"tampered", string(tampered)},
+		{"truncated", ct[:len(ct)/2]},
+		{"invalid base64", "%%%not-base64%%%"},
+		{"malformed json envelope", `{"v":1,"nonce":"x"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := svc.OpenRaw(domain.SecretScopeGitHubUser, "user-a", tc.ciphertext); err == nil {
+				t.Fatal("tampered/malformed ciphertext must fail closed")
+			}
+		})
 	}
 }
 

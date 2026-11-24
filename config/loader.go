@@ -50,6 +50,7 @@ var supervisorValidations = []validation{
 	{wrap: "validate checks config", fn: validateChecksConfig},
 	{wrap: "validate workflows config", fn: validateWorkflowsConfig},
 	{wrap: "validate graphql config", fn: validateGraphQLConfig},
+	{wrap: "validate forge config", fn: validateForgeConfig},
 }
 
 // ciWrapperValidations is the client-relevant subset. The wrapper consumes only
@@ -382,6 +383,17 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("forge.gitlab_api_url", "https://gitlab.com/api/v4")
 	v.SetDefault("forge.gitea_api_url", "")
 	v.SetDefault("forge.webhook_secret", "")
+	v.SetDefault("forge.github.allowed_api_urls", []string{})
+	v.SetDefault("forge.github.ca_cert_path", "")
+	v.SetDefault("forge.github.http_timeout", 15*time.Second)
+	v.SetDefault("forge.github.oauth.enabled", false)
+	v.SetDefault("forge.github.oauth.client_id", "")
+	v.SetDefault("forge.github.oauth.client_secret", "")
+	v.SetDefault("forge.github.oauth.oauth_base_url", "https://github.com")
+	v.SetDefault("forge.github.oauth.scopes", []string{"repo", "read:org", "admin:repo_hook"})
+	v.SetDefault("forge.github.oauth.state_ttl", 10*time.Minute)
+	v.SetDefault("forge.github.oauth.device_flow_enabled", true)
+	v.SetDefault("forge.github.oauth.allowed_redirect_uris", []string{})
 
 	v.AutomaticEnv()
 
@@ -1079,6 +1091,107 @@ func validatePipelineMetricsConfig(cfg *domain.Config) error {
 		return fmt.Errorf("pipeline.metrics.max_record_window must be > 0 when pipeline.metrics.enabled is true")
 	}
 	return nil
+}
+
+// validateForgeConfig guards outbound forge and GitHub OAuth-app settings. It
+// is deliberately independent of auth.oauth: credential linking works on
+// internal-auth-only and OIDC deployments.
+func validateForgeConfig(cfg *domain.Config) error {
+	g := cfg.Forge.GitHub
+	if g.HTTPTimeout <= 0 || g.HTTPTimeout > 2*time.Minute {
+		return fmt.Errorf("forge.github.http_timeout must be > 0 and <= 2m")
+	}
+	for _, raw := range g.AllowedAPIURLs {
+		if err := validateForgeAPIURL(raw); err != nil {
+			return fmt.Errorf("forge.github.allowed_api_urls: %w", err)
+		}
+	}
+	o := g.OAuth
+	if o.OAuthBaseURL == "" {
+		return fmt.Errorf("forge.github.oauth.oauth_base_url must not be empty")
+	}
+	if err := validateForgeAPIURL(o.OAuthBaseURL); err != nil {
+		return fmt.Errorf("forge.github.oauth.oauth_base_url: %w", err)
+	}
+	for _, raw := range o.AllowedRedirectURIs {
+		if err := validateGitHubCallbackURI(raw); err != nil {
+			return fmt.Errorf("forge.github.oauth.allowed_redirect_uris: %w", err)
+		}
+	}
+	if !o.Enabled {
+		return nil
+	}
+	if o.ClientID == "" {
+		return fmt.Errorf("forge.github.oauth.client_id must not be empty when forge.github.oauth.enabled is true")
+	}
+	if o.ClientSecret == "" {
+		return fmt.Errorf("forge.github.oauth.client_secret must not be empty when forge.github.oauth.enabled is true")
+	}
+	if len(o.Scopes) == 0 {
+		return fmt.Errorf("forge.github.oauth.scopes must not be empty when forge.github.oauth.enabled is true")
+	}
+	for _, scope := range o.Scopes {
+		if strings.TrimSpace(scope) == "" || hasControlChars(scope) {
+			return fmt.Errorf("forge.github.oauth.scopes contains an invalid scope")
+		}
+	}
+	if o.StateTTL < time.Minute || o.StateTTL > time.Hour {
+		return fmt.Errorf("forge.github.oauth.state_ttl must be >= 1m and <= 1h when forge.github.oauth.enabled is true")
+	}
+	return nil
+}
+
+// validateForgeAPIURL requires an absolute https URL, or a loopback http URL
+// for local testing, with no userinfo, query, or fragment (CWE-918).
+func validateForgeAPIURL(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL %q: %w", raw, err)
+	}
+	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("URL %q must be absolute with no userinfo, query, or fragment", raw)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return fmt.Errorf("URL %q must use https (http is allowed only for loopback)", raw)
+	}
+	return nil
+}
+
+// validateGitHubCallbackURI requires an absolute http(s) URL whose path is
+// exactly /github/callback and which carries no userinfo, query, or fragment.
+func validateGitHubCallbackURI(raw string) error {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("invalid URL %q: %w", raw, err)
+	}
+	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("URL %q must be absolute with no userinfo, query, or fragment", raw)
+	}
+	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+		return fmt.Errorf("URL %q must use https (http is allowed only for loopback)", raw)
+	}
+	if u.Path != "/github/callback" {
+		return fmt.Errorf("URL %q must use path /github/callback", raw)
+	}
+	return nil
+}
+
+func isLoopbackHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasControlChars(s string) bool {
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // s3BucketWithFallback returns the effective bucket for an S3-backed

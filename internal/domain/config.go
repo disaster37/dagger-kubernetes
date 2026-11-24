@@ -673,7 +673,30 @@ type ForgeConfig struct {
 	GitLabAPIURL string `mapstructure:"gitlab_api_url"`
 	GiteaAPIURL  string `mapstructure:"gitea_api_url"`
 	// WebhookSecret is the fallback HMAC secret when a source has none.
-	WebhookSecret string `mapstructure:"webhook_secret"`
+	WebhookSecret string            `mapstructure:"webhook_secret"`
+	GitHub        ForgeGitHubConfig `mapstructure:"github"`
+}
+
+// ForgeGitHubConfig configures the outbound GitHub API and OAuth app used for
+// credential linking (ADR-059). It is intentionally independent of auth.oauth.
+type ForgeGitHubConfig struct {
+	AllowedAPIURLs []string               `mapstructure:"allowed_api_urls"`
+	CACertPath     string                 `mapstructure:"ca_cert_path"`
+	HTTPTimeout    time.Duration          `mapstructure:"http_timeout"`
+	OAuth          ForgeGitHubOAuthConfig `mapstructure:"oauth"`
+}
+
+// ForgeGitHubOAuthConfig configures the GitHub OAuth app used to link GitHub
+// repository credentials. It is NOT a supervisor login provider.
+type ForgeGitHubOAuthConfig struct {
+	Enabled             bool          `mapstructure:"enabled"`
+	ClientID            string        `mapstructure:"client_id"`
+	ClientSecret        string        `mapstructure:"client_secret"`
+	OAuthBaseURL        string        `mapstructure:"oauth_base_url"` // default "https://github.com"
+	Scopes              []string      `mapstructure:"scopes"`         // default ["repo","read:org","admin:repo_hook"]
+	StateTTL            time.Duration `mapstructure:"state_ttl"`      // default 10m
+	DeviceFlowEnabled   bool          `mapstructure:"device_flow_enabled"`
+	AllowedRedirectURIs []string      `mapstructure:"allowed_redirect_uris"`
 }
 
 // GraphQLConfig bounds Cloud GraphQL query complexity and introspection.

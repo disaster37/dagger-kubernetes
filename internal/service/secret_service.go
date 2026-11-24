@@ -2,6 +2,9 @@ package service
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -13,12 +16,14 @@ import (
 )
 
 // SecretService stores write-only AES-256-GCM sealed secrets with scope-bound
-// AAD (org/project/environment).
+// AAD (org/project/environment/github_user/github_org_account).
 type SecretService struct {
 	repo   domain.SecretRepository
 	key    []byte
 	logger *logrus.Logger
 }
+
+var _ domain.TokenSealer = (*SecretService)(nil)
 
 // NewSecretService returns a SecretService. key must be 32 bytes.
 func NewSecretService(repo domain.SecretRepository, key []byte, logger *logrus.Logger) *SecretService {
@@ -30,11 +35,49 @@ func secretAAD(scope domain.SecretScope, scopeID string) []byte {
 }
 
 func (s *SecretService) sealer(scope domain.SecretScope, scopeID string) (*authcrypto.AESGCMSealer, error) {
+	if scopeID == "" || strings.Contains(scopeID, "|") {
+		return nil, fmt.Errorf("%w: invalid secret scope id", domain.ErrValidation)
+	}
 	sealer, err := authcrypto.NewAESGCMSealer(s.key, secretAAD(scope, scopeID))
 	if err != nil {
 		return nil, fmt.Errorf("create secret sealer: %w", err)
 	}
 	return sealer, nil
+}
+
+// openSealed decrypts a sealed value while enforcing this service's scope-bound
+// AAD. go-auth's JSON envelope embeds its AAD (ctx) and OpenString trusts it,
+// so opening the envelope under a different scope would otherwise succeed.
+// Comparing the embedded context against the expected AAD before decryption
+// keeps cross-scope substitution impossible.
+func (s *SecretService) openSealed(scope domain.SecretScope, scopeID, ciphertext string) (string, error) {
+	if ciphertext == "" {
+		return "", nil
+	}
+	sealer, err := s.sealer(scope, scopeID)
+	if err != nil {
+		return "", err
+	}
+	var envelope struct {
+		Alg string `json:"alg"`
+		Ctx string `json:"ctx"`
+		Ct  string `json:"ct"`
+	}
+	if err := json.Unmarshal([]byte(ciphertext), &envelope); err == nil && envelope.Alg != "" && envelope.Ct != "" {
+		aad, err := base64.StdEncoding.DecodeString(envelope.Ctx)
+		if err != nil {
+			return "", fmt.Errorf("decode sealed value context: %w", err)
+		}
+		expected := secretAAD(scope, scopeID)
+		if subtle.ConstantTimeCompare(aad, expected) != 1 {
+			return "", fmt.Errorf("open sealed value: %w", domain.ErrValidation)
+		}
+	}
+	pt, err := sealer.OpenString(ciphertext)
+	if err != nil {
+		return "", fmt.Errorf("open sealed value: %w", err)
+	}
+	return pt, nil
 }
 
 // Put seals and stores a secret value.
@@ -86,13 +129,9 @@ func (s *SecretService) Reveal(ctx context.Context, scope domain.SecretScope, sc
 	if err != nil {
 		return "", err
 	}
-	sealer, err := s.sealer(scope, scopeID)
+	pt, err := s.openSealed(scope, scopeID, sec.Ciphertext)
 	if err != nil {
 		return "", err
-	}
-	pt, err := sealer.OpenString(sec.Ciphertext)
-	if err != nil {
-		return "", fmt.Errorf("open secret: %w", err)
 	}
 	return pt, nil
 }
@@ -100,18 +139,7 @@ func (s *SecretService) Reveal(ctx context.Context, scope domain.SecretScope, sc
 // OpenRaw decrypts a sealed value stored outside the secret repository (e.g.
 // a forge token or webhook secret on a ForgeSource).
 func (s *SecretService) OpenRaw(scope domain.SecretScope, scopeID, ciphertext string) (string, error) {
-	if ciphertext == "" {
-		return "", nil
-	}
-	sealer, err := s.sealer(scope, scopeID)
-	if err != nil {
-		return "", err
-	}
-	pt, err := sealer.OpenString(ciphertext)
-	if err != nil {
-		return "", fmt.Errorf("open sealed value: %w", err)
-	}
-	return pt, nil
+	return s.openSealed(scope, scopeID, ciphertext)
 }
 
 // SealRaw seals a value stored outside the secret repository.

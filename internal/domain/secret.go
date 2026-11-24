@@ -11,10 +11,23 @@ import (
 type SecretScope string
 
 const (
-	SecretScopeOrg         SecretScope = "org"
-	SecretScopeProject     SecretScope = "project"
-	SecretScopeEnvironment SecretScope = "environment"
+	SecretScopeOrg              SecretScope = "org"
+	SecretScopeProject          SecretScope = "project"
+	SecretScopeEnvironment      SecretScope = "environment"
+	SecretScopeGitHubUser       SecretScope = "github_user"
+	SecretScopeGitHubOrgAccount SecretScope = "github_org_account"
 )
+
+// GitHubOrgAccountScopeID builds the tenant-isolated scope identifier
+// "<orgID>/<accountID>" for SecretScopeGitHubOrgAccount.
+func GitHubOrgAccountScopeID(orgID, accountID string) (string, error) {
+	orgID = strings.TrimSpace(orgID)
+	accountID = strings.TrimSpace(accountID)
+	if orgID == "" || accountID == "" || strings.ContainsAny(orgID, "/|") || strings.ContainsAny(accountID, "/|") {
+		return "", fmt.Errorf("%w: invalid github account scope", ErrValidation)
+	}
+	return fmt.Sprintf("%s/%s", orgID, accountID), nil
+}
 
 // Secret is a write-only AES-256-GCM sealed value. Plaintext is never returned
 // by the API.

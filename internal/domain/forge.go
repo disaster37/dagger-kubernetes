@@ -25,6 +25,7 @@ type ForgeSource struct {
 	Provider                ForgeKind `json:"provider"`
 	BaseURL                 string    `json:"base_url"`
 	Repo                    string    `json:"repo"` // owner/repo or group/project
+	AccountSourceID         string    `json:"account_source_id,omitempty"`
 	TokenCiphertext         string    `json:"-"`
 	WebhookSecretCiphertext string    `json:"-"`
 	AppID                   string    `json:"app_id,omitempty"`
@@ -103,6 +104,26 @@ func hostFromURL(raw string) string {
 		return raw
 	}
 	return u.Host
+}
+
+// CanonicalForgeRepo returns the canonical "<host>/<owner>/<name>" form of a
+// repository slug. A repo already carrying a host segment is returned with the
+// scheme and .git suffix stripped; otherwise the provider's host derived from
+// baseURL is prepended.
+func CanonicalForgeRepo(provider ForgeKind, baseURL, repo string) string {
+	repo = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(repo), "https://"), ".git")
+	if repo == "" {
+		return ""
+	}
+	parts := strings.Split(repo, "/")
+	if len(parts) >= 3 && strings.Contains(parts[0], ".") {
+		return repo
+	}
+	host := forgeHost(provider, baseURL)
+	if host == "" {
+		return repo
+	}
+	return fmt.Sprintf("%s/%s", host, repo)
 }
 
 // WebhookEvent is the normalized forge webhook payload.
