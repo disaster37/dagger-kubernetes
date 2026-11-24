@@ -55,6 +55,8 @@ type ForgeSourceInput struct {
 }
 
 // CreateSource seals credentials, stores the source, and registers a webhook.
+//
+//nolint:gocyclo // create + GitHub sync branches
 func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (*domain.ForgeSource, error) {
 	if in.OrgID == "" || in.Repo == "" {
 		return nil, fmt.Errorf("%w: org and repo are required", domain.ErrValidation)
@@ -71,8 +73,9 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 		repo = repoTail(in.Repo)
 	}
 	baseURL := in.BaseURL
-	if in.Provider == domain.ForgeGitHub && baseURL == "" {
-		baseURL = "https://api.github.com"
+	accountBase := baseURL
+	if in.Provider == domain.ForgeGitHub && accountBase == "" {
+		accountBase = "https://api.github.com"
 	}
 	tokenCT, err := s.secrets.SealRaw(domain.SecretScopeOrg, in.OrgID, in.Token)
 	if err != nil {
@@ -82,7 +85,7 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 	if in.Provider == domain.ForgeGitHub && in.Token != "" && s.accounts != nil {
 		owner, _ := splitOwnerRepo(repo)
 		if owner != "" {
-			acct, err = s.upsertAccountForSource(ctx, in.OrgID, baseURL, owner, in.Token)
+			acct, err = s.upsertAccountForSource(ctx, in.OrgID, accountBase, owner, in.Token)
 			if err != nil {
 				return nil, err
 			}
@@ -116,7 +119,7 @@ func (s *ForgeService) CreateSource(ctx context.Context, in *ForgeSourceInput) (
 		return nil, err
 	}
 	if acct != nil && s.repoSettings != nil {
-		canonical := domain.CanonicalForgeRepo(domain.ForgeGitHub, baseURL, repo)
+		canonical := domain.CanonicalForgeRepo(domain.ForgeGitHub, accountBase, repo)
 		setting := &domain.RepoSetting{
 			OrgID: in.OrgID, Repo: canonical, Provider: domain.ForgeGitHub,
 			SourceID: acct.ID, ForgeSourceID: id,

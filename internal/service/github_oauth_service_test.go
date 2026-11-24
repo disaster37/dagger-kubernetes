@@ -22,6 +22,8 @@ type fakeGitHubAPI struct {
 	orgs          []domain.GitHubOwner
 	repos         []domain.GitHubRemoteRepo
 	repoErr       error
+	profileErr    error
+	reposErr      error
 	exchangeCalls int
 	pollToken     *domain.GitHubTokenResult
 	pollErr       error
@@ -52,6 +54,9 @@ func (f *fakeGitHubAPI) PollDeviceFlow(context.Context, string) (*domain.GitHubT
 }
 
 func (f *fakeGitHubAPI) GetAuthenticatedUser(context.Context, string, string) (*domain.GitHubUserProfile, []string, error) {
+	if f.profileErr != nil {
+		return nil, nil, f.profileErr
+	}
 	cp := f.profile
 	return &cp, append([]string(nil), f.scopes...), nil
 }
@@ -61,6 +66,9 @@ func (f *fakeGitHubAPI) ListUserOrgs(context.Context, string, string) ([]domain.
 }
 
 func (f *fakeGitHubAPI) ListAccessibleRepos(context.Context, string, string) ([]domain.GitHubRemoteRepo, error) {
+	if f.reposErr != nil {
+		return nil, f.reposErr
+	}
 	return append([]domain.GitHubRemoteRepo(nil), f.repos...), nil
 }
 
@@ -87,17 +95,18 @@ func (f *failingRepoSettingRepo) BatchUpsert(context.Context, string, []domain.R
 }
 
 type gitHubEnv struct {
-	svc        *GitHubIntegrationService
-	gh         *fakeGitHubAPI
-	provider   *capturingForgeProvider
-	store      *repository.RaftStore
-	org        *domain.Org
-	alice      *domain.User
-	bob        *domain.User
-	accounts   domain.GitHubAccountSourceRepository
-	repoSets   domain.RepoSettingRepository
-	forges     domain.ForgeSourceRepository
-	oauthState domain.GitHubOAuthStateRepository
+	svc         *GitHubIntegrationService
+	gh          *fakeGitHubAPI
+	provider    *capturingForgeProvider
+	store       *repository.RaftStore
+	org         *domain.Org
+	alice       *domain.User
+	bob         *domain.User
+	connections domain.GitHubConnectionRepository
+	accounts    domain.GitHubAccountSourceRepository
+	repoSets    domain.RepoSettingRepository
+	forges      domain.ForgeSourceRepository
+	oauthState  domain.GitHubOAuthStateRepository
 }
 
 func newGitHubEnv(t *testing.T) *gitHubEnv {
@@ -154,7 +163,7 @@ func newGitHubEnv(t *testing.T) *gitHubEnv {
 	})
 	return &gitHubEnv{
 		svc: svc, gh: gh, provider: provider, store: store, org: org, alice: alice, bob: bob,
-		accounts: accounts, repoSets: repoSets, forges: forges, oauthState: states,
+		connections: connections, accounts: accounts, repoSets: repoSets, forges: forges, oauthState: states,
 	}
 }
 
@@ -400,6 +409,22 @@ func TestGitHubIntegrationUpdateOrgRepoSettings(t *testing.T) {
 		t.Fatalf("off setting = %+v err=%v", setting, err)
 	}
 
+	// Re-enabling flips the triggers back without registering a second hook.
+	onAgain := []domain.RepoSettingMutation{{
+		Repo: "github.com/alice/api", SourceID: &acct.ID,
+		RunChecksOnDefaultBranch: &yes, RunChecksOnPullRequest: &yes,
+	}}
+	if err := env.svc.UpdateOrgRepoSettings(ctx, env.alice.ID, false, env.org, onAgain); err != nil {
+		t.Fatal(err)
+	}
+	if env.provider.registerCalls != 1 {
+		t.Fatalf("re-enable must not duplicate hooks, register=%d", env.provider.registerCalls)
+	}
+	setting, err = env.repoSets.Get(ctx, env.org.ID, "github.com/alice/api")
+	if err != nil || !setting.RunChecksOnDefaultBranch || !setting.RunChecksOnPullRequest {
+		t.Fatalf("re-enabled setting = %+v err=%v", setting, err)
+	}
+
 	// Claim release cleans the claim and webhook.
 	if err := env.svc.DeleteOrgRepoSetting(ctx, env.alice.ID, false, env.org, "github.com/alice/api"); err != nil {
 		t.Fatal(err)
@@ -452,6 +477,34 @@ func TestGitHubIntegrationUpdateRejectsInaccessibleRepo(t *testing.T) {
 	}})
 	if !errors.Is(err, domain.ErrRepoNotInInstallation) {
 		t.Fatalf("owner mismatch err = %v", err)
+	}
+}
+
+func TestGitHubIntegrationRevokedTokenStatus(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	acct, err := env.svc.ConnectOrgAccount(ctx, env.alice.ID, false, env.org.ID, "alice", "", "ghp_token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.gh.reposErr = domain.ErrGitHubTokenRevoked
+	if _, err := env.svc.ListSourceRepositories(ctx, env.org, acct.ID); !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("list err = %v", err)
+	}
+	stored, err := env.accounts.Get(ctx, acct.ID)
+	if err != nil || stored.Status != domain.GitHubConnectionRevoked {
+		t.Fatalf("account status = %+v err=%v", stored, err)
+	}
+	if _, err := env.svc.ConnectUserPAT(ctx, env.alice.ID, "https://api.github.com", "ghp_user"); err != nil {
+		t.Fatal(err)
+	}
+	env.gh.profileErr = domain.ErrGitHubTokenRevoked
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("owners err = %v", err)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.Status != domain.GitHubConnectionRevoked {
+		t.Fatalf("connection status = %+v err=%v", conn, err)
 	}
 }
 

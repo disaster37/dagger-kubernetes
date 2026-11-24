@@ -116,6 +116,8 @@ func copyWorkflowDefs(m map[string]*domain.WorkflowDef) []*domain.WorkflowDef {
 }
 
 // Snapshot deep-copies the state under the read lock and returns a snapshot.
+//
+//nolint:gocyclo // linear copy of every entity type
 func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	f.state.mu.RLock()
 	defer f.state.mu.RUnlock()

@@ -189,3 +189,27 @@ source pre-cleans any stale hook with the same callback URL, so recreates do not
 duplicate and pre-fix orphans are cleaned up. Cleanup requires the stored token
 to still be valid; otherwise the hook must be deleted manually in the forge
 settings.
+
+## Follow-up — ADR-059 (2026-11-24)
+
+ADR-059 supersedes the `githubOAuthURL` and `updateOrgRepoSettings` stubs
+documented above whenever `forge.github.oauth` is configured and the
+`GitHubIntegrationService` is wired:
+
+- `Query.githubOAuthURL` now returns a real GitHub OAuth authorize URL (PKCE
+  S256, replicated single-use state) and only falls back to the actionable
+  "GitHub OAuth app integration is not configured" error when the forge OAuth
+  app is disabled.
+- `Mutation.updateOrgRepoSettings` / `updateOrgRepoSetting` /
+  `deleteOrgRepoSetting` now materialize per-repo `ForgeSource`s + webhooks and
+  persist `RepoSetting` trigger flags, so `dagger cloud checks on|off` work.
+  The historical self-hosted error remains the fallback when no
+  `GitHubCloudIntegrator` is wired (unit-test fixtures / older binaries).
+- `Query.sources`, `sourceRepositories`, `user.repositories`,
+  `org.repoSettings`, and `githubConnection` now prefer persisted
+  `GitHubAccountSource` / `RepoSetting` rows while preserving the legacy
+  per-repo `ForgeSource` fallback.
+
+The per-repo PAT integration remains fully supported; see ADR-059 for the
+credential-linking vs. login separation (`forge.github.oauth` never reads
+`auth.oauth.*`).

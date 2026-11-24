@@ -1493,6 +1493,9 @@ func (s *fsmState) batchUpsertRepoSettings(p *cmdBatchUpsertRepoSettings) error 
 		if w.Setting.OrgID == "" || w.Setting.OrgID != p.OrgID || w.Setting.Repo == "" {
 			return fmt.Errorf("repo setting: %w", domain.ErrValidation)
 		}
+		if w.ForgeSource != nil && w.ForgeSource.OrgID != p.OrgID {
+			return fmt.Errorf("repo setting forge source: %w", domain.ErrValidation)
+		}
 		if ownerOrg, taken := s.repoClaimsByRepo[repoClaimKey(w.Setting.Repo)]; taken && ownerOrg != p.OrgID {
 			return fmt.Errorf("repo %s: %w", w.Setting.Repo, domain.ErrRepoClaimedByOtherOrg)
 		}

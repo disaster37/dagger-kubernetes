@@ -487,6 +487,22 @@ supervisor:
       gitlabApiUrl: "https://gitlab.com/api/v4"
       giteaApiUrl: ""
       webhookSecret: ""
+      github:
+        allowedApiUrls: []
+        caCertPath: ""
+        httpTimeout: "15s"
+        oauth:
+          enabled: false
+          clientId: ""
+          clientSecret: ""
+          clientSecretRef:
+            name: ""
+            key: "client_secret"
+          oauthBaseUrl: "https://github.com"
+          scopes: ["repo", "read:org", "admin:repo_hook"]
+          stateTtl: "10m"
+          deviceFlowEnabled: true
+          allowedRedirectUris: []
     graphql:
       introspectionEnabled: false
       maxDepth: 15

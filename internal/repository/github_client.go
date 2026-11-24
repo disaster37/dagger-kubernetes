@@ -52,6 +52,8 @@ var _ domain.GitHubAPIClient = (*GitHubClient)(nil)
 
 // NewGitHubClient returns a GitHubClient. A PEM CA bundle is loaded at startup
 // and an unreadable/invalid bundle fails fast.
+//
+//nolint:gocritic // config is a startup-only immutable value
 func NewGitHubClient(cfg GitHubClientConfig) (*GitHubClient, error) {
 	if cfg.OAuthBaseURL == "" {
 		cfg.OAuthBaseURL = "https://github.com"
@@ -283,7 +285,7 @@ type githubRepoPayload struct {
 	} `json:"permissions"`
 }
 
-func (p githubRepoPayload) toDomain() domain.GitHubRemoteRepo {
+func (p *githubRepoPayload) toDomain() domain.GitHubRemoteRepo {
 	return domain.GitHubRemoteRepo{
 		ID: p.ID, Name: p.Name, FullName: p.FullName, Owner: p.Owner.Login,
 		Private: p.Private, Archived: p.Archived, DefaultBranch: p.DefaultBranch, AdminPerm: p.Permissions.Admin,
@@ -314,12 +316,12 @@ func (c *GitHubClient) getJSON(ctx context.Context, apiBaseURL, token, path stri
 	return header, nil
 }
 
-func (c *GitHubClient) doWithRetries(ctx context.Context, url, token string) ([]byte, http.Header, error) {
+func (c *GitHubClient) doWithRetries(ctx context.Context, endpoint, token string) ([]byte, http.Header, error) {
 	const attempts = 3
 	backoff := 200 * time.Millisecond
 	var lastErr error
 	for attempt := 0; attempt < attempts; attempt++ {
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, http.NoBody)
 		if err != nil {
 			return nil, nil, fmt.Errorf("build github request: %w", err)
 		}
@@ -353,7 +355,7 @@ func (c *GitHubClient) doWithRetries(ctx context.Context, url, token string) ([]
 		if resp.StatusCode == http.StatusUnauthorized {
 			return nil, resp.Header, fmt.Errorf("%w: github api rejected the token", domain.ErrGitHubTokenRevoked)
 		}
-		lastErr = fmt.Errorf("github api GET %s: status %d: %s", sanitizeGitHubURL(url), resp.StatusCode, scrubGitHubBody(body))
+		lastErr = fmt.Errorf("github api GET %s: status %d: %s", sanitizeGitHubURL(endpoint), resp.StatusCode, scrubGitHubBody(body))
 		if (resp.StatusCode == http.StatusBadGateway || resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusGatewayTimeout) && attempt < attempts-1 {
 			if err := sleepGitHubBackoff(ctx, backoff); err != nil {
 				return nil, resp.Header, err
@@ -508,6 +510,9 @@ func pathSegment(segment string) (string, error) {
 // githubRepoPath builds the escaped "owner/repo" path element.
 func githubRepoPath(repo string) (string, error) {
 	parts := strings.Split(strings.Trim(repo, "/"), "/")
+	if len(parts) == 3 && strings.Contains(parts[0], ".") {
+		parts = parts[1:]
+	}
 	if len(parts) != 2 {
 		return "", fmt.Errorf("%w: github repo must be owner/name", domain.ErrValidation)
 	}

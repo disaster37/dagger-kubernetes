@@ -15,7 +15,7 @@ const (
 	SecretScopeProject          SecretScope = "project"
 	SecretScopeEnvironment      SecretScope = "environment"
 	SecretScopeGitHubUser       SecretScope = "github_user"
-	SecretScopeGitHubOrgAccount SecretScope = "github_org_account"
+	SecretScopeGitHubOrgAccount SecretScope = "github_org_account" //nolint:gosec // scope name, not a credential
 )
 
 // GitHubOrgAccountScopeID builds the tenant-isolated scope identifier

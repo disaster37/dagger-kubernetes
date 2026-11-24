@@ -105,6 +105,13 @@ spec:
                   name: {{ .Values.auth.oauth.clientSecretRef.name | default (printf "%s-oauth" (include "dagger-kubernetes.fullname" .)) }}
                   key: {{ .Values.auth.oauth.clientSecretRef.key | default "client_secret" }}
             {{- end }}
+            {{- if or .Values.supervisor.config.forge.github.oauth.clientSecret .Values.supervisor.config.forge.github.oauth.clientSecretRef.name }}
+            - name: DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.supervisor.config.forge.github.oauth.clientSecretRef.name | default (printf "%s-github-integration-oauth" (include "dagger-kubernetes.fullname" .)) }}
+                  key: {{ .Values.supervisor.config.forge.github.oauth.clientSecretRef.key | default "client_secret" }}
+            {{- end }}
             # S3 credentials for the supervisor's shared S3 client (CLI cache +
             # cache GC). Optional: without the secret the client falls back to
             # the AWS env credential chain.

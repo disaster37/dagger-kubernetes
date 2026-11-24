@@ -495,10 +495,106 @@ export interface ForgeSource {
   provider: 'github' | 'gitlab' | 'gitea'
   base_url: string
   repo: string
+  account_source_id?: string
   app_id?: string
   installation_id?: string
   created_at: string
   updated_at: string
+}
+
+export interface GitHubConnection {
+  user_id: string
+  github_user_id: number
+  github_login: string
+  avatar_url?: string
+  base_url: string
+  scopes?: string[]
+  status: 'active' | 'revoked'
+  connected_at: string
+  updated_at: string
+}
+
+export interface GitHubConnectionState {
+  connected: boolean
+  oauth_enabled: boolean
+  device_flow_enabled: boolean
+  connection?: GitHubConnection
+}
+
+export interface GitHubAccountSource {
+  id: string
+  org_id: string
+  owner: string
+  owner_type: 'User' | 'Organization' | 'PAT'
+  base_url: string
+  connected_by_user_id?: string
+  scopes?: string[]
+  app_id?: string
+  installation_id?: string
+  status: 'active' | 'revoked'
+  created_at: string
+  updated_at: string
+}
+
+export interface GitHubOwner {
+  login: string
+  type: 'User' | 'Organization'
+  avatar_url?: string
+}
+
+export interface SourceRepositoryItem {
+  repository: string
+  full_name: string
+  private: boolean
+  archived: boolean
+  admin_perm: boolean
+  selected: boolean
+  eligible: boolean
+  claimed_by_org_name?: string
+}
+
+export interface RepoSetting {
+  org_id: string
+  repo: string
+  provider: string
+  source_id: string
+  forge_source_id: string
+  is_public: boolean
+  run_checks_on_default_branch: boolean
+  run_checks_on_pull_request: boolean
+  run_checks_on_branch_push: boolean
+  claimed_by_user_id?: string
+  created_at: string
+  updated_at: string
+}
+
+export interface OrgRepoSettings {
+  repo: string
+  isPublic: boolean
+  effectiveRunChecksOnDefaultBranch: boolean
+  effectiveRunChecksOnPullRequest: boolean
+  effectiveRunChecksOnBranchPush: boolean
+}
+
+export interface GitHubAdminOrg {
+  id: string
+  name: string
+}
+
+export interface GitHubOAuthCompleteResult {
+  connection: GitHubConnection
+  auto_connected_org?: GitHubAccountSource
+  target_org_slug?: string
+  available_owners: GitHubOwner[]
+  admin_orgs: GitHubAdminOrg[]
+}
+
+export interface GitHubDeviceFlowStart {
+  session_id: string
+  user_code: string
+  verification_uri: string
+  expires_at: string
+  interval: number
 }
 
 export interface CheckItem {

@@ -59,6 +59,6 @@ func (r *RepoSettingRepo) ListBySource(ctx context.Context, sourceID string) ([]
 	return r.store.fsmRead().listRepoSettingsBySource(sourceID), nil
 }
 
-func (r *RepoSettingRepo) Delete(ctx context.Context, orgID, canonicalRepo string, deleteForgeSourceID string) error {
+func (r *RepoSettingRepo) Delete(ctx context.Context, orgID, canonicalRepo, deleteForgeSourceID string) error {
 	return r.store.applyCtx(ctx, kindDeleteRepoSetting, cmdDeleteRepoSetting{OrgID: orgID, Repo: canonicalRepo, DeleteForgeSourceID: deleteForgeSourceID})
 }

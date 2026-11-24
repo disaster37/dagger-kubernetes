@@ -251,13 +251,50 @@ func run(c *cli.Context) error {
 
 	secretRepo := repository.NewSecretRepo(raftStore)
 	forgeSourceRepo := repository.NewForgeSourceRepo(raftStore)
+	githubConnRepo := repository.NewGitHubConnectionRepo(raftStore)
+	githubAccountRepo := repository.NewGitHubAccountSourceRepo(raftStore)
+	repoSettingRepo := repository.NewRepoSettingRepo(raftStore)
+	githubOAuthStateRepo := repository.NewGitHubOAuthStateRepo(raftStore)
 	secretSvc := service.NewSecretService(secretRepo, tokenEncKey, logger)
+	githubForge := repository.NewGitHubForge(cfg.Forge.GitHubAPIURL)
 	forgeProviders := []domain.ForgeProvider{
-		repository.NewGitHubForge(cfg.Forge.GitHubAPIURL),
+		githubForge,
 		repository.NewGitLabForge(cfg.Forge.GitLabAPIURL),
 		repository.NewGiteaForge(cfg.Forge.GiteaAPIURL),
 	}
-	forgeSvc := service.NewForgeService(forgeSourceRepo, secretSvc, forgeProviders, cfg.Server.PublicURL, logger)
+	forgeSvc := service.NewForgeService(forgeSourceRepo, secretSvc, forgeProviders, cfg.Server.PublicURL, logger).
+		WithGitHubSync(githubAccountRepo, repoSettingRepo)
+	githubClient, err := repository.NewGitHubClient(repository.GitHubClientConfig{
+		ClientID:       cfg.Forge.GitHub.OAuth.ClientID,
+		ClientSecret:   cfg.Forge.GitHub.OAuth.ClientSecret,
+		OAuthBaseURL:   cfg.Forge.GitHub.OAuth.OAuthBaseURL,
+		DefaultAPIURL:  cfg.Forge.GitHubAPIURL,
+		CACertPath:     cfg.Forge.GitHub.CACertPath,
+		HTTPTimeout:    cfg.Forge.GitHub.HTTPTimeout,
+		AllowedAPIURLs: cfg.Forge.GitHub.AllowedAPIURLs,
+	})
+	if err != nil {
+		return fmt.Errorf("init github client: %w", err)
+	}
+	githubIntegrationSvc := service.NewGitHubIntegrationService(service.GitHubIntegrationConfig{
+		PublicURL:           cfg.Server.PublicURL,
+		DefaultAPIURL:       cfg.Forge.GitHubAPIURL,
+		AllowedAPIURLs:      cfg.Forge.GitHub.AllowedAPIURLs,
+		CORSAllowedOrigins:  cfg.Auth.CORS.AllowedOrigins,
+		OAuthEnabled:        cfg.Forge.GitHub.OAuth.Enabled,
+		ClientID:            cfg.Forge.GitHub.OAuth.ClientID,
+		ClientSecret:        cfg.Forge.GitHub.OAuth.ClientSecret,
+		Scopes:              cfg.Forge.GitHub.OAuth.Scopes,
+		StateTTL:            cfg.Forge.GitHub.OAuth.StateTTL,
+		DeviceFlowEnabled:   cfg.Forge.GitHub.OAuth.DeviceFlowEnabled,
+		AllowedRedirectURIs: cfg.Forge.GitHub.OAuth.AllowedRedirectURIs,
+	}, service.GitHubIntegrationDeps{
+		Connections: githubConnRepo, AccountSources: githubAccountRepo, RepoSettings: repoSettingRepo,
+		ForgeSources: forgeSourceRepo, OAuthStates: githubOAuthStateRepo,
+		DeviceSessions: service.NewMemoryGitHubDeviceSessionStore(), Users: userRepo,
+		Orgs: orgsSvc, Projects: projectsSvc, Sealer: secretSvc, GitHub: githubClient,
+		ForgeProvider: githubForge, Logger: logger,
+	})
 	var checkRunner domain.CheckJobRunner
 	if cfg.Checks.Enabled && clientset != nil {
 		checkRunner = repository.NewK8sJobRunner(clientset, effectiveNamespace(cfg.Checks.Namespace, cfg.Fleet.Namespace), cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
@@ -523,8 +560,13 @@ func run(c *cli.Context) error {
 		logger,
 	).WithEnabled(cfg.Workflows.Enabled)
 	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, cfg.Forge.WebhookSecret, logger).
-		WithEnabled(cfg.Checks.Enabled)
-	cloudGraphQL.WithForgeSources(forgeSourceRepo).WithProjects(projectRepo).WithPublicURL(cfg.Server.PublicURL)
+		WithEnabled(cfg.Checks.Enabled).
+		WithRepoSettings(repoSettingRepo)
+	cloudGraphQL.WithForgeSources(forgeSourceRepo).WithProjects(projectRepo).WithPublicURL(cfg.Server.PublicURL).
+		WithGitHubConnections(githubConnRepo).
+		WithGitHubAccountSources(githubAccountRepo).
+		WithRepoSettings(repoSettingRepo).
+		WithGitHubIntegrator(githubIntegrationSvc)
 	if cfg.Checks.Enabled {
 		cloudGraphQL.WithCheckRerunner(checksSvc.Rerun)
 	}
@@ -644,6 +686,7 @@ func run(c *cli.Context) error {
 		RemoteCache:          remoteCacheSvc,
 		Checks:               checksSvc,
 		Forge:                forgeSvc,
+		GitHubIntegration:    githubIntegrationSvc,
 		Secrets:              secretSvc,
 		Environments:         service.NewEnvironmentService(envRepo, logger),
 		Workflows:            workflowSvc,

@@ -291,6 +291,19 @@ data:
       gitlab_api_url: {{ .Values.supervisor.config.forge.gitlabApiUrl | quote }}
       gitea_api_url: {{ .Values.supervisor.config.forge.giteaApiUrl | quote }}
       webhook_secret: ""
+      github:
+        allowed_api_urls: {{ .Values.supervisor.config.forge.github.allowedApiUrls | toJson }}
+        ca_cert_path: {{ .Values.supervisor.config.forge.github.caCertPath | quote }}
+        http_timeout: {{ .Values.supervisor.config.forge.github.httpTimeout | quote }}
+        oauth:
+          enabled: {{ .Values.supervisor.config.forge.github.oauth.enabled }}
+          client_id: {{ .Values.supervisor.config.forge.github.oauth.clientId | quote }}
+          client_secret: ""
+          oauth_base_url: {{ .Values.supervisor.config.forge.github.oauth.oauthBaseUrl | quote }}
+          scopes: {{ .Values.supervisor.config.forge.github.oauth.scopes | toJson }}
+          state_ttl: {{ .Values.supervisor.config.forge.github.oauth.stateTtl | quote }}
+          device_flow_enabled: {{ .Values.supervisor.config.forge.github.oauth.deviceFlowEnabled }}
+          allowed_redirect_uris: {{ .Values.supervisor.config.forge.github.oauth.allowedRedirectUris | toJson }}
     graphql:
       introspection_enabled: {{ .Values.supervisor.config.graphql.introspectionEnabled }}
       max_depth: {{ .Values.supervisor.config.graphql.maxDepth }}

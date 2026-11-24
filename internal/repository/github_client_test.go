@@ -171,7 +171,7 @@ func TestGitHubListAccessibleReposPagination(t *testing.T) {
 		for i := 0; i < count; i++ {
 			rows = append(rows, fmt.Sprintf(`{"id":%d,"name":"r%d","full_name":"acme/r%d","private":true,"owner":{"login":"acme"},"permissions":{"admin":true}}`, i, i, i))
 		}
-		_, _ = io.WriteString(w, fmt.Sprintf("[%s]", strings.Join(rows, ",")))
+		_, _ = fmt.Fprintf(w, "[%s]", strings.Join(rows, ","))
 	}))
 	t.Cleanup(srv.Close)
 	c := newTestGitHubClient(t, srv.URL)
@@ -239,6 +239,10 @@ func TestGitHubRateLimitAndErrors(t *testing.T) {
 			w.Header().Set("X-RateLimit-Reset", "1767225600")
 			w.WriteHeader(http.StatusForbidden)
 			_, _ = io.WriteString(w, `{"message":"API rate limit exceeded for ghp_leakedtoken"}`)
+		case "/rate429":
+			w.Header().Set("Retry-After", "30")
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = io.WriteString(w, `{"message":"slow down"}`)
 		case "/badjson":
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = io.WriteString(w, `{not-json`)
@@ -255,6 +259,9 @@ func TestGitHubRateLimitAndErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "leakedtoken") {
 		t.Fatalf("error leaked a token: %v", err)
+	}
+	if _, err := c.getJSON(context.Background(), srv.URL, "tok", "/rate429", nil); !errors.As(err, &rate) || rate.RetryAfter != 30*time.Second {
+		t.Fatalf("429 err = %v", err)
 	}
 	var out map[string]any
 	if _, err := c.getJSON(context.Background(), srv.URL, "tok", "/badjson", &out); err == nil || !strings.Contains(err.Error(), "decode github response") {

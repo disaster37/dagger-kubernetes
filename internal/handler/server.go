@@ -167,6 +167,7 @@ type Deps struct {
 	RemoteCache          *service.RemoteCacheService
 	Checks               *service.ChecksService
 	Forge                *service.ForgeService
+	GitHubIntegration    *service.GitHubIntegrationService
 	Secrets              *service.SecretService
 	Environments         *service.EnvironmentService
 	Workflows            *service.WorkflowService
@@ -308,6 +309,7 @@ type Server struct {
 	remoteCache         *service.RemoteCacheService
 	checks              *service.ChecksService
 	forges              *service.ForgeService
+	githubIntegration   *service.GitHubIntegrationService
 	secrets             *service.SecretService
 	environments        *service.EnvironmentService
 	workflows           *service.WorkflowService
@@ -382,6 +384,7 @@ func NewServer(cfg *ServerConfig, deps *Deps) *Server {
 		remoteCache:         deps.RemoteCache,
 		checks:              deps.Checks,
 		forges:              deps.Forge,
+		githubIntegration:   deps.GitHubIntegration,
 		secrets:             deps.Secrets,
 		environments:        deps.Environments,
 		workflows:           deps.Workflows,
@@ -897,6 +900,22 @@ func (s *Server) registerRoutes(h *server.Hertz) {
 	h.GET("/api/v1/orgs/:org/integrations", s.handleForgeSourcesList)
 	h.POST("/api/v1/orgs/:org/integrations", s.handleForgeSourceCreate)
 	h.DELETE("/api/v1/orgs/:org/integrations/:sourceID", s.handleForgeSourceDelete)
+	h.GET("/api/v1/github/connection", s.handleGitHubConnectionGet)
+	h.DELETE("/api/v1/github/connection", s.handleGitHubConnectionDelete)
+	h.POST("/api/v1/github/oauth/complete", s.handleGitHubOAuthComplete)
+	h.POST("/api/v1/github/pat", s.handleGitHubPAT)
+	h.POST("/api/v1/github/device/code", s.handleGitHubDeviceCode)
+	h.POST("/api/v1/github/device/poll", s.handleGitHubDevicePoll)
+	h.GET("/api/v1/github/owners", s.handleGitHubOwners)
+	h.POST("/api/v1/orgs/:org/github/oauth/start", s.handleGitHubOrgOAuthStart)
+	h.GET("/api/v1/orgs/:org/github/accounts", s.handleGitHubOrgAccountsList)
+	h.POST("/api/v1/orgs/:org/github/accounts", s.handleGitHubOrgAccountCreate)
+	h.DELETE("/api/v1/orgs/:org/github/accounts/:accountID", s.handleGitHubOrgAccountDelete)
+	h.GET("/api/v1/orgs/:org/github/repositories", s.handleGitHubOrgRepositories)
+	h.POST("/api/v1/orgs/:org/github/sources", s.handleGitHubOrgSources)
+	h.PUT("/api/v1/orgs/:org/github/repos/:owner/:repo/settings", s.handleGitHubOrgRepoSettingsPut)
+	h.DELETE("/api/v1/orgs/:org/github/repos/:owner/:repo/claim", s.handleGitHubOrgRepoClaimDelete)
+	h.GET("/github/callback", s.serveUI)
 	h.GET("/api/v1/orgs/:org/secrets", s.handleOrgSecretsList)
 	h.PUT("/api/v1/orgs/:org/secrets", s.handleOrgSecretPut)
 	h.DELETE("/api/v1/orgs/:org/secrets/:name", s.handleOrgSecretDelete)

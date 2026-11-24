@@ -86,6 +86,8 @@ func (s *ChecksService) Enabled() bool { return s.enabled.Load() }
 // ErrForbidden and must never be recorded as token failures (shared NAT IPs).
 // The ordering is fail-closed: load source, verify signature, honour the
 // enabled gate, then classify before any project/record/dispatch/forge write.
+//
+//nolint:gocyclo // fail-closed webhook pipeline
 func (s *ChecksService) HandleWebhook(ctx context.Context, provider domain.ForgeKind, sourceID string, headers map[string]string, body []byte) (*WebhookResult, error) {
 	src, err := s.sources.Get(ctx, sourceID)
 	if err != nil {

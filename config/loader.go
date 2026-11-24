@@ -1151,7 +1151,7 @@ func validateForgeAPIURL(raw string) error {
 	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("URL %q must be absolute with no userinfo, query, or fragment", raw)
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
 		return fmt.Errorf("URL %q must use https (http is allowed only for loopback)", raw)
 	}
 	return nil
@@ -1167,7 +1167,7 @@ func validateGitHubCallbackURI(raw string) error {
 	if u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return fmt.Errorf("URL %q must be absolute with no userinfo, query, or fragment", raw)
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackHost(u.Hostname())) {
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {
 		return fmt.Errorf("URL %q must use https (http is allowed only for loopback)", raw)
 	}
 	if u.Path != "/github/callback" {

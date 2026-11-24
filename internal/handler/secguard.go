@@ -124,7 +124,7 @@ func (s *Server) secguardMiddleware() app.HandlerFunc {
 			return
 		}
 
-		if len(s.corsAllowedOrigins) > 0 {
+		if len(s.corsAllowedOrigins) > 0 || strings.HasPrefix(path, "/api/v1/github/oauth/") {
 			allowed := append([]string{s.publicURLOrigin()}, s.corsAllowedOrigins...)
 			if err := headers.CheckMutationOrigin(
 				string(c.Method()),
@@ -150,7 +150,8 @@ func (s *Server) secguardMiddleware() app.HandlerFunc {
 			return
 		}
 
-		if (strings.HasPrefix(path, "/api/v1/auth/") || strings.HasPrefix(path, "/oauth/")) && s.guard.Config.RateLimit.Enabled {
+		if (strings.HasPrefix(path, "/api/v1/auth/") || strings.HasPrefix(path, "/oauth/") ||
+			strings.HasPrefix(path, "/api/v1/github/oauth/") || strings.HasPrefix(path, "/api/v1/github/device/")) && s.guard.Config.RateLimit.Enabled {
 			if !s.guard.RateLimiter.Allow(ip, s.guard.Config.RateLimit.MaxRequests, s.guard.Config.RateLimit.Window) {
 				s.metrics.SecurityRejectionsTotal.WithLabelValues("rate_limited").Inc()
 				writeError(c, consts.StatusTooManyRequests, "rate limit exceeded, try again later")

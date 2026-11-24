@@ -428,6 +428,9 @@ func (r *graphqlRoot) Sources(ctx context.Context) ([]*graphqlSource, error) {
 				return nil, err
 			}
 			for _, acct := range accounts {
+				if acct.Status == domain.GitHubConnectionRevoked {
+					continue
+				}
 				coveredOwners[strings.ToLower(acct.Owner)] = true
 				out = append(out, &graphqlSource{
 					root: r, id: acct.ID, name: acct.Owner, sourceType: string(domain.ForgeGitHub),
@@ -703,6 +706,8 @@ func (r *graphqlRoot) SourceRepositories(ctx context.Context, args struct {
 
 // User.Repositories returns the caller's forge repositories, merging persisted
 // RepoSettings with legacy standalone ForgeSources.
+//
+//nolint:gocyclo // setting/source merge branches
 func (u *graphqlUser) Repositories(ctx context.Context, args struct{ Refs *[]string }) ([]*graphqlUserRepository, error) {
 	orgs, err := u.root.accessibleOrgs(ctx)
 	if err != nil {
@@ -711,6 +716,7 @@ func (u *graphqlUser) Repositories(ctx context.Context, args struct{ Refs *[]str
 	out := make([]*graphqlUserRepository, 0)
 	for _, org := range orgs {
 		coveredSources := map[string]bool{}
+		coveredTails := map[string]bool{}
 		if u.root.repoSettings != nil {
 			settings, err := u.root.repoSettings.ListByOrg(ctx, org.ID)
 			if err != nil {
@@ -718,6 +724,7 @@ func (u *graphqlUser) Repositories(ctx context.Context, args struct{ Refs *[]str
 			}
 			for _, rs := range settings {
 				coveredSources[rs.ForgeSourceID] = true
+				coveredTails[normalizeRepoTail(rs.Repo)] = true
 				if args.Refs != nil && len(*args.Refs) > 0 && !repoFilterMatches(*args.Refs, rs.Repo) {
 					continue
 				}
@@ -764,7 +771,7 @@ func (u *graphqlUser) Repositories(ctx context.Context, args struct{ Refs *[]str
 			return nil, err
 		}
 		for _, src := range sources {
-			if coveredSources[src.ID] {
+			if coveredSources[src.ID] || coveredTails[normalizeRepoTail(src.Repo)] {
 				continue
 			}
 			ref := canonicalCheckRepo(src.Provider, src.Repo)
@@ -918,6 +925,7 @@ func (r *graphqlRoot) GetRepos(ctx context.Context) ([]*graphqlRepo, error) {
 func (o *graphqlOrg) RepoSettings(ctx context.Context, args struct{ Repo *string }) ([]*graphqlRepoSettings, error) {
 	out := make([]*graphqlRepoSettings, 0)
 	coveredSources := map[string]bool{}
+	coveredTails := map[string]bool{}
 	if o.root.repoSettings != nil {
 		settings, err := o.root.repoSettings.ListByOrg(ctx, o.org.ID)
 		if err != nil {
@@ -925,6 +933,7 @@ func (o *graphqlOrg) RepoSettings(ctx context.Context, args struct{ Repo *string
 		}
 		for _, rs := range settings {
 			coveredSources[rs.ForgeSourceID] = true
+			coveredTails[normalizeRepoTail(rs.Repo)] = true
 			if args.Repo != nil && *args.Repo != "" && !sameNormalizedRepo(*args.Repo, rs.Repo) {
 				continue
 			}
@@ -944,7 +953,7 @@ func (o *graphqlOrg) RepoSettings(ctx context.Context, args struct{ Repo *string
 		return nil, err
 	}
 	for _, src := range sources {
-		if coveredSources[src.ID] {
+		if coveredSources[src.ID] || coveredTails[normalizeRepoTail(src.Repo)] {
 			continue
 		}
 		ref := canonicalCheckRepo(src.Provider, src.Repo)
@@ -1031,7 +1040,7 @@ func (r *graphqlRoot) UpdateOrgRepoSettings(ctx context.Context, args struct {
 	return true, nil
 }
 
-func (r *graphqlRoot) repoSettingActor(ctx context.Context) (string, bool, error) {
+func (r *graphqlRoot) repoSettingActor(ctx context.Context) (actorID string, isGlobalAdmin bool, err error) {
 	id := graphqlIdentity(ctx)
 	if id.UserID == "" {
 		return "", false, fmt.Errorf("forbidden")

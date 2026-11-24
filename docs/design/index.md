@@ -66,3 +66,4 @@ the decision.
 | 056  | [Cloud Checks and multi-forge integration](ADR-056-cloud-checks-multi-forge.md) |
 | 057  | [Dagger-native workflows, artifacts, and approvals](ADR-057-dagger-native-workflows.md) |
 | 058  | [Organization as root namespace: tenancy, quotas, and storage](ADR-058-organization-root-tenancy-quotas-storage.md) |
+| 059  | [GitHub CLI integration: OAuth, sealed tokens, repo claims](ADR-059-github-cli-integration-oauth-sealed-tokens-repo-claims.md) |

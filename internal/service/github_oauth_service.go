@@ -100,10 +100,17 @@ type GitHubIntegrationService struct {
 	logger         *logrus.Logger
 }
 
+var _ domain.GitHubCloudIntegrator = (*GitHubIntegrationService)(nil)
+
 // NewGitHubIntegrationService returns a GitHubIntegrationService.
+//
+//nolint:gocritic // config/deps are startup-only immutable values
 func NewGitHubIntegrationService(cfg GitHubIntegrationConfig, deps GitHubIntegrationDeps) *GitHubIntegrationService {
 	if cfg.StateTTL <= 0 {
 		cfg.StateTTL = defaultGitHubStateTTL
+	}
+	if cfg.DefaultAPIURL == "" {
+		cfg.DefaultAPIURL = "https://api.github.com"
 	}
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"repo", "read:org", "admin:repo_hook"}
@@ -420,10 +427,16 @@ func (s *GitHubIntegrationService) ListUserOwners(ctx context.Context, userID st
 	}
 	profile, _, err := s.github.GetAuthenticatedUser(ctx, conn.BaseURL, token)
 	if err != nil {
+		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markUserRevoked(ctx, userID)
+		}
 		return nil, err
 	}
 	orgs, err := s.github.ListUserOrgs(ctx, conn.BaseURL, token)
 	if err != nil {
+		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markUserRevoked(ctx, userID)
+		}
 		return nil, err
 	}
 	return dedupeOwners(profile, orgs), nil
@@ -460,10 +473,16 @@ func (s *GitHubIntegrationService) ConnectOrgAccount(ctx context.Context, actorU
 	}
 	profile, scopes, err := s.github.GetAuthenticatedUser(ctx, base, token)
 	if err != nil {
+		if pat == "" && errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markUserRevoked(ctx, actorUserID)
+		}
 		return nil, err
 	}
 	orgs, err := s.github.ListUserOrgs(ctx, base, token)
 	if err != nil {
+		if pat == "" && errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markUserRevoked(ctx, actorUserID)
+		}
 		return nil, err
 	}
 	owner = strings.TrimSpace(owner)
@@ -544,13 +563,16 @@ func (s *GitHubIntegrationService) DisconnectOrgAccount(ctx context.Context, act
 	if err != nil {
 		return err
 	}
-	if !cascade && len(settings) > 0 {
+	owned := make([]*domain.RepoSetting, 0, len(settings))
+	for _, setting := range settings {
+		if setting.OrgID == orgID {
+			owned = append(owned, setting)
+		}
+	}
+	if !cascade && len(owned) > 0 {
 		return fmt.Errorf("%w: github account still has claimed repositories", domain.ErrConflict)
 	}
-	for _, setting := range settings {
-		if setting.OrgID != orgID {
-			continue
-		}
+	for _, setting := range owned {
 		s.deleteRemoteWebhook(ctx, orgID, setting.ForgeSourceID)
 		if err := s.repoSettings.Delete(ctx, orgID, setting.Repo, setting.ForgeSourceID); err != nil && !errors.Is(err, domain.ErrNotFound) {
 			return err
@@ -579,6 +601,9 @@ func (s *GitHubIntegrationService) ListSourceRepositories(ctx context.Context, o
 	}
 	repos, err := s.github.ListAccessibleRepos(ctx, acct.BaseURL, token)
 	if err != nil {
+		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markAccountRevoked(ctx, acct)
+		}
 		return nil, err
 	}
 	return s.mapSourceRepositories(ctx, org, acct, repos, "", ""), nil
@@ -615,6 +640,9 @@ func (s *GitHubIntegrationService) ListOrgGitHubRepositories(ctx context.Context
 	}
 	repos, err := s.github.ListAccessibleRepos(ctx, acct.BaseURL, token)
 	if err != nil {
+		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markAccountRevoked(ctx, acct)
+		}
 		return nil, err
 	}
 	return s.mapSourceRepositories(ctx, org, acct, repos, ownerFilter, search), nil
@@ -625,6 +653,9 @@ func (s *GitHubIntegrationService) mapSourceRepositories(ctx context.Context, or
 	out := make([]domain.SourceRepositoryItem, 0, len(repos))
 	search = strings.ToLower(strings.TrimSpace(search))
 	ownerFilter = strings.ToLower(strings.TrimSpace(ownerFilter))
+	if ownerFilter == "" && acct.Owner != "" {
+		ownerFilter = strings.ToLower(acct.Owner)
+	}
 	for _, repo := range repos {
 		owner, name := splitOwnerRepo(repo.FullName)
 		if owner == "" {
@@ -673,6 +704,7 @@ func (s *GitHubIntegrationService) UpdateOrgRepoSettings(ctx context.Context, ac
 	return nil
 }
 
+//nolint:gocyclo // materialization + rollback branches
 func (s *GitHubIntegrationService) applyRepoSetting(ctx context.Context, actorUserID string, org *domain.Org, in domain.RepoSettingMutation) error {
 	if strings.TrimSpace(in.Repo) == "" {
 		return fmt.Errorf("%w: repo is required", domain.ErrValidation)
@@ -712,6 +744,10 @@ func (s *GitHubIntegrationService) applyRepoSetting(ctx context.Context, actorUs
 	remote, err := s.github.GetRepository(ctx, acct.BaseURL, token, owner, name)
 	if err != nil {
 		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+			s.markAccountRevoked(ctx, acct)
+			return err
+		}
+		if errors.Is(err, domain.ErrGitHubRateLimited) || errors.Is(err, domain.ErrValidation) {
 			return err
 		}
 		return fmt.Errorf("repository %s is not available through this GitHub connection: %w", canonical, domain.ErrRepoInaccessible)
@@ -738,6 +774,9 @@ func (s *GitHubIntegrationService) applyRepoSetting(ctx context.Context, actorUs
 			s.logger.WithError(err).WithField("source_id", forgeID).Warn("github webhook pre-clean failed")
 		}
 		if _, err := s.forgeProvider.RegisterWebhook(ctx, src, token, callback, webhookSecret); err != nil {
+			if strings.Contains(err.Error(), "status 401") {
+				return fmt.Errorf("%w: github rejected the webhook credential; reconnect the account", domain.ErrGitHubTokenRevoked)
+			}
 			if strings.Contains(err.Error(), "status 403") || strings.Contains(err.Error(), "status 404") || strings.Contains(strings.ToLower(err.Error()), "archived") {
 				return fmt.Errorf("cannot register webhook on %s: repository is not available through this GitHub connection (admin:repo_hook and repository admin permission required): %w", canonical, domain.ErrRepoInaccessible)
 			}
@@ -764,6 +803,8 @@ func (s *GitHubIntegrationService) applyRepoSetting(ctx context.Context, actorUs
 }
 
 // resolveRepoAccount finds the target account/legacy source and canonical repo.
+//
+//nolint:gocyclo,gocritic // source resolution branches
 func (s *GitHubIntegrationService) resolveRepoAccount(ctx context.Context, org *domain.Org, in domain.RepoSettingMutation) (*domain.GitHubAccountSource, *domain.ForgeSource, string, string, string, error) {
 	owner, name := splitOwnerRepo(in.Repo)
 	if owner == "" || name == "" {
@@ -781,7 +822,7 @@ func (s *GitHubIntegrationService) resolveRepoAccount(ctx context.Context, org *
 			return nil, nil, "", "", "", err
 		} else {
 			legacy, err := s.forgeSources.Get(ctx, *in.SourceID)
-			if err != nil {
+			if err != nil || !sameRepo(legacy.Repo, in.Repo) {
 				return nil, nil, "", "", "", fmt.Errorf("repository %s %w", in.Repo, domain.ErrRepoNotInInstallation)
 			}
 			if legacy.OrgID != org.ID {
@@ -830,8 +871,7 @@ func (s *GitHubIntegrationService) DeleteOrgRepoSetting(ctx context.Context, act
 	if !s.isOrgAdmin(ctx, org.ID, actorUserID, actorIsGlobalAdmin) {
 		return fmt.Errorf("%w: organization administrator role required", domain.ErrForbidden)
 	}
-	canonical := s.canonicalRepo(repo, "")
-	if setting, err := s.repoSettings.Get(ctx, org.ID, canonical); err == nil {
+	if setting, err := s.findRepoSetting(ctx, org.ID, repo); err == nil {
 		s.deleteRemoteWebhook(ctx, org.ID, setting.ForgeSourceID)
 		return s.repoSettings.Delete(ctx, org.ID, setting.Repo, setting.ForgeSourceID)
 	} else if !errors.Is(err, domain.ErrNotFound) {
@@ -842,7 +882,7 @@ func (s *GitHubIntegrationService) DeleteOrgRepoSetting(ctx context.Context, act
 		return err
 	}
 	for _, src := range sources {
-		if src.Provider != domain.ForgeGitHub || !sameRepo(src.Repo, canonical) {
+		if src.Provider != domain.ForgeGitHub || !sameRepo(src.Repo, repo) {
 			continue
 		}
 		s.deleteRemoteWebhook(ctx, org.ID, src.ID)
@@ -853,7 +893,29 @@ func (s *GitHubIntegrationService) DeleteOrgRepoSetting(ctx context.Context, act
 
 // GetRepoSetting returns one org repo setting.
 func (s *GitHubIntegrationService) GetRepoSetting(ctx context.Context, orgID, repo string) (*domain.RepoSetting, error) {
-	return s.repoSettings.Get(ctx, orgID, s.canonicalRepo(repo, ""))
+	return s.findRepoSetting(ctx, orgID, repo)
+}
+
+// findRepoSetting resolves a setting by canonical form or by matching the
+// host-stripped owner/name tail (covers GHES/custom API hosts and legacy rows).
+func (s *GitHubIntegrationService) findRepoSetting(ctx context.Context, orgID, repo string) (*domain.RepoSetting, error) {
+	setting, err := s.repoSettings.Get(ctx, orgID, s.canonicalRepo(repo, ""))
+	if err == nil {
+		return setting, nil
+	}
+	if !errors.Is(err, domain.ErrNotFound) {
+		return nil, err
+	}
+	rows, err := s.repoSettings.ListByOrg(ctx, orgID)
+	if err != nil {
+		return nil, err
+	}
+	for _, candidate := range rows {
+		if sameRepo(candidate.Repo, repo) {
+			return candidate, nil
+		}
+	}
+	return nil, domain.ErrNotFound
 }
 
 // deleteRemoteWebhook best-effort deletes the remote hook for a forge source.
@@ -875,6 +937,16 @@ func (s *GitHubIntegrationService) deleteRemoteWebhook(ctx context.Context, orgI
 	}
 }
 
+// DeviceSessionInterval returns the current poll interval for the caller's
+// device session (used to surface slow_down back to the UI).
+func (s *GitHubIntegrationService) DeviceSessionInterval(userID, sessionID string) int {
+	session, err := s.deviceSessions.Get(sessionID)
+	if err != nil || subtle.ConstantTimeCompare([]byte(userID), []byte(session.UserID)) != 1 {
+		return 0
+	}
+	return session.Interval
+}
+
 // canonicalRepo canonicalizes a repo slug using baseURL (or the default API
 // host when empty).
 func (s *GitHubIntegrationService) canonicalRepo(repo, baseURL string) string {
@@ -882,6 +954,29 @@ func (s *GitHubIntegrationService) canonicalRepo(repo, baseURL string) string {
 		baseURL = s.cfg.DefaultAPIURL
 	}
 	return domain.CanonicalForgeRepo(domain.ForgeGitHub, baseURL, repoTail(repo))
+}
+
+// markUserRevoked persists a revoked status so githubConnection reports null
+// and the UI prompts re-authorization.
+func (s *GitHubIntegrationService) markUserRevoked(ctx context.Context, userID string) {
+	conn, err := s.connections.GetByUser(ctx, userID)
+	if err != nil {
+		return
+	}
+	conn.Status = domain.GitHubConnectionRevoked
+	conn.UpdatedAt = time.Now().UTC()
+	if err := s.connections.Upsert(ctx, conn); err != nil {
+		s.logger.WithError(err).WithField("user_id", userID).Warn("mark github connection revoked failed")
+	}
+}
+
+// markAccountRevoked persists a revoked org-account status.
+func (s *GitHubIntegrationService) markAccountRevoked(ctx context.Context, acct *domain.GitHubAccountSource) {
+	acct.Status = domain.GitHubConnectionRevoked
+	acct.UpdatedAt = time.Now().UTC()
+	if err := s.accountSources.Upsert(ctx, acct); err != nil {
+		s.logger.WithError(err).WithField("account_id", acct.ID).Warn("mark github account revoked failed")
+	}
 }
 
 func (s *GitHubIntegrationService) accountToken(acct *domain.GitHubAccountSource) (string, error) {
@@ -1001,7 +1096,7 @@ func (s *GitHubIntegrationService) validateAPIBaseURL(raw string) (string, error
 	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return "", fmt.Errorf("%w: invalid github api base url", domain.ErrValidation)
 	}
-	if u.Scheme != "https" && !(u.Scheme == "http" && isLoopbackURLHost(u.Hostname())) {
+	if u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackURLHost(u.Hostname())) {
 		return "", fmt.Errorf("%w: github api base url must use https", domain.ErrValidation)
 	}
 	candidates := append([]string{s.cfg.DefaultAPIURL}, s.cfg.AllowedAPIURLs...)
@@ -1026,7 +1121,7 @@ func validatePAT(pat string) error {
 }
 
 func validCode(code string) bool {
-	if len(code) == 0 || len(code) > 512 {
+	if code == "" || len(code) > 512 {
 		return false
 	}
 	for _, r := range code {
@@ -1045,7 +1140,7 @@ func validStateID(stateID string) bool {
 	return err == nil
 }
 
-func splitOwnerRepo(repo string) (string, string) {
+func splitOwnerRepo(repo string) (owner, name string) {
 	parts := strings.Split(strings.Trim(repo, "/"), "/")
 	if len(parts) < 2 {
 		return "", parts[0]

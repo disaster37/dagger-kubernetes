@@ -19,6 +19,14 @@ import type {
   ImageCachePruneRef,
   ImageCachePruneResult,
   ForgeSource,
+  GitHubAccountSource,
+  GitHubConnectionState,
+  GitHubDeviceFlowStart,
+  GitHubOAuthCompleteResult,
+  GitHubOwner,
+  OrgRepoSettings,
+  RepoSetting,
+  SourceRepositoryItem,
   LogSearchPage,
   LogSearchRequest,
   Org,
@@ -450,6 +458,72 @@ export async function createForgeSource(org: string, payload: Record<string, unk
 }
 export async function deleteForgeSource(org: string, sourceId: string): Promise<void> {
   await api.delete(`/api/v1/orgs/${org}/integrations/${sourceId}`)
+}
+
+// --- GitHub credential linking & repo claims ---
+export async function getGitHubConnection(): Promise<GitHubConnectionState> {
+  const { data } = await api.get('/api/v1/github/connection')
+  return data
+}
+export async function disconnectGitHub(): Promise<void> {
+  await api.delete('/api/v1/github/connection')
+}
+export async function completeGitHubOAuth(code: string, state: string): Promise<GitHubOAuthCompleteResult> {
+  const { data } = await api.post('/api/v1/github/oauth/complete', { code, state })
+  return data
+}
+export async function connectGitHubPAT(token: string, baseUrl = ''): Promise<{ connection: GitHubConnectionState['connection']; available_owners: GitHubOwner[] }> {
+  const { data } = await api.post('/api/v1/github/pat', { token, base_url: baseUrl })
+  return data
+}
+export async function startGitHubDeviceFlow(org = ''): Promise<GitHubDeviceFlowStart> {
+  const { data } = await api.post('/api/v1/github/device/code', { org })
+  return data
+}
+export async function pollGitHubDeviceFlow(sessionId: string): Promise<{ status: 'pending' | 'slow_down' | 'complete'; interval?: number; result?: GitHubOAuthCompleteResult }> {
+  const { data } = await api.post('/api/v1/github/device/poll', { session_id: sessionId })
+  return data
+}
+export async function listGitHubOwners(): Promise<GitHubOwner[]> {
+  const { data } = await api.get('/api/v1/github/owners')
+  return (data?.owners as GitHubOwner[] | null) ?? []
+}
+export async function startOrgGitHubOAuth(org: string, redirectUri: string): Promise<string> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/oauth/start`, { redirect_uri: redirectUri })
+  return data.authorize_url
+}
+export async function listOrgGitHubAccounts(org: string): Promise<GitHubAccountSource[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/github/accounts`)
+  return (data as GitHubAccountSource[] | null) ?? []
+}
+export async function createOrgGitHubAccount(org: string, payload: { owner: string; base_url?: string; token?: string }): Promise<GitHubAccountSource> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/accounts`, payload)
+  return data
+}
+export async function deleteOrgGitHubAccount(org: string, accountId: string, cascade = true): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/github/accounts/${accountId}`, { params: { cascade } })
+}
+export async function fetchOrgRepoSettings(org: string): Promise<OrgRepoSettings[]> {
+  const { data } = await api.post('/query', {
+    query: `query($org: String!) { org(name: $org) { repoSettings { repo isPublic effectiveRunChecksOnDefaultBranch effectiveRunChecksOnPullRequest effectiveRunChecksOnBranchPush } } }`,
+    variables: { org },
+  })
+  return (data?.data?.org?.repoSettings as OrgRepoSettings[] | null) ?? []
+}
+export async function listOrgGitHubRepositories(org: string, params: { account_id?: string; owner?: string; q?: string } = {}): Promise<SourceRepositoryItem[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/github/repositories`, { params })
+  return (data?.repositories as SourceRepositoryItem[] | null) ?? []
+}
+export async function enableOrgGitHubSources(org: string, accountId: string, repos: Array<{ repo: string; run_checks_on_default_branch?: boolean; run_checks_on_pull_request?: boolean; run_checks_on_branch_push?: boolean; is_public?: boolean }>): Promise<{ updated: number }> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/sources`, { account_id: accountId, repos })
+  return data
+}
+export async function updateOrgGitHubRepoSettings(org: string, owner: string, repo: string, payload: { run_checks_on_default_branch?: boolean; run_checks_on_pull_request?: boolean; run_checks_on_branch_push?: boolean; is_public?: boolean }): Promise<RepoSetting> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/settings`, payload)
+  return data
+}
+export async function deleteOrgGitHubRepoClaim(org: string, owner: string, repo: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/claim`)
 }
 
 // --- Cloud Checks ---

@@ -1042,18 +1042,56 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   idempotently returns) an org and grants the caller `org_admin`. `Org.features`
   is the `Feature { name status trialStart trialEnd }` object list;
   `Org.cliNotice` is a `CLINotice { level, title, body }` object (null when
-  none). Operations with no self-hosted backing (billing portal, GitHub OAuth
-  app, GitLab account linking, Entire, repo-setting mutations, check rerun when
-  `checks.enabled` is false) return a deterministic self-hosted error **after**
-  the uniform authorization check. Query complexity is bounded by
+  none). Operations with no self-hosted backing (billing portal, GitLab
+  account linking, Entire, check rerun when `checks.enabled` is false) return a
+  deterministic self-hosted error **after** the uniform authorization check.
+  Query complexity is bounded by
   `graphql.max_depth`, `graphql.max_selections`, `graphql.max_query_bytes`, and
   `graphql.max_parallelism`; introspection is disabled unless
   `graphql.introspection_enabled: true`. Forge integrations are configured via
-  the platform (`POST /api/v1/orgs/<org>/integrations`), and `githubConnection`
-  reports the caller's first accessible GitHub forge source; the CLI's own
-  GitHub App flow (`dagger cloud integration create github`, unmapped
-  `checks on`) is a client-side Dagger Cloud app and is not usable on
-  self-hosted instances.
+  the platform (`POST /api/v1/orgs/<org>/integrations`), the Web UI, or the
+  native GitHub OAuth/PAT flow; `githubConnection` reports the caller's personal
+  `UserGitHubConnection` first and falls back to the first accessible org
+  GitHub account/source. `dagger cloud integration create github`,
+  `integration list`, and `checks on|off|status|list|rerun` now work on
+  self-hosted instances (see **GitHub CLI integration** below).
+- **GitHub CLI integration (ADR-059).** `forge.github.oauth` configures a GitHub
+  **OAuth App used only for credential linking** — it is independent of
+  `auth.oauth` and never changes how humans log in. Register exactly one
+  Authorization callback URL, `https://<public-host>/github/callback`, and
+  enable the app's Device Flow checkbox; the default scopes are `repo`,
+  `read:org`, and `admin:repo_hook` (list/clone private repositories, enumerate
+  GitHub organizations, post commit statuses, manage webhooks). `dagger cloud
+  integration create github [--open]` prints a GitHub authorize URL with PKCE
+  S256 + a replicated single-use state; the browser completes
+  `/github/callback` → `POST /api/v1/github/oauth/complete`. After completion
+  the caller's `UserGitHubConnection` is sealed under
+  `github_user|<userID>`; on a single-org (or UI-bound) flow the personal
+  `GitHubAccountSource` is auto-provisioned under
+  `github_org_account|<orgID>/<accountID>`. `dagger cloud checks on`
+  materializes a per-repo `ForgeSource` + webhook and a `RepoSetting`;
+  `checks off` flips all three triggers false **without** deleting the claim or
+  webhook, so `checks status` reports `off` and deliveries are acknowledged with
+  `{"status":"ignored","reason":"trigger_disabled"}`.
+  - **PAT fallback (zero OAuth config).** Paste a PAT in the UI or
+    `POST /api/v1/orgs/:org/github/accounts` (account-wide) /
+    `POST /api/v1/orgs/:org/integrations` (per-repo). Creating a per-repo
+    GitHub source also idempotently mirrors the parent account and claim.
+  - **Device flow.** `POST /api/v1/github/device/code` + `/device/poll` power
+    the UI fallback for `kubectl port-forward` / single-callback-URL setups.
+  - **Internal-auth & OIDC deployments.** Internal username/password
+    (`auth.oauth.enabled: false`) and OIDC users can link any GitHub account;
+    the browser completing `/github/callback` must be signed in as the **same
+    supervisor user** who ran the CLI flow. An unauthenticated browser bounces
+    through `/auth/login?redirect=/github/callback?...` preserving `code` and
+    `state`; a different signed-in user gets a `403 state_user_mismatch` card
+    with a one-click sign-out, and the state is **not consumed** so the owner
+    can finish the same URL. Headless/SSH users sign in once in the browser
+    opening the URL, or use the PAT zero-browser fallback.
+  - **Legacy compatibility.** Existing per-repo `ForgeSource`s keep receiving
+    webhooks/cloning/reporting statuses and appear in `sources`,
+    `user.repositories`, and `org.repoSettings`; toggling them `on`/`off`
+    lazily creates a linked `RepoSetting` without re-registering hooks.
 - **OTLP read-back.** `GET /v1/{traces,logs,metrics}/:traceID` streams framed
   binary `application/vnd.dagger.otlp.stream` data for `dagger trace` and
   `dagger agent -r`.

@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -246,6 +247,25 @@ func attributionUserID(id *domain.Identity) string {
 //
 //nolint:gocyclo // exhaustive sentinel-to-status mapping
 func (s *Server) writeServiceError(c *app.RequestContext, err error) {
+	var mismatch *domain.OAuthStateUserMismatchError
+	if errors.As(err, &mismatch) {
+		c.Response.Header.Set("Cache-Control", "no-store")
+		c.JSON(consts.StatusForbidden, map[string]string{
+			"message":           "oauth state belongs to a different user",
+			"code":              "state_user_mismatch",
+			"expected_username": mismatch.ExpectedUsername,
+			"current_username":  mismatch.CurrentUsername,
+		})
+		return
+	}
+	var rate *domain.GitHubRateLimitError
+	if errors.As(err, &rate) {
+		if rate.RetryAfter > 0 {
+			c.Response.Header.Set("Retry-After", fmt.Sprintf("%d", int(rate.RetryAfter.Seconds())))
+		}
+		writeError(c, consts.StatusTooManyRequests, "github api rate limit exceeded, try again later")
+		return
+	}
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		writeError(c, consts.StatusNotFound, "not found")
@@ -292,6 +312,17 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusUnauthorized, "session revoked; please sign in again")
 	case errors.Is(err, domain.ErrValidation):
 		writeError(c, consts.StatusBadRequest, err.Error())
+	case errors.Is(err, domain.ErrGitHubOAuthDisabled), errors.Is(err, domain.ErrGitHubDeviceFlowDisabled):
+		writeError(c, consts.StatusBadRequest, err.Error())
+	case errors.Is(err, domain.ErrInvalidRedirectURI), errors.Is(err, domain.ErrOAuthStateInvalid),
+		errors.Is(err, domain.ErrRepoNotInInstallation), errors.Is(err, domain.ErrRepoInaccessible),
+		errors.Is(err, domain.ErrGitHubDeviceAuthorizationDelay), errors.Is(err, domain.ErrGitHubDeviceSlowDown),
+		errors.Is(err, domain.ErrGitHubDeviceFlowDenied):
+		writeError(c, consts.StatusBadRequest, err.Error())
+	case errors.Is(err, domain.ErrGitHubTokenRevoked):
+		writeError(c, consts.StatusConflict, "github connection token is expired or revoked; please reconnect")
+	case errors.Is(err, domain.ErrRepoClaimedByOtherOrg):
+		writeError(c, consts.StatusConflict, "repository is already claimed by another organization")
 	default:
 		s.logger.WithError(err).Error("handler error")
 		writeError(c, consts.StatusInternalServerError, "internal error")
