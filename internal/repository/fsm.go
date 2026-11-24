@@ -75,6 +75,16 @@ const (
 	// Organization root-namespace commands (appended after every existing kind).
 	kindBootstrapOrg     // 45
 	kindDeleteOrgCascade // 46
+
+	// GitHub CLI integration, account sources, OAuth states, and repo claims.
+	kindUpsertGitHubConnection    // 47
+	kindDeleteGitHubConnection    // 48
+	kindUpsertGitHubAccountSource // 49
+	kindDeleteGitHubAccountSource // 50
+	kindBatchUpsertRepoSettings   // 51
+	kindDeleteRepoSetting         // 52
+	kindCreateGitHubOAuthState    // 53
+	kindConsumeGitHubOAuthState   // 54
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -292,6 +302,7 @@ type (
 		Provider                domain.ForgeKind `json:"provider"`
 		BaseURL                 string           `json:"base_url"`
 		Repo                    string           `json:"repo"`
+		AccountSourceID         string           `json:"account_source_id,omitempty"`
 		TokenCiphertext         string           `json:"token_ciphertext"`
 		WebhookSecretCiphertext string           `json:"webhook_secret_ciphertext"`
 		AppID                   string           `json:"app_id,omitempty"`
@@ -339,6 +350,80 @@ type (
 
 	cmdDeleteWorkflowRun struct {
 		ID string `json:"id"`
+	}
+
+	// cmdGitHubConnection is the snapshot-safe user GitHub connection payload.
+	// domain.UserGitHubConnection hides TokenCiphertext with json:"-".
+	cmdGitHubConnection struct {
+		UserID          string                        `json:"user_id"`
+		GitHubUserID    int64                         `json:"github_user_id"`
+		GitHubLogin     string                        `json:"github_login"`
+		AvatarURL       string                        `json:"avatar_url,omitempty"`
+		BaseURL         string                        `json:"base_url"`
+		Scopes          []string                      `json:"scopes,omitempty"`
+		TokenCiphertext string                        `json:"token_ciphertext"`
+		Status          domain.GitHubConnectionStatus `json:"status"`
+		ConnectedAt     time.Time                     `json:"connected_at"`
+		UpdatedAt       time.Time                     `json:"updated_at"`
+	}
+
+	cmdDeleteGitHubConnection struct {
+		UserID string `json:"user_id"`
+	}
+
+	// cmdGitHubAccountSource is the snapshot-safe org account payload.
+	cmdGitHubAccountSource struct {
+		ID                string                        `json:"id"`
+		OrgID             string                        `json:"org_id"`
+		Owner             string                        `json:"owner"`
+		OwnerType         string                        `json:"owner_type"`
+		BaseURL           string                        `json:"base_url"`
+		ConnectedByUserID string                        `json:"connected_by_user_id,omitempty"`
+		Scopes            []string                      `json:"scopes,omitempty"`
+		TokenCiphertext   string                        `json:"token_ciphertext"`
+		AppID             string                        `json:"app_id,omitempty"`
+		InstallationID    string                        `json:"installation_id,omitempty"`
+		Status            domain.GitHubConnectionStatus `json:"status"`
+		CreatedAt         time.Time                     `json:"created_at"`
+		UpdatedAt         time.Time                     `json:"updated_at"`
+	}
+
+	cmdDeleteGitHubAccountSource struct {
+		ID string `json:"id"`
+	}
+
+	cmdRepoSettingWrite struct {
+		Setting     domain.RepoSetting `json:"setting"`
+		ForgeSource *cmdForgeSource    `json:"forge_source,omitempty"`
+	}
+
+	cmdBatchUpsertRepoSettings struct {
+		OrgID  string                `json:"org_id"`
+		Writes []cmdRepoSettingWrite `json:"writes"`
+	}
+
+	cmdDeleteRepoSetting struct {
+		OrgID               string `json:"org_id"`
+		Repo                string `json:"repo"`
+		DeleteForgeSourceID string `json:"delete_forge_source_id,omitempty"`
+	}
+
+	// cmdGitHubOAuthState is the snapshot-safe OAuth state payload.
+	// domain.GitHubOAuthState hides PKCEVerifier with json:"-".
+	cmdGitHubOAuthState struct {
+		StateID      string    `json:"state_id"`
+		UserID       string    `json:"user_id"`
+		OrgID        string    `json:"org_id,omitempty"`
+		RedirectURI  string    `json:"redirect_uri"`
+		PKCEVerifier string    `json:"pkce_verifier"`
+		CreatedAt    time.Time `json:"created_at"`
+		ExpiresAt    time.Time `json:"expires_at"`
+		Consumed     bool      `json:"consumed"`
+	}
+
+	cmdConsumeGitHubOAuthState struct {
+		StateID string    `json:"state_id"`
+		At      time.Time `json:"at"`
 	}
 )
 
@@ -435,6 +520,7 @@ func cmdForgeSourceFrom(s *domain.ForgeSource) *cmdForgeSource {
 		Provider:                s.Provider,
 		BaseURL:                 s.BaseURL,
 		Repo:                    s.Repo,
+		AccountSourceID:         s.AccountSourceID,
 		TokenCiphertext:         s.TokenCiphertext,
 		WebhookSecretCiphertext: s.WebhookSecretCiphertext,
 		AppID:                   s.AppID,
@@ -458,6 +544,7 @@ func (c *cmdForgeSource) toDomain() *domain.ForgeSource {
 		Provider:                c.Provider,
 		BaseURL:                 c.BaseURL,
 		Repo:                    c.Repo,
+		AccountSourceID:         c.AccountSourceID,
 		TokenCiphertext:         c.TokenCiphertext,
 		WebhookSecretCiphertext: c.WebhookSecretCiphertext,
 		AppID:                   c.AppID,
@@ -465,6 +552,128 @@ func (c *cmdForgeSource) toDomain() *domain.ForgeSource {
 		PrivateKeyCiphertext:    c.PrivateKeyCiphertext,
 		CreatedAt:               c.CreatedAt,
 		UpdatedAt:               c.UpdatedAt,
+	}
+}
+
+// toDomain converts a command GitHub connection payload into a
+// domain.UserGitHubConnection.
+func (c *cmdGitHubConnection) toDomain() *domain.UserGitHubConnection {
+	if c == nil {
+		return nil
+	}
+	return &domain.UserGitHubConnection{
+		UserID:          c.UserID,
+		GitHubUserID:    c.GitHubUserID,
+		GitHubLogin:     c.GitHubLogin,
+		AvatarURL:       c.AvatarURL,
+		BaseURL:         c.BaseURL,
+		Scopes:          append([]string(nil), c.Scopes...),
+		TokenCiphertext: c.TokenCiphertext,
+		Status:          c.Status,
+		ConnectedAt:     c.ConnectedAt,
+		UpdatedAt:       c.UpdatedAt,
+	}
+}
+
+// cmdGitHubConnectionFrom converts a domain.UserGitHubConnection into its
+// snapshot-safe command form.
+func cmdGitHubConnectionFrom(conn *domain.UserGitHubConnection) *cmdGitHubConnection {
+	if conn == nil {
+		return nil
+	}
+	return &cmdGitHubConnection{
+		UserID:          conn.UserID,
+		GitHubUserID:    conn.GitHubUserID,
+		GitHubLogin:     conn.GitHubLogin,
+		AvatarURL:       conn.AvatarURL,
+		BaseURL:         conn.BaseURL,
+		Scopes:          append([]string(nil), conn.Scopes...),
+		TokenCiphertext: conn.TokenCiphertext,
+		Status:          conn.Status,
+		ConnectedAt:     conn.ConnectedAt,
+		UpdatedAt:       conn.UpdatedAt,
+	}
+}
+
+// toDomain converts a command GitHub account source payload into a
+// domain.GitHubAccountSource.
+func (c *cmdGitHubAccountSource) toDomain() *domain.GitHubAccountSource {
+	if c == nil {
+		return nil
+	}
+	return &domain.GitHubAccountSource{
+		ID:                c.ID,
+		OrgID:             c.OrgID,
+		Owner:             c.Owner,
+		OwnerType:         c.OwnerType,
+		BaseURL:           c.BaseURL,
+		ConnectedByUserID: c.ConnectedByUserID,
+		Scopes:            append([]string(nil), c.Scopes...),
+		TokenCiphertext:   c.TokenCiphertext,
+		AppID:             c.AppID,
+		InstallationID:    c.InstallationID,
+		Status:            c.Status,
+		CreatedAt:         c.CreatedAt,
+		UpdatedAt:         c.UpdatedAt,
+	}
+}
+
+// cmdGitHubAccountSourceFrom converts a domain.GitHubAccountSource into its
+// snapshot-safe command form.
+func cmdGitHubAccountSourceFrom(src *domain.GitHubAccountSource) *cmdGitHubAccountSource {
+	if src == nil {
+		return nil
+	}
+	return &cmdGitHubAccountSource{
+		ID:                src.ID,
+		OrgID:             src.OrgID,
+		Owner:             src.Owner,
+		OwnerType:         src.OwnerType,
+		BaseURL:           src.BaseURL,
+		ConnectedByUserID: src.ConnectedByUserID,
+		Scopes:            append([]string(nil), src.Scopes...),
+		TokenCiphertext:   src.TokenCiphertext,
+		AppID:             src.AppID,
+		InstallationID:    src.InstallationID,
+		Status:            src.Status,
+		CreatedAt:         src.CreatedAt,
+		UpdatedAt:         src.UpdatedAt,
+	}
+}
+
+// toDomain converts a command OAuth state payload into a
+// domain.GitHubOAuthState.
+func (c *cmdGitHubOAuthState) toDomain() *domain.GitHubOAuthState {
+	if c == nil {
+		return nil
+	}
+	return &domain.GitHubOAuthState{
+		StateID:      c.StateID,
+		UserID:       c.UserID,
+		OrgID:        c.OrgID,
+		RedirectURI:  c.RedirectURI,
+		PKCEVerifier: c.PKCEVerifier,
+		CreatedAt:    c.CreatedAt,
+		ExpiresAt:    c.ExpiresAt,
+		Consumed:     c.Consumed,
+	}
+}
+
+// cmdGitHubOAuthStateFrom converts a domain.GitHubOAuthState into its
+// snapshot-safe command form.
+func cmdGitHubOAuthStateFrom(st *domain.GitHubOAuthState) *cmdGitHubOAuthState {
+	if st == nil {
+		return nil
+	}
+	return &cmdGitHubOAuthState{
+		StateID:      st.StateID,
+		UserID:       st.UserID,
+		OrgID:        st.OrgID,
+		RedirectURI:  st.RedirectURI,
+		PKCEVerifier: st.PKCEVerifier,
+		CreatedAt:    st.CreatedAt,
+		ExpiresAt:    st.ExpiresAt,
+		Consumed:     st.Consumed,
 	}
 }
 
@@ -579,6 +788,13 @@ type fsmState struct {
 	secrets      map[string]*domain.Secret // key = scope|scopeID|name
 	forgeSources map[string]*domain.ForgeSource
 
+	githubConnections        map[string]*domain.UserGitHubConnection // key = userID
+	githubAccountSources     map[string]*domain.GitHubAccountSource  // key = accountSourceID
+	githubAccountsByOrgOwner map[string]string                       // orgID\x00lower(owner) -> accountSourceID
+	repoSettings             map[string]*domain.RepoSetting          // orgID\x00lower(canonicalRepo) -> setting
+	repoClaimsByRepo         map[string]string                       // lower(canonicalRepo) -> orgID
+	githubOAuthStates        map[string]*domain.GitHubOAuthState     // key = stateID
+
 	environments     map[string]*domain.Environment // key = orgID/name
 	checkRuns        map[string]*domain.CheckRunRecord
 	workflowDefs     map[string]*domain.WorkflowDef // key = orgID/projectID/wfName
@@ -601,32 +817,38 @@ type fsmState struct {
 
 func newState() *fsmState {
 	st := &fsmState{
-		users:             make(map[string]*domain.User),
-		usersByName:       make(map[string]string),
-		usersByOAuth:      make(map[string]string),
-		groups:            make(map[string]*domain.Group),
-		groupsByOrgName:   make(map[string]string),
-		memberships:       make(map[string]map[string]struct{}),
-		membershipsByUser: make(map[string]map[string]struct{}),
-		tokens:            make(map[string]*domain.APIToken),
-		tokensByHash:      make(map[string]string),
-		tokensByUser:      make(map[string]string),
-		projects:          make(map[string]*domain.Project),
-		projectsByOrgName: make(map[string]string),
-		orgs:              make(map[string]*domain.Org),
-		orgsByName:        make(map[string]string),
-		orgMembers:        make(map[string]map[string]domain.OrgRole),
-		orgMembersByUser:  make(map[string]map[string]struct{}),
-		orgMemberSince:    make(map[string]map[string]time.Time),
-		secrets:           make(map[string]*domain.Secret),
-		forgeSources:      make(map[string]*domain.ForgeSource),
-		environments:      make(map[string]*domain.Environment),
-		checkRuns:         make(map[string]*domain.CheckRunRecord),
-		workflowDefs:      make(map[string]*domain.WorkflowDef),
-		workflowRuns:      make(map[string]*domain.WorkflowRun),
-		workflowCounters:  make(map[string]int64),
-		traces:            make(map[string]*domain.TraceMeta),
-		meta:              make(map[string]string),
+		users:                    make(map[string]*domain.User),
+		usersByName:              make(map[string]string),
+		usersByOAuth:             make(map[string]string),
+		groups:                   make(map[string]*domain.Group),
+		groupsByOrgName:          make(map[string]string),
+		memberships:              make(map[string]map[string]struct{}),
+		membershipsByUser:        make(map[string]map[string]struct{}),
+		tokens:                   make(map[string]*domain.APIToken),
+		tokensByHash:             make(map[string]string),
+		tokensByUser:             make(map[string]string),
+		projects:                 make(map[string]*domain.Project),
+		projectsByOrgName:        make(map[string]string),
+		orgs:                     make(map[string]*domain.Org),
+		orgsByName:               make(map[string]string),
+		orgMembers:               make(map[string]map[string]domain.OrgRole),
+		orgMembersByUser:         make(map[string]map[string]struct{}),
+		orgMemberSince:           make(map[string]map[string]time.Time),
+		secrets:                  make(map[string]*domain.Secret),
+		forgeSources:             make(map[string]*domain.ForgeSource),
+		githubConnections:        make(map[string]*domain.UserGitHubConnection),
+		githubAccountSources:     make(map[string]*domain.GitHubAccountSource),
+		githubAccountsByOrgOwner: make(map[string]string),
+		repoSettings:             make(map[string]*domain.RepoSetting),
+		repoClaimsByRepo:         make(map[string]string),
+		githubOAuthStates:        make(map[string]*domain.GitHubOAuthState),
+		environments:             make(map[string]*domain.Environment),
+		checkRuns:                make(map[string]*domain.CheckRunRecord),
+		workflowDefs:             make(map[string]*domain.WorkflowDef),
+		workflowRuns:             make(map[string]*domain.WorkflowRun),
+		workflowCounters:         make(map[string]int64),
+		traces:                   make(map[string]*domain.TraceMeta),
+		meta:                     make(map[string]string),
 	}
 	return st
 }
@@ -849,7 +1071,7 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		}), true
 	case kindDeleteForgeSource:
 		return nil, applyPayload(cmd, "delete forge source", func(p cmdForgeSource) error {
-			delete(s.forgeSources, p.ID)
+			s.deleteForgeSource(p.ID)
 			return nil
 		}), true
 	case kindUpsertEnvironment:
@@ -921,6 +1143,45 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 			s.touchToken(p.ID, p.At)
 			return nil
 		}), true
+	case kindUpsertGitHubConnection:
+		return nil, applyPayload(cmd, "github connection", func(p cmdGitHubConnection) error {
+			return s.upsertGitHubConnection(p.toDomain())
+		}), true
+	case kindDeleteGitHubConnection:
+		return nil, applyPayload(cmd, "delete github connection", func(p cmdDeleteGitHubConnection) error {
+			s.deleteGitHubConnection(p.UserID)
+			return nil
+		}), true
+	case kindUpsertGitHubAccountSource:
+		return nil, applyPayload(cmd, "github account source", func(p cmdGitHubAccountSource) error {
+			return s.upsertGitHubAccountSource(p.toDomain())
+		}), true
+	case kindDeleteGitHubAccountSource:
+		return nil, applyPayload(cmd, "delete github account source", func(p cmdDeleteGitHubAccountSource) error {
+			s.deleteGitHubAccountSource(p.ID)
+			return nil
+		}), true
+	case kindBatchUpsertRepoSettings:
+		return nil, applyPayload(cmd, "batch upsert repo settings", func(p cmdBatchUpsertRepoSettings) error {
+			return s.batchUpsertRepoSettings(&p)
+		}), true
+	case kindDeleteRepoSetting:
+		return nil, applyPayload(cmd, "delete repo setting", func(p cmdDeleteRepoSetting) error {
+			s.deleteRepoSetting(p)
+			return nil
+		}), true
+	case kindCreateGitHubOAuthState:
+		return nil, applyPayload(cmd, "create github oauth state", func(p cmdGitHubOAuthState) error {
+			return s.createGitHubOAuthState(p.toDomain())
+		}), true
+	case kindConsumeGitHubOAuthState:
+		var out *domain.GitHubOAuthState
+		err := applyPayload(cmd, "consume github oauth state", func(p cmdConsumeGitHubOAuthState) error {
+			st, err := s.consumeGitHubOAuthState(p.StateID, p.At)
+			out = st
+			return err
+		})
+		return out, err, true
 	default:
 		return nil, nil, false
 	}
@@ -1158,6 +1419,206 @@ func orgEntityNameKey(orgID, name string) string {
 	return fmt.Sprintf("%s\x00%s", orgID, strings.ToLower(name))
 }
 
+// maxPendingGitHubOAuthStates bounds replicated OAuth state memory.
+const maxPendingGitHubOAuthStates = 4096
+
+func githubAccountOwnerKey(orgID, owner string) string {
+	return fmt.Sprintf("%s\x00%s", orgID, strings.ToLower(strings.TrimSpace(owner)))
+}
+
+func repoSettingKey(orgID, repo string) string {
+	return fmt.Sprintf("%s\x00%s", orgID, strings.ToLower(strings.TrimSpace(repo)))
+}
+
+func repoClaimKey(repo string) string {
+	return strings.ToLower(strings.TrimSpace(repo))
+}
+
+// upsertGitHubConnection stores a user-scoped connection.
+func (s *fsmState) upsertGitHubConnection(conn *domain.UserGitHubConnection) error {
+	if conn == nil || conn.UserID == "" {
+		return fmt.Errorf("github connection: %w", domain.ErrValidation)
+	}
+	cp := *conn
+	cp.Scopes = append([]string(nil), conn.Scopes...)
+	s.githubConnections[conn.UserID] = &cp
+	return nil
+}
+
+// deleteGitHubConnection erases a user's connection and any pending OAuth
+// states bound to that user.
+func (s *fsmState) deleteGitHubConnection(userID string) {
+	delete(s.githubConnections, userID)
+	for id, st := range s.githubOAuthStates {
+		if st.UserID == userID {
+			delete(s.githubOAuthStates, id)
+		}
+	}
+}
+
+// upsertGitHubAccountSource stores an org-scoped account source and refreshes
+// the (org, owner) index.
+func (s *fsmState) upsertGitHubAccountSource(src *domain.GitHubAccountSource) error {
+	if src == nil || src.ID == "" || src.OrgID == "" || src.Owner == "" {
+		return fmt.Errorf("github account source: %w", domain.ErrValidation)
+	}
+	if existing, ok := s.githubAccountSources[src.ID]; ok {
+		delete(s.githubAccountsByOrgOwner, githubAccountOwnerKey(existing.OrgID, existing.Owner))
+	}
+	cp := *src
+	cp.Scopes = append([]string(nil), src.Scopes...)
+	s.githubAccountSources[src.ID] = &cp
+	s.githubAccountsByOrgOwner[githubAccountOwnerKey(src.OrgID, src.Owner)] = src.ID
+	return nil
+}
+
+// deleteGitHubAccountSource removes an account source and its owner index.
+func (s *fsmState) deleteGitHubAccountSource(id string) {
+	src, ok := s.githubAccountSources[id]
+	if !ok {
+		return
+	}
+	delete(s.githubAccountsByOrgOwner, githubAccountOwnerKey(src.OrgID, src.Owner))
+	delete(s.githubAccountSources, id)
+}
+
+// batchUpsertRepoSettings atomically validates and applies repo claims plus
+// their optional materialized ForgeSources.
+func (s *fsmState) batchUpsertRepoSettings(p *cmdBatchUpsertRepoSettings) error {
+	if p == nil || p.OrgID == "" {
+		return fmt.Errorf("repo settings: %w", domain.ErrValidation)
+	}
+	for i := range p.Writes {
+		w := &p.Writes[i]
+		if w.Setting.OrgID == "" || w.Setting.OrgID != p.OrgID || w.Setting.Repo == "" {
+			return fmt.Errorf("repo setting: %w", domain.ErrValidation)
+		}
+		if ownerOrg, taken := s.repoClaimsByRepo[repoClaimKey(w.Setting.Repo)]; taken && ownerOrg != p.OrgID {
+			return fmt.Errorf("repo %s: %w", w.Setting.Repo, domain.ErrRepoClaimedByOtherOrg)
+		}
+	}
+	for i := range p.Writes {
+		w := &p.Writes[i]
+		if w.ForgeSource != nil {
+			if err := s.upsertForgeSource(w.ForgeSource.toDomain()); err != nil {
+				return err
+			}
+		}
+		cp := w.Setting
+		cp.OrgID = p.OrgID
+		s.repoSettings[repoSettingKey(p.OrgID, cp.Repo)] = &cp
+		s.repoClaimsByRepo[repoClaimKey(cp.Repo)] = p.OrgID
+	}
+	return nil
+}
+
+// deleteRepoSetting removes one claim and (optionally) its materialized forge
+// source. It is idempotent when already absent.
+func (s *fsmState) deleteRepoSetting(p cmdDeleteRepoSetting) {
+	key := repoSettingKey(p.OrgID, p.Repo)
+	delete(s.repoSettings, key)
+	if s.repoClaimsByRepo[repoClaimKey(p.Repo)] == p.OrgID {
+		delete(s.repoClaimsByRepo, repoClaimKey(p.Repo))
+	}
+	if p.DeleteForgeSourceID != "" {
+		if src, ok := s.forgeSources[p.DeleteForgeSourceID]; ok && src.OrgID == p.OrgID {
+			delete(s.forgeSources, p.DeleteForgeSourceID)
+		}
+	}
+}
+
+// deleteForgeSource removes a forge source and any repo claim it backed.
+func (s *fsmState) deleteForgeSource(id string) {
+	src, ok := s.forgeSources[id]
+	if !ok {
+		return
+	}
+	for key, rs := range s.repoSettings {
+		if rs.OrgID != src.OrgID || rs.ForgeSourceID != id {
+			continue
+		}
+		delete(s.repoSettings, key)
+		if s.repoClaimsByRepo[repoClaimKey(rs.Repo)] == src.OrgID {
+			delete(s.repoClaimsByRepo, repoClaimKey(rs.Repo))
+		}
+	}
+	delete(s.forgeSources, id)
+}
+
+// createGitHubOAuthState stores a single-use OAuth state, sweeping expired or
+// consumed entries first and evicting one bounded entry when full.
+func (s *fsmState) createGitHubOAuthState(st *domain.GitHubOAuthState) error {
+	if st == nil || st.StateID == "" || st.UserID == "" {
+		return fmt.Errorf("github oauth state: %w", domain.ErrValidation)
+	}
+	for id, existing := range s.githubOAuthStates {
+		if existing.Consumed || (!existing.ExpiresAt.IsZero() && !existing.ExpiresAt.After(st.CreatedAt)) {
+			delete(s.githubOAuthStates, id)
+		}
+	}
+	if len(s.githubOAuthStates) >= maxPendingGitHubOAuthStates {
+		s.evictOldestGitHubOAuthState()
+	}
+	cp := *st
+	cp.Consumed = false
+	s.githubOAuthStates[st.StateID] = &cp
+	return nil
+}
+
+// evictOldestGitHubOAuthState drops the entry with the earliest ExpiresAt,
+// breaking ties by the lexicographically smallest StateID (deterministic on
+// every peer).
+func (s *fsmState) evictOldestGitHubOAuthState() {
+	var victimID string
+	var victimExpiry time.Time
+	for id, st := range s.githubOAuthStates {
+		if victimID == "" || st.ExpiresAt.Before(victimExpiry) || (st.ExpiresAt.Equal(victimExpiry) && id < victimID) {
+			victimID = id
+			victimExpiry = st.ExpiresAt
+		}
+	}
+	if victimID != "" {
+		delete(s.githubOAuthStates, victimID)
+	}
+}
+
+// consumeGitHubOAuthState atomically validates and deletes a state, returning
+// a deep copy for the caller.
+func (s *fsmState) consumeGitHubOAuthState(stateID string, at time.Time) (*domain.GitHubOAuthState, error) {
+	st, ok := s.githubOAuthStates[stateID]
+	if !ok || st.Consumed || !at.Before(st.ExpiresAt) {
+		return nil, domain.ErrOAuthStateInvalid
+	}
+	cp := *st
+	cp.Consumed = true
+	delete(s.githubOAuthStates, stateID)
+	return &cp, nil
+}
+
+// removeGitHubOrgScopedLocked removes every GitHub account source, repo claim,
+// and pending OAuth state owned by orgID.
+func (s *fsmState) removeGitHubOrgScopedLocked(orgID string) {
+	for id, src := range s.githubAccountSources {
+		if src.OrgID == orgID {
+			delete(s.githubAccountsByOrgOwner, githubAccountOwnerKey(src.OrgID, src.Owner))
+			delete(s.githubAccountSources, id)
+		}
+	}
+	for key, rs := range s.repoSettings {
+		if rs.OrgID == orgID {
+			if s.repoClaimsByRepo[repoClaimKey(rs.Repo)] == orgID {
+				delete(s.repoClaimsByRepo, repoClaimKey(rs.Repo))
+			}
+			delete(s.repoSettings, key)
+		}
+	}
+	for id, st := range s.githubOAuthStates {
+		if st.OrgID == orgID {
+			delete(s.githubOAuthStates, id)
+		}
+	}
+}
+
 // secretKey builds the FSM key for a scoped secret.
 func secretKey(scope domain.SecretScope, scopeID, name string) string {
 	return fmt.Sprintf("%s|%s|%s", scope, scopeID, name)
@@ -1311,10 +1772,15 @@ func copyBytesMap(in map[string][]byte) map[string][]byte {
 	return out
 }
 
-// storeOrg stores a deep copy of o and refreshes the name index.
+// storeOrg stores a deep copy of o and refreshes the name index. Orgs without
+// an explicit feature list are backfilled with the platform defaults so a
+// snapshot restore (or a pre-feature record) always reports CLOUD_CHECKS.
 func (s *fsmState) storeOrg(o *domain.Org) {
 	cp := *o
 	cp.Features = append([]string(nil), o.Features...)
+	if len(cp.Features) == 0 {
+		cp.Features = append([]string(nil), domain.DefaultOrgFeatures...)
+	}
 	s.orgs[o.ID] = &cp
 	s.orgsByName[strings.ToLower(o.Name)] = o.ID
 }
@@ -1469,6 +1935,7 @@ func (s *fsmState) removeOrgScopedStateLocked(id string) {
 			delete(s.secrets, key)
 		}
 	}
+	s.removeGitHubOrgScopedLocked(id)
 	s.deleteToken(fmt.Sprintf("org:%s", id))
 }
 
@@ -1805,6 +2272,7 @@ func (s *fsmState) deleteUser(id string) error {
 	if tokenID, ok := s.tokensByUser[id]; ok {
 		s.removeToken(tokenID)
 	}
+	s.deleteGitHubConnection(id)
 	// Cascade memberships.
 	for gid := range s.membershipsByUser[id] {
 		delete(s.memberships[gid], id)
@@ -1935,6 +2403,7 @@ func (s *fsmState) softDeleteUser(p cmdSoftDeleteUser) error {
 	s.deleteToken(p.ID)
 	s.removeUserMemberships(p.ID)
 	s.removeUserOrgMembershipsLocked(p.ID)
+	s.deleteGitHubConnection(p.ID)
 	u.DeletedAt = copyTime(&p.At)
 	u.DisabledAt = copyTime(&p.At)
 	u.PasswordHash = ""

@@ -47,7 +47,12 @@ type fsmSnapshotPayload struct {
 	WorkflowRuns     []*cmdWorkflowRun               `json:"workflow_runs"`
 	WorkflowCounters map[string]int64                `json:"workflow_counters"`
 	Traces           []*domain.TraceMeta             `json:"traces"`
-	Meta             map[string]string               `json:"meta"`
+	// GitHub integration state (additive; pre-upgrade snapshots decode to nil).
+	GitHubConnections    []*cmdGitHubConnection    `json:"github_connections,omitempty"`
+	GitHubAccountSources []*cmdGitHubAccountSource `json:"github_account_sources,omitempty"`
+	RepoSettings         []*domain.RepoSetting     `json:"repo_settings,omitempty"`
+	GitHubOAuthStates    []*cmdGitHubOAuthState    `json:"github_oauth_states,omitempty"`
+	Meta                 map[string]string         `json:"meta"`
 }
 
 // fsmSnapshot is a point-in-time snapshot of the FSM state.
@@ -147,6 +152,19 @@ func (f *FSM) Snapshot() (raft.FSMSnapshot, error) {
 	for _, src := range f.state.forgeSources {
 		payload.ForgeSources = append(payload.ForgeSources, cmdForgeSourceFrom(src))
 	}
+	for _, conn := range f.state.githubConnections {
+		payload.GitHubConnections = append(payload.GitHubConnections, cmdGitHubConnectionFrom(conn))
+	}
+	for _, src := range f.state.githubAccountSources {
+		payload.GitHubAccountSources = append(payload.GitHubAccountSources, cmdGitHubAccountSourceFrom(src))
+	}
+	for _, rs := range f.state.repoSettings {
+		cp := *rs
+		payload.RepoSettings = append(payload.RepoSettings, &cp)
+	}
+	for _, st := range f.state.githubOAuthStates {
+		payload.GitHubOAuthStates = append(payload.GitHubOAuthStates, cmdGitHubOAuthStateFrom(st))
+	}
 	for id, rec := range f.state.checkRuns {
 		if rec.RunTokenHash != "" {
 			payload.CheckRunTokens[id] = rec.RunTokenHash
@@ -239,6 +257,33 @@ func (f *FSM) Restore(rc io.ReadCloser) error {
 		if d := src.toDomain(); d != nil {
 			s.forgeSources[d.ID] = d
 		}
+	}
+	for _, conn := range payload.GitHubConnections {
+		if conn == nil {
+			continue
+		}
+		_ = s.upsertGitHubConnection(conn.toDomain())
+	}
+	for _, src := range payload.GitHubAccountSources {
+		if src == nil {
+			continue
+		}
+		_ = s.upsertGitHubAccountSource(src.toDomain())
+	}
+	for _, rs := range payload.RepoSettings {
+		if rs == nil {
+			continue
+		}
+		cp := *rs
+		s.repoSettings[repoSettingKey(cp.OrgID, cp.Repo)] = &cp
+		s.repoClaimsByRepo[repoClaimKey(cp.Repo)] = cp.OrgID
+	}
+	for _, st := range payload.GitHubOAuthStates {
+		if st == nil {
+			continue
+		}
+		cp := *st.toDomain()
+		s.githubOAuthStates[cp.StateID] = &cp
 	}
 	for _, env := range payload.Environments {
 		if env == nil {
@@ -356,6 +401,12 @@ func (s *fsmState) adopt(other *fsmState) {
 	s.orgMemberSince = other.orgMemberSince
 	s.secrets = other.secrets
 	s.forgeSources = other.forgeSources
+	s.githubConnections = other.githubConnections
+	s.githubAccountSources = other.githubAccountSources
+	s.githubAccountsByOrgOwner = other.githubAccountsByOrgOwner
+	s.repoSettings = other.repoSettings
+	s.repoClaimsByRepo = other.repoClaimsByRepo
+	s.githubOAuthStates = other.githubOAuthStates
 	s.environments = other.environments
 	s.checkRuns = other.checkRuns
 	s.workflowDefs = other.workflowDefs
