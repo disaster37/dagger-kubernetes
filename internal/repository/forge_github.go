@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -35,6 +36,10 @@ func (g *GitHubForge) apiBase(source *domain.ForgeSource) string {
 }
 
 func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeSource, token, callbackURL, secret string) (string, error) {
+	repoPath, err := githubRepoPath(source.Repo)
+	if err != nil {
+		return "", err
+	}
 	body, err := jsonBody(map[string]any{
 		"name":   "web",
 		"active": true,
@@ -47,7 +52,7 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 	if err != nil {
 		return "", err
 	}
-	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), source.Repo), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
+	data, err := forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), repoPath), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
 	if err != nil {
 		return "", err
 	}
@@ -60,13 +65,21 @@ func (g *GitHubForge) RegisterWebhook(ctx context.Context, source *domain.ForgeS
 
 func (g *GitHubForge) DeleteWebhook(ctx context.Context, source *domain.ForgeSource, token, webhookID string) error {
 	auth := fmt.Sprintf("Bearer %s", token)
-	if webhookID != "" {
-		_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiBase(source), source.Repo, webhookID), "Authorization", auth, nil, "")
+	repoPath, err := githubRepoPath(source.Repo)
+	if err != nil {
 		return err
 	}
-	listURL := fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), source.Repo)
+	if webhookID != "" {
+		hookID, idErr := pathSegment(webhookID)
+		if idErr != nil {
+			return idErr
+		}
+		_, err := forgeRequest(ctx, "DELETE", fmt.Sprintf("%s/repos/%s/hooks/%s", g.apiBase(source), repoPath, hookID), "Authorization", auth, nil, "")
+		return err
+	}
+	listURL := fmt.Sprintf("%s/repos/%s/hooks", g.apiBase(source), repoPath)
 	return deleteMatchingHooks(ctx, listURL, "Authorization", auth, source, func(id int64) string {
-		return fmt.Sprintf("%s/repos/%s/hooks/%d", g.apiBase(source), source.Repo, id)
+		return fmt.Sprintf("%s/repos/%s/hooks/%d", g.apiBase(source), repoPath, id)
 	})
 }
 
@@ -75,6 +88,11 @@ func (g *GitHubForge) VerifyWebhook(_ *domain.ForgeSource, secret string, header
 }
 
 func (g *GitHubForge) SetCommitStatus(ctx context.Context, source *domain.ForgeSource, token string, run *domain.CheckRun) error {
+	repoPath, err := githubRepoPath(source.Repo)
+	if err != nil {
+		return err
+	}
+	sha := url.PathEscape(run.HeadSHA)
 	body, err := jsonBody(map[string]string{
 		"state":       string(run.State),
 		"context":     run.Name,
@@ -84,11 +102,15 @@ func (g *GitHubForge) SetCommitStatus(ctx context.Context, source *domain.ForgeS
 	if err != nil {
 		return err
 	}
-	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/statuses/%s", g.apiBase(source), source.Repo, run.HeadSHA), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
+	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/statuses/%s", g.apiBase(source), repoPath, sha), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
 	return err
 }
 
 func (g *GitHubForge) CreateCheckRun(ctx context.Context, source *domain.ForgeSource, token string, run *domain.CheckRun) error {
+	repoPath, err := githubRepoPath(source.Repo)
+	if err != nil {
+		return err
+	}
 	payload := map[string]any{
 		"name":        run.Name,
 		"head_sha":    run.HeadSHA,
@@ -107,7 +129,7 @@ func (g *GitHubForge) CreateCheckRun(ctx context.Context, source *domain.ForgeSo
 	if err != nil {
 		return err
 	}
-	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/check-runs", g.apiBase(source), source.Repo), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
+	_, err = forgeRequest(ctx, "POST", fmt.Sprintf("%s/repos/%s/check-runs", g.apiBase(source), repoPath), "Authorization", fmt.Sprintf("Bearer %s", token), body, "application/json")
 	return err
 }
 

@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,6 +96,22 @@ func TestGitHubRegisterWebhookNarrowsEvents(t *testing.T) {
 		if payload.Events[i] != want[i] {
 			t.Fatalf("events = %v, want %v", payload.Events, want)
 		}
+	}
+}
+
+func TestGitHubForgeEscapesPathSegments(t *testing.T) {
+	srv := newForgeHookServer(t, "[]")
+	src := &domain.ForgeSource{ID: "src-1", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "own er/re po", BaseURL: srv.URL}
+	p := NewGitHubForge(srv.URL)
+	if _, err := p.RegisterWebhook(context.Background(), src, "token", "https://example.com/hook", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	if len(srv.requests) == 0 || srv.requests[0] != "POST /repos/own%20er/re%20po/hooks" {
+		t.Fatalf("requests = %v", srv.requests)
+	}
+	src.Repo = "acme/../evil"
+	if _, err := p.RegisterWebhook(context.Background(), src, "token", "https://example.com/hook", "secret"); !errors.Is(err, domain.ErrValidation) {
+		t.Fatalf("traversal repo err = %v", err)
 	}
 }
 
