@@ -90,6 +90,10 @@ var helmTemplateMatrix = []helmVariant{
 			"targetPort: 8080",
 			"targetPort: 8443",
 			"targetPort: 8081",
+			// Exact supervisor Service selector block: proves the Services
+			// select on component: supervisor (not name+instance alone), the
+			// regression this fix addresses.
+			"selector:\n    app.kubernetes.io/name: dagger-kubernetes\n    app.kubernetes.io/instance: dagger-kubernetes\n    app.kubernetes.io/component: supervisor",
 		},
 	},
 	{
