@@ -167,7 +167,7 @@ No secrets are required for CI. `publish` needs a registry username/password for
   `values.yaml` resolve to real `<service>.<namespace>.svc` URLs. The CI helm
   matrix (default + rename variants) asserts these endpoints render, so a
   subchart upgrade that drops the `tpl` fails CI.
-- **golangci-lint version drift:** The local module pins golangci-lint **v2.14.0** via a custom base image. Bump deliberately when upgrading.
+- **golangci-lint version drift:** The local module pins golangci-lint **v2.14.0** via a custom base image, installed into `/usr/local/bin` (never `$(go env GOPATH)/bin`: the `golang` module mounts a cache volume over that path, which hides the binary and makes the module silently download the latest GitHub release instead of the pin). Bump deliberately when upgrading.
 - **GHCR push fails with 401/403:** the PAT behind `env:GHCR_TOKEN` needs the `write:packages` scope (and the username must match the token owner). Both credentials must be passed together — see the next bullet.
 - **`publish` with only one credential:** the `image` module **silently skips auth** when only one of `WithRegistryUsername`/`WithRegistryPassword` is set; the local module therefore rejects a lone credential up front (`registryUsername and registryPassword must be provided together`). Pass both, or neither for anonymous registries (ttl.sh).
 - **Mutable `dev`/`latest` tags:** re-publishing over them is expected (`imagePullPolicy: Always`); do not re-publish a published semver tag.

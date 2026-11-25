@@ -178,10 +178,13 @@ func New(
 // Lint runs golangci-lint against the Go source.
 //
 // It delegates to the golang module with a custom base container that has
-// golangci-lint preinstalled, preserving the CI version pin.
+// golangci-lint preinstalled, preserving the CI version pin. The binary must
+// live outside $(go env GOPATH)/bin: the golang module mounts a cache volume
+// there, which hides whatever the base image installed, making the module fall
+// back to downloading whatever release GitHub reports as latest.
 func (m *DaggerKubernetes) Lint(ctx context.Context) (string, error) {
 	install := fmt.Sprintf(
-		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C $(go env GOPATH)/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 golangci-lint-%s-linux-amd64/golangci-lint && rm /tmp/golangci-lint.tar.gz",
+		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C /usr/local/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 golangci-lint-%s-linux-amd64/golangci-lint && rm /tmp/golangci-lint.tar.gz",
 		golangciLintVersion, strings.TrimPrefix(golangciLintVersion, "v"), strings.TrimPrefix(golangciLintVersion, "v"),
 	)
 	base := dag.Container().
