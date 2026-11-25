@@ -166,7 +166,12 @@ its mTLS listener on `server.data_addr` (8443).
 - `internal/repository/raft_store.go`: `RaftStore.LeaderCh()` and its test are
   deleted; `LeaderAddress()` replaces it.
 - `deploy/helm/.../service.yaml`: the `dagger-kubernetes.io/raft-leader: "true"`
-  selector is removed from both Services (standard selector labels only).
+  selector is removed from both Services (standard selector labels only). The
+  supervisor Services now select pods with
+  `dagger-kubernetes.supervisorSelectorLabels` (`app.kubernetes.io/component:
+  supervisor`) and use numeric `targetPort`s, so the `component: image-cache`
+  mirror pods are excluded and named-port resolution never inspects a pod that
+  lacks the port.
 - `deploy/helm/.../rbac.yaml`: `pods`/`services` no longer grant `patch`.
 - `deploy/helm/.../statefulset.yaml`: the supervisor advertises the internal
   relay-in `containerPort: 8444` and the internal control listener

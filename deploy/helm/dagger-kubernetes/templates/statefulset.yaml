@@ -14,7 +14,7 @@ metadata:
   name: {{ include "dagger-kubernetes.fullname" . }}
   namespace: {{ include "dagger-kubernetes.namespace" . }}
   labels:
-    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    {{- include "dagger-kubernetes.supervisorLabels" . | nindent 4 }}
 spec:
   serviceName: {{ include "dagger-kubernetes.supervisorHeadlessService" . }}
   podManagementPolicy: Parallel
@@ -25,7 +25,7 @@ spec:
   template:
     metadata:
       labels:
-        {{- include "dagger-kubernetes.selectorLabels" . | nindent 8 }}
+        {{- include "dagger-kubernetes.supervisorSelectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
         checksum/secret: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}

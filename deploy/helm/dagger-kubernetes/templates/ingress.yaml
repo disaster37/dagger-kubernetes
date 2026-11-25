@@ -17,8 +17,8 @@ metadata:
     nginx.org/client-max-body-size: {{ .Values.ingress.proxyBodySize | default "64m" | quote }}
     nginx.org/proxy-read-timeout: "3600s"
     nginx.org/proxy-send-timeout: "3600s"
-    # The control Service uses a named targetPort ("control") that the F5
-    # controller cannot resolve to endpoints; proxy via the ClusterIP instead.
+    # The F5 NGINX Ingress Controller cannot reliably resolve the control
+    # Service's named port to endpoints; proxy via the ClusterIP instead.
     nginx.org/use-cluster-ip: "true"
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}

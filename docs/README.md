@@ -2217,6 +2217,24 @@ The chart renders a cert-manager `Certificate` (`dataCert.enabled: true` +
 `ssl-passthrough`) forwards the raw mTLS handshake to the supervisor, which
 serves the cert-manager certificate.
 
+**Passthrough mode (`dataIngress.passthroughVia`).** The data-plane passthrough
+resource depends on the ingress controller:
+
+- `annotation` (default) — community `kubernetes/ingress-nginx` (EOL): the chart
+  renders an `Ingress` with `nginx.ingress.kubernetes.io/ssl-passthrough:
+  "true"`. cert-manager annotations placed in `dataIngress.annotations` (e.g.
+  `cert-manager.io/cluster-issuer`) work because an Ingress exists for the data
+  host.
+- `transportServer` — F5 NGINX Ingress Controller: the chart renders a
+  `TransportServer` (`k8s.nginx.org/v1`) instead of an `Ingress`, and the
+  controller must run with `enableTLSPassthrough=true`. Because **no Ingress
+  exists for the data host**, `dataIngress.annotations` cert-manager annotations
+  are inert; operators must set `dataCert.enabled: true` (with
+  `dataIngress.tls.secretName` empty) so cert-manager still issues and renews the
+  data-plane certificate. The `TransportServer` claims the host globally, so no
+  other `Ingress`/`VirtualServer` may use it; if an HTTP-01 solver Ingress is
+  rejected for that reason, switch the `ClusterIssuer` to a DNS-01 solver.
+
 > **Two alternative flows:** Use **either** `dataCert.enabled` (chart-rendered
 > cert-manager `Certificate`) **or** `dataIngress.tls.secretName` (operator-
 > managed secret) — not both. When both are set, `dataIngress.tls.secretName`
