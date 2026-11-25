@@ -907,12 +907,19 @@ ingress:
 ##   mode no data Ingress renders, so dataIngress.annotations cert-manager
 ##   annotations are inert — set dataCert.enabled: true (with
 ##   dataIngress.tls.secretName empty) for cert-manager renewal.
+## @param dataIngress.sessionTimeout [string] Idle timeout between two successive
+##   read or write operations on the passthrough stream (F5 TransportServer
+##   `sessionParameters.timeout` / nginx `proxy_timeout`). Only used when
+##   dataIngress.passthroughVia=transportServer. The controller default is 10m,
+##   which cuts long-lived idle connections such as a Dagger CLI control
+##   connection during a CI pipeline; raise it for long engine sessions.
 dataIngress:
   enabled: false
   host: "data.supv.example.com"
   className: ""
   annotations: {}
   passthroughVia: "annotation"
+  sessionTimeout: "24h"
   tls:
     secretName: ""
 

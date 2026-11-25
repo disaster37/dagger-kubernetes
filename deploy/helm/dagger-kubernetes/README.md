@@ -441,6 +441,7 @@ grafana:
 | `supervisor.dataplane.tls.crt` / `.key` | Server cert/key PEM (only `external` provider, rendered into `<fullname>-tls` Secret). | `""` |
 | `dataCert.enabled` | Render a cert-manager `Certificate` for the data plane | `false` |
 | `dataIngress.passthroughVia` | Data-plane TLS passthrough mode: `annotation` (community ingress-nginx `ssl-passthrough` Ingress) \| `transportServer` (F5 NGINX Ingress Controller `TransportServer`) | `annotation` |
+| `dataIngress.sessionTimeout` | Idle timeout between successive read/write operations on the passthrough stream (`transportServer` only). The controller default is 10m, which cuts long-lived idle engine sessions. | `24h` |
 | `dataIngress.tls.secretName` | cert-manager (Let's Encrypt) secret for the data plane | `""` |
 | `ingress.enabled` | Enable control-plane Ingress | `true` |
 | `service.control.host` / `service.data.host` | Routable hostname when exposed via LoadBalancer/NodePort (no ingress) | `""` |
@@ -946,6 +947,7 @@ subchart values.
 | `dataIngress.className` | string | `""` | Ingress class name. |
 | `dataIngress.annotations` | object | `{}` | Additional ingress annotations. |
 | `dataIngress.passthroughVia` | string | `"annotation"` | How the TLS passthrough is implemented: `"annotation"` (community ingress-nginx `ssl-passthrough` Ingress) or `"transportServer"` (F5 NGINX Ingress Controller `TransportServer`; requires controller `enableTLSPassthrough=true`; host must not be claimed by any other Ingress/VirtualServer; no data Ingress renders, so use `dataCert.enabled: true` for cert-manager renewal). |
+| `dataIngress.sessionTimeout` | string | `"24h"` | Idle timeout between successive read/write operations on the passthrough stream (`transportServer` only; F5 `sessionParameters.timeout`). The controller default is 10m, which cuts long-lived idle engine sessions. |
 | `dataIngress.tls.secretName` | string | `""` | Secret name for the data-plane TLS cert. |
 
 ### Data-plane certificate (cert-manager)

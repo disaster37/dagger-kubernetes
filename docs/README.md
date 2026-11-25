@@ -2235,6 +2235,12 @@ resource depends on the ingress controller:
   other `Ingress`/`VirtualServer` may use it; if an HTTP-01 solver Ingress is
   rejected for that reason, switch the `ClusterIssuer` to a DNS-01 solver.
 
+`dataIngress.sessionTimeout` (default `24h`) sets the F5 `TransportServer`
+`sessionParameters.timeout` — the idle timeout between successive read/write
+operations on the passthrough stream. The controller default is 10m, which cuts
+long-lived idle connections (e.g. a Dagger CLI control connection while a CI
+pipeline runs); raise it for long engine sessions.
+
 > **Two alternative flows:** Use **either** `dataCert.enabled` (chart-rendered
 > cert-manager `Certificate`) **or** `dataIngress.tls.secretName` (operator-
 > managed secret) — not both. When both are set, `dataIngress.tls.secretName`

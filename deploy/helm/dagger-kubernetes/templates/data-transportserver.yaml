@@ -17,4 +17,6 @@ spec:
       port: {{ .Values.service.data.port }}
   action:
     pass: {{ include "dagger-kubernetes.fullname" . }}-data
+  sessionParameters:
+    timeout: {{ .Values.dataIngress.sessionTimeout | default "24h" | quote }}
 {{- end }}

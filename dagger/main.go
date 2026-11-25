@@ -186,6 +186,10 @@ var helmTemplateMatrix = []helmVariant{
 			"kind: Certificate",
 			"app.kubernetes.io/component: supervisor",
 			"app.kubernetes.io/component: image-cache",
+			// Generous idle timeout so the controller's 10m default does not
+			// cut long-lived idle engine sessions.
+			"sessionParameters:",
+			`timeout: "24h"`,
 		},
 	},
 }
