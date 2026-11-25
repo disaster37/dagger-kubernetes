@@ -481,6 +481,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
 |                 | `engine_registry_mirrors_http`            | `[]` (chart: generated plaintext mirror hosts)           | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors and omits TLS mirrors, which BuildKit dials over HTTPS). |
 | `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
+|                 | `minting_ca_configmap`                    | `supervisor-minting-ca-bundle`                           | K8s ConfigMap the leader keeps in sync with the public minting CA trust bundle (key `ca.crt`, certificates only — never the private key) for Gateway API `BackendTLSPolicy`; tracks phased rotation (dual-trust during the overlap). `""` disables publishing. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
 |                 | `keyring_rotation_enabled`                | `true`                                                   | Zero-downtime phased Minting CA rotation for the engine/data-plane/internal-control mTLS plane.                                               |
 |                 | `rotation_period`                         | `24h`                                                    | Minting CA rotation cadence; must be `>= 2 * client_cert_ttl` when rotation is enabled.                                                       |
@@ -2117,7 +2118,10 @@ The data plane is mTLS-only. The Supervisor:
     issuing anything. The `supervisor.dataplane.tls.ca_path` files are kept as
     a local cache. The Secret contains the CA **private key** (any pod may mint
     client certs) and must be RBAC-restricted to the supervisor ServiceAccount —
-    the chart already does this.
+    the chart already does this. The leader additionally publishes the
+    **public** trust bundle (certificates only) into the
+    `<release>-minting-ca-bundle` ConfigMap (`ca.minting_ca_configmap`, key
+    `ca.crt`) for Gateway API `BackendTLSPolicy`, tracking the phased rotation.
 3. Pins each minted cert's lease to a specific engine pod via the L4 proxy.
 
 The **Raft transport** is likewise mTLS (chart default) with its own
@@ -2180,6 +2184,17 @@ Gateway listener certificates through its gateway-shim:
 
 The ACME challenge route uses an `Exact` path match on the `http` listener, so
 it takes precedence over the `PathPrefix: /` HTTP→HTTPS redirect route.
+
+The control `BackendTLSPolicy` verifies the supervisor's HTTPS `:8080` listener
+against the Core `ConfigMap` `<release>-minting-ca-bundle` (key `ca.crt`), which
+the leader supervisor keeps in sync with the full public minting CA trust bundle
+— including the dual-trust bundle during phased rotation — so no operator action
+is needed. For a **private mirror CA**, provide a `ConfigMap` (key `ca.crt`) in
+the release namespace (naming it equal to `imageCache.tls.caSecretName` works
+with no extra overrides), or set
+`gateway.registryMirror.backendTLS.caCertificateRef.name` explicitly. NGF
+`2.9.1` rejects `Opaque` Secret `caCertificateRefs`; a `kubernetes.io/tls`
+Secret additionally needs valid `tls.crt` + `tls.key` *and* `ca.crt`.
 
 ### Troubleshooting data-plane TLS failures
 

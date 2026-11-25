@@ -571,7 +571,7 @@ supervisor:
 ## @param imageCache.sync.retryDelay Delay between upstream fetch retries.
 ## @param imageCache.tls.enabled Serve the Zot mirrors over HTTPS (requires imageCache.tls.secretName).
 ## @param imageCache.tls.secretName Secret with tls.crt + tls.key valid for every mirror hostname (a wildcard `*.<namespace>.svc` cert covers all mirrors). Required when enabled.
-## @param imageCache.tls.caSecretName Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors.
+## @param imageCache.tls.caSecretName Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors. When `gateway.registryMirror` renders a `BackendTLSPolicy` with a private CA, also provide a `ConfigMap` of the same name in the release namespace (key `ca.crt`) — Gateway API only reads `ca.crt` from a Core `ConfigMap` — or set `gateway.registryMirror.backendTLS.caCertificateRef.name` explicitly.
 ## @param imageCache.tls.caSecretKey Key inside `imageCache.tls.caSecretName` (default "ca.crt").
 ## @param imageCache.resources.requests.cpu Mirror CPU request.
 ## @param imageCache.resources.requests.memory Mirror memory request.
@@ -995,9 +995,9 @@ dataCert:
 ## @param gateway.control.backendTLS.enabled Render a `BackendTLSPolicy` for `<fullname>-control` (required because the supervisor `:8080` listener serves HTTPS).
 ## @param gateway.control.backendTLS.hostname SNI and certificate SAN verified on `<fullname>-control` (empty = `<fullname>-control.<namespace>.svc`, which triggers the supervisor's Minting-CA internal leaf).
 ## @param gateway.control.backendTLS.wellKnownCACertificates Set to `"System"` to verify against system roots instead of `caCertificateRef` (mutually exclusive with `caCertificateRef`).
-## @param gateway.control.backendTLS.caCertificateRef.group API group of the CA object verifying `<fullname>-control` (`""` for core `Secret`/`ConfigMap`).
-## @param gateway.control.backendTLS.caCertificateRef.kind Kind of the CA object (`Secret` on NGF; `ConfigMap` on implementations that only support Core `ConfigMap`).
-## @param gateway.control.backendTLS.caCertificateRef.name Name of the CA object holding `ca.crt` (empty = `<fullname>-minting-ca`).
+## @param gateway.control.backendTLS.caCertificateRef.group API group of the CA object verifying `<fullname>-control` (`""` for the Core `ConfigMap`).
+## @param gateway.control.backendTLS.caCertificateRef.kind Kind of the CA object (`ConfigMap` is the Gateway API Core kind; NGF `2.9.1` rejects `Secret` refs).
+## @param gateway.control.backendTLS.caCertificateRef.name Name of the CA object holding `ca.crt` (empty = `<fullname>-minting-ca-bundle`, auto-populated and rotated by the supervisor).
 ## @param gateway.data.enabled Expose the supervisor mTLS data plane via TLS passthrough (`TLSRoute` -> `<fullname>-data`). Pair with `dataCert.enabled: true` for cert-manager issuance/renewal.
 ## @param gateway.data.host Hostname for the mTLS data plane (e.g. `data.supv.example.com`; must differ from `gateway.control.host`). Drives `server.data_hostname` and `dataCert` `dnsNames`.
 ## @param gateway.data.sectionName Listener `sectionName` for the data `TLSRoute` (`tls-data` on the rendered Gateway; set `""` to omit `sectionName`).
@@ -1015,8 +1015,8 @@ dataCert:
 ## @param gateway.registryMirror.backendTLS.hostname Override SNI/SAN verified on the mirror Service when `imageCache.tls.enabled=true` (empty = `<release>-registry-dagger-io-mirror.<namespace>.svc`).
 ## @param gateway.registryMirror.backendTLS.wellKnownCACertificates Set to `"System"` when `imageCache.tls.enabled=true` uses a publicly trusted cert without `imageCache.tls.caSecretName`.
 ## @param gateway.registryMirror.backendTLS.caCertificateRef.group API group of the CA object for the mirror `BackendTLSPolicy`.
-## @param gateway.registryMirror.backendTLS.caCertificateRef.kind Kind of the CA object (`Secret` or `ConfigMap`).
-## @param gateway.registryMirror.backendTLS.caCertificateRef.name Name of the CA object (empty = `imageCache.tls.caSecretName`).
+## @param gateway.registryMirror.backendTLS.caCertificateRef.kind Kind of the CA object for a private mirror CA (`ConfigMap` with key `ca.crt` is the Gateway API Core kind; `Secret` is Implementation-specific on NGF `2.9.1` and requires a `kubernetes.io/tls` Secret with valid `tls.crt` + `tls.key` *and* `ca.crt`).
+## @param gateway.registryMirror.backendTLS.caCertificateRef.name Name of the CA object (empty = `imageCache.tls.caSecretName`). With a private mirror CA, provide a `ConfigMap` with key `ca.crt` in the release namespace, or set this explicitly.
 ## @param gateway.dex.enabled Expose the optional `dex` subchart via `HTTPRoute` + `https-dex` Gateway listener (set `dex.ingress.enabled: false` when enabled). Requires `dex.enabled: true`.
 ## @param gateway.dex.host Hostname for Dex (must match `dex.config.issuer` host).
 ## @param gateway.dex.sectionName Listener `sectionName` for the Dex `HTTPRoute` (`https-dex` on the rendered Gateway).
@@ -1066,7 +1066,7 @@ gateway:
       wellKnownCACertificates: ""
       caCertificateRef:
         group: ""
-        kind: "Secret"
+        kind: "ConfigMap"
         name: ""
   data:
     enabled: false
@@ -1091,7 +1091,7 @@ gateway:
       wellKnownCACertificates: ""
       caCertificateRef:
         group: ""
-        kind: "Secret"
+        kind: "ConfigMap"
         name: ""
   dex:
     enabled: false

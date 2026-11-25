@@ -224,7 +224,8 @@ data:
 {{ include "dagger-kubernetes.imageCacheMirrorHosts" . | indent 8 }}
       isolation: {{ .Values.supervisor.config.fleet.isolation | quote }}
     ca:
-      minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
+      minting_ca_secret: {{ printf "%s-minting-ca" (include "dagger-kubernetes.fullname" .) | quote }}
+      minting_ca_configmap: {{ include "dagger-kubernetes.supervisorMintingCAConfigMap" . | quote }}
       client_cert_ttl: {{ .Values.supervisor.dataplane.tls.clientCertTtl | quote }}
     supervisor:
       dataplane:
@@ -318,5 +319,26 @@ data:
         rate_window: {{ .metrics.rateWindow | quote }}
         record_interval: {{ .metrics.recordInterval | quote }}
         max_record_window: {{ .metrics.maxRecordWindow | quote }}
+{{- end }}
+---
+# Helm-owned shell for the public Minting CA trust bundle (certificates only,
+# key ca.crt). The leader supervisor keeps data.ca.crt in sync on bootstrap and
+# through phased rotation via ca.minting_ca_configmap; Gateway API
+# BackendTLSPolicy reads it as a Core caCertificateRef.
+#
+# CRITICAL: when supervisor.dataplane.tls.caCrt is empty, omit `data:` entirely
+# (never render `data: {}` or `ca.crt: ""`). Under Helm's 3-way strategic merge
+# patch, a manifest with no `data` field produces zero patch diff on `data`
+# during `helm upgrade`, preserving the supervisor's runtime-written ca.crt.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dagger-kubernetes.supervisorMintingCAConfigMap" . }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+{{- if .Values.supervisor.dataplane.tls.caCrt }}
+data:
+  ca.crt: {{ .Values.supervisor.dataplane.tls.caCrt | quote }}
 {{- end }}
 {{- end }}

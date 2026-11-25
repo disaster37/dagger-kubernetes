@@ -509,6 +509,13 @@ back the stable pod names used for discovery: <fullname>-headless. */}}
 {{- printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .) -}}
 {{- end -}}
 
+{{/* Resolve the public Minting CA trust-bundle ConfigMap name (key ca.crt,
+certificates only). The supervisor keeps it in sync on bootstrap and through
+phased rotation; Gateway API BackendTLSPolicy reads it as a Core caCertificateRef. */}}
+{{- define "dagger-kubernetes.supervisorMintingCAConfigMap" -}}
+{{- printf "%s-minting-ca-bundle" (include "dagger-kubernetes.fullname" .) -}}
+{{- end -}}
+
 {{/* Resolve the data-plane server TLS provider. The chart auto-switches:
 - dataTLSSecretName (gateway.data.tls.secretName or dataIngress.tls.secretName)
   -> "external" (operator/cert-manager-managed tls.crt/tls.key Secret, mounted

@@ -54,8 +54,8 @@ spec:
     {{- else }}
     caCertificateRefs:
       - group: {{ .Values.gateway.control.backendTLS.caCertificateRef.group | quote }}
-        kind: {{ .Values.gateway.control.backendTLS.caCertificateRef.kind | default "Secret" | quote }}
-        name: {{ .Values.gateway.control.backendTLS.caCertificateRef.name | default (printf "%s-minting-ca" $fullname) | quote }}
+        kind: {{ .Values.gateway.control.backendTLS.caCertificateRef.kind | default "ConfigMap" | quote }}
+        name: {{ .Values.gateway.control.backendTLS.caCertificateRef.name | default (include "dagger-kubernetes.supervisorMintingCAConfigMap" .) | quote }}
     {{- end }}
 ---
 {{- end }}

@@ -537,8 +537,13 @@ type FleetConfig struct {
 }
 
 type CAConfig struct {
-	MintingCASecret string        `mapstructure:"minting_ca_secret"`
-	ClientCertTTL   time.Duration `mapstructure:"client_cert_ttl"`
+	MintingCASecret string `mapstructure:"minting_ca_secret"`
+	// MintingCAConfigMap names the Kubernetes ConfigMap the leader keeps in
+	// sync with the public Minting CA trust bundle (key ca.crt, certificate(s)
+	// only — never the private key). Gateway API BackendTLSPolicy reads it as a
+	// Core ConfigMap caCertificateRef. Empty disables ConfigMap publishing.
+	MintingCAConfigMap string        `mapstructure:"minting_ca_configmap"`
+	ClientCertTTL      time.Duration `mapstructure:"client_cert_ttl"`
 	// KeyringRotationEnabled enables zero-downtime phased Minting CA rotation
 	// for the engine/data-plane/internal-control mTLS plane. Default: true.
 	KeyringRotationEnabled bool `mapstructure:"keyring_rotation_enabled"`

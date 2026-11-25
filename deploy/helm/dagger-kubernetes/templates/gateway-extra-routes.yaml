@@ -5,6 +5,10 @@
 {{- $gwNamespace := include "dagger-kubernetes.gatewayNamespace" . }}
 {{- $mirrorEnabled := eq (include "dagger-kubernetes.gatewayMirrorEnabled" .) "true" }}
 {{- $mirrorSvc := printf "%s-%s-mirror" .Release.Name (include "dagger-kubernetes.imageCacheSlug" "registry.dagger.io") }}
+{{/* The mirror CA object name: an explicit caCertificateRef.name always wins
+(even when imageCache.tls.caSecretName is empty), else fall back to the
+imageCache.tls.caSecretName. */}}
+{{- $mirrorCARefName := .Values.gateway.registryMirror.backendTLS.caCertificateRef.name | default .Values.imageCache.tls.caSecretName }}
 {{- if $mirrorEnabled }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
@@ -36,8 +40,8 @@ spec:
 ---
 {{- end }}
 {{- if and $mirrorEnabled .Values.imageCache.tls.enabled }}
-{{- if and .Values.imageCache.tls.caSecretName (ne .Values.imageCache.tls.caSecretKey "ca.crt") }}
-{{- fail "imageCache.tls.caSecretKey must be \"ca.crt\" when gateway.registryMirror renders a BackendTLSPolicy: Gateway API caCertificateRefs only read the ca.crt key" }}
+{{- if and (not .Values.gateway.registryMirror.backendTLS.wellKnownCACertificates) (eq .Values.gateway.registryMirror.backendTLS.caCertificateRef.name "") .Values.imageCache.tls.caSecretName (ne .Values.imageCache.tls.caSecretKey "ca.crt") }}
+{{- fail "imageCache.tls.caSecretKey must be \"ca.crt\" when gateway.registryMirror renders a BackendTLSPolicy from imageCache.tls.caSecretName: Gateway API caCertificateRefs only read the ca.crt key (set gateway.registryMirror.backendTLS.caCertificateRef.name or .wellKnownCACertificates to override)" }}
 {{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: BackendTLSPolicy
@@ -54,13 +58,13 @@ spec:
       name: {{ $mirrorSvc }}
   validation:
     hostname: {{ .Values.gateway.registryMirror.backendTLS.hostname | default (printf "%s.%s.svc" $mirrorSvc $ns) | quote }}
-    {{- if or .Values.gateway.registryMirror.backendTLS.wellKnownCACertificates (eq .Values.imageCache.tls.caSecretName "") }}
+    {{- if or .Values.gateway.registryMirror.backendTLS.wellKnownCACertificates (eq $mirrorCARefName "") }}
     wellKnownCACertificates: {{ .Values.gateway.registryMirror.backendTLS.wellKnownCACertificates | default "System" | quote }}
     {{- else }}
     caCertificateRefs:
       - group: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.group | quote }}
-        kind: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.kind | default "Secret" | quote }}
-        name: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.name | default .Values.imageCache.tls.caSecretName | quote }}
+        kind: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.kind | default "ConfigMap" | quote }}
+        name: {{ $mirrorCARefName | quote }}
     {{- end }}
 ---
 {{- end }}

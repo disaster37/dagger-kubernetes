@@ -175,7 +175,7 @@ require manual generation** in a standard Helm install:
 
 | Certificate | Auto-bootstrapped | Notes |
 |---|---|---|
-| **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Set `supervisor.dataplane.tls.caCrt`/`caKey` only to bring an existing CA. |
+| **Minting CA** (`<release>-minting-ca`) | Yes | Signer of short-lived engine client certs. Ordinal 0 generates a goca CA on first boot and writes it to the Secret; other pods poll it. Its **public** trust bundle is mirrored into the `<release>-minting-ca-bundle` ConfigMap (`ca.minting_ca_configmap`, key `ca.crt`, certificates only) for Gateway API `BackendTLSPolicy`. Set `supervisor.dataplane.tls.caCrt`/`caKey` only to bring an existing CA. |
 | **Raft transport CA** (`<release>-raft-ca`) | Yes | Internal mTLS for the Raft transport. Same bootstrap pattern (see [Raft](#raft-distributed-store)). |
 | **Server certificate** (control + data plane) | `embedded` (default) | Issued by the minting CA, self-signed. SANs cover the data host, cache vhost, pod names, and each pod's own exact FQDN SANs automatically (the leader-forward hop needs them — ADR-041). The minting CA additionally issues a dedicated leaf for the internal-only control listener (port 8082) in every provider mode. |
 
@@ -326,14 +326,26 @@ The rendered Gateway mixes a wildcard `:80` HTTP listener (no `hostname`, so
 ACME `gatewayHTTPRoute` challenges work for every host), `:443` HTTPS
 `Terminate` listeners for the control / mirror / Dex hosts, and a `:443` TLS
 `Passthrough` listener for the data plane. The control route carries a
-`BackendTLSPolicy` (the supervisor `:8080` listener serves HTTPS, verified
-against the minting-CA Secret); the mirror route carries one when
-`imageCache.tls.enabled` (verified against `imageCache.tls.caSecretName`). The
-data plane uses an NGF `SnippetsPolicy` (`context: stream.server`,
-`proxy_timeout 24h;`) so NGINX's 10m default does not cut long idle CI sessions.
-An HTTP→HTTPS 301 redirect `HTTPRoute` is rendered for every TLS-terminated host
-(cert-manager's `Exact` ACME challenge routes take precedence over
-`PathPrefix: /`).
+`BackendTLSPolicy` that verifies the supervisor's HTTPS `:8080` listener against
+the Core `ConfigMap` `<fullname>-minting-ca-bundle` (key `ca.crt`), which the
+leader supervisor keeps in sync with the full public Minting CA trust bundle on
+bootstrap **and** through phased rotation (dual-trust `[M0, M1]` during the
+overlap). The mirror route carries one when `imageCache.tls.enabled`: for a
+private mirror CA, provide a `ConfigMap` (key `ca.crt`) in the release namespace
+— naming it equal to `imageCache.tls.caSecretName` works with zero extra
+overrides, or set `gateway.registryMirror.backendTLS.caCertificateRef.name`
+explicitly. The data plane uses an NGF `SnippetsPolicy`
+(`context: stream.server`, `proxy_timeout 24h;`) so NGINX's 10m default does not
+cut long idle CI sessions. An HTTP→HTTPS 301 redirect `HTTPRoute` is rendered
+for every TLS-terminated host (cert-manager's `Exact` ACME challenge routes take
+precedence over `PathPrefix: /`).
+
+> **Why `ConfigMap` and not `Secret`:** `ConfigMap` (key `ca.crt`) is the only
+> Core `caCertificateRefs` kind in Gateway API. NGF `2.9.1` rejects `Opaque`
+> Secrets (`unsupported secret type`) and, for `kubernetes.io/tls` Secrets,
+> still reads `ca.crt` (and requires valid `tls.crt` + `tls.key`, exposing the
+> CA key). A `ConfigMap` is also natively multi-certificate, so phased-rotation
+> bundles work without exposing private keys.
 
 **Shared Gateway mode.** To attach the routes to an existing Gateway instead of
 rendering one, set `gateway.create: false` and `gateway.parentRef.name` /
@@ -1093,9 +1105,9 @@ subchart values.
 | `gateway.control.backendTLS.enabled` | bool | `true` | Render a `BackendTLSPolicy` for `<fullname>-control` (the supervisor `:8080` listener serves HTTPS). |
 | `gateway.control.backendTLS.hostname` | string | `""` | SNI/SAN verified on `<fullname>-control` (empty = `<fullname>-control.<namespace>.svc`). |
 | `gateway.control.backendTLS.wellKnownCACertificates` | string | `""` | Set to `"System"` to verify against system roots instead of `caCertificateRef`. |
-| `gateway.control.backendTLS.caCertificateRef.group` | string | `""` | API group of the CA object (`""` for core `Secret`/`ConfigMap`). |
-| `gateway.control.backendTLS.caCertificateRef.kind` | string | `"Secret"` | Kind of the CA object (`Secret` on NGF; `ConfigMap` on implementations that only support Core `ConfigMap`). |
-| `gateway.control.backendTLS.caCertificateRef.name` | string | `""` | Name of the CA object holding `ca.crt` (empty = `<fullname>-minting-ca`). |
+| `gateway.control.backendTLS.caCertificateRef.group` | string | `""` | API group of the CA object (`""` for the Core `ConfigMap`). |
+| `gateway.control.backendTLS.caCertificateRef.kind` | string | `"ConfigMap"` | Kind of the CA object (`ConfigMap` is the Gateway API Core kind; NGF `2.9.1` rejects `Secret` refs). |
+| `gateway.control.backendTLS.caCertificateRef.name` | string | `""` | Name of the CA object holding `ca.crt` (empty = `<fullname>-minting-ca-bundle`, auto-populated and rotated by the supervisor). |
 | `gateway.data.enabled` | bool | `false` | Expose the supervisor mTLS data plane via TLS passthrough (`TLSRoute` -> `<fullname>-data`). |
 | `gateway.data.host` | string | `"data.supv.example.com"` | Hostname for the mTLS data plane (must differ from `gateway.control.host`). Drives `server.data_hostname` and `dataCert` `dnsNames`. |
 | `gateway.data.sectionName` | string | `"tls-data"` | Listener `sectionName` for the data `TLSRoute` (set `""` to omit `sectionName`). |
@@ -1113,8 +1125,8 @@ subchart values.
 | `gateway.registryMirror.backendTLS.hostname` | string | `""` | Override SNI/SAN verified on the mirror Service when `imageCache.tls.enabled=true`. |
 | `gateway.registryMirror.backendTLS.wellKnownCACertificates` | string | `""` | Set to `"System"` when `imageCache.tls.enabled=true` uses a publicly trusted cert without `imageCache.tls.caSecretName`. |
 | `gateway.registryMirror.backendTLS.caCertificateRef.group` | string | `""` | API group of the CA object for the mirror `BackendTLSPolicy`. |
-| `gateway.registryMirror.backendTLS.caCertificateRef.kind` | string | `"Secret"` | Kind of the CA object (`Secret` or `ConfigMap`). |
-| `gateway.registryMirror.backendTLS.caCertificateRef.name` | string | `""` | Name of the CA object (empty = `imageCache.tls.caSecretName`). |
+| `gateway.registryMirror.backendTLS.caCertificateRef.kind` | string | `"ConfigMap"` | Kind of the CA object for a private mirror CA (`ConfigMap` with key `ca.crt` is the Gateway API Core kind; `Secret` is Implementation-specific on NGF `2.9.1` and requires a `kubernetes.io/tls` Secret with valid `tls.crt` + `tls.key` *and* `ca.crt`). |
+| `gateway.registryMirror.backendTLS.caCertificateRef.name` | string | `""` | Name of the CA object (empty = `imageCache.tls.caSecretName`). With a private mirror CA, provide a `ConfigMap` with key `ca.crt` in the release namespace, or set this explicitly. |
 | `gateway.dex.enabled` | bool | `false` | Expose the optional `dex` subchart via `HTTPRoute` + `https-dex` listener. Requires `dex.enabled: true`. |
 | `gateway.dex.host` | string | `"dex.example.com"` | Hostname for Dex (must match `dex.config.issuer` host). |
 | `gateway.dex.sectionName` | string | `"https-dex"` | Listener `sectionName` for the Dex `HTTPRoute`. |

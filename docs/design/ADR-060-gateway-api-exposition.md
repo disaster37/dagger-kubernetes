@@ -56,22 +56,40 @@ When `gateway.create=true` the chart renders a single `Gateway` with:
   the control, mirror, and Dex hosts, with `certificateRefs` defaulting to
   `<fullname>-gateway-tls` / `-mirror-tls` / `-dex-tls`;
 - a `:443` TLS `Passthrough` listener (`tls-data`) restricted to `TLSRoute`
-  kinds for the mTLS data plane.
+  kinds for the mTLS data plane. The `TLSRoute` and every other rendered route
+  use the GA `gateway.networking.k8s.io/v1` group (Gateway API `v1.7.0` serves
+  `TLSRoute` as `v1` only; the NGF-specific policy attachments stay on
+  `gateway.nginx.org/v1alpha1`).
 
 The chart fails closed when two `:443` listeners would bind the same hostname.
 `gateway.create=false` attaches the routes to an existing shared Gateway via
 `gateway.parentRef` (cross-namespace supported) — the escape hatch for
 platform teams that own one Gateway per cluster.
 
-### D3 — `BackendTLSPolicy` bridges the HTTPS upstreams
+### D3 — `BackendTLSPolicy` bridges the HTTPS upstreams via Core `ConfigMap`s
 
 The supervisor `:8080` listener serves HTTPS, so the control `HTTPRoute` carries
 a `BackendTLSPolicy` verifying `<fullname>-control.<namespace>.svc` against the
-minting-CA Secret (`<fullname>-minting-ca`, [ADR-005](ADR-005-embedded-minting-ca.md)).
+public minting CA trust bundle. Gateway API's only Core conformance
+`caCertificateRefs` kind is a `ConfigMap` (key `ca.crt`); NGF `2.9.1` rejects
+`Opaque` Secrets (`unsupported secret type`) and, for `kubernetes.io/tls`
+Secrets, still reads `ca.crt` while requiring valid `tls.crt` + `tls.key`
+(exposing the CA private key). The chart therefore renders a
+`<fullname>-minting-ca-bundle` `ConfigMap` (certificates only) and the leader
+supervisor keeps it in sync (`ca.minting_ca_configmap`) with the full
+**dual-trust** bundle during phased rotation (`[M0, M1]` at the stage/activate
+terms), so a load-balanced control Service verifies followers still presenting
+the old leaf. `ConfigMap` is also natively multi-certificate, unlike a `Secret`
+`tls.crt`.
+
 The mirror route carries one when `imageCache.tls.enabled`, verifying against
-`imageCache.tls.caSecretName` (or `wellKnownCACertificates: System` when the
-mirror cert is publicly trusted). `caCertificateRefs` only read the `ca.crt`
-key, so the chart fails closed when `imageCache.tls.caSecretKey != "ca.crt"`.
+`gateway.registryMirror.backendTLS.caCertificateRef.name` (explicit) or, when
+unset, `imageCache.tls.caSecretName` — the operator must provide a `ConfigMap`
+(key `ca.crt`) in the release namespace for a private mirror CA (or
+`wellKnownCACertificates: System` for a publicly trusted cert). Because
+`caCertificateRefs` only read `ca.crt`, the chart fails closed when it falls back
+to `imageCache.tls.caSecretName` and `imageCache.tls.caSecretKey != "ca.crt"`
+(an explicit `caCertificateRef.name` or `wellKnownCACertificates` opts out).
 
 ### D4 — Toggleable NGF v1alpha1 policies
 
@@ -123,9 +141,17 @@ existing template. The ClusterIssuer's HTTP-01 solver points at the Gateway
   `registryMirrorExternalHost`, `dataTLSSecretName`), and precedence-aware
   `publicUrl` / `dataHostname` / `dataplaneTLS*` helpers. Default rendering is
   unchanged.
+- Supervisor: new `ca.minting_ca_configmap` config key, a `TrustBundlePEM()`
+  accessor on the dynamic minting CA (certificates only), and a leader-only
+  ConfigMap sync (`<fullname>-minting-ca-bundle`) with an immediate startup pass
+  and a keyring-driven wake-up, so the control `BackendTLSPolicy` CA stays
+  current through phased rotation. The `configmaps` RBAC verbs already cover it.
 - Operator prerequisites (documented, not automated): install NGF ≥ 2.9 (with
   `nginxGateway.snippets.enable=true` for the stream timeout), enable
   cert-manager Gateway API support, and point the issuer solver at the Gateway.
+  For a private mirror CA, provide a `ConfigMap` (key `ca.crt`) in the release
+  namespace (name it after `imageCache.tls.caSecretName` for zero extra
+  overrides).
 - The mirror and Dex routes are in scope; Grafana/MinIO consoles and other
   subcharts are out of scope (reach them via `kubectl port-forward`).
 - `gateway.create=false` requires `gateway.parentRef.name` (fail-closed).

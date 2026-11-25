@@ -97,6 +97,10 @@ var helmTemplateMatrix = []helmVariant{
 			// select on component: supervisor (not name+instance alone), the
 			// regression this fix addresses.
 			"selector:\n    app.kubernetes.io/name: dagger-kubernetes\n    app.kubernetes.io/instance: dagger-kubernetes\n    app.kubernetes.io/component: supervisor",
+			// The public Minting CA trust-bundle ConfigMap is rendered by
+			// default (supervisor.enabled) and wired through ca.minting_ca_configmap.
+			`minting_ca_configmap: "dagger-kubernetes-dagger-kubernetes-minting-ca-bundle"`,
+			"name: dagger-kubernetes-dagger-kubernetes-minting-ca-bundle",
 		},
 	},
 	{
@@ -228,7 +232,8 @@ var helmTemplateMatrix = []helmVariant{
 			`gatewayClassName: "nginx"`,
 			"mode: Passthrough",
 			"kind: HTTPRoute",
-			"kind: TLSRoute",
+			// TLSRoute must be GA v1 (Gateway API v1.7.0 serves v1 only).
+			"apiVersion: gateway.networking.k8s.io/v1\nkind: TLSRoute",
 			"kind: BackendTLSPolicy",
 			"kind: ClientSettingsPolicy",
 			"kind: ProxySettingsPolicy",
@@ -245,6 +250,17 @@ var helmTemplateMatrix = []helmVariant{
 			"statusCode: 301",
 			"-registry-dagger-io-mirror.",
 			"dex.example.com",
+			// Control BackendTLSPolicy reads the Core ConfigMap bundle the
+			// supervisor syncs; the mirror policy reads the explicit/default
+			// mirror CA ConfigMap.
+			`kind: "ConfigMap"`,
+			`name: "dagger-kubernetes-dagger-kubernetes-minting-ca-bundle"`,
+			`name: "mirror-ca"`,
+		},
+		forbid: []string{
+			"gateway.networking.k8s.io/v1alpha2",
+			"gateway.networking.k8s.io/v1alpha3",
+			"gateway.networking.k8s.io/v1beta1",
 		},
 	},
 	// Shared-Gateway mode: no dedicated Gateway is rendered; every route
@@ -269,7 +285,7 @@ var helmTemplateMatrix = []helmVariant{
 			"kind: HTTPRoute",
 			"kind: TLSRoute",
 		},
-		forbid: []string{"kind: Gateway", "kind: SnippetsPolicy"},
+		forbid: []string{"kind: Gateway", "kind: SnippetsPolicy", "gateway.networking.k8s.io/v1alpha2"},
 	},
 	// allowedRoutes.namespaces.from=Selector: the rendered Gateway listeners
 	// carry a valid selector block (the gatewayAllowedRoutes helper indents it
