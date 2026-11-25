@@ -192,6 +192,75 @@ var helmTemplateMatrix = []helmVariant{
 			`timeout: "24h"`,
 		},
 	},
+	// Gateway API exposition (NGINX Gateway Fabric): a dedicated Gateway with
+	// HTTP/HTTPS/TLS listeners, HTTPRoute/TLSRoute/BackendTLSPolicy, and the
+	// NGF v1alpha1 policies, alongside the dataCert Certificate and the
+	// registry mirror. Proves the rendered URLs follow the gateway precedence
+	// (public_url from gateway.control.host, data_hostname from
+	// gateway.data.host, external_addr from gateway.registryMirror.host) and
+	// that the data Cert SAN follows gateway.data.host.
+	{
+		sets: []string{
+			"--set", "ingress.enabled=false",
+			"--set", "gateway.enabled=true",
+			"--set", `gateway.annotations.cert-manager\.io/cluster-issuer=letsencrypt-prod`,
+			"--set", "gateway.control.host=supv.example.com",
+			"--set", "gateway.data.enabled=true",
+			"--set", "gateway.data.host=data.example.com",
+			"--set", "dataCert.enabled=true",
+			"--set", "imageCache.enabled=true",
+			"--set", `imageCache.presets.registry\.dagger\.io.enabled=true`,
+			"--set", "imageCache.tls.enabled=true",
+			"--set", "imageCache.tls.secretName=mirror-tls",
+			"--set", "imageCache.tls.caSecretName=mirror-ca",
+			"--set", "gateway.registryMirror.enabled=true",
+			"--set", "gateway.registryMirror.host=mirror.example.com",
+			"--set", "dex.enabled=true",
+			"--set", "dex.ingress.enabled=false",
+			"--set", "gateway.dex.enabled=true",
+			"--set", "gateway.dex.host=dex.example.com",
+		},
+		expect: []string{
+			"kind: Gateway",
+			`gatewayClassName: "nginx"`,
+			"mode: Passthrough",
+			"kind: HTTPRoute",
+			"kind: TLSRoute",
+			"kind: BackendTLSPolicy",
+			"kind: ClientSettingsPolicy",
+			"kind: ProxySettingsPolicy",
+			"kind: SnippetsPolicy",
+			`context: "stream.server"`,
+			`value: "proxy_timeout 24h;"`,
+			`public_url: "https://supv.example.com"`,
+			`data_hostname: "data.example.com"`,
+			`external_addr: "mirror.example.com"`,
+			`- "data.example.com"`,
+			"-control.",
+		},
+	},
+	// Shared-Gateway mode: no dedicated Gateway is rendered; every route
+	// attaches to the existing Gateway named by gateway.parentRef (cross
+	// namespace), and the NGF-specific policies are disabled for portability
+	// to other Gateway API implementations.
+	{
+		sets: []string{
+			"--set", "ingress.enabled=false",
+			"--set", "gateway.enabled=true",
+			"--set", "gateway.create=false",
+			"--set", "gateway.parentRef.name=shared-gw",
+			"--set", "gateway.parentRef.namespace=gateway-system",
+			"--set", "gateway.nginxPolicies.enabled=false",
+			"--set", "gateway.data.enabled=true",
+			"--set", "gateway.data.host=data.example.com",
+		},
+		expect: []string{
+			`name: "shared-gw"`,
+			`namespace: "gateway-system"`,
+			"kind: HTTPRoute",
+			"kind: TLSRoute",
+		},
+	},
 }
 
 // DaggerKubernetes is the root type for the dagger-kubernetes module.

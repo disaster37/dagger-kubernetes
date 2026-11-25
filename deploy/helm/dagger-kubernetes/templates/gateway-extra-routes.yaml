@@ -1,0 +1,95 @@
+{{- if .Values.gateway.enabled }}
+{{- $ns := include "dagger-kubernetes.namespace" . }}
+{{- $fullname := include "dagger-kubernetes.fullname" . }}
+{{- $gwName := include "dagger-kubernetes.gatewayName" . }}
+{{- $gwNamespace := include "dagger-kubernetes.gatewayNamespace" . }}
+{{- $mirrorEnabled := eq (include "dagger-kubernetes.gatewayMirrorEnabled" .) "true" }}
+{{- $mirrorSvc := printf "%s-%s-mirror" .Release.Name (include "dagger-kubernetes.imageCacheSlug" "registry.dagger.io") }}
+{{- if $mirrorEnabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $mirrorSvc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+  {{- with .Values.gateway.registryMirror.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: {{ $gwName | quote }}
+      namespace: {{ $gwNamespace | quote }}
+      sectionName: {{ if .Values.gateway.registryMirror.tls.enabled }}{{ .Values.gateway.registryMirror.sectionName | quote }}{{ else }}{{ .Values.gateway.httpSectionName | quote }}{{ end }}
+  hostnames:
+    - {{ .Values.gateway.registryMirror.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ $mirrorSvc }}
+          port: 5000
+---
+{{- end }}
+{{- if and $mirrorEnabled .Values.imageCache.tls.enabled }}
+{{- if and .Values.imageCache.tls.caSecretName (ne .Values.imageCache.tls.caSecretKey "ca.crt") }}
+{{- fail "imageCache.tls.caSecretKey must be \"ca.crt\" when gateway.registryMirror renders a BackendTLSPolicy: Gateway API caCertificateRefs only read the ca.crt key" }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: {{ printf "%s-tls" $mirrorSvc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ $mirrorSvc }}
+  validation:
+    hostname: {{ .Values.gateway.registryMirror.backendTLS.hostname | default (printf "%s.%s.svc" $mirrorSvc $ns) | quote }}
+    {{- if or .Values.gateway.registryMirror.backendTLS.wellKnownCACertificates (eq .Values.imageCache.tls.caSecretName "") }}
+    wellKnownCACertificates: {{ .Values.gateway.registryMirror.backendTLS.wellKnownCACertificates | default "System" | quote }}
+    {{- else }}
+    caCertificateRefs:
+      - group: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.group | quote }}
+        kind: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.kind | default "Secret" | quote }}
+        name: {{ .Values.gateway.registryMirror.backendTLS.caCertificateRef.name | default .Values.imageCache.tls.caSecretName | quote }}
+    {{- end }}
+---
+{{- end }}
+{{- if and .Values.dex.enabled .Values.gateway.dex.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ printf "%s-dex" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+  {{- with .Values.gateway.dex.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: {{ $gwName | quote }}
+      namespace: {{ $gwNamespace | quote }}
+      sectionName: {{ if .Values.gateway.dex.tls.enabled }}{{ .Values.gateway.dex.sectionName | quote }}{{ else }}{{ .Values.gateway.httpSectionName | quote }}{{ end }}
+  hostnames:
+    - {{ .Values.gateway.dex.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ include "dagger-kubernetes.dexServiceName" . }}
+          port: {{ (.Values.dex.service).ports.http.port | default 5556 }}
+{{- end }}
+{{- end }}

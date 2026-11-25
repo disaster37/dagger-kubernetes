@@ -164,7 +164,7 @@ spec:
               mountPath: /etc/dagger-kubernetes/tls
               readOnly: true
             {{- end }}
-            {{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName }}
+            {{- if or .Values.dataCert.enabled (ne (include "dagger-kubernetes.dataTLSSecretName" .) "") }}
             - name: data-tls
               mountPath: /etc/dagger-kubernetes/data-tls
               readOnly: true
@@ -225,10 +225,10 @@ spec:
           secret:
             secretName: {{ include "dagger-kubernetes.fullname" . }}-tls
         {{- end }}
-        {{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName }}
+        {{- if or .Values.dataCert.enabled (ne (include "dagger-kubernetes.dataTLSSecretName" .) "") }}
         - name: data-tls
           secret:
-            secretName: {{ .Values.dataIngress.tls.secretName | default .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
+            secretName: {{ include "dagger-kubernetes.dataTLSSecretName" . | default .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
         {{- end }}
         - name: cache-scratch
           emptyDir:

@@ -1,5 +1,5 @@
 {{- if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" }}
-{{- if not (or .Values.dataCert.enabled .Values.dataIngress.tls.secretName) }}
+{{- if not (or .Values.dataCert.enabled (ne (include "dagger-kubernetes.dataTLSSecretName" .) "")) }}
 {{- if not (and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key) }}
 {{- if not (and .Values.supervisor.dataplane.tls.certPath .Values.supervisor.dataplane.tls.keyPath) }}
 {{- fail "supervisor.dataplane.tls.provider=external requires either supervisor.dataplane.tls.crt + supervisor.dataplane.tls.key (rendered into the <fullname>-tls Secret and mounted at /etc/dagger-kubernetes/tls) or supervisor.dataplane.tls.certPath + supervisor.dataplane.tls.keyPath (operator-managed PEM files). Without a server keypair the supervisor cannot serve the mTLS data plane (fail-closed check). (dataCert.enabled / dataIngress.tls.secretName auto-wire the mounted data-tls Secret, so they are exempt.)" }}
@@ -170,8 +170,8 @@ data:
           host: {{ .host | quote }}
           upstream: {{ .remoteUrl | quote }}
           internal_addr: {{ $addr | quote }}
-          {{- if and (eq .host "registry.dagger.io") $.Values.imageCache.registryIngress.enabled }}
-          external_addr: {{ $.Values.imageCache.registryIngress.host | quote }}
+          {{- if and (eq .host "registry.dagger.io") (ne (include "dagger-kubernetes.registryMirrorExternalHost" $) "") }}
+          external_addr: {{ include "dagger-kubernetes.registryMirrorExternalHost" $ | quote }}
           {{- end }}
           backend: {{ $.Values.imageCache.storage.backend | default "s3" | quote }}
           tls: {{ $.Values.imageCache.tls.enabled }}

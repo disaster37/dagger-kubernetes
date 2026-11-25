@@ -64,3 +64,6 @@ startup and persists it:
 - In multi-node, the `ca.minting_ca_secret` Secret holds the CA **private
   key** (any pod may mint client certs) and must be RBAC-restricted to the
   supervisor ServiceAccount.
+- With Gateway API exposition ([ADR-060](ADR-060-gateway-api-exposition.md)),
+  the minting-CA Secret (`<fullname>-minting-ca`) also backs the control
+  `BackendTLSPolicy`, which verifies the supervisor's HTTPS `:8080` listener.
