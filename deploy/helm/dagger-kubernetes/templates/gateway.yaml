@@ -63,13 +63,13 @@ spec:
     - name: {{ .Values.gateway.httpSectionName | quote }}
       protocol: HTTP
       port: {{ .Values.gateway.ports.http }}
-      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $ "indent" 6) | nindent 6 }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
     {{- if and .Values.supervisor.enabled .Values.gateway.control.enabled .Values.gateway.control.tls.enabled }}
     - name: {{ .Values.gateway.control.sectionName | quote }}
       protocol: HTTPS
       port: {{ .Values.gateway.ports.https }}
       hostname: {{ .Values.gateway.control.host | quote }}
-      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $ "indent" 6) | nindent 6 }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
       tls:
         mode: Terminate
         certificateRefs:
@@ -78,7 +78,7 @@ spec:
             name: {{ .Values.gateway.control.tls.secretName | default (printf "%s-gateway-tls" $fullname) | quote }}
     {{- end }}
     {{- if and .Values.supervisor.enabled .Values.gateway.data.enabled }}
-    - name: {{ .Values.gateway.data.sectionName | quote }}
+    - name: {{ .Values.gateway.data.sectionName | default "tls-data" | quote }}
       protocol: TLS
       port: {{ .Values.gateway.ports.tls }}
       hostname: {{ .Values.gateway.data.host | quote }}
@@ -100,7 +100,7 @@ spec:
       protocol: HTTPS
       port: {{ .Values.gateway.ports.https }}
       hostname: {{ .Values.gateway.registryMirror.host | quote }}
-      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $ "indent" 6) | nindent 6 }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
       tls:
         mode: Terminate
         certificateRefs:
@@ -113,7 +113,7 @@ spec:
       protocol: HTTPS
       port: {{ .Values.gateway.ports.https }}
       hostname: {{ .Values.gateway.dex.host | quote }}
-      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $ "indent" 6) | nindent 6 }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
       tls:
         mode: Terminate
         certificateRefs:

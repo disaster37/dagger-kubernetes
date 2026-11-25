@@ -110,15 +110,15 @@ imageCache enabled + the registry.dagger.io preset + gateway.registryMirror. */}
 {{- end -}}
 
 {{/* Render a Gateway listener's allowedRoutes block (namespaces from + optional
-selector), indented for the given indent. Args (dict): root, indent. */}}
+selector). The caller re-indents the whole block with `nindent 6`, so the
+selector keys use a relative indent of 6. Args (dict): root. */}}
 {{- define "dagger-kubernetes.gatewayAllowedRoutes" -}}
-{{- $indent := .indent | int -}}
 allowedRoutes:
   namespaces:
     from: {{ .root.Values.gateway.allowedRoutes.namespaces.from }}
     {{- if eq .root.Values.gateway.allowedRoutes.namespaces.from "Selector" }}
     selector:
-      {{- toYaml .root.Values.gateway.allowedRoutes.namespaces.selector | nindent (add $indent 6) }}
+      {{- toYaml .root.Values.gateway.allowedRoutes.namespaces.selector | nindent 6 }}
     {{- end }}
 {{- end -}}
 
