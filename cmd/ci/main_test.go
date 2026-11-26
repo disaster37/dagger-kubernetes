@@ -1727,3 +1727,36 @@ func TestCheckFilterArgv(t *testing.T) {
 		t.Fatal("invalid filter must be rejected")
 	}
 }
+
+func TestGuardInteractive(t *testing.T) {
+	original := stdinIsTerminal
+	t.Cleanup(func() { stdinIsTerminal = original })
+
+	cases := []struct {
+		name      string
+		args      []string
+		steps     bool
+		tty       bool
+		wantError bool
+	}{
+		{name: "call is fine", args: []string{"call", "build"}, tty: false},
+		{name: "check -l is fine", args: []string{"check", "-l"}, tty: false},
+		{name: "shell without tty", args: []string{"shell"}, tty: false, wantError: true},
+		{name: "shell with tty", args: []string{"shell"}, tty: true},
+		{name: "shell in steps mode", args: []string{"shell"}, tty: true, steps: true, wantError: true},
+		{name: "silent prefix still detects shell", args: []string{"--silent", "shell"}, tty: false, wantError: true},
+		{name: "check interactive short without tty", args: []string{"check", "-i", "build"}, tty: false, wantError: true},
+		{name: "check interactive short with tty", args: []string{"check", "-i", "build"}, tty: true},
+		{name: "check interactive long", args: []string{"check", "--interactive", "build"}, tty: false, wantError: true},
+		{name: "interactive flag before check is not a shell", args: []string{"call", "-i"}, tty: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdinIsTerminal = func() bool { return tc.tty }
+			err := guardInteractive(tc.args, tc.steps)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("guardInteractive(%v, %v) err = %v, wantError %v", tc.args, tc.steps, err, tc.wantError)
+			}
+		})
+	}
+}

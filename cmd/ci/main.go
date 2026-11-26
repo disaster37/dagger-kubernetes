@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -166,6 +167,9 @@ func run(c *cli.Context) error {
 
 	silent := c.Bool("silent")
 	cmdArgs = withSilentFlag(cmdArgs, silent)
+	if gerr := guardInteractive(cmdArgs, steps); gerr != nil {
+		return gerr
+	}
 
 	runnerHost := resolveRunnerHost(c.String("runner-host"), cmdArgs)
 	org := c.String("org")
@@ -406,6 +410,50 @@ func run(c *cli.Context) error {
 	}
 
 	return err
+}
+
+// errInteractive is returned when an invocation needs a TTY but cannot get one.
+var errInteractive = errors.New("dagger shell / check -i needs an interactive TTY; run it without --steps and from a terminal")
+
+// stdinIsTerminal reports whether stdin is a terminal (a character device). It
+// is a variable so tests can simulate both a TTY and a redirected stdin.
+var stdinIsTerminal = func() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// guardInteractive rejects invocations that need a TTY but cannot get one: in
+// --steps mode stdout is the NDJSON channel, and a TTY-less CI Job would hang
+// until --timeout. Runners never pass -i, so Jobs are unaffected.
+func guardInteractive(args []string, stepsMode bool) error {
+	if !interactiveRequested(args) {
+		return nil
+	}
+	if stepsMode || !stdinIsTerminal() {
+		return errInteractive
+	}
+	return nil
+}
+
+// interactiveRequested reports whether args invoke `shell` or `check -i`.
+func interactiveRequested(args []string) bool {
+	subcommand := ""
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			subcommand = arg
+			break
+		}
+	}
+	if subcommand == "shell" {
+		return true
+	}
+	if subcommand != "check" {
+		return false
+	}
+	return hasFlag(args, "-i") || hasFlag(args, "--interactive")
 }
 
 // clampPollInterval enforces the minimum step-stream poll cadence so a

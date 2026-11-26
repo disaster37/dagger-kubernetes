@@ -3094,6 +3094,12 @@ and exports `DAGGER_SILENT=1` so nested sessions inherit it. Silent mode
 suppresses progress output; the run result, exit code, NDJSON `--steps` stream
 and pipeline-view link are unaffected.
 
+`dagger shell` and `dagger check -i` need an interactive TTY. The wrapper
+rejects them with a clear error when `--steps` is active (stdout is the NDJSON
+protocol channel) or when stdin is not a terminal, instead of letting a
+TTY-less CI job hang until `--timeout`. Run dev shells without `--steps` from a
+real terminal; check/workflow Jobs never pass `-i`.
+
 ---
 
 ## Operations
