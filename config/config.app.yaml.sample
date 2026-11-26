@@ -370,6 +370,7 @@ fleet:
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:
   minting_ca_secret: "supervisor-minting-ca"  # K8s Secret holding the minting CA (AUTO-BOOTSTRAPPED on first boot; holds the CA private key).
+  minting_ca_configmap: "supervisor-minting-ca-bundle"  # K8s ConfigMap holding the PUBLIC minting CA trust bundle (key ca.crt, certificate(s) only). The leader keeps it in sync on bootstrap and through phased rotation; Gateway API BackendTLSPolicy reads it. "" disables publishing.
   client_cert_ttl: "2h"                        # TTL of client certs minted at lease grant.
   keyring_rotation_enabled: true               # zero-downtime phased Minting CA rotation for the engine/data-plane/internal-control mTLS plane.
   rotation_period: "24h"                       # how often the Minting CA is rotated; must be >= 2 * client_cert_ttl when rotation is enabled.

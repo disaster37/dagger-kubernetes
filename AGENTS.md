@@ -74,10 +74,7 @@ Rules that keep CI green:
       _ = srv.Shutdown(shutdownCtx)
   })
   ```
-- **The effective lint version is the latest release.** The Dagger `golang`
-  module falls back to installing the newest `golangci-lint` when the pinned
-  binary is not on `PATH`, so code must pass the current latest release, not
-  only the pin in `dagger/main.go`.
+- **The effective lint version is the latest release.** The Dagger pipeline installs the newest `golangci-lint` release through the Go module proxy, so code must pass the current latest release.
 - **Changes to `dagger/`, CI scripts, or `.github/workflows/` must update
   `DAGGER.md`** (function table, pins, troubleshooting) in the same changeset.
 

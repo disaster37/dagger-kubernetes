@@ -147,17 +147,18 @@ supervisor:
 ## - custom secret: set `dataIngress.tls.secretName` (any tls.crt/tls.key
 ##   Secret — cert-manager via Ingress annotation, or operator-managed) —
 ##   the chart auto-switches `provider` to "external" and auto-wires
-##   `certPath`/`keyPath` to the mounted data-tls secret.
-## When BOTH dataCert.enabled and dataIngress.tls.secretName are set,
-## dataIngress.tls.secretName wins (that secret is mounted and served;
-## cert-manager's dataCert secret is unused). Operators should set only one
-## of them. When neither is set, `provider` selects embedded (default),
-## cert-manager (operator-managed mounted files), or external (PEM files at
-## certPath/keyPath, or crt/key rendered into the <fullname>-tls Secret).
+##   `certPath`/`keyPath` to the mounted data-tls secret. With Gateway API
+##   exposition, `gateway.data.tls.secretName` is the equivalent knob.
+## When BOTH dataCert.enabled and a data TLS secret are set, the secret wins
+## (that secret is mounted and served; cert-manager's dataCert secret is
+## unused). Operators should set only one of them. When neither is set,
+## `provider` selects embedded (default), cert-manager (operator-managed
+## mounted files), or external (PEM files at certPath/keyPath, or crt/key
+## rendered into the <fullname>-tls Secret).
 ## @descriptionEnd
 
-## @param supervisor.dataplane.tls.provider Server certificate source: "embedded" (default) | "cert-manager" | "external". Auto-overridden to "cert-manager" when dataCert.enabled, and to "external" when dataIngress.tls.secretName is set.
-## @param supervisor.dataplane.tls.certPath Server certificate path (only "external", or auto-wired). cert-manager/dataIngress auto-wire the mounted data-tls secret.
+## @param supervisor.dataplane.tls.provider Server certificate source: "embedded" (default) | "cert-manager" | "external". Auto-overridden to "cert-manager" when dataCert.enabled, and to "external" when dataIngress.tls.secretName or gateway.data.tls.secretName is set.
+## @param supervisor.dataplane.tls.certPath Server certificate path (only "external", or auto-wired). cert-manager/dataIngress/gateway.data auto-wire the mounted data-tls secret.
 ## @param supervisor.dataplane.tls.keyPath Server key path (only "external", or auto-wired).
 ## @param supervisor.dataplane.tls.clientCertTtl Client certificate TTL (engine session certs minted from the CA).
 ## @param supervisor.dataplane.tls.caCrt [optional] PEM-encoded minting CA certificate. Leave empty to AUTO-BOOTSTRAP on first boot.
@@ -183,12 +184,16 @@ supervisor:
 ## @descriptionStart
 ## URLs are NOT asked — they are computed from the exposition:
 ## - `server.public_url` (UI + API): `https://<ingress host>` when the ingress
-##   has TLS, `http://<ingress host>` without TLS; `<service.control.host>`
-##   for LoadBalancer/NodePort; else the internal
+##   has TLS, `http://<ingress host>` without TLS; with Gateway API exposition
+##   (`gateway.enabled` + `gateway.control.enabled`), `https://<gateway.control.host>`
+##   (http when `gateway.control.tls.enabled=false`), which wins over the ingress;
+##   `<service.control.host>` for LoadBalancer/NodePort; else the internal
 ##   `https://<release>-control.<namespace>.svc:<port>`.
-## - `server.data_hostname` (engine data plane): `<dataIngress.host>` when the
-##   data ingress is enabled, `<service.data.host>` for LoadBalancer/NodePort,
-##   else `<release>-data.<namespace>.svc:<port>`.
+## - `server.data_hostname` (engine data plane): `<gateway.data.host>` when
+##   `gateway.enabled` + `gateway.data.enabled` (wins over the data ingress),
+##   `<dataIngress.host>` when the data ingress is enabled,
+##   `<service.data.host>` for LoadBalancer/NodePort, else
+##   `<release>-data.<namespace>.svc:<port>`.
 ## - `server.pipeline_url` is dropped: pipeline-view links use the same URL as
 ##   the UI.
 ## Container paths/ports are fixed (control :8080, data :8443, raft :8081,
@@ -566,7 +571,7 @@ supervisor:
 ## @param imageCache.sync.retryDelay Delay between upstream fetch retries.
 ## @param imageCache.tls.enabled Serve the Zot mirrors over HTTPS (requires imageCache.tls.secretName).
 ## @param imageCache.tls.secretName Secret with tls.crt + tls.key valid for every mirror hostname (a wildcard `*.<namespace>.svc` cert covers all mirrors). Required when enabled.
-## @param imageCache.tls.caSecretName Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors.
+## @param imageCache.tls.caSecretName Optional Secret (key `imageCache.tls.caSecretKey`) with the CA that signed the mirror cert; mounted into the supervisor so `image_cache.tls_ca_path` can verify HTTPS mirrors. When `gateway.registryMirror` renders a `BackendTLSPolicy` with a private CA, also provide a `ConfigMap` of the same name in the release namespace (key `ca.crt`) — Gateway API only reads `ca.crt` from a Core `ConfigMap` — or set `gateway.registryMirror.backendTLS.caCertificateRef.name` explicitly.
 ## @param imageCache.tls.caSecretKey Key inside `imageCache.tls.caSecretName` (default "ca.crt").
 ## @param imageCache.resources.requests.cpu Mirror CPU request.
 ## @param imageCache.resources.requests.memory Mirror memory request.
@@ -877,9 +882,13 @@ ingress:
 ## @section Data-plane Ingress (mTLS passthrough)
 
 ## @param dataIngress.enabled Expose data plane via TLS passthrough on a dedicated host.
-##   Creates an ingress with nginx.ingress.kubernetes.io/ssl-passthrough: "true".
-##   The data plane cert must include this hostname (embedded provider adds it
-##   automatically; for external/cert-manager providers, ensure the cert has it).
+##   Creates a passthrough resource on the dedicated host, selected by
+##   dataIngress.passthroughVia: an Ingress with
+##   nginx.ingress.kubernetes.io/ssl-passthrough: "true" (community
+##   ingress-nginx) or a k8s.nginx.org/v1 TransportServer (F5 NGINX Ingress
+##   Controller). The data plane cert must include this hostname (embedded
+##   provider adds it automatically; for external/cert-manager providers,
+##   ensure the cert has it).
 ## @param dataIngress.host Hostname for the data plane (e.g. data.supv.example.com).
 ##   Must resolve to the same IP as the control plane ingress.
 ## @param dataIngress.className Ingress class name.
@@ -892,19 +901,30 @@ ingress:
 ##   Encrypt certificate via the annotation
 ##   `cert-manager.io/cluster-issuer: <issuer>`, or an operator-managed
 ##   keypair). Takes precedence over dataCert.secretName.
+## @param dataIngress.passthroughVia [string] How the TLS passthrough is
+##   implemented, depending on the ingress controller. "annotation" (default):
+##   kubernetes/ingress-nginx (community, EOL) — creates an Ingress with
+##   nginx.ingress.kubernetes.io/ssl-passthrough: "true". "transportServer":
+##   F5 NGINX Ingress Controller — creates a TransportServer (k8s.nginx.org/v1)
+##   instead of an Ingress; requires controller.enableTLSPassthrough=true on the
+##   controller, and the host must NOT be claimed by any other Ingress or
+##   VirtualServer (the TransportServer claims it globally). In transportServer
+##   mode no data Ingress renders, so dataIngress.annotations cert-manager
+##   annotations are inert — set dataCert.enabled: true (with
+##   dataIngress.tls.secretName empty) for cert-manager renewal.
+## @param dataIngress.sessionTimeout [string] Idle timeout between two successive
+##   read or write operations on the passthrough stream (F5 TransportServer
+##   `sessionParameters.timeout` / nginx `proxy_timeout`). Only used when
+##   dataIngress.passthroughVia=transportServer. The controller default is 10m,
+##   which cuts long-lived idle connections such as a Dagger CLI control
+##   connection during a CI pipeline; raise it for long engine sessions.
 dataIngress:
   enabled: false
   host: "data.supv.example.com"
   className: ""
   annotations: {}
-  ## How the TLS passthrough is implemented, depending on the ingress controller:
-  ##   annotation      - kubernetes/ingress-nginx (community, EOL): creates an
-  ##                     Ingress with nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-  ##   transportServer - F5 NGINX Ingress Controller: creates a TransportServer
-  ##                     (k8s.nginx.org) instead of an Ingress. Requires
-  ##                     controller.enableTLSPassthrough=true on the controller.
-  ##                     The host must NOT be claimed by any other Ingress.
   passthroughVia: "annotation"
+  sessionTimeout: "24h"
   tls:
     secretName: ""
 
@@ -916,9 +936,11 @@ dataIngress:
 ##   `supervisor.dataplane.tls.provider` to "cert-manager" and auto-wires
 ##   certPath/keyPath to the resulting Secret (mounted as the supervisor's
 ##   server certificate). The minting CA is still auto-bootstrapped (it never
-##   needs a public issuer). When BOTH dataCert.enabled and
-##   dataIngress.tls.secretName are set, dataIngress.tls.secretName wins —
-##   operators should set only one of them.
+##   needs a public issuer). When BOTH dataCert.enabled and a data TLS secret
+##   (dataIngress.tls.secretName or gateway.data.tls.secretName) are set, the
+##   secret wins — operators should set only one of them. With Gateway API
+##   exposition, `dataCert` dnsNames[0] follows `gateway.data.host` when
+##   `gateway.enabled` + `gateway.data.enabled`.
 ## @param dataCert.issuerName cert-manager ClusterIssuer name (e.g. letsencrypt-prod).
 ## @param dataCert.issuerKind cert-manager issuer kind: ClusterIssuer or Issuer.
 ## @param dataCert.secretName Secret name where cert-manager stores the certificate.
@@ -927,6 +949,162 @@ dataCert:
   issuerName: "letsencrypt-prod"
   issuerKind: "ClusterIssuer"
   secretName: ""
+
+## @section Gateway API
+
+## @descriptionStart
+## Expose the platform through Kubernetes Gateway API v1 resources (`Gateway`,
+## `HTTPRoute`, `TLSRoute`, `BackendTLSPolicy`) instead of — or alongside
+## during migration — `Ingress` / `TransportServer`. Targets NGINX Gateway
+## Fabric (NGF >= 2.9, `gatewayClassName: nginx`) by default, with NGF policy
+## attachments toggleable via `gateway.nginxPolicies.*` for portability to other
+## Gateway API implementations.
+## When switching from Ingress to Gateway API only, set `ingress.enabled: false`
+## (and `dataIngress.enabled: false`, `imageCache.registryIngress.enabled: false`,
+## `dex.ingress.enabled: false` if used).
+## @descriptionEnd
+
+## @param gateway.enabled Enable Gateway API exposition (`HTTPRoute` / `TLSRoute` / `BackendTLSPolicy`, plus `Gateway` when `gateway.create=true`).
+## @param gateway.create Render a dedicated `Gateway` resource in the release namespace. Set `false` to attach routes to an existing shared Gateway via `gateway.parentRef`.
+## @param gateway.name Override the rendered `Gateway` name (empty = `<fullname>`). Ignored when `gateway.create=false`.
+## @param gateway.className `GatewayClass` name for the rendered `Gateway` (`nginx` for NGINX Gateway Fabric).
+## @param gateway.annotations [object] Annotations on the rendered `Gateway` (e.g. `cert-manager.io/cluster-issuer: letsencrypt-prod` so cert-manager issues/renews TLS certs for all HTTPS Terminate listeners).
+## @param gateway.labels [object] Extra labels on the rendered `Gateway`.
+## @param gateway.addresses [array] Optional static `spec.addresses` entries on the rendered `Gateway`.
+## @param gateway.infrastructure [object] Optional `spec.infrastructure` (`annotations`, `labels`, `parametersRef`, e.g. a per-Gateway `NginxProxy`).
+## @param gateway.ports.http HTTP listener port on the rendered `Gateway` (listener `http` omits `hostname` so ACME `gatewayHTTPRoute` challenges work for every host, including `dataCert`).
+## @param gateway.ports.https HTTPS Terminate listener port on the rendered `Gateway`.
+## @param gateway.ports.tls TLS Passthrough listener port on the rendered `Gateway`.
+## @param gateway.allowedRoutes.namespaces.from Namespace policy on rendered `Gateway` listeners (`Same` | `All` | `Selector`). Set `All` when sharing this Gateway across namespaces.
+## @param gateway.allowedRoutes.namespaces.selector [object] Label selector when `allowedRoutes.namespaces.from=Selector`.
+## @param gateway.allowedListeners [object] Optional `spec.allowedListeners` on the rendered `Gateway` (e.g. `{namespaces: {from: Same}}` for `ListenerSet` attachment).
+## @param gateway.extraListeners [array] Additional raw listener entries appended to `Gateway.spec.listeners`.
+## @param gateway.parentRef.name Existing `Gateway` name when `gateway.create=false`.
+## @param gateway.parentRef.namespace Existing `Gateway` namespace when `gateway.create=false` (empty = release namespace).
+## @param gateway.httpSectionName Listener `sectionName` for HTTP (`:80`) routes and HTTP->HTTPS redirects.
+## @param gateway.tlsRedirect Render an `HTTPRoute` (`RequestRedirect` 301 HTTP->HTTPS) on `httpSectionName` for all TLS-terminated Gateway hosts (`control`, `registryMirror`, `dex`). Cert-manager `Exact` ACME challenge routes take precedence over `PathPrefix: /`.
+## @param gateway.control.enabled Expose the supervisor control plane (UI + API + OTLP + `/v1/engine` WebSocket) via `HTTPRoute` + `BackendTLSPolicy`.
+## @param gateway.control.host Hostname for the control plane (e.g. `supv.example.com`). Drives `server.public_url`.
+## @param gateway.control.sectionName Listener `sectionName` for the control `HTTPRoute` when TLS is enabled (`https` on the rendered Gateway).
+## @param gateway.control.annotations [object] Extra annotations on the control `HTTPRoute`.
+## @param gateway.control.maxBodySize Max request body size (`ClientSettingsPolicy` `body.maxSize`). Keep >= `supervisor.config.otel.ingestMaxBodySize` (`64m`).
+## @param gateway.control.readTimeout Upstream proxy read timeout (`ProxySettingsPolicy` `timeout.read`) for long-lived `/v1/engine` WebSockets and SSE streams.
+## @param gateway.control.sendTimeout Upstream proxy send timeout (`ProxySettingsPolicy` `timeout.send`).
+## @param gateway.control.tls.enabled Terminate HTTPS on the Gateway for the control host (`false` attaches to `httpSectionName` over HTTP).
+## @param gateway.control.tls.secretName TLS Secret name referenced by the control `https` listener (empty = `<fullname>-gateway-tls`; populated by cert-manager when `cert-manager.io/cluster-issuer` is set on `gateway.annotations`).
+## @param gateway.control.backendTLS.enabled Render a `BackendTLSPolicy` for `<fullname>-control` (required because the supervisor `:8080` listener serves HTTPS).
+## @param gateway.control.backendTLS.hostname SNI and certificate SAN verified on `<fullname>-control` (empty = `<fullname>-control.<namespace>.svc`, which triggers the supervisor's Minting-CA internal leaf).
+## @param gateway.control.backendTLS.wellKnownCACertificates Set to `"System"` to verify against system roots instead of `caCertificateRef` (mutually exclusive with `caCertificateRef`).
+## @param gateway.control.backendTLS.caCertificateRef.group API group of the CA object verifying `<fullname>-control` (`""` for the Core `ConfigMap`).
+## @param gateway.control.backendTLS.caCertificateRef.kind Kind of the CA object (`ConfigMap` is the Gateway API Core kind; NGF `2.9.1` rejects `Secret` refs).
+## @param gateway.control.backendTLS.caCertificateRef.name Name of the CA object holding `ca.crt` (empty = `<fullname>-minting-ca-bundle`, auto-populated and rotated by the supervisor).
+## @param gateway.data.enabled Expose the supervisor mTLS data plane via TLS passthrough (`TLSRoute` -> `<fullname>-data`). Pair with `dataCert.enabled: true` for cert-manager issuance/renewal.
+## @param gateway.data.host Hostname for the mTLS data plane (e.g. `data.supv.example.com`; must differ from `gateway.control.host`). Drives `server.data_hostname` and `dataCert` `dnsNames`.
+## @param gateway.data.sectionName Listener `sectionName` for the data `TLSRoute` (`tls-data` on the rendered Gateway; set `""` to omit `sectionName`).
+## @param gateway.data.annotations [object] Extra annotations on the data `TLSRoute`.
+## @param gateway.data.sessionTimeout Stream idle timeout (`proxy_timeout`) injected via `SnippetsPolicy` (`stream.server`) when `gateway.nginxPolicies.snippets.enabled=true`. Raises NGINX's 10m default so long idle CI sessions are not cut.
+## @param gateway.data.tls.secretName Optional pre-existing `kubernetes.io/tls` Secret mounted into the supervisor for the data plane (alternative to `dataCert.enabled`; auto-switches `supervisor.dataplane.tls.provider` to `"external"`).
+## @param gateway.registryMirror.enabled Expose the `registry.dagger.io` Zot mirror via `HTTPRoute` so node kubelets pull engine images through it (`external_addr`, ADR-046). Requires `imageCache.enabled` and `imageCache.presets."registry.dagger.io".enabled`.
+## @param gateway.registryMirror.host Node-reachable hostname for the mirror route.
+## @param gateway.registryMirror.sectionName Listener `sectionName` for the mirror `HTTPRoute` (`https-mirror` on the rendered Gateway).
+## @param gateway.registryMirror.annotations [object] Extra annotations on the mirror `HTTPRoute`.
+## @param gateway.registryMirror.readTimeout Upstream proxy read timeout (`ProxySettingsPolicy`) for cold Zot upstream layer pulls.
+## @param gateway.registryMirror.sendTimeout Upstream proxy send timeout (`ProxySettingsPolicy`).
+## @param gateway.registryMirror.tls.enabled Terminate HTTPS on the Gateway for the mirror host (required in practice so kubelet trusts the pull).
+## @param gateway.registryMirror.tls.secretName TLS Secret name referenced by the `https-mirror` listener (empty = `<fullname>-mirror-tls`).
+## @param gateway.registryMirror.backendTLS.hostname Override SNI/SAN verified on the mirror Service when `imageCache.tls.enabled=true` (empty = `<release>-registry-dagger-io-mirror.<namespace>.svc`).
+## @param gateway.registryMirror.backendTLS.wellKnownCACertificates Set to `"System"` when `imageCache.tls.enabled=true` uses a publicly trusted cert without `imageCache.tls.caSecretName`.
+## @param gateway.registryMirror.backendTLS.caCertificateRef.group API group of the CA object for the mirror `BackendTLSPolicy`.
+## @param gateway.registryMirror.backendTLS.caCertificateRef.kind Kind of the CA object for a private mirror CA (`ConfigMap` with key `ca.crt` is the Gateway API Core kind; `Secret` is Implementation-specific on NGF `2.9.1` and requires a `kubernetes.io/tls` Secret with valid `tls.crt` + `tls.key` *and* `ca.crt`).
+## @param gateway.registryMirror.backendTLS.caCertificateRef.name Name of the CA object (empty = `imageCache.tls.caSecretName`). With a private mirror CA, provide a `ConfigMap` with key `ca.crt` in the release namespace, or set this explicitly.
+## @param gateway.dex.enabled Expose the optional `dex` subchart via `HTTPRoute` + `https-dex` Gateway listener (set `dex.ingress.enabled: false` when enabled). Requires `dex.enabled: true`.
+## @param gateway.dex.host Hostname for Dex (must match `dex.config.issuer` host).
+## @param gateway.dex.sectionName Listener `sectionName` for the Dex `HTTPRoute` (`https-dex` on the rendered Gateway).
+## @param gateway.dex.annotations [object] Extra annotations on the Dex `HTTPRoute`.
+## @param gateway.dex.tls.enabled Terminate HTTPS on the Gateway for the Dex host.
+## @param gateway.dex.tls.secretName TLS Secret name referenced by the `https-dex` listener (empty = `<fullname>-dex-tls`).
+## @param gateway.nginxPolicies.enabled Render NGF `gateway.nginx.org/v1alpha1` policies (`ClientSettingsPolicy` for `maxBodySize`, `ProxySettingsPolicy` for WebSocket/SSE/mirror timeouts). Disable on non-NGF Gateway controllers.
+## @param gateway.nginxPolicies.snippets.enabled Render an NGF `SnippetsPolicy` (`context: stream.server`, `proxy_timeout <gateway.data.sessionTimeout>;`) on the rendered `Gateway` when `gateway.data.enabled=true`. Requires NGF >= 2.9 installed with `nginxGateway.snippets.enable=true`.
+gateway:
+  enabled: false
+  create: true
+  name: ""
+  className: "nginx"
+  annotations: {}
+  labels: {}
+  addresses: []
+  infrastructure: {}
+  ports:
+    http: 80
+    https: 443
+    tls: 443
+  allowedRoutes:
+    namespaces:
+      from: "Same"
+      selector: {}
+  allowedListeners: {}
+  extraListeners: []
+  parentRef:
+    name: ""
+    namespace: ""
+  httpSectionName: "http"
+  tlsRedirect: true
+  control:
+    enabled: true
+    host: "supv.example.com"
+    sectionName: "https"
+    annotations: {}
+    maxBodySize: "64m"
+    readTimeout: "3600s"
+    sendTimeout: "3600s"
+    tls:
+      enabled: true
+      secretName: ""
+    backendTLS:
+      enabled: true
+      hostname: ""
+      wellKnownCACertificates: ""
+      caCertificateRef:
+        group: ""
+        kind: "ConfigMap"
+        name: ""
+  data:
+    enabled: false
+    host: "data.supv.example.com"
+    sectionName: "tls-data"
+    annotations: {}
+    sessionTimeout: "24h"
+    tls:
+      secretName: ""
+  registryMirror:
+    enabled: false
+    host: "mirror-registry.example.com"
+    sectionName: "https-mirror"
+    annotations: {}
+    readTimeout: "300s"
+    sendTimeout: "300s"
+    tls:
+      enabled: true
+      secretName: ""
+    backendTLS:
+      hostname: ""
+      wellKnownCACertificates: ""
+      caCertificateRef:
+        group: ""
+        kind: "ConfigMap"
+        name: ""
+  dex:
+    enabled: false
+    host: "dex.example.com"
+    sectionName: "https-dex"
+    annotations: {}
+    tls:
+      enabled: true
+      secretName: ""
+  nginxPolicies:
+    enabled: true
+    snippets:
+      enabled: true
 
 ## @section Prometheus ServiceMonitor
 

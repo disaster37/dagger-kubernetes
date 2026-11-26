@@ -10,7 +10,10 @@
 **Updated:** 2026-08-28 — `tls.provider` config key renamed to
 `supervisor.dataplane.tls.provider`; the Helm chart now auto-switches the
 provider value when `dataCert.enabled` or `dataIngress.tls.secretName` is set,
-so operators no longer need to manually set it. See also the data-plane TLS
+so operators no longer need to manually set it. When
+`dataIngress.passthroughVia: transportServer` (F5 NGINX Ingress Controller) no
+data-plane Ingress renders, so cert-manager renewal uses `dataCert.enabled:
+true` rather than `dataIngress.annotations`. See also the data-plane TLS
 troubleshooting section in `docs/README.md`.
 
 ## Context
@@ -61,3 +64,10 @@ startup and persists it:
 - In multi-node, the `ca.minting_ca_secret` Secret holds the CA **private
   key** (any pod may mint client certs) and must be RBAC-restricted to the
   supervisor ServiceAccount.
+- With Gateway API exposition ([ADR-060](ADR-060-gateway-api-exposition.md)),
+  the leader supervisor publishes the **public** minting CA trust bundle
+  (certificates only, key `ca.crt`) into the `<fullname>-minting-ca-bundle`
+  ConfigMap (`ca.minting_ca_configmap`), which backs the control
+  `BackendTLSPolicy` verifying the supervisor's HTTPS `:8080` listener. The
+  bundle carries the full dual-trust set during phased rotation and never the
+  CA private key (that stays only in the `<fullname>-minting-ca` Secret).

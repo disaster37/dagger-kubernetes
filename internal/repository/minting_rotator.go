@@ -181,6 +181,42 @@ func (d *DynamicMintingCA) ActiveCAPEM() (keyID string, term uint64, certPEM, ke
 	return active.ID, st.keyring.Term, active.CertPEM, keyPEM, true
 }
 
+// TrustBundlePEM returns the public Minting CA trust bundle as a concatenated
+// PEM of every key in the current keyring (certificates only — never the
+// private keys), suitable for a Gateway API BackendTLSPolicy Core ConfigMap
+// ca.crt. During phased rotation it yields the full dual-trust bundle
+// ([M0, M1]) at the stage/activate terms so a load-balanced control Service
+// keeps verifying followers that still present the old leaf. ok is false when
+// no CA is available yet.
+func (d *DynamicMintingCA) TrustBundlePEM() ([]byte, bool) {
+	st := d.state.Load()
+	if st == nil {
+		return nil, false
+	}
+	if st.keyring != nil {
+		var buf bytes.Buffer
+		for _, k := range st.keyring.Keys {
+			if k == nil || len(k.CertPEM) == 0 {
+				continue
+			}
+			buf.Write(bytes.TrimSpace(k.CertPEM))
+			buf.WriteByte('\n')
+		}
+		if buf.Len() == 0 {
+			return nil, false
+		}
+		return buf.Bytes(), true
+	}
+	if st.active != nil {
+		certPEM, _, err := st.active.EncodePEM()
+		if err != nil || len(certPEM) == 0 {
+			return nil, false
+		}
+		return certPEM, true
+	}
+	return nil, false
+}
+
 // SetKeyringJSON installs a replicated keyring JSON document, updating the
 // active CA, the union pool, and the server/internal leaves atomically.
 func (d *DynamicMintingCA) SetKeyringJSON(value string) error {

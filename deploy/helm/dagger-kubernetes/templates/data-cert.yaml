@@ -12,5 +12,9 @@ spec:
     name: {{ .Values.dataCert.issuerName }}
     kind: {{ .Values.dataCert.issuerKind }}
   dnsNames:
+    {{- if and .Values.gateway.enabled .Values.gateway.data.enabled }}
+    - {{ required "gateway.data.host is required when gateway.enabled and gateway.data.enabled" .Values.gateway.data.host | quote }}
+    {{- else }}
     - {{ required "dataIngress.host is required when dataCert is enabled" .Values.dataIngress.host | quote }}
+    {{- end }}
 {{- end }}
