@@ -675,7 +675,7 @@ func TestOAuthRevalidatorRefreshAutoCreatesMappedGroup(t *testing.T) {
 		t.Fatalf("check: %v", err)
 	}
 
-	created, err := r.groups.GetByName(ctx, "auto-rev")
+	created, err := r.groups.GetByName(ctx, "", "auto-rev")
 	if err != nil {
 		t.Fatalf("auto-created group not persisted: %v", err)
 	}

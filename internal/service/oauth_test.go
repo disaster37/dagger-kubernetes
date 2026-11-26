@@ -33,7 +33,7 @@ type getErrGroupRepo struct {
 	err error
 }
 
-func (r *getErrGroupRepo) GetByName(_ context.Context, _ string) (*domain.Group, error) {
+func (r *getErrGroupRepo) GetByName(_ context.Context, _, _ string) (*domain.Group, error) {
 	return nil, r.err
 }
 
@@ -76,7 +76,7 @@ func TestEnsureGroupByName(t *testing.T) {
 				if !ValidateGroupName(g.Name) {
 					t.Fatalf("created group name %q invalid", g.Name)
 				}
-				got, err := groups.GetByName(context.Background(), "brand-new")
+				got, err := groups.GetByName(context.Background(), "", "brand-new")
 				if err != nil {
 					t.Fatalf("GetByName after create: %v", err)
 				}
@@ -113,7 +113,7 @@ func TestEnsureGroupByName(t *testing.T) {
 			groups := newServiceDB(t).groups
 			name := tt.setup(t, groups)
 
-			g, err := ensureGroupByName(context.Background(), groups, name, 3, testLogger())
+			g, err := ensureGroupByName(context.Background(), groups, nil, "", name, 3, testLogger())
 			if err != nil {
 				t.Fatalf("ensureGroupByName error = %v, want nil", err)
 			}
@@ -140,7 +140,7 @@ func TestEnsureGroupByNameGetError(t *testing.T) {
 	wantErr := errors.New("store unavailable")
 	repo := &getErrGroupRepo{err: wantErr}
 
-	g, err := ensureGroupByName(context.Background(), repo, "g", 0, testLogger())
+	g, err := ensureGroupByName(context.Background(), repo, nil, "", "g", 0, testLogger())
 	if g != nil {
 		t.Fatalf("group = %v, want nil", g)
 	}
@@ -153,7 +153,7 @@ func TestEnsureGroupByNameConflictReusesWinner(t *testing.T) {
 	backing := newServiceDB(t).groups
 	repo := &conflictGroupRepo{GroupRepository: backing}
 
-	g, err := ensureGroupByName(context.Background(), repo, "raced", 5, testLogger())
+	g, err := ensureGroupByName(context.Background(), repo, nil, "", "raced", 5, testLogger())
 	if err != nil {
 		t.Fatalf("ensureGroupByName: %v", err)
 	}
@@ -184,7 +184,11 @@ func TestResolveOAuthGroupIDsAutoCreates(t *testing.T) {
 		t.Fatalf("seed group: %v", err)
 	}
 
-	gids, err := resolveOAuthGroupIDs(ctx, r.groups, logger, []string{"existing", "brand-new", "has space"}, 3)
+	gids, err := resolveOAuthGroupIDs(ctx, r.groups, nil, nil, logger, []mappedGroup{
+		{Name: "existing"},
+		{Name: "brand-new"},
+		{Name: "has space"},
+	}, 3)
 	if err != nil {
 		t.Fatalf("resolveOAuthGroupIDs: %v", err)
 	}
@@ -193,7 +197,7 @@ func TestResolveOAuthGroupIDsAutoCreates(t *testing.T) {
 	}
 
 	// The pre-existing group's quota is untouched.
-	existing, err := r.groups.GetByName(ctx, "existing")
+	existing, err := r.groups.GetByName(ctx, "", "existing")
 	if err != nil {
 		t.Fatalf("GetByName existing: %v", err)
 	}
@@ -202,7 +206,7 @@ func TestResolveOAuthGroupIDsAutoCreates(t *testing.T) {
 	}
 
 	// The missing group is auto-created with the default limit.
-	created, err := r.groups.GetByName(ctx, "brand-new")
+	created, err := r.groups.GetByName(ctx, "", "brand-new")
 	if err != nil {
 		t.Fatalf("GetByName brand-new: %v", err)
 	}

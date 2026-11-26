@@ -93,7 +93,7 @@ func TestHandleTracesDetailEnrichesUser(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			if tc.seed {
-				if err := env.server.traceMeta.UpsertProvision(ctx, tc.traceID, tc.seedUser, ""); err != nil {
+				if err := env.server.traceMeta.UpsertProvision(ctx, "", tc.traceID, tc.seedUser, ""); err != nil {
 					t.Fatalf("upsert provision: %v", err)
 				}
 			}
@@ -223,7 +223,7 @@ func TestHandleTracesListTextFilters(t *testing.T) {
 
 	seed := func(traceID, userID, ciRepo, project string) {
 		t.Helper()
-		if err := env.server.traceMeta.UpsertProvision(ctx, traceID, userID, ""); err != nil {
+		if err := env.server.traceMeta.UpsertProvision(ctx, "", traceID, userID, ""); err != nil {
 			t.Fatalf("provision: %v", err)
 		}
 		if err := env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{
@@ -236,7 +236,7 @@ func TestHandleTracesListTextFilters(t *testing.T) {
 	// admin's repo run, alice's project-only run, and an anonymous run.
 	seed("trace-repo", admin.ID, "github.com/org/repo", "")
 	seed("trace-alice", alice.ID, "", "alice-project")
-	seed("trace-anon", "", "", "unrelated")
+	seed("trace-anon", "", "unrelated", "")
 
 	cases := []struct {
 		name  string
@@ -277,6 +277,85 @@ func TestHandleTracesListTextFilters(t *testing.T) {
 				if !got[w] {
 					t.Fatalf("missing %q in %+v", w, got)
 				}
+			}
+		})
+	}
+}
+
+// TestHandleTracesDetailPromotesRootSpanStatus proves the terminal-status
+// invariant: when trace_meta captured a final status, the (stale) root span is
+// promoted to it and a zero root duration is backfilled from the trace
+// duration; a terminal root status is never downgraded.
+func TestHandleTracesDetailPromotesRootSpanStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		rootStatus  string
+		rootDurMS   int64
+		metaStatus  string
+		metaDurMS   int64
+		wantStatus  string
+		wantRootDur int64
+	}{
+		{
+			name:       "running root promoted to success with duration backfill",
+			rootStatus: "running", rootDurMS: 0,
+			metaStatus: "success", metaDurMS: 1847,
+			wantStatus: "success", wantRootDur: 1847,
+		},
+		{
+			name:       "empty root promoted to failed",
+			rootStatus: "", rootDurMS: 0,
+			metaStatus: "failed", metaDurMS: 500,
+			wantStatus: "failed", wantRootDur: 500,
+		},
+		{
+			name:       "terminal root never downgraded",
+			rootStatus: "failed", rootDurMS: 900,
+			metaStatus: "running", metaDurMS: 0,
+			wantStatus: "failed", wantRootDur: 900,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newTestEnv(t)
+			bearer := env.loginAsAdmin(t)
+			ctx := context.Background()
+
+			const traceID = "trace-root-promote"
+			root := &domain.SpanNode{SpanID: "root", Name: "build", Status: tc.rootStatus, DurationMS: tc.rootDurMS}
+			env.server.traces = &stubTraceRepo{trace: &domain.TraceInfo{
+				TraceID: traceID, RootSpan: root, Status: "running", DurationMS: 0,
+			}}
+			if err := env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{
+				TraceID: traceID, Status: tc.metaStatus, DurationMS: tc.metaDurMS, StartedAt: time.Now().UTC(),
+			}); err != nil {
+				t.Fatalf("seed trace_meta: %v", err)
+			}
+
+			e := newAuthEngine(env.server)
+			resp := ut.PerformRequest(e, "GET", "/api/v1/traces/"+traceID, nil, ut.Header{Key: "Authorization", Value: bearer})
+			if resp.Result().StatusCode() != http.StatusOK {
+				t.Fatalf("status = %d, want 200", resp.Result().StatusCode())
+			}
+			var body struct {
+				Status   string `json:"status"`
+				RootSpan struct {
+					Status     string `json:"status"`
+					DurationMS int64  `json:"duration_ms"`
+				} `json:"root_span"`
+			}
+			if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+				t.Fatalf("decode: %v", err)
+			}
+			if body.Status != tc.wantStatus {
+				t.Fatalf("trace status = %q, want %q", body.Status, tc.wantStatus)
+			}
+			if body.RootSpan.Status != tc.wantStatus {
+				t.Fatalf("root_span.status = %q, want %q", body.RootSpan.Status, tc.wantStatus)
+			}
+			if body.RootSpan.DurationMS != tc.wantRootDur {
+				t.Fatalf("root_span.duration_ms = %d, want %d", body.RootSpan.DurationMS, tc.wantRootDur)
 			}
 		})
 	}

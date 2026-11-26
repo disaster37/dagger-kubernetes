@@ -18,12 +18,12 @@ func TestTraceMetaRepoProvisionSetOnce(t *testing.T) {
 	u1 := seedUser(t, store, "u1")
 	u2 := seedUser(t, store, "u2")
 
-	if err := repo.UpsertProvision(ctx, "t1", u1.ID, "v0.21.4"); err != nil {
+	if err := repo.UpsertProvision(ctx, "", "t1", u1.ID, "v0.21.4"); err != nil {
 		t.Fatalf("UpsertProvision: %v", err)
 	}
 	// Second provision by a different user must not steal the trace, and an
 	// empty version must not wipe the previously recorded one.
-	if err := repo.UpsertProvision(ctx, "t1", u2.ID, ""); err != nil {
+	if err := repo.UpsertProvision(ctx, "", "t1", u2.ID, ""); err != nil {
 		t.Fatalf("UpsertProvision 2: %v", err)
 	}
 	got, _ := repo.Get(ctx, "t1")
@@ -42,7 +42,7 @@ func TestTraceMetaRepoValidatesTraceIDKey(t *testing.T) {
 
 	t.Run("provision rejects invalid key", func(t *testing.T) {
 		for _, id := range []string{`bad"id`, "has space", "", ".leading-dot"} {
-			err := repo.UpsertProvision(ctx, id, "u1", "v0.21.4")
+			err := repo.UpsertProvision(ctx, "", id, "u1", "v0.21.4")
 			if !errors.Is(err, domain.ErrValidation) {
 				t.Fatalf("UpsertProvision(%q) err = %v, want ErrValidation", id, err)
 			}
@@ -59,7 +59,7 @@ func TestTraceMetaRepoValidatesTraceIDKey(t *testing.T) {
 	})
 
 	t.Run("broad-charset key still succeeds", func(t *testing.T) {
-		if err := repo.UpsertProvision(ctx, "test-trace-001", "u1", "v0.21.4"); err != nil {
+		if err := repo.UpsertProvision(ctx, "", "test-trace-001", "u1", "v0.21.4"); err != nil {
 			t.Fatalf("UpsertProvision broad key: %v", err)
 		}
 		if err := repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "in-group_1.v2", Status: "success"}); err != nil {
@@ -376,7 +376,7 @@ func TestTraceMetaRepoStats(t *testing.T) {
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "a", StartedAt: base, UpdatedAt: base})
 	repo.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "b", StartedAt: base.Add(-3 * time.Hour), UpdatedAt: base.Add(-3 * time.Hour)})
 
-	count, oldest, err := repo.Stats(ctx)
+	count, oldest, err := repo.Stats(ctx, "")
 	if err != nil {
 		t.Fatalf("Stats: %v", err)
 	}

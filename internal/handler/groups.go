@@ -12,6 +12,7 @@ import (
 
 type groupRow struct {
 	ID                string `json:"id"`
+	OrgID             string `json:"org_id"`
 	Name              string `json:"name"`
 	Description       string `json:"description"`
 	MaxRunnerSessions int    `json:"max_runner_sessions"`
@@ -36,12 +37,13 @@ type setGroupMembersRequest struct {
 	UserIDs []string `json:"user_ids"`
 }
 
-// All handlers below are registered through adminOnly, which enforces the
-// admin role before they run.
-
-// handleGroupsList returns all groups with member counts and live quota usage.
+// handleGroupsList returns the request org's groups.
 func (s *Server) handleGroupsList(ctx context.Context, c *app.RequestContext) {
-	gs, err := s.groups.List(ctx)
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return
+	}
+	gs, err := s.groups.ListByOrg(ctx, org.ID)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -53,24 +55,37 @@ func (s *Server) handleGroupsList(ctx context.Context, c *app.RequestContext) {
 	c.JSON(consts.StatusOK, rows)
 }
 
-// handleGroupCreate creates a new group.
+// handleGroupCreate creates a group inside the request org.
 func (s *Server) handleGroupCreate(ctx context.Context, c *app.RequestContext) {
+	org, id, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
 	var req createGroupRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	g, err := s.groups.Create(ctx, toGroupInput(req))
+	if warning, err := s.quota.CheckGroupCreate(ctx, id, org.ID); err != nil {
+		s.writeServiceError(c, err)
+		return
+	} else {
+		setQuotaWarning(c, warning)
+	}
+	g, err := s.groups.Create(ctx, org.ID, toGroupInput(req))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
-	c.JSON(consts.StatusCreated, toGroupRow(g, 0, 0))
+	c.JSON(consts.StatusCreated, s.toGroupRow(ctx, g))
 }
 
 // handleGroupGet returns a single group.
 func (s *Server) handleGroupGet(ctx context.Context, c *app.RequestContext) {
-	id := c.Param("id")
-	g, err := s.groups.Get(ctx, id)
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return
+	}
+	g, err := s.groups.GetInOrg(ctx, org.ID, c.Param("id"))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -80,12 +95,15 @@ func (s *Server) handleGroupGet(ctx context.Context, c *app.RequestContext) {
 
 // handleGroupUpdate modifies a group.
 func (s *Server) handleGroupUpdate(ctx context.Context, c *app.RequestContext) {
-	id := c.Param("id")
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
 	var req updateGroupRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	g, err := s.groups.Update(ctx, id, toGroupInput(req))
+	g, err := s.groups.Update(ctx, org.ID, c.Param("id"), toGroupInput(req))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -95,8 +113,11 @@ func (s *Server) handleGroupUpdate(ctx context.Context, c *app.RequestContext) {
 
 // handleGroupDelete removes a group.
 func (s *Server) handleGroupDelete(ctx context.Context, c *app.RequestContext) {
-	id := c.Param("id")
-	if err := s.groups.Delete(ctx, id); err != nil {
+	org, _, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
+	if err := s.groups.Delete(ctx, org.ID, c.Param("id")); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
@@ -105,8 +126,15 @@ func (s *Server) handleGroupDelete(ctx context.Context, c *app.RequestContext) {
 
 // handleGroupMembers returns the users in a group.
 func (s *Server) handleGroupMembers(ctx context.Context, c *app.RequestContext) {
-	id := c.Param("id")
-	members, err := s.groups.Members(ctx, id)
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
+		return
+	}
+	if _, err := s.groups.GetInOrg(ctx, org.ID, c.Param("id")); err != nil {
+		s.writeServiceError(c, err)
+		return
+	}
+	members, err := s.groups.Members(ctx, c.Param("id"))
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
@@ -120,12 +148,21 @@ func (s *Server) handleGroupMembers(ctx context.Context, c *app.RequestContext) 
 
 // handleGroupSetMembers replaces a group's membership.
 func (s *Server) handleGroupSetMembers(ctx context.Context, c *app.RequestContext) {
-	id := c.Param("id")
+	org, id, ok := s.requireOrgAdminResolved(ctx, c)
+	if !ok {
+		return
+	}
 	var req setGroupMembersRequest
 	if !decodeBody(c, &req) {
 		return
 	}
-	if err := s.groups.SetMembers(ctx, id, req.UserIDs); err != nil {
+	if warning, err := s.quota.CheckMemberAdd(ctx, id, org.ID, int64(len(req.UserIDs))); err != nil {
+		s.writeServiceError(c, err)
+		return
+	} else {
+		setQuotaWarning(c, warning)
+	}
+	if err := s.groups.SetMembers(ctx, org.ID, c.Param("id"), req.UserIDs); err != nil {
 		s.writeServiceError(c, err)
 		return
 	}
@@ -152,6 +189,7 @@ func toGroupInput(req createGroupRequest) service.GroupInput {
 func toGroupRow(g *domain.Group, memberCount, activeSessions int) groupRow {
 	return groupRow{
 		ID:                g.ID,
+		OrgID:             g.OrgID,
 		Name:              g.Name,
 		Description:       g.Description,
 		MaxRunnerSessions: g.MaxRunnerSessions,
@@ -160,5 +198,12 @@ func toGroupRow(g *domain.Group, memberCount, activeSessions int) groupRow {
 		MemberCount:       memberCount,
 		ActiveSessions:    activeSessions,
 		CreatedAt:         formatTime(g.CreatedAt),
+	}
+}
+
+// setQuotaWarning emits the soft-quota warning header.
+func setQuotaWarning(c *app.RequestContext, warning string) {
+	if warning != "" {
+		c.Response.Header.Set("X-Dagger-Quota-Warning", warning)
 	}
 }

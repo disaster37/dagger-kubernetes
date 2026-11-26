@@ -36,12 +36,13 @@ func TestProjectMappingIngestAssigns(t *testing.T) {
 	}
 	attributionSvc.SetProjectMapper(mapper)
 
-	g, err := groupsSvc.Create(ctx, service.GroupInput{Name: "acme", AgentAvailable: true})
+	_, orgID := newIntegrationOrgService(t, store, groupRepo, nil, observ.NewTestLogger())
+	g, err := groupsSvc.Create(ctx, orgID, service.GroupInput{Name: "acme", AgentAvailable: true})
 	if err != nil {
 		t.Fatalf("create group: %v", err)
 	}
 
-	attributionSvc.Ingest(ctx, "trace-1", "user-1", "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	attributionSvc.Ingest(ctx, orgID, "trace-1", "user-1", "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, err := traceMetaRepo.Get(ctx, "trace-1")
 	if err != nil {
@@ -50,7 +51,7 @@ func TestProjectMappingIngestAssigns(t *testing.T) {
 	if meta.GroupID != g.ID {
 		t.Fatalf("trace group_id = %q, want %s (mapped)", meta.GroupID, g.ID)
 	}
-	proj, err := projectRepo.GetByName(ctx, "github.com/acme/api")
+	proj, err := projectRepo.GetByName(ctx, orgID, "github.com/acme/api")
 	if err != nil {
 		t.Fatalf("project GetByName: %v", err)
 	}
@@ -83,11 +84,12 @@ func TestProjectMappingIngestMissingGroupSkipped(t *testing.T) {
 	}
 	attributionSvc.SetProjectMapper(mapper)
 
-	if _, err := groupsSvc.Create(ctx, service.GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`}); err != nil {
+	_, orgID2 := newIntegrationOrgService(t, store, groupRepo, nil, observ.NewTestLogger())
+	if _, err := groupsSvc.Create(ctx, orgID2, service.GroupInput{Name: "auto", AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`}); err != nil {
 		t.Fatalf("create auto group: %v", err)
 	}
 
-	attributionSvc.Ingest(ctx, "trace-2", "user-1", "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
+	attributionSvc.Ingest(ctx, "", "trace-2", "user-1", "github.com/acme/api", "", "github", "v0.21.4", "success", 0, time.Now().UTC())
 
 	meta, err := traceMetaRepo.Get(ctx, "trace-2")
 	if err != nil {

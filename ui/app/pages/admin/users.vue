@@ -110,13 +110,10 @@
     <UModal v-model:open="groupModalOpen" :title="`Groups for ${groupModalUser?.username ?? ''}`">
       <template #body>
         <div class="max-h-[300px] overflow-y-auto">
-          <UCheckbox
-            v-for="g in allGroups"
-            :key="g.id"
+          <UCheckboxGroup
             v-model="groupModalSelected"
-            :value="g.id"
-            :label="g.name"
-            class="block py-1"
+            :items="groupModalItems"
+            class="block"
           />
         </div>
       </template>
@@ -300,6 +297,8 @@ function runConfirmed() {
   confirmAction?.()
   confirmAction = null
 }
+
+const groupModalItems = computed(() => allGroups.value.map(g => ({ label: g.name, value: g.id })))
 
 function manageGroups(u: UserRow) {
   groupModalUser.value = u

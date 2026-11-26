@@ -27,10 +27,18 @@ func (s *Server) handleTracesList(ctx context.Context, c *app.RequestContext) {
 		CIRepo:   strings.TrimSpace(c.Query("ci_repo")),
 		Username: strings.TrimSpace(c.Query("user")),
 	}
+	allOrgs := id.IsAdmin() && c.Query("org") == "all"
+	if !allOrgs {
+		org, _, ok := s.requireOrgMember(ctx, c)
+		if !ok {
+			return
+		}
+		f.OrgID = org.ID
+	}
 	if id.IsAdmin() {
 		// Admin may narrow with ?group_id= (repeatable); the "unassigned"
 		// keyword selects only traces without a group. Without a filter
-		// admins see everything.
+		// admins see everything in scope.
 		f.IncludeUnassigned = true
 		for _, gid := range c.QueryArgs().PeekAll("group_id") {
 			if string(gid) == "unassigned" {
@@ -115,11 +123,43 @@ func (s *Server) handleTracesDetail(ctx context.Context, c *app.RequestContext) 
 		trace.URL = u
 	}
 
+	// Enforce the root-span invariant: a terminal trace status is mirrored onto
+	// its root span (never a stale "running"), with the root duration backfilled
+	// from the trace duration; a terminal root span is never downgraded by a
+	// stale trace_meta "running".
+	promoteRootSpanStatus(trace)
+
 	// Derive the per-span exec view-model (command/args/env/exit/kind) from the
 	// flattened span attributes + events. Additive: non-exec spans stay nil.
 	service.DeriveExec(trace.RootSpan)
 
 	writeJSON(c, trace)
+}
+
+// promoteRootSpanStatus keeps trace.Status and trace.RootSpan.Status consistent
+// for a finished trace: a terminal trace status is promoted onto a running/empty
+// root span (and a zero root duration is backfilled from the trace duration so
+// the UI freezes liveSpanDuration at the final value), while a terminal root
+// span is never downgraded by a stale trace_meta "running".
+func promoteRootSpanStatus(trace *domain.TraceInfo) {
+	if trace == nil || trace.RootSpan == nil {
+		return
+	}
+	root := trace.RootSpan
+	rootTerminal := root.Status == "success" || root.Status == "failed"
+	if rootTerminal && (trace.Status == "running" || trace.Status == "") {
+		trace.Status = root.Status
+	}
+	if trace.Status != "success" && trace.Status != "failed" {
+		return
+	}
+	if root.Status == "running" || root.Status == "" {
+		root.Status = trace.Status
+	}
+	if root.DurationMS == 0 && trace.DurationMS > 0 {
+		root.DurationMS = trace.DurationMS
+		root.Duration = time.Duration(trace.DurationMS) * time.Millisecond
+	}
 }
 
 // handleTracesLogs returns a trace's logs (Loki). Gated by authorizeTrace.

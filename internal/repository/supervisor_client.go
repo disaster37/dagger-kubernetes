@@ -23,6 +23,7 @@ var maxSupervisorResponseBytes int64 = 32 << 20 // 32 MiB
 type SupervisorTraceClient struct {
 	baseURL    string // e.g. https://supv.example.com
 	token      string // Bearer token
+	org        string // optional X-Dagger-Org selector
 	httpClient *http.Client
 }
 
@@ -38,6 +39,12 @@ func NewSupervisorTraceClient(baseURL, token string, timeout time.Duration) *Sup
 			Timeout: timeout,
 		},
 	}
+}
+
+// WithOrg scopes every REST call to an organization via X-Dagger-Org.
+func (c *SupervisorTraceClient) WithOrg(org string) *SupervisorTraceClient {
+	c.org = strings.TrimSpace(org)
+	return c
 }
 
 // GetTrace fetches GET /api/v1/traces/{id} (Bearer auth) and decodes the
@@ -96,6 +103,9 @@ func (c *SupervisorTraceClient) getJSON(ctx context.Context, u string, out any) 
 		return fmt.Errorf("build request: %w", err)
 	}
 	req.Header.Set("Authorization", fmt.Sprintf("Bearer %s", c.token))
+	if c.org != "" {
+		req.Header.Set("X-Dagger-Org", c.org)
+	}
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {

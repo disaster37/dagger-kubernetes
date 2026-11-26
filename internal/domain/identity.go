@@ -19,6 +19,9 @@ type Identity struct {
 	Role     Role
 	GroupIDs []string
 	Method   AuthMethod
+	// OrgID is set for org-scoped dag_<org>_ tokens (and X-Dagger-Org
+	// resolution). Empty means the identity is not org-scoped.
+	OrgID string
 }
 
 // IsAdmin reports whether the identity has the admin role (which bypasses

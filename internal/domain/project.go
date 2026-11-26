@@ -8,6 +8,7 @@ import (
 // Project is a CI pipeline (identified by repo slug) assigned to a group.
 type Project struct {
 	ID        string    `json:"id"`
+	OrgID     string    `json:"org_id"`
 	Name      string    `json:"name"`               // canonical CI repo slug, e.g. "github.com/acme/api"
 	GroupID   string    `json:"group_id,omitempty"` // empty = unassigned
 	CreatedAt time.Time `json:"created_at"`
@@ -18,8 +19,12 @@ type Project struct {
 type ProjectRepository interface {
 	Create(ctx context.Context, p *Project) error
 	Get(ctx context.Context, id string) (*Project, error)
-	GetByName(ctx context.Context, name string) (*Project, error)
-	List(ctx context.Context) ([]*Project, error)
+	GetByName(ctx context.Context, orgID, name string) (*Project, error)
+	ListByOrg(ctx context.Context, orgID string) ([]*Project, error)
+	// ListByNameAcrossOrgs supports secretless CI OIDC lookups when the org
+	// selector is omitted.
+	ListByNameAcrossOrgs(ctx context.Context, name string) ([]*Project, error)
+	List(ctx context.Context) ([]*Project, error) // internal cross-org reads only
 	Update(ctx context.Context, p *Project) error
 	Delete(ctx context.Context, id string) error
 }

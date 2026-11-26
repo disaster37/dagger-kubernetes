@@ -15,7 +15,8 @@ import (
 // metrics-backend failure) yields an empty-but-valid payload (HTTP 200),
 // matching the tolerant trace-metrics endpoint.
 func (s *Server) handleFleetMetrics(ctx context.Context, c *app.RequestContext) {
-	if !s.requireAuth(ctx, c) {
+	org, _, ok := s.requireOrgMember(ctx, c)
+	if !ok {
 		return
 	}
 	version := c.Param("version")
@@ -28,10 +29,10 @@ func (s *Server) handleFleetMetrics(ctx context.Context, c *app.RequestContext) 
 		return
 	}
 	replicas := 0
-	if fleet, err := s.fleetManager.GetVersionFleet(version); err == nil {
+	if fleet, err := s.fleetManager.GetVersionFleetForOrg(org.ID, version); err == nil {
 		replicas = len(fleet.Ordinals)
 	}
-	fm, err := s.fleetMetrics.FleetMetrics(ctx, version, replicas)
+	fm, err := s.fleetMetrics.FleetMetricsForOrg(ctx, org.ID, version, replicas)
 	if err != nil {
 		s.logger.WithError(err).WithField("version", version).Warn("fleet metrics unavailable")
 		fm = &domain.FleetMetrics{Version: version, Series: []domain.MetricSeries{}}

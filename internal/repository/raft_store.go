@@ -66,6 +66,10 @@ type RaftStoreConfig struct {
 	// replay restores sessions into the local store on every pod.
 	SessionSink domain.SessionStateSink
 
+	// OrgQuotaDefaults are the cluster-wide org quota defaults mirrored into
+	// the FSM so hard-cap guards are deterministic on every peer.
+	OrgQuotaDefaults domain.OrgQuotas
+
 	// TLS configures the Raft transport mTLS + in-band keyring.
 	TLSEnabled             bool
 	TLSDir                 string
@@ -238,6 +242,7 @@ func NewRaftStore(cfg *RaftStoreConfig, logger *logrus.Logger) (*RaftStore, erro
 
 	fsm := NewFSM()
 	fsm.state.sessionSink = cfg.SessionSink
+	fsm.state.quotaDefaults = cfg.OrgQuotaDefaults
 	if cfg.MetaHook != nil {
 		fsm.SetMetaHook(cfg.MetaHook)
 	}

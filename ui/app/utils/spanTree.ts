@@ -1,4 +1,4 @@
-import type { ExecInfo, LogSearchMode, SpanNode, TraceLogEntry } from '~/api/types'
+import type { ExecEnvVar, ExecInfo, LogSearchMode, SpanNode, TraceLogEntry } from '~/api/types'
 
 // Internal-span name rules, ported from internal/service/ci_steps.go
 // (internalSpanPrefixes/internalSpanExact) so the pipeline UI folds the same
@@ -41,16 +41,55 @@ export interface DisplaySpan {
 
 // visibleChildren returns the direct children of nodes after passthrough
 // promotion and internal-span folding (port of the old topLevelSpans).
+//
+// A passthrough/internal node that carries a meaningful exec is kept visible in
+// place (its exec details — notably the exit code — would otherwise be erased),
+// and any promoted child whose exec command equals the node's is deduplicated
+// away so the command is not shown twice.
 export function visibleChildren(nodes: SpanNode[]): SpanNode[] {
   const out: SpanNode[] = []
   for (const n of nodes) {
     if (attrBool(n, 'dagger.io/ui.passthrough') || isInternalSpan(n)) {
-      out.push(...visibleChildren(n.children))
+      const promoted = visibleChildren(n.children)
+      if (hasMeaningfulExec(n)) {
+        out.push(n)
+        out.push(...promoted.filter((c) => !sameCommand(c.exec, n.exec)))
+      } else {
+        out.push(...promoted)
+      }
     } else {
       out.push(n)
     }
   }
   return out
+}
+
+// hasMeaningfulExec reports whether a span carries an exec view-model worth
+// showing (a command, env, workdir/user, or a non-zero/failed exit code).
+export function hasMeaningfulExec(n: SpanNode): boolean {
+  const exec = n.exec
+  if (!exec) return false
+  if (exec.args && exec.args.length > 0) return true
+  if (exec.env && exec.env.length > 0) return true
+  if (exec.cwd) return true
+  if (exec.user) return true
+  if (exec.exit_code !== null && exec.exit_code !== undefined) {
+    return exec.exit_code !== 0 || n.status === 'failed'
+  }
+  return false
+}
+
+// sameCommand reports whether two exec view-models describe the same command
+// line (used to deduplicate a passthrough leaf against its visible child).
+function sameCommand(a: ExecInfo | null | undefined, b: ExecInfo | null | undefined): boolean {
+  const aa = a?.args ?? (a?.command ? [a.command] : [])
+  const bb = b?.args ?? (b?.command ? [b.command] : [])
+  if (aa.length === 0 || bb.length === 0) return false
+  if (aa.length !== bb.length) return false
+  for (let i = 0; i < aa.length; i++) {
+    if (aa[i] !== bb[i]) return false
+  }
+  return true
 }
 
 // computeRowOwners maps every span in focus's subtree to the span_id of the
@@ -139,25 +178,28 @@ export function findSpanByID(node: SpanNode | null, spanID: string): SpanNode | 
 }
 
 // flattenVisible walks a node's subtree, promoting passthrough spans and
-// hiding internal/encapsulated spans (counting the latter as hidden).
+// hiding internal/encapsulated spans (counting the latter as hidden). A
+// passthrough/internal node carrying a meaningful exec is kept visible in place
+// (so the failed command + exit code survive), and promoted children whose exec
+// command duplicates the node's are filtered out.
 export function flattenVisible(node: SpanNode, depth: number): { spans: DisplaySpan[]; hidden: number } {
-  if (attrBool(node, 'dagger.io/ui.passthrough')) {
-    const result = { spans: [] as DisplaySpan[], hidden: 0 }
+  if (attrBool(node, 'dagger.io/ui.passthrough') || isHiddenSpan(node)) {
+    const promoted: DisplaySpan[] = []
+    let hidden = 0
     for (const child of node.children) {
       const r = flattenVisible(child, depth)
-      result.spans.push(...r.spans)
-      result.hidden += r.hidden
+      promoted.push(...r.spans)
+      hidden += r.hidden
     }
-    return result
-  }
-  if (isHiddenSpan(node)) {
-    const result = { spans: [] as DisplaySpan[], hidden: 1 }
-    for (const child of node.children) {
-      const r = flattenVisible(child, depth)
-      result.spans.push(...r.spans)
-      result.hidden += r.hidden
+    if (hasMeaningfulExec(node)) {
+      // Non-passthrough hidden nodes count as hidden even when kept for their
+      // exec detail (their name is a hidden transport span).
+      const hiddenSelf = !attrBool(node, 'dagger.io/ui.passthrough') && isHiddenSpan(node) ? 1 : 0
+      const deduped = promoted.filter((s) => !sameCommand(s.node.exec, node.exec))
+      return { spans: [{ node, depth } as DisplaySpan, ...deduped], hidden: hidden + hiddenSelf }
     }
-    return result
+    if (!attrBool(node, 'dagger.io/ui.passthrough') && isHiddenSpan(node)) hidden += 1
+    return { spans: promoted, hidden }
   }
   const result = { spans: [{ node, depth } as DisplaySpan], hidden: 0 }
   for (const child of node.children) {
@@ -170,10 +212,40 @@ export function flattenVisible(node: SpanNode, depth: number): { spans: DisplayS
 
 // --- Exec view-model helpers ----------------------------------------------
 
-// formatArgv renders an exec's full command line (program + args) for display.
+// formatArgv renders an exec's full command line (program + args) for display,
+// shell-quoting any argument that contains whitespace or shell metacharacters
+// so multi-word `-c` scripts stay readable and copy-pasteable.
 export function formatArgv(exec: ExecInfo): string {
   const parts = exec.args && exec.args.length > 0 ? exec.args : exec.command ? [exec.command] : []
-  return parts.join(' ')
+  return parts.map(quoteArg).join(' ')
+}
+
+// shellMeta matches characters that need quoting in a POSIX shell word.
+const SHELL_META = /[\s"'`$&|;<>()*?{}[\]!#~=\\]/
+
+function quoteArg(arg: string): string {
+  if (arg === '') return "''"
+  if (!SHELL_META.test(arg)) return arg
+  // Prefer single quotes; escape an embedded single quote as '\''.
+  return `'${arg.replace(/'/g, "'\\''")}'`
+}
+
+// formatEnvInline renders an exec's env vars as a one-line summary, e.g.
+// `FOO=bar-value BAZ=<secret>`.
+export function formatEnvInline(env: ExecEnvVar[]): string {
+  return env.map((e) => `${e.name}=${e.is_secret ? '<secret>' : (e.value ?? '')}`).join(' ')
+}
+
+// findSpanPathByID returns the breadcrumb path (root → node) to the span with
+// the given id, or null when absent. Used to zoom a sub-span into focus.
+export function findSpanPathByID(node: SpanNode | null, spanID: string): SpanNode[] | null {
+  if (!node) return null
+  if (node.span_id === spanID) return [node]
+  for (const child of node.children) {
+    const sub = findSpanPathByID(child, spanID)
+    if (sub) return [node, ...sub]
+  }
+  return null
 }
 
 // exitCodeTone maps an exit code to a badge tone: 0 = success, non-zero =

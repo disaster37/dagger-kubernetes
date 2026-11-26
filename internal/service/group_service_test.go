@@ -20,7 +20,7 @@ func TestGroupServiceCreate(t *testing.T) {
 	gsvc, _ := newGroupService(t)
 	ctx := context.Background()
 
-	g, err := gsvc.Create(ctx, GroupInput{Name: "Eng", MaxRunnerSessions: 8, AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
+	g, err := gsvc.Create(ctx, "", GroupInput{Name: "Eng", MaxRunnerSessions: 8, AgentAvailable: true, AutoAssignPattern: `^github\.com/.*`})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -44,7 +44,7 @@ func TestGroupServiceValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if _, err := gsvc.Create(ctx, tc.in); err == nil {
+			if _, err := gsvc.Create(ctx, "", tc.in); err == nil {
 				t.Fatal("expected validation error")
 			}
 		})
@@ -55,9 +55,9 @@ func TestGroupServiceCRUD(t *testing.T) {
 	gsvc, _ := newGroupService(t)
 	ctx := context.Background()
 
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "G", AgentAvailable: true})
 
-	got, err := gsvc.Get(ctx, g.ID)
+	got, err := gsvc.GetInOrg(ctx, "", g.ID)
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestGroupServiceCRUD(t *testing.T) {
 		t.Fatalf("name = %q", got.Name)
 	}
 
-	updated, err := gsvc.Update(ctx, g.ID, GroupInput{Name: "G2", MaxRunnerSessions: 4, AgentAvailable: false})
+	updated, err := gsvc.Update(ctx, "", g.ID, GroupInput{Name: "G2", MaxRunnerSessions: 4, AgentAvailable: false})
 	if err != nil {
 		t.Fatalf("Update: %v", err)
 	}
@@ -78,10 +78,10 @@ func TestGroupServiceCRUD(t *testing.T) {
 		t.Fatalf("list = %d", len(list))
 	}
 
-	if err := gsvc.Delete(ctx, g.ID); err != nil {
+	if err := gsvc.Delete(ctx, "", g.ID); err != nil {
 		t.Fatalf("Delete: %v", err)
 	}
-	if _, err := gsvc.Get(ctx, g.ID); !errors.Is(err, domain.ErrNotFound) {
+	if _, err := gsvc.GetInOrg(ctx, "", g.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("Get after delete: %v", err)
 	}
 }
@@ -90,11 +90,11 @@ func TestGroupServiceSetMembers(t *testing.T) {
 	gsvc, usvc := newGroupService(t)
 	ctx := context.Background()
 
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "G", AgentAvailable: true})
 	u1 := seedUserSvc(t, usvc, "u1")
 	u2 := seedUserSvc(t, usvc, "u2")
 
-	if err := gsvc.SetMembers(ctx, g.ID, []string{u1.ID, u2.ID, u1.ID}); err != nil {
+	if err := gsvc.SetMembers(ctx, "", g.ID, []string{u1.ID, u2.ID, u1.ID}); err != nil {
 		t.Fatalf("SetMembers: %v", err)
 	}
 	members, _ := gsvc.Members(ctx, g.ID)
@@ -108,11 +108,11 @@ func TestGroupServiceSetMembers(t *testing.T) {
 	}
 
 	// Missing user ID -> error.
-	if err := gsvc.SetMembers(ctx, g.ID, []string{"nope"}); !errors.Is(err, domain.ErrNotFound) {
+	if err := gsvc.SetMembers(ctx, "", g.ID, []string{"nope"}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("SetMembers missing user: %v", err)
 	}
 	// Missing group -> error.
-	if err := gsvc.SetMembers(ctx, "nope", []string{u1.ID}); !errors.Is(err, domain.ErrNotFound) {
+	if err := gsvc.SetMembers(ctx, "", "nope", []string{u1.ID}); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("SetMembers missing group: %v", err)
 	}
 }
@@ -121,11 +121,11 @@ func TestGroupServiceEnsureMember(t *testing.T) {
 	gsvc, usvc := newGroupService(t)
 	ctx := context.Background()
 
-	g, _ := gsvc.Create(ctx, GroupInput{Name: "G", AgentAvailable: true})
+	g, _ := gsvc.Create(ctx, "", GroupInput{Name: "G", AgentAvailable: true})
 	u := seedUserSvc(t, usvc, "u1")
 
 	// Add member.
-	if err := gsvc.EnsureMember(ctx, g.ID, u.ID); err != nil {
+	if err := gsvc.EnsureMember(ctx, "", g.ID, u.ID); err != nil {
 		t.Fatalf("EnsureMember: %v", err)
 	}
 	members, _ := gsvc.Members(ctx, g.ID)
@@ -134,7 +134,7 @@ func TestGroupServiceEnsureMember(t *testing.T) {
 	}
 
 	// Idempotent — duplicate add must not error.
-	if err := gsvc.EnsureMember(ctx, g.ID, u.ID); err != nil {
+	if err := gsvc.EnsureMember(ctx, "", g.ID, u.ID); err != nil {
 		t.Fatalf("EnsureMember duplicate: %v", err)
 	}
 	members, _ = gsvc.Members(ctx, g.ID)
@@ -143,12 +143,12 @@ func TestGroupServiceEnsureMember(t *testing.T) {
 	}
 
 	// Non-existent group.
-	if err := gsvc.EnsureMember(ctx, "nope", u.ID); !errors.Is(err, domain.ErrNotFound) {
+	if err := gsvc.EnsureMember(ctx, "", "nope", u.ID); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("EnsureMember missing group: %v", err)
 	}
 
 	// Non-existent user.
-	if err := gsvc.EnsureMember(ctx, g.ID, "nope"); !errors.Is(err, domain.ErrNotFound) {
+	if err := gsvc.EnsureMember(ctx, "", g.ID, "nope"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("EnsureMember missing user: %v", err)
 	}
 }

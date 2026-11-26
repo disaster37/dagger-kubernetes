@@ -58,3 +58,12 @@ the decision.
 | 048  | [Pipeline metrics recorded during the run (leader-only, trace-tagged)](ADR-048-pipeline-metrics-recording.md) |
 | 049  | [OAuth re-login recovery, visible failures, and protected account lifecycle](ADR-049-oauth-relogin-account-lifecycle.md) |
 | 050  | [Adopt shared go-raft, go-auth, and go-secguard libraries](ADR-050-adopt-shared-raft-auth-secguard-libraries.md) |
+| 051  | [Supervisor & Raft stability hardening](ADR-051-supervisor-raft-stability-hardening.md) |
+| 052  | [SemVer pre-releases, Org tenancy, and 1.0-beta engine provisioning](ADR-052-semver-prereleases-org-tenancy.md) |
+| 053  | [Device flow, CI OIDC, and Cloud GraphQL](ADR-053-device-flow-ci-oidc-cloud-graphql.md) |
+| 054  | [Framed binary otlpstream read-back](ADR-054-otlpstream-readback.md) |
+| 055  | [Read-through remote cache service](ADR-055-read-through-remote-cache.md) |
+| 056  | [Cloud Checks and multi-forge integration](ADR-056-cloud-checks-multi-forge.md) |
+| 057  | [Dagger-native workflows, artifacts, and approvals](ADR-057-dagger-native-workflows.md) |
+| 058  | [Organization as root namespace: tenancy, quotas, and storage](ADR-058-organization-root-tenancy-quotas-storage.md) |
+| 059  | [GitHub CLI integration: OAuth, sealed tokens, repo claims](ADR-059-github-cli-integration-oauth-sealed-tokens-repo-claims.md) |

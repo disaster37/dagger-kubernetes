@@ -47,6 +47,48 @@ func TestStubProviderPVCLifecycle(t *testing.T) {
 	}
 }
 
+// TestStubProviderScopes verifies WithScope keys fleets per org and AllScopes
+// enumerates every deployed (org, version) pair.
+func TestStubProviderScopes(t *testing.T) {
+	p := NewStubProvider()
+	if err := p.EnsureStatefulSet("v0.20.0", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet shared: %v", err)
+	}
+	if err := p.WithScope("default").EnsureStatefulSet("v0.21.8", ""); err != nil {
+		t.Fatalf("EnsureStatefulSet default: %v", err)
+	}
+	if err := p.WithScope("default").ScaleUp("v0.21.8", 1); err != nil {
+		t.Fatalf("ScaleUp: %v", err)
+	}
+
+	// A scoped provider only sees its own fleets.
+	if v, _ := p.WithScope("default").AllVersions(); len(v) != 1 || v[0] != "v0.21.8" {
+		t.Fatalf("default versions = %v, want [v0.21.8]", v)
+	}
+	// The unscoped provider sees only the shared fleet.
+	if v, _ := p.AllVersions(); len(v) != 1 || v[0] != "v0.20.0" {
+		t.Fatalf("shared versions = %v, want [v0.20.0]", v)
+	}
+
+	scopes, err := p.AllScopes()
+	if err != nil {
+		t.Fatalf("AllScopes: %v", err)
+	}
+	if len(scopes) != 2 {
+		t.Fatalf("scopes = %+v, want 2", scopes)
+	}
+
+	// Scoped pod + PVC names use the org-scoped STS name.
+	replicas, _ := p.WithScope("default").GetReplicas("v0.21.8")
+	if len(replicas) != 1 || replicas[0].Name != "dagger-engine-default-v0-21-8-0" {
+		t.Fatalf("replicas = %+v, want scoped pod name", replicas)
+	}
+	pvcs, _ := p.WithScope("default").ListPVCs("v0.21.8")
+	if len(pvcs) != 1 || pvcs[0].Ordinal != 0 {
+		t.Fatalf("pvcs = %+v, want scoped PVC ordinal 0", pvcs)
+	}
+}
+
 func TestStubProviderAddPVCCreatesVersion(t *testing.T) {
 	p := NewStubProvider()
 

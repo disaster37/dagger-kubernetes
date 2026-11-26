@@ -34,6 +34,8 @@ type GitHubOAuthService struct {
 	http                         *http.Client
 	users                        *UserService
 	groups                       domain.GroupRepository
+	orgs                         domain.OrgRepository
+	quota                        *QuotaService
 	jwt                          *JWTService
 	logger                       *logrus.Logger
 	mapper                       *GroupMapper
@@ -67,6 +69,12 @@ func NewGitHubOAuthService(cfg *domain.OAuthConfig, mapper *GroupMapper, users *
 // LoginURL returns the GitHub authorize URL with the given state token. All
 // parameters are percent-encoded so config values containing reserved
 // characters cannot corrupt the query string.
+// SetOrgRepository wires organization lookups for OAuth group auto-creation.
+func (s *GitHubOAuthService) SetOrgRepository(orgs domain.OrgRepository) { s.orgs = orgs }
+
+// SetQuotaService wires org-quota enforcement into OAuth group auto-creation.
+func (s *GitHubOAuthService) SetQuotaService(q *QuotaService) { s.quota = q }
+
 func (s *GitHubOAuthService) LoginURL(state string) string {
 	v := url.Values{}
 	v.Set("client_id", s.clientID)
@@ -119,10 +127,10 @@ func (s *GitHubOAuthService) Complete(ctx context.Context, code string) (access,
 	providerGroups = append(providerGroups, orgs...)
 	providerGroups = append(providerGroups, teams...)
 
-	mappedGroups := s.mapper.mapIfActive(providerGroups)
+	mappedGroups := s.mapper.mapIfActiveTargets(providerGroups)
 
 	cred := &goauthoauth.Credential{Provider: "github", AccessToken: accessToken}
-	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.jwt, s.logger, s.encKey, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, s.adminGroups, providerGroups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
+	access, refresh, u, err = completeOAuthLogin(ctx, s.users, s.groups, s.quota, s.jwt, s.logger, s.encKey, s.orgs, "github", strconv.Itoa(ghUser.ID), ghUser.Login, s.defaultGroup, s.adminGroups, providerGroups, mappedGroups, s.mappedGroupMaxRunnerSessions, cred)
 	if err != nil {
 		return "", "", nil, fmt.Errorf("github oauth: %w", err)
 	}

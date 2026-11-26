@@ -72,6 +72,14 @@ func (m *mockS3ObjectStore) StatObject(_ context.Context, _, objectName string, 
 	return minio.ObjectInfo{Key: objectName, Size: int64(len(obj.data)), LastModified: obj.lastModified}, nil
 }
 
+// RemoveObject implements the s3ObjectAPI RemoveObject slice for DeleteRun.
+func (m *mockS3ObjectStore) RemoveObject(_ context.Context, _, objectName string, _ minio.RemoveObjectOptions) error { //nolint:gocritic // hugeParam: signature must match the minio-go API
+	m.mu.Lock()
+	delete(m.objects, objectName)
+	m.mu.Unlock()
+	return nil
+}
+
 func (m *mockS3ObjectStore) ListObjects(_ context.Context, _ string, opts minio.ListObjectsOptions) <-chan minio.ObjectInfo { //nolint:gocritic // hugeParam: signature must match the minio-go API
 	ch := make(chan minio.ObjectInfo)
 	go func() {

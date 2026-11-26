@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -196,6 +197,7 @@ func run(c *cli.Context) error {
 
 	// --- Minting CA phased rotation (leader-only) ---
 	if cfg.CA.KeyringRotationEnabled {
+		rotatorHostname, _ := os.Hostname()
 		rotator := repository.NewMintingRotator(&repository.MintingRotatorConfig{
 			Store:          raftStore,
 			CA:             dynamicCA,
@@ -207,6 +209,7 @@ func run(c *cli.Context) error {
 			CommonName:     "dagger-kubernetes-minting-ca",
 			Organization:   "dagger-kubernetes",
 			CAValidity:     cfg.CA.CAValidity,
+			DNSNames:       mintingExtraSANs(cfg, rotatorHostname),
 			Logger:         logger,
 		})
 		go rotator.Start(ctx)
@@ -220,14 +223,83 @@ func run(c *cli.Context) error {
 	userRepo := repository.NewUserRepo(raftStore)
 	groupRepo := repository.NewGroupRepo(raftStore)
 	projectRepo := repository.NewProjectRepo(raftStore)
+	orgRepo := repository.NewOrgRepo(raftStore)
 	tokenRepo := repository.NewTokenRepo(raftStore)
 	traceMetaRepo := repository.NewTraceMetaRepo(raftStore)
+	checkRunRepo := repository.NewCheckRunRepo(raftStore)
+	cloudGraphQL := repository.NewCloudGraphQL(userRepo, orgRepo, groupRepo, traceMetaRepo, checkRunRepo, cfg.GraphQL)
 
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
 	tokensSvc := service.NewTokenService(tokenRepo, logger, tokenEncKey)
+	orgMetaStore := repository.NewMetaStore(raftStore)
+	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger).
+		WithMetaStore(orgMetaStore).
+		WithFleetIsolation(cfg.Fleet.Isolation).
+		WithDefaultQuotas(cfg.Org.DefaultQuotas)
+	if _, err := orgsSvc.EnsureBootstrap(ctx, cfg.Org.Default.DisplayName); err != nil && !errors.Is(err, domain.ErrNotLeader) {
+		return fmt.Errorf("bootstrap organization: %w", err)
+	}
+	cloudGraphQL.WithOrgCreator(func(ctx context.Context, name, display string) (*domain.Org, error) {
+		return orgsSvc.Create(ctx, service.OrgInput{Name: name, DisplayName: display})
+	})
+	ciOIDCSvc := service.NewCIOIDCService(map[string]string{
+		"github": cfg.Checks.GitHubOIDCIssuer,
+		"gitlab": cfg.Checks.GitLabOIDCIssuer,
+	}, cfg.Checks.OIDCAudience, orgsSvc, projectsSvc, logger)
 
+	secretRepo := repository.NewSecretRepo(raftStore)
+	forgeSourceRepo := repository.NewForgeSourceRepo(raftStore)
+	githubConnRepo := repository.NewGitHubConnectionRepo(raftStore)
+	githubAccountRepo := repository.NewGitHubAccountSourceRepo(raftStore)
+	repoSettingRepo := repository.NewRepoSettingRepo(raftStore)
+	githubOAuthStateRepo := repository.NewGitHubOAuthStateRepo(raftStore)
+	secretSvc := service.NewSecretService(secretRepo, tokenEncKey, logger)
+	githubForge := repository.NewGitHubForge(cfg.Forge.GitHubAPIURL)
+	forgeProviders := []domain.ForgeProvider{
+		githubForge,
+		repository.NewGitLabForge(cfg.Forge.GitLabAPIURL),
+		repository.NewGiteaForge(cfg.Forge.GiteaAPIURL),
+	}
+	forgeSvc := service.NewForgeService(forgeSourceRepo, secretSvc, forgeProviders, cfg.Server.PublicURL, logger).
+		WithGitHubSync(githubAccountRepo, repoSettingRepo)
+	githubClient, err := repository.NewGitHubClient(repository.GitHubClientConfig{
+		ClientID:       cfg.Forge.GitHub.OAuth.ClientID,
+		ClientSecret:   cfg.Forge.GitHub.OAuth.ClientSecret,
+		OAuthBaseURL:   cfg.Forge.GitHub.OAuth.OAuthBaseURL,
+		DefaultAPIURL:  cfg.Forge.GitHubAPIURL,
+		CACertPath:     cfg.Forge.GitHub.CACertPath,
+		HTTPTimeout:    cfg.Forge.GitHub.HTTPTimeout,
+		AllowedAPIURLs: cfg.Forge.GitHub.AllowedAPIURLs,
+	})
+	if err != nil {
+		return fmt.Errorf("init github client: %w", err)
+	}
+	githubIntegrationSvc := service.NewGitHubIntegrationService(service.GitHubIntegrationConfig{
+		PublicURL:           cfg.Server.PublicURL,
+		DefaultAPIURL:       cfg.Forge.GitHubAPIURL,
+		AllowedAPIURLs:      cfg.Forge.GitHub.AllowedAPIURLs,
+		CORSAllowedOrigins:  cfg.Auth.CORS.AllowedOrigins,
+		OAuthEnabled:        cfg.Forge.GitHub.OAuth.Enabled,
+		ClientID:            cfg.Forge.GitHub.OAuth.ClientID,
+		ClientSecret:        cfg.Forge.GitHub.OAuth.ClientSecret,
+		Scopes:              cfg.Forge.GitHub.OAuth.Scopes,
+		StateTTL:            cfg.Forge.GitHub.OAuth.StateTTL,
+		DeviceFlowEnabled:   cfg.Forge.GitHub.OAuth.DeviceFlowEnabled,
+		AllowedRedirectURIs: cfg.Forge.GitHub.OAuth.AllowedRedirectURIs,
+	}, service.GitHubIntegrationDeps{
+		Connections: githubConnRepo, AccountSources: githubAccountRepo, RepoSettings: repoSettingRepo,
+		ForgeSources: forgeSourceRepo, OAuthStates: githubOAuthStateRepo,
+		DeviceSessions: service.NewMemoryGitHubDeviceSessionStore(), Users: userRepo,
+		Orgs: orgsSvc, Projects: projectsSvc, Sealer: secretSvc, GitHub: githubClient,
+		ForgeProvider: githubForge, Logger: logger,
+	})
+	var checkRunner domain.CheckJobRunner
+	if cfg.Checks.Enabled && clientset != nil {
+		checkRunner = repository.NewK8sJobRunner(clientset, effectiveNamespace(cfg.Checks.Namespace, cfg.Fleet.Namespace), cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
+			WithImagePullSecrets(cfg.Checks.JobImagePullSecrets)
+	}
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
 	if cfg.Auth.Internal.Enabled && cfg.Auth.Internal.TokensFile != "" {
@@ -235,19 +307,23 @@ func run(c *cli.Context) error {
 	}
 
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, legacyValidator, logger)
+	authSvc.SetOrgRepository(orgRepo)
+	usersSvc.SetOrgRepository(orgRepo)
+	deviceAuthSvc := service.NewDeviceAuthService(service.NewMemoryDeviceAuthStore(), usersSvc, groupRepo, jwtSvc, cfg.Auth.Device.CodeTTL, cfg.Auth.Device.PollInterval, logger)
 
 	// Bootstrap admin (idempotent: only when user count is 0).
 	if err := bootstrapAdmin(ctx, cfg, usersSvc, logger); err != nil {
 		return fmt.Errorf("bootstrap admin: %w", err)
 	}
 
-	// Bootstrap default group (idempotent: only when groups table is empty).
-	if err := bootstrapDefaultGroup(ctx, groupsSvc, usersSvc, logger); err != nil {
-		return fmt.Errorf("bootstrap default group: %w", err)
-	}
-
-	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger)
+	quotaSvc := service.NewQuotaService(sessions, groupRepo, logger).
+		WithOrgRepository(orgRepo, projectRepo).
+		WithDefaults(cfg.Org.DefaultQuotas, cfg.History.GC.MaxAge).
+		WithMetrics(metrics)
+	groupsSvc.WithQuotaService(quotaSvc)
+	projectsSvc.WithQuotaService(quotaSvc)
 	attributionSvc := service.NewAttributionService(projectsSvc, groupRepo, traceMetaRepo, logger)
+	attributionSvc.SetOrgRepository(orgRepo)
 
 	projectMapper, err := service.NewProjectMapper(cfg.Attribution.ProjectMappings)
 	if err != nil {
@@ -282,9 +358,15 @@ func run(c *cli.Context) error {
 		}
 		switch cfg.Auth.OAuth.Provider {
 		case "github":
-			oauthSvc = service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, tokenEncKey)
+			gh := service.NewGitHubOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, tokenEncKey)
+			gh.SetOrgRepository(orgRepo)
+			gh.SetQuotaService(quotaSvc)
+			oauthSvc = gh
 		case "oidc":
-			oauthSvc = service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient, tokenEncKey, raftStore.IsLeader)
+			oidc := service.NewOIDCOAuthService(&cfg.Auth.OAuth, mapper, usersSvc, groupRepo, jwtSvc, logger, oauthHTTPClient, tokenEncKey, raftStore.IsLeader)
+			oidc.SetOrgRepository(orgRepo)
+			oidc.SetQuotaService(quotaSvc)
+			oauthSvc = oidc
 		default:
 			// validateAuthConfig already rejected this, but fail closed.
 			return fmt.Errorf("unsupported oauth provider: %s", cfg.Auth.OAuth.Provider)
@@ -309,6 +391,8 @@ func run(c *cli.Context) error {
 			FailOpen:      cfg.Auth.OAuth.RevalidateFailOpen,
 			SessionMaxAge: cfg.Auth.OAuth.SessionMaxAge,
 		})
+		revalidator.SetOrgRepository(orgRepo)
+		revalidator.SetQuotaService(quotaSvc)
 		authSvc.SetOAuthRevalidator(revalidator)
 	}
 
@@ -322,7 +406,34 @@ func run(c *cli.Context) error {
 		MaxSessionsPerReplica: cfg.Fleet.MaxSessionsPerReplica,
 		ReplicaIdleTTL:        cfg.Fleet.ReplicaIdleTTL,
 		VersionRetention:      cfg.Fleet.VersionRetention,
+		Isolation:             cfg.Fleet.Isolation,
 	}, logger, metrics)
+
+	fleetManager.WithEngineQuota(func(ctx context.Context, orgID string) (int64, error) {
+		eff, err := quotaSvc.EffectiveQuotas(ctx, orgID)
+		if err != nil {
+			return 0, err
+		}
+		return eff.MaxEngines.Hard, nil
+	})
+	quotaSvc.WithEngineUsage(func(ctx context.Context, orgID string) (int64, error) {
+		infos, err := fleetManager.AllFleetInfoForOrg(orgID)
+		if err != nil {
+			return 0, err
+		}
+		var n int64
+		for _, info := range infos {
+			n += int64(info.Replicas)
+		}
+		return n, nil
+	})
+
+	if cfg.Fleet.Isolation == "shared" {
+		logger.Warn("fleet.isolation=shared is deprecated and restricts the cluster to a single organization")
+		if all, listErr := orgsSvc.List(ctx); listErr == nil && len(all) > 1 {
+			return fmt.Errorf("fleet.isolation=shared requires exactly one organization, found %d: %w", len(all), domain.ErrSharedFleetMultiOrg)
+		}
+	}
 
 	// Per-version local-cache purge: prune every running engine pod in-process
 	// (engine dagql API over plaintext TCP). Requires only a clientset + fleet
@@ -344,7 +455,7 @@ func run(c *cli.Context) error {
 	// Trace-scoped engine resource metrics (cAdvisor container_* series).
 	var engineMetricsSvc *service.EngineMetricsService
 	if cfg.Pipeline.Metrics.Enabled {
-		engineMetricsSvc = service.NewEngineMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, rateWindow, logger)
+		engineMetricsSvc = service.NewEngineMetricsService(metricsClient, cfg.Fleet.Namespace, cfg.Pipeline.Metrics.Step, rateWindow, logger).WithFleetIsolation(cfg.Fleet.Isolation)
 	}
 
 	// Runners-page fleet metrics: same cAdvisor source + feature flag, plus the
@@ -368,7 +479,7 @@ func run(c *cli.Context) error {
 	var metricsRecorder *service.TraceMetricsRecorder
 	if cfg.Pipeline.Metrics.Enabled {
 		metricsRecorder = service.NewTraceMetricsRecorder(metricsClient, traceMetaRepo, cfg.Fleet.Namespace,
-			cfg.Pipeline.Metrics.RecordInterval, rateWindow, cfg.Pipeline.Metrics.MaxRecordWindow, raftStore.IsLeader, logger)
+			cfg.Pipeline.Metrics.RecordInterval, rateWindow, cfg.Pipeline.Metrics.MaxRecordWindow, raftStore.IsLeader, logger).WithFleetIsolation(cfg.Fleet.Isolation)
 	}
 
 	// Shared S3 client for the S3-backed CLI cache.
@@ -383,9 +494,86 @@ func run(c *cli.Context) error {
 		s3Client = client
 	}
 
+	var otlpArchive domain.OTLPArchive = repository.NewMemoryOTLPArchive()
+	if s3Client != nil && cfg.Cache.S3.Bucket != "" {
+		otlpArchive = repository.NewS3OTLPArchive(s3Client, cfg.Cache.S3.Bucket, "otlp-archive", logger)
+	}
+	otlpStreamSvc := service.NewOTLPStreamService(otlpArchive, traceMetaRepo, logger)
+	var remoteCacheSvc *service.RemoteCacheService
+	var wsDialer repository.WSLeaderDialer
+	if cfg.Cache.Remote.Enabled {
+		index, err := repository.OpenBboltCacheIndex(cfg.Cache.Remote.IndexPath)
+		if err != nil {
+			return fmt.Errorf("open remote cache index: %w", err)
+		}
+		defer func() { _ = index.Close() }()
+		bucket := cfg.Cache.Remote.Bucket
+		if bucket == "" {
+			bucket = cfg.Cache.S3.Bucket
+		}
+		store, err := repository.NewS3RemoteCacheStore(
+			cfg.Cache.S3.Endpoint, cfg.Cache.S3.Region, cfg.Cache.S3.AccessKey, cfg.Cache.S3.SecretKey, cfg.Cache.S3.UseSSL,
+			cfg.Cache.Remote.S3EngineEndpoint, bucket, cfg.Cache.Remote.Prefix, cfg.Cache.Remote.TTL,
+		)
+		if err != nil {
+			return fmt.Errorf("create remote cache store: %w", err)
+		}
+		remoteCacheSvc = service.NewRemoteCacheService(index, store, cfg.Cache.Remote.TTL, cfg.Cache.Remote.MaxBytes, cfg.Cache.Remote.Workers, cfg.Cache.Remote.PackMaxMemberBytes, cfg.Cache.Remote.GCInterval, metrics, logger)
+		remoteCacheSvc.WithCacheQuota(quotaSvc)
+		quotaSvc.WithCacheUsage(func(orgID string) (int64, error) {
+			_, size, err := remoteCacheSvc.Stats(orgID)
+			return size, err
+		})
+		wsDialer = repository.NewGorillaWSLeaderDialer(dynamicCA.ForwardTLSProvider())
+		if kp, ok := provider.(*repository.K8sProvider); ok {
+			kp.SetRemoteCache(fmt.Sprintf("%s/v1/engine", strings.TrimSuffix(cfg.Server.InternalControlURL, "/")), "")
+			kp.SetOrgTokenProvider(func(ctx context.Context, orgID string) (string, error) {
+				return orgsSvc.EnsureToken(ctx, orgID)
+			})
+			orgsSvc.SetOnTokenChange(func(ctx context.Context, orgID, token string) {
+				if token == "" {
+					_ = kp.DeleteOrgTokenSecret(ctx, orgID)
+					return
+				}
+				if err := kp.EnsureOrgTokenSecret(ctx, orgID, token); err != nil {
+					logger.WithError(err).WithField("org", orgID).Warn("sync engine token secret failed")
+				}
+			})
+		}
+	}
+	var artifactStore domain.ArtifactStore
+	if s3Client != nil && cfg.Cache.S3.Bucket != "" {
+		artifactStore = repository.NewS3ArtifactStore(s3Client, cfg.Cache.S3.Bucket, "")
+	}
+	var workflowRunner domain.WorkflowJobRunner
+	if cfg.Workflows.Enabled && clientset != nil {
+		workflowRunner = repository.NewK8sWorkflowRunner(clientset, effectiveNamespace(cfg.Workflows.Namespace, cfg.Fleet.Namespace), cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
+			WithImagePullSecrets(cfg.Workflows.JobImagePullSecrets)
+	}
+	envRepo := repository.NewEnvironmentRepo(raftStore)
+	workflowRepo := repository.NewWorkflowRepo(raftStore)
+	workflowSvc := service.NewWorkflowService(
+		workflowRepo, envRepo, orgsSvc, projectsSvc, forgeSourceRepo,
+		repository.NewWorkflowFileParser(), repository.NewWorkflowExprEvaluator(),
+		artifactStore, workflowRunner, secretSvc,
+		service.WorkflowServiceConfig{DefaultTimeout: cfg.Workflows.DefaultTimeout, MaxParallel: cfg.Workflows.MaxParallel},
+		logger,
+	).WithEnabled(cfg.Workflows.Enabled)
+	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, cfg.Forge.WebhookSecret, logger).
+		WithEnabled(cfg.Checks.Enabled).
+		WithRepoSettings(repoSettingRepo)
+	cloudGraphQL.WithForgeSources(forgeSourceRepo).WithProjects(projectRepo).WithPublicURL(cfg.Server.PublicURL).
+		WithGitHubConnections(githubConnRepo).
+		WithGitHubAccountSources(githubAccountRepo).
+		WithRepoSettings(repoSettingRepo).
+		WithGitHubIntegrator(githubIntegrationSvc)
+	if cfg.Checks.Enabled {
+		cloudGraphQL.WithCheckRerunner(checksSvc.Rerun)
+	}
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
+	historyPurgeSvc.SetOTLPArchive(otlpArchive)
 	statusSvc := service.NewStatusService(cfg, fleetManager, logger, raftStore)
-	connectSvc := service.NewConnectService(cfg, versionResolver, tokensSvc, logger)
+	connectSvc := service.NewConnectService(cfg, versionResolver, tokensSvc, logger).WithOrgService(orgsSvc)
 
 	// Local image cache: admin list/prune of the configured Zot mirrors over
 	// their OCI Distribution v2 API (chart-rendered image_cache.mirrors). Only
@@ -453,20 +641,27 @@ func run(c *cli.Context) error {
 	}
 
 	server := handler.NewServer(&handler.ServerConfig{
-		ControlAddr:         cfg.Server.ControlAddr,
-		DataAddr:            cfg.Server.DataAddr,
-		DataHost:            cfg.Server.DataHost,
-		CollectorURL:        cfg.Telemetry.CollectorURL,
-		VictoriaURL:         cfg.Telemetry.VictoriaURL,
-		CertPath:            controlTLSCertPath,
-		KeyPath:             controlTLSKeyPath,
-		PipelineURL:         cfg.Server.PublicURL,
-		OTelMaxBodyBytes:    cfg.OTel.IngestMaxBodySize,
-		InternalTLSCert:     &internalTLS,
-		ControlTLSProvider:  controlTLSProvider,
-		DataTLSProvider:     dataTLSProvider,
-		InternalTLSProvider: dynamicCA.InternalTLSProvider(),
-		ForwardTLSProvider:  dynamicCA.ForwardTLSProvider(),
+		ControlAddr:           cfg.Server.ControlAddr,
+		DataAddr:              cfg.Server.DataAddr,
+		DataHost:              cfg.Server.DataHost,
+		CollectorURL:          cfg.Telemetry.CollectorURL,
+		VictoriaURL:           cfg.Telemetry.VictoriaURL,
+		CertPath:              controlTLSCertPath,
+		KeyPath:               controlTLSKeyPath,
+		PipelineURL:           cfg.Server.PublicURL,
+		OTelMaxBodyBytes:      cfg.OTel.IngestMaxBodySize,
+		OTelMaxInflightBytes:  cfg.OTel.MaxInflightBytes,
+		MaxDataConns:          cfg.Server.MaxDataConns,
+		CLIIncludePrereleases: cfg.CLI.IncludePrereleases,
+		InternalControlURL:    cfg.Server.InternalControlURL,
+		InternalDataHost:      cfg.Server.InternalDataHost,
+		FleetIsolation:        cfg.Fleet.Isolation,
+		ClusterDomain:         cfg.Raft.ClusterDomain,
+		InternalTLSCert:       &internalTLS,
+		ControlTLSProvider:    controlTLSProvider,
+		DataTLSProvider:       dataTLSProvider,
+		InternalTLSProvider:   dynamicCA.InternalTLSProvider(),
+		ForwardTLSProvider:    dynamicCA.ForwardTLSProvider(),
 	}, &handler.Deps{
 		Logger:               logger,
 		Metrics:              metrics,
@@ -483,6 +678,20 @@ func run(c *cli.Context) error {
 		Users:                usersSvc,
 		Groups:               groupsSvc,
 		Projects:             projectsSvc,
+		Orgs:                 orgsSvc,
+		DeviceAuth:           deviceAuthSvc,
+		CIOIDC:               ciOIDCSvc,
+		CloudGraphQL:         cloudGraphQL,
+		OTLPStream:           otlpStreamSvc,
+		RemoteCache:          remoteCacheSvc,
+		Checks:               checksSvc,
+		Forge:                forgeSvc,
+		GitHubIntegration:    githubIntegrationSvc,
+		Secrets:              secretSvc,
+		Environments:         service.NewEnvironmentService(envRepo, logger),
+		Workflows:            workflowSvc,
+		Artifacts:            artifactStore,
+		WSLeaderDialer:       wsDialer,
 		Tokens:               tokensSvc,
 		Quota:                quotaSvc,
 		Attribution:          attributionSvc,
@@ -518,6 +727,16 @@ func run(c *cli.Context) error {
 
 	stopHistoryGC := historyPurgeSvc.StartGCSweeper(ctx)
 	defer stopHistoryGC()
+	go otlpStreamSvc.Start(ctx)
+	if cfg.Checks.Enabled {
+		go checksSvc.StartReconciler(ctx, raftStore.IsLeader)
+	}
+	if remoteCacheSvc != nil {
+		go remoteCacheSvc.Start(ctx, raftStore.IsLeader)
+	}
+	if cfg.Workflows.Enabled {
+		go workflowSvc.StartScheduler(ctx, raftStore.IsLeader)
+	}
 
 	stopMetricsRecorder := func() {}
 	if metricsRecorder != nil {
@@ -890,62 +1109,6 @@ func writeBootstrapPasswordFile(path, password string) error {
 	return nil
 }
 
-// bootstrapDefaultGroup creates the "default" system group when no groups exist
-// yet (first boot). Existing users with zero memberships are swept into it.
-// Idempotent: when groups already exist this is a no-op.
-func bootstrapDefaultGroup(ctx context.Context, groups *service.GroupService, users *service.UserService, logger *logrus.Logger) error {
-	existing, err := groups.List(ctx)
-	if err != nil {
-		return err
-	}
-	if len(existing) > 0 {
-		return nil // idempotent: groups already exist
-	}
-
-	g, err := groups.Create(ctx, service.GroupInput{
-		Name:              "default",
-		AgentAvailable:    true,
-		MaxRunnerSessions: 0,
-	})
-	if err != nil {
-		if errors.Is(err, domain.ErrNotLeader) {
-			logger.Warn("bootstrap default group: not raft leader, skipping")
-			return nil
-		}
-		return fmt.Errorf("create default group: %w", err)
-	}
-	logger.WithField("group_id", g.ID).Info("bootstrap default group created")
-
-	// Sweep existing users with zero memberships into the default group.
-	allUsers, err := users.List(ctx)
-	if err != nil {
-		return fmt.Errorf("list users for default group sweep: %w", err)
-	}
-	swept := 0
-	for _, u := range allUsers {
-		userGroups, err := groups.GroupsForUser(ctx, u.ID)
-		if err != nil {
-			logger.WithError(err).WithField("user_id", u.ID).Warn("default group sweep: check memberships failed")
-			continue
-		}
-		if len(userGroups) > 0 {
-			continue
-		}
-		if err := groups.EnsureMember(ctx, g.ID, u.ID); err != nil {
-			logger.WithError(err).WithFields(logrus.Fields{
-				"user_id":  u.ID,
-				"username": u.Username,
-			}).Warn("default group sweep: add member failed")
-			continue
-		}
-		swept++
-	}
-	if swept > 0 {
-		logger.WithField("swept", swept).Info("default group sweep: added existing users")
-	}
-	return nil
-}
-
 // runMigrateTokens is the `supervisor migrate-tokens` CLI subcommand.
 func runMigrateTokens(c *cli.Context) error {
 	cfg, err := config.Load(c.String("config"))
@@ -993,6 +1156,7 @@ func runMigrateTokens(c *cli.Context) error {
 
 	userRepo := repository.NewUserRepo(raftStore)
 	groupRepo := repository.NewGroupRepo(raftStore)
+	orgRepo := repository.NewOrgRepo(raftStore)
 	tokenRepo := repository.NewTokenRepo(raftStore)
 	usersSvc := service.NewUserService(userRepo, groupRepo, logger)
 	groupsSvc := service.NewGroupService(groupRepo, userRepo, logger)
@@ -1002,8 +1166,20 @@ func runMigrateTokens(c *cli.Context) error {
 		return fmt.Errorf("load token encryption key: %w", err)
 	}
 	tokensSvc := service.NewTokenService(tokenRepo, logger, tokenEncKey)
-
-	res, err := service.ImportTokensFile(ctx, tokensFile, usersSvc, tokensSvc, groupsSvc, logger, c.Bool("dry-run"))
+	orgMetaStore := repository.NewMetaStore(raftStore)
+	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger).
+		WithMetaStore(orgMetaStore).
+		WithFleetIsolation(cfg.Fleet.Isolation).
+		WithDefaultQuotas(cfg.Org.DefaultQuotas)
+	bootOrg, err := orgsSvc.EnsureBootstrap(ctx, cfg.Org.Default.DisplayName)
+	if err != nil && !errors.Is(err, domain.ErrNotLeader) {
+		return fmt.Errorf("bootstrap organization: %w", err)
+	}
+	orgID := ""
+	if bootOrg != nil {
+		orgID = bootOrg.ID
+	}
+	res, err := service.ImportTokensFile(ctx, tokensFile, orgID, usersSvc, tokensSvc, groupsSvc, logger, c.Bool("dry-run"))
 	if err != nil {
 		return err
 	}
@@ -1101,6 +1277,15 @@ func raftDiscoveryConfig(cfg *domain.Config) discovery.Config {
 		ClusterDomain:   cfg.Raft.ClusterDomain,
 		RaftPort:        raftPortFromBindAddr(cfg.Raft.BindAddr),
 	}
+}
+
+// effectiveNamespace returns the specific namespace when set, else the fleet
+// namespace (matching initRaftStore's fallback).
+func effectiveNamespace(specific, fleet string) string {
+	if specific != "" {
+		return specific
+	}
+	return fleet
 }
 
 // raftPortFromBindAddr returns the port from bind_addr, defaulting to 8081.
@@ -1274,12 +1459,7 @@ func selectTLSProvider(cfg *domain.Config, dynamicCA *repository.DynamicMintingC
 // auto-bootstrapped for every server-TLS provider.
 func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *repository.EmbeddedProvider {
 	hostname, _ := os.Hostname()
-	discoveryCfg := raftDiscoveryConfig(cfg)
-	// The server cert must carry this pod's own exact FQDN SANs so any
-	// follower can verify the leader's control-plane cert on the internal
-	// forward hop (ADR-041). The engine-facing data host stays in the list.
-	extraSANs := discovery.ServerCertFQDNSANs(&discoveryCfg, hostname)
-	extraSANs = append(extraSANs, cfg.Server.DataHost)
+	extraSANs := mintingExtraSANs(cfg, hostname)
 	if clientset != nil && cfg.CA.MintingCASecret != "" {
 		namespace := cfg.Raft.Namespace
 		if namespace == "" {
@@ -1297,6 +1477,65 @@ func mintingProvider(cfg *domain.Config, clientset kubernetes.Interface) *reposi
 		)
 	}
 	return repository.NewEmbeddedProvider(cfg.Supervisor.Dataplane.TLS.CAPath, cfg.CA.ClientCertTTL, extraSANs...)
+}
+
+// mintingExtraSANs returns the extra DNS names the Minting-CA server leaf must
+// cover: this pod's own discovery FQDN SANs (so any follower can verify the
+// leader's control cert on the internal forward hop, ADR-041), the engine-facing
+// data host, and the in-cluster internal service SANs.
+func mintingExtraSANs(cfg *domain.Config, hostname string) []string {
+	discoveryCfg := raftDiscoveryConfig(cfg)
+	extraSANs := discovery.ServerCertFQDNSANs(&discoveryCfg, hostname)
+	extraSANs = append(extraSANs, cfg.Server.DataHost)
+	extraSANs = append(extraSANs, internalServiceSANs(cfg.Server.InternalControlURL, cfg.Server.InternalDataHost, cfg.Raft.ClusterDomain)...)
+	return extraSANs
+}
+
+// internalServiceSANs parses hostnames from the internal control URL and data
+// host and emits, for each, the bare host plus the "<host>.<clusterDomain>"
+// form when the host ends in ".svc" and a cluster domain is configured. These
+// are added to the Minting-CA leaf so pods dialing the internal services (in
+// either the short or fully-qualified form) verify successfully.
+func internalServiceSANs(internalControlURL, internalDataHost, clusterDomain string) []string {
+	var sans []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		if s == "" || seen[s] {
+			return
+		}
+		seen[s] = true
+		sans = append(sans, s)
+	}
+	for _, raw := range []string{hostOf(internalControlURL), hostOf(internalDataHost)} {
+		if raw == "" {
+			continue
+		}
+		add(raw)
+		if strings.Contains(raw, ".svc") {
+			// Bare single-label service name, accepted by internalHostForms /
+			// matchesInternalSNI for same-namespace clients.
+			add(strings.SplitN(raw, ".", 2)[0])
+		}
+		if clusterDomain != "" && strings.HasSuffix(raw, ".svc") {
+			add(fmt.Sprintf("%s.%s", raw, strings.Trim(clusterDomain, ".")))
+		}
+	}
+	return sans
+}
+
+// hostOf extracts the hostname from a URL or host[:port] string.
+func hostOf(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Host != "" {
+		raw = u.Host
+	}
+	if h, _, err := net.SplitHostPort(raw); err == nil {
+		raw = h
+	}
+	return strings.Trim(raw, "[]")
 }
 
 // mintingCABootstrap reports whether this node should generate + share the

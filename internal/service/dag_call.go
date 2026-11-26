@@ -213,3 +213,21 @@ func isIOOperationField(field string) bool {
 		return false
 	}
 }
+
+// isImageSourceField reports whether a dagql call field names a container image
+// source (from) whose address rides an "address" argument.
+func isImageSourceField(field string) bool {
+	return strings.EqualFold(field, "from")
+}
+
+// isWorkdirCallField reports whether a dagql call field sets the working
+// directory (withWorkdir) via its "path" argument.
+func isWorkdirCallField(field string) bool {
+	return strings.EqualFold(field, "withWorkdir")
+}
+
+// isUserCallField reports whether a dagql call field sets the container user
+// (withUser) via its "name" argument.
+func isUserCallField(field string) bool {
+	return strings.EqualFold(field, "withUser")
+}

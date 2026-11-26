@@ -35,6 +35,7 @@ type HistoryPurgeService struct {
 	gcCfg      domain.HistoryGCConfig
 	logger     *logrus.Logger
 	metricsObs *observ.Metrics // may be nil
+	archive    domain.OTLPArchive
 
 	mu       sync.Mutex
 	cached   *domain.HistoryStats
@@ -64,6 +65,10 @@ func NewHistoryPurgeService(
 		metricsObs: obs,
 	}
 }
+
+// SetOTLPArchive wires the framed OTLP archive so purges also delete archived
+// chunks (ADR-054).
+func (s *HistoryPurgeService) SetOTLPArchive(a domain.OTLPArchive) { s.archive = a }
 
 // telemetryDeleteCounts aggregates best-effort Loki + VictoriaMetrics delete
 // outcomes for one trace.
@@ -100,8 +105,14 @@ func (s *HistoryPurgeService) deleteTraceTelemetry(ctx context.Context, traceID 
 // purgeTrace deletes a trace's telemetry (best-effort) then its trace_meta row,
 // bumping the purge counter on success. It returns the per-trace telemetry
 // outcome and any trace_meta delete error.
-func (s *HistoryPurgeService) purgeTrace(ctx context.Context, traceID string) (telemetryDeleteCounts, error) {
+func (s *HistoryPurgeService) purgeTrace(ctx context.Context, orgID, traceID string) (telemetryDeleteCounts, error) {
 	tc := s.deleteTraceTelemetry(ctx, traceID)
+	if s.archive != nil {
+		if err := s.archive.DeleteTrace(ctx, orgID, traceID); err != nil {
+			s.logger.WithField("trace_id", traceID).WithError(err).Warn("otlp archive delete failed")
+			tc.errors++
+		}
+	}
 	if err := s.traceMeta.Delete(ctx, traceID); err != nil {
 		return tc, err
 	}
@@ -120,7 +131,7 @@ func (s *HistoryPurgeService) Stats(ctx context.Context) (*domain.HistoryStats, 
 		return s.cached, nil
 	}
 
-	count, oldest, err := s.traceMeta.Stats(ctx)
+	count, oldest, err := s.traceMeta.Stats(ctx, "")
 	if err != nil {
 		return nil, fmt.Errorf("trace stats: %w", err)
 	}
@@ -135,6 +146,23 @@ func (s *HistoryPurgeService) Stats(ctx context.Context) (*domain.HistoryStats, 
 	}
 	s.cached = stats
 	s.cachedAt = time.Now()
+	return stats, nil
+}
+
+// StatsForOrg reports history stats scoped to orgID.
+func (s *HistoryPurgeService) StatsForOrg(ctx context.Context, orgID string) (*domain.HistoryStats, error) {
+	count, oldest, err := s.traceMeta.Stats(ctx, orgID)
+	if err != nil {
+		return nil, fmt.Errorf("trace stats: %w", err)
+	}
+	stats := &domain.HistoryStats{
+		TraceCount:  count,
+		CollectedAt: rfc3339(time.Now()),
+		GC:          s.GCRules(),
+	}
+	if !oldest.IsZero() {
+		stats.OldestUpdatedAt = rfc3339(oldest)
+	}
 	return stats, nil
 }
 
@@ -175,13 +203,19 @@ func (s *HistoryPurgeService) Purge(ctx context.Context, req domain.HistoryPurge
 	result.MetricsDeleted += tc.metricsDeleted
 
 	// Decide purged vs already_purged, then delete the row (idempotent).
-	_, err := s.traceMeta.Get(ctx, req.TraceID)
+	meta, err := s.traceMeta.Get(ctx, req.TraceID)
 	switch {
 	case errors.Is(err, domain.ErrNotFound):
 		result.AlreadyPurged = 1
 	case err != nil:
 		return nil, fmt.Errorf("trace get: %w", err)
 	default:
+		orgID := meta.OrgID
+		if s.archive != nil {
+			if aErr := s.archive.DeleteTrace(ctx, orgID, req.TraceID); aErr != nil {
+				s.logger.WithField("trace_id", req.TraceID).WithError(aErr).Warn("otlp archive delete failed")
+			}
+		}
 		if err := s.traceMeta.Delete(ctx, req.TraceID); err != nil {
 			return nil, fmt.Errorf("trace delete: %w", err)
 		}
@@ -217,7 +251,7 @@ func (s *HistoryPurgeService) PurgeAll(ctx context.Context) (*domain.HistoryPurg
 			result.Message = "cancelled"
 			break
 		}
-		tc, err := s.purgeTrace(ctx, m.TraceID)
+		tc, err := s.purgeTrace(ctx, m.OrgID, m.TraceID)
 		result.LogsDeleted += tc.logsDeleted
 		result.MetricsDeleted += tc.metricsDeleted
 		if err != nil {
@@ -266,7 +300,7 @@ func (s *HistoryPurgeService) RunGC(ctx context.Context) (*domain.HistoryGCRunSu
 			summary.SkippedRunning++
 			continue
 		}
-		tc, err := s.purgeTrace(ctx, m.TraceID)
+		tc, err := s.purgeTrace(ctx, m.OrgID, m.TraceID)
 		summary.LogsDeleted += tc.logsDeleted
 		summary.MetricsDeleted += tc.metricsDeleted
 		summary.TelemetryErrors += tc.errors

@@ -64,7 +64,7 @@ func TestConnectEnvNoVersionMasked(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", false)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -83,8 +83,8 @@ func TestConnectEnvNoVersionMasked(t *testing.T) {
 	if snap.Token.Prefix == "" {
 		t.Fatal("Token.Prefix empty")
 	}
-	if len(snap.EnvVars) != 3 {
-		t.Fatalf("EnvVars = %d, want 3", len(snap.EnvVars))
+	if len(snap.EnvVars) != 6 {
+		t.Fatalf("EnvVars = %d, want 6", len(snap.EnvVars))
 	}
 	if got := envValue(snap.EnvVars, "DAGGER_CLOUD_TOKEN"); got != "" {
 		t.Fatalf("masked token value = %q, want empty", got)
@@ -109,7 +109,7 @@ func TestConnectEnvNoVersionRevealed(t *testing.T) {
 		t.Fatalf("Generate: %v", err)
 	}
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", true)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, true)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -123,15 +123,15 @@ func TestConnectEnvWithVersion(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "v0.21.4", false)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "v0.21.4", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
 	if snap.SelectedVersion != "v0.21.4" {
 		t.Fatalf("SelectedVersion = %q", snap.SelectedVersion)
 	}
-	if len(snap.EnvVars) != 4 {
-		t.Fatalf("EnvVars = %d, want 4", len(snap.EnvVars))
+	if len(snap.EnvVars) != 7 {
+		t.Fatalf("EnvVars = %d, want 7", len(snap.EnvVars))
 	}
 	if got := envValue(snap.EnvVars, "_EXPERIMENTAL_DAGGER_TAG"); got != "v0.21.4" {
 		t.Fatalf("TAG = %q", got)
@@ -143,7 +143,7 @@ func TestConnectEnvInvalidVersion(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	if _, err := fx.svc.ConnectEnv(ctx, u.ID, "notaversion", false); !errors.Is(err, domain.ErrValidation) {
+	if _, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "notaversion", "personal", false, false); !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("invalid version: %v, want ErrValidation", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestConnectEnvDisallowedVersion(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	if _, err := fx.svc.ConnectEnv(ctx, u.ID, "v0.10.0", false); !errors.Is(err, domain.ErrValidation) {
+	if _, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "v0.10.0", "personal", false, false); !errors.Is(err, domain.ErrValidation) {
 		t.Fatalf("disallowed version: %v, want ErrValidation", err)
 	}
 }
@@ -163,7 +163,7 @@ func TestConnectEnvTokenMissing(t *testing.T) {
 	ctx := context.Background()
 	u := seedUserSvc(t, fx.users, "u1")
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", false)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -188,7 +188,7 @@ func TestConnectEnvTokenNotRecoverable(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", true)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, true)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -204,15 +204,15 @@ func TestConnectEnvEmptyUserID(t *testing.T) {
 	fx := newConnectFixture(t, testEncKey())
 	ctx := context.Background()
 
-	snap, err := fx.svc.ConnectEnv(ctx, "", "", false)
+	snap, err := fx.svc.ConnectEnv(ctx, "", nil, "", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
 	if snap.Token.Exists {
 		t.Fatal("empty user id should yield missing token")
 	}
-	if len(snap.EnvVars) != 3 {
-		t.Fatalf("EnvVars = %d, want 3", len(snap.EnvVars))
+	if len(snap.EnvVars) != 6 {
+		t.Fatalf("EnvVars = %d, want 6", len(snap.EnvVars))
 	}
 }
 
@@ -222,7 +222,7 @@ func TestConnectEnvAllowedVersions(t *testing.T) {
 	u := seedUserSvc(t, fx.users, "u1")
 
 	fx.setReleases(t, map[string][]string{"0.21": {"v0.21.4"}})
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", false)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -242,7 +242,7 @@ func TestConnectEnvNoVersionLatestRelease(t *testing.T) {
 		"0.21": {"v0.21.4"},
 	})
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", false)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -273,7 +273,7 @@ func TestConnectEnvTokenMetaError(t *testing.T) {
 	ts := NewTokenService(errorTokenRepo{}, testLogger(), testEncKey())
 	cs := NewConnectService(cfg, vr, ts, testLogger())
 
-	snap, err := cs.ConnectEnv(context.Background(), "u1", "", false)
+	snap, err := cs.ConnectEnv(context.Background(), "u1", nil, "", "personal", false, false)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}
@@ -300,7 +300,7 @@ func TestConnectEnvRevealDecryptFails(t *testing.T) {
 		t.Fatalf("Upsert: %v", err)
 	}
 
-	snap, err := fx.svc.ConnectEnv(ctx, u.ID, "", true)
+	snap, err := fx.svc.ConnectEnv(ctx, u.ID, nil, "", "personal", false, true)
 	if err != nil {
 		t.Fatalf("ConnectEnv: %v", err)
 	}

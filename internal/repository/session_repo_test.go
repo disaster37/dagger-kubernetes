@@ -21,6 +21,10 @@ func (c *captureSessionSink) ApplySessionRegistered(lease *domain.Lease) {
 	c.registered = append(c.registered, lease)
 }
 
+func (c *captureSessionSink) ApplyBootstrapOrg(string)           {}
+func (c *captureSessionSink) ApplyUserOrgRevoked(string, string) {}
+func (c *captureSessionSink) ApplyOrgDeleted(string)             {}
+
 func (c *captureSessionSink) ApplySessionTouched(certFP string, at time.Time) {
 	c.touched = append(c.touched, struct {
 		fp string
@@ -35,7 +39,7 @@ func TestSessionRepoRegisterAndTouchReplicate(t *testing.T) {
 	repo := NewSessionRepo(store)
 	ctx := context.Background()
 
-	if err := repo.Register(ctx, "fp1", "v0.21.9", "dagger-engine-v0-21-9-0", "instance-1", "trace-1", "user-1", "group-1"); err != nil {
+	if err := repo.Register(ctx, "", "fp1", "v0.21.9", "dagger-engine-v0-21-9-0", "instance-1", "trace-1", "user-1", "group-1"); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	if len(sink.registered) != 1 {
@@ -72,7 +76,7 @@ func TestSessionRepoRejectsEmptyFingerprint(t *testing.T) {
 	repo := NewSessionRepo(store)
 	ctx := context.Background()
 
-	if err := repo.Register(ctx, "", "v0.21.9", "pod-0", "i", "t", "u", "g"); err == nil {
+	if err := repo.Register(ctx, "", "", "v0.21.9", "pod-0", "i", "t", "u", "g"); err == nil {
 		t.Fatal("Register with empty certFP must fail")
 	}
 	if err := repo.Touch(ctx, ""); err == nil {
@@ -91,7 +95,7 @@ func TestSessionRepoClipsFreeFormFields(t *testing.T) {
 	for i := range long {
 		long[i] = 'x'
 	}
-	if err := repo.Register(ctx, "fp1", "v0.21.9", "pod-0", string(long), string(long), string(long), string(long)); err != nil {
+	if err := repo.Register(ctx, "", "fp1", "v0.21.9", "pod-0", string(long), string(long), string(long), string(long)); err != nil {
 		t.Fatalf("Register: %v", err)
 	}
 	l := sink.registered[0]

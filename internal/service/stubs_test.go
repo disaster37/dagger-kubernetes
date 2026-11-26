@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -313,13 +314,38 @@ func (r *stubGroupRepo) Get(_ context.Context, id string) (*domain.Group, error)
 	}
 	return g, nil
 }
-func (r *stubGroupRepo) GetByName(_ context.Context, name string) (*domain.Group, error) {
-	g, ok := r.byName[name]
-	if !ok {
-		return nil, domain.ErrNotFound
+func (r *stubGroupRepo) GetByName(_ context.Context, orgID, name string) (*domain.Group, error) {
+	for _, g := range r.groups {
+		if g.OrgID == orgID && strings.EqualFold(g.Name, name) {
+			cp := *g
+			return &cp, nil
+		}
 	}
-	return g, nil
+	return nil, domain.ErrNotFound
 }
+
+func (r *stubGroupRepo) ListByOrg(_ context.Context, orgID string) ([]*domain.Group, error) {
+	out := make([]*domain.Group, 0)
+	for _, g := range r.groups {
+		if g.OrgID == orgID {
+			cp := *g
+			out = append(out, &cp)
+		}
+	}
+	return out, nil
+}
+
+func (r *stubGroupRepo) GroupsForUserInOrg(ctx context.Context, orgID, userID string) ([]*domain.Group, error) {
+	all, _ := r.GroupsForUser(ctx, userID)
+	out := make([]*domain.Group, 0, len(all))
+	for _, g := range all {
+		if g.OrgID == orgID {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
 func (r *stubGroupRepo) List(context.Context) ([]*domain.Group, error) {
 	out := make([]*domain.Group, 0, len(r.groups))
 	for _, g := range r.groups {
@@ -461,8 +487,8 @@ type stubSessionStore struct {
 	leases []*domain.Lease
 }
 
-func (s *stubSessionStore) Register(certFP, version, replicaPod, instanceID, traceID, userID string) *domain.Lease {
-	l := &domain.Lease{CertFP: certFP, Version: version, ReplicaPod: replicaPod, InstanceID: instanceID, TraceID: traceID, UserID: userID}
+func (s *stubSessionStore) Register(orgID, certFP, version, replicaPod, instanceID, traceID, userID string) *domain.Lease {
+	l := &domain.Lease{CertFP: certFP, OrgID: orgID, Version: version, ReplicaPod: replicaPod, InstanceID: instanceID, TraceID: traceID, UserID: userID}
 	s.leases = append(s.leases, l)
 	return l
 }
@@ -497,6 +523,17 @@ func (s *stubSessionStore) SetGroupID(certFP, groupID string) {
 		}
 	}
 }
+func (s *stubSessionStore) CountByOrg(orgID string) int {
+	n := 0
+	for _, l := range s.leases {
+		if l.OrgID == orgID {
+			n++
+		}
+	}
+	return n
+}
+func (s *stubSessionStore) RemoveByUserAndOrg(userID, orgID string) []string { return nil }
+func (s *stubSessionStore) RemoveByOrg(orgID string) []string                { return nil }
 func (s *stubSessionStore) CountByUser(userID string) int {
 	n := 0
 	for _, l := range s.leases {
@@ -517,12 +554,13 @@ func (s *stubSessionStore) List() []*domain.Lease {
 
 // stubFleetProvider is an in-memory FleetProvider for status/fleet tests.
 type stubFleetProvider struct {
-	versions  []string
-	replicas  map[string][]domain.Replica
-	allErr    error
-	pvcs      map[string][]domain.PVCInfo // version → PVCs
-	pvcErr    error                       // error for ListPVCs
-	deleteErr map[string]error            // PVC name → error for DeletePVC
+	versions    []string
+	replicas    map[string][]domain.Replica
+	allErr      error
+	replicasErr map[string]error            // version → error for GetReplicas
+	pvcs        map[string][]domain.PVCInfo // version → PVCs
+	pvcErr      error                       // error for ListPVCs
+	deleteErr   map[string]error            // PVC name → error for DeletePVC
 }
 
 func (p *stubFleetProvider) EnsureStatefulSet(string, string) error { return nil }
@@ -530,6 +568,9 @@ func (p *stubFleetProvider) DeleteStatefulSet(string) error         { return nil
 func (p *stubFleetProvider) EnsureService(string) error             { return nil }
 func (p *stubFleetProvider) DeleteService(string) error             { return nil }
 func (p *stubFleetProvider) GetReplicas(v string) ([]domain.Replica, error) {
+	if err, ok := p.replicasErr[v]; ok {
+		return nil, err
+	}
 	return p.replicas[v], nil
 }
 func (p *stubFleetProvider) ScaleUp(string, int) error                        { return nil }

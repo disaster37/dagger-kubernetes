@@ -948,6 +948,165 @@ func TestLoadAdminGroupsDefault(t *testing.T) {
 	}
 }
 
+func TestLoadForgeGitHubDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	g := cfg.Forge.GitHub
+	if g.HTTPTimeout != 15*time.Second {
+		t.Fatalf("http_timeout = %v", g.HTTPTimeout)
+	}
+	if g.OAuth.OAuthBaseURL != "https://github.com" {
+		t.Fatalf("oauth_base_url = %q", g.OAuth.OAuthBaseURL)
+	}
+	if g.OAuth.StateTTL != 10*time.Minute {
+		t.Fatalf("state_ttl = %v", g.OAuth.StateTTL)
+	}
+	if !g.OAuth.DeviceFlowEnabled {
+		t.Fatal("device_flow_enabled default should be true")
+	}
+	wantScopes := []string{"repo", "read:org", "admin:repo_hook"}
+	if len(g.OAuth.Scopes) != len(wantScopes) {
+		t.Fatalf("scopes = %v", g.OAuth.Scopes)
+	}
+	for i := range wantScopes {
+		if g.OAuth.Scopes[i] != wantScopes[i] {
+			t.Fatalf("scopes = %v", g.OAuth.Scopes)
+		}
+	}
+	if g.OAuth.Enabled {
+		t.Fatal("oauth.enabled default should be false")
+	}
+}
+
+func TestLoadForgeGitHubEnvOverride(t *testing.T) {
+	t.Setenv("DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_ENABLED", "true")
+	t.Setenv("DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_ID", "client-id")
+	t.Setenv("DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_SECRET", "client-secret")
+	t.Setenv("DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_STATE_TTL", "20m")
+	t.Setenv("DAGGER_KUBERNETES_FORGE_GITHUB_HTTP_TIMEOUT", "20s")
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	o := cfg.Forge.GitHub.OAuth
+	if !o.Enabled || o.ClientID != "client-id" || o.ClientSecret != "client-secret" {
+		t.Fatalf("oauth = %+v", o)
+	}
+	if o.StateTTL != 20*time.Minute || cfg.Forge.GitHub.HTTPTimeout != 20*time.Second {
+		t.Fatalf("durations = %v / %v", o.StateTTL, cfg.Forge.GitHub.HTTPTimeout)
+	}
+}
+
+// TestLoadForgeOAuthIndependentOfAuthOAuth proves credential linking needs no
+// login provider: internal auth alone plus forge.github.oauth is valid.
+func TestLoadForgeOAuthIndependentOfAuthOAuth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`auth:
+  internal:
+    enabled: true
+  oauth:
+    enabled: false
+forge:
+  github:
+    oauth:
+      enabled: true
+      client_id: "client-id"
+      client_secret: "client-secret"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load = %v", err)
+	}
+	if !cfg.Forge.GitHub.OAuth.Enabled {
+		t.Fatal("forge oauth must be enabled")
+	}
+	if cfg.Auth.OAuth.Enabled {
+		t.Fatal("auth.oauth must remain disabled")
+	}
+}
+
+func TestValidateForgeConfigRejections(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{Forge: domain.ForgeConfig{GitHub: domain.ForgeGitHubConfig{
+			HTTPTimeout: 15 * time.Second,
+			OAuth: domain.ForgeGitHubOAuthConfig{
+				OAuthBaseURL:      "https://github.com",
+				DeviceFlowEnabled: true,
+				Enabled:           true,
+				ClientID:          "id",
+				ClientSecret:      "secret",
+				Scopes:            []string{"repo"},
+				StateTTL:          10 * time.Minute,
+			},
+		}}}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*domain.Config)
+		want   string
+	}{
+		{"timeout zero", func(c *domain.Config) { c.Forge.GitHub.HTTPTimeout = 0 }, "http_timeout"},
+		{"timeout too long", func(c *domain.Config) { c.Forge.GitHub.HTTPTimeout = 3 * time.Minute }, "http_timeout"},
+		{"api url insecure", func(c *domain.Config) { c.Forge.GitHub.AllowedAPIURLs = []string{"http://evil.example.com"} }, "allowed_api_urls"},
+		{"api url userinfo", func(c *domain.Config) { c.Forge.GitHub.AllowedAPIURLs = []string{"https://u:p@example.com"} }, "allowed_api_urls"},
+		{"oauth base insecure", func(c *domain.Config) { c.Forge.GitHub.OAuth.OAuthBaseURL = "http://evil.example.com" }, "oauth_base_url"},
+		{"redirect wrong path", func(c *domain.Config) {
+			c.Forge.GitHub.OAuth.AllowedRedirectURIs = []string{"https://example.com/other"}
+		}, "allowed_redirect_uris"},
+		{"client id missing", func(c *domain.Config) { c.Forge.GitHub.OAuth.ClientID = "" }, "client_id"},
+		{"client secret missing", func(c *domain.Config) { c.Forge.GitHub.OAuth.ClientSecret = "" }, "client_secret"},
+		{"scopes empty", func(c *domain.Config) { c.Forge.GitHub.OAuth.Scopes = nil }, "scopes"},
+		{"scope control char", func(c *domain.Config) { c.Forge.GitHub.OAuth.Scopes = []string{"repo\x00"} }, "scopes"},
+		{"state ttl too short", func(c *domain.Config) { c.Forge.GitHub.OAuth.StateTTL = 30 * time.Second }, "state_ttl"},
+		{"state ttl too long", func(c *domain.Config) { c.Forge.GitHub.OAuth.StateTTL = 2 * time.Hour }, "state_ttl"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			tc.mutate(cfg)
+			err := validateForgeConfig(cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v want substring %q", err, tc.want)
+			}
+		})
+	}
+	if err := validateForgeConfig(base()); err != nil {
+		t.Fatalf("valid config rejected: %v", err)
+	}
+	loopback := base()
+	loopback.Forge.GitHub.OAuth.AllowedRedirectURIs = []string{"http://127.0.0.1:3000/github/callback"}
+	loopback.Forge.GitHub.AllowedAPIURLs = []string{"http://localhost:8081"}
+	if err := validateForgeConfig(loopback); err != nil {
+		t.Fatalf("loopback URLs rejected: %v", err)
+	}
+}
+
+func TestLoadRejectsInvalidForgeConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`forge:
+  github:
+    oauth:
+      enabled: true
+      client_id: "id"
+      client_secret: "secret"
+      oauth_base_url: "http://evil.example.com"
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "validate forge config") {
+		t.Fatalf("err = %v want wrapped forge validation", err)
+	}
+}
+
 func TestLoadRejectsInternalDisabledWithoutOAuth(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.app.yaml")
@@ -1959,5 +2118,116 @@ func TestValidateImageCacheConfig(t *testing.T) {
 				t.Fatalf("validateImageCacheConfig err = %v, want %q", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestValidateChecksAndWorkflowsConfig(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{
+			Checks:    domain.ChecksConfig{Enabled: true, JobImage: "ghcr.io/acme/runner:latest", Timeout: time.Minute},
+			Workflows: domain.WorkflowConfig{Enabled: true, JobImage: "ghcr.io/acme/runner:latest", DefaultTimeout: time.Minute, MaxParallel: 1},
+		}
+	}
+	tests := []struct {
+		name    string
+		mut     func(c *domain.Config)
+		wantErr string
+	}{
+		{name: "valid", mut: func(c *domain.Config) {}},
+		{name: "checks disabled skips", mut: func(c *domain.Config) {
+			c.Checks.Enabled = false
+			c.Checks.JobImage = ""
+			c.Checks.Timeout = 0
+		}},
+		{name: "checks empty job_image", mut: func(c *domain.Config) {
+			c.Checks.JobImage = ""
+		}, wantErr: "checks.job_image must not be empty"},
+		{name: "checks zero timeout", mut: func(c *domain.Config) {
+			c.Checks.Timeout = 0
+		}, wantErr: "checks.timeout must be > 0"},
+		{name: "workflows disabled skips", mut: func(c *domain.Config) {
+			c.Workflows.Enabled = false
+			c.Workflows.JobImage = ""
+			c.Workflows.DefaultTimeout = 0
+		}},
+		{name: "workflows empty job_image", mut: func(c *domain.Config) {
+			c.Workflows.JobImage = ""
+		}, wantErr: "workflows.job_image must not be empty"},
+		{name: "workflows zero default_timeout", mut: func(c *domain.Config) {
+			c.Workflows.DefaultTimeout = 0
+		}, wantErr: "workflows.default_timeout must be > 0"},
+		{name: "workflows negative max_parallel", mut: func(c *domain.Config) {
+			c.Workflows.MaxParallel = -1
+		}, wantErr: "workflows.max_parallel must be >= 0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := base()
+			tt.mut(cfg)
+			err := validateChecksConfig(cfg)
+			if err == nil {
+				err = validateWorkflowsConfig(cfg)
+			}
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("err = %v, want %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadChecksAndWorkflowsDefaults(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Checks.JobImage != "ghcr.io/disaster37/dagger-kubernetes:latest" {
+		t.Fatalf("checks.job_image default = %q", cfg.Checks.JobImage)
+	}
+	if cfg.Workflows.JobImage != "ghcr.io/disaster37/dagger-kubernetes:latest" {
+		t.Fatalf("workflows.job_image default = %q", cfg.Workflows.JobImage)
+	}
+	if len(cfg.Checks.JobImagePullSecrets) != 0 || len(cfg.Workflows.JobImagePullSecrets) != 0 {
+		t.Fatal("job_image_pull_secrets must default to empty")
+	}
+}
+
+// TestLoadJobImagePullSecretsStringList locks the config contract with the Helm
+// template: job_image_pull_secrets is a plain string list of pull-secret NAMES
+// (not the Kubernetes {name: ...} object shape). A non-empty list must decode.
+func TestLoadJobImagePullSecretsStringList(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.app.yaml")
+	content := []byte(`checks:
+  enabled: true
+  job_image: "ghcr.io/acme/runner:latest"
+  job_image_pull_secrets:
+    - "ghcr-pull"
+    - "other-pull"
+  timeout: "30m"
+workflows:
+  enabled: true
+  job_image: "ghcr.io/acme/runner:latest"
+  job_image_pull_secrets:
+    - "ghcr-pull"
+  default_timeout: "30m"
+  max_parallel: 4
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Checks.JobImagePullSecrets) != 2 || cfg.Checks.JobImagePullSecrets[0] != "ghcr-pull" || cfg.Checks.JobImagePullSecrets[1] != "other-pull" {
+		t.Fatalf("checks.job_image_pull_secrets = %v", cfg.Checks.JobImagePullSecrets)
+	}
+	if len(cfg.Workflows.JobImagePullSecrets) != 1 || cfg.Workflows.JobImagePullSecrets[0] != "ghcr-pull" {
+		t.Fatalf("workflows.job_image_pull_secrets = %v", cfg.Workflows.JobImagePullSecrets)
 	}
 }

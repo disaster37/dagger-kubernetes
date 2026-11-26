@@ -342,7 +342,7 @@ func TestStopCancelsPendingGraceTimers(t *testing.T) {
 // (InFlight == 1) for the "active-running" trace.
 func newStaleSweepSessions() *stubSessionStore {
 	s := &stubSessionStore{}
-	l := s.Register("fp-active", "v0.21.4", "pod-0", "inst-1", "active-running", "")
+	l := s.Register("", "fp-active", "v0.21.4", "pod-0", "inst-1", "active-running", "")
 	l.InFlight = 1
 	return s
 }

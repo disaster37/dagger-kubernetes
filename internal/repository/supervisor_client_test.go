@@ -208,3 +208,20 @@ func TestSupervisorTraceClientResponseSizeCap(t *testing.T) {
 		t.Fatalf("err = %v, want decode error from truncated body", err)
 	}
 }
+
+func TestSupervisorTraceClientWithOrgSendsHeader(t *testing.T) {
+	var gotOrg string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotOrg = r.Header.Get("X-Dagger-Org")
+		_ = json.NewEncoder(w).Encode([]domain.TraceListResult{})
+	}))
+	defer srv.Close()
+
+	c := NewSupervisorTraceClient(srv.URL, "tok", time.Second).WithOrg("acme")
+	if _, err := c.ListTraces(context.Background(), 1); err != nil {
+		t.Fatalf("ListTraces: %v", err)
+	}
+	if gotOrg != "acme" {
+		t.Fatalf("X-Dagger-Org = %q, want acme", gotOrg)
+	}
+}

@@ -1,6 +1,12 @@
 <template>
   <div>
-    <h1 class="mb-6 text-2xl font-semibold">Runner Fleet</h1>
+    <div class="mb-6 flex items-center justify-between gap-3">
+      <h1 class="text-2xl font-semibold">Runner Fleet</h1>
+      <div v-if="auth.isAdmin" class="flex items-center gap-2">
+        <span class="text-sm text-muted">All organizations</span>
+        <USwitch v-model="allOrgs" @change="load" />
+      </div>
+    </div>
 
     <div v-if="loading" class="py-12 text-center text-muted">
       <UIcon name="i-lucide-loader-circle" class="mx-auto size-7 animate-spin text-primary" />
@@ -21,17 +27,20 @@
     />
 
     <div v-else>
-      <UCard v-for="version in fleet" :key="version.version" class="mb-4">
+      <UCard v-for="version in fleet" :key="version.stsName || version.version" class="mb-4">
         <div class="flex items-center justify-between gap-3">
-          <h3 class="font-semibold">{{ version.version }}</h3>
+          <h3 class="font-semibold">
+            {{ version.version }}
+            <UBadge v-if="version.org" color="neutral" variant="soft" size="sm" class="ml-1">{{ version.org_slug || version.org }}</UBadge>
+          </h3>
           <UButton
             v-if="auth.isAdmin"
             color="neutral"
             variant="outline"
-            :loading="purging[version.version]"
-            @click="askPurge(version.version)"
+            :loading="purging[key(version)]"
+            @click="askPurge(version)"
           >
-            {{ purging[version.version] ? 'Purging…' : 'Purge local cache' }}
+            {{ purging[key(version)] ? 'Purging…' : 'Purge local cache' }}
           </UButton>
         </div>
         <p class="text-[13px] text-muted">
@@ -39,16 +48,16 @@
         </p>
 
         <UAlert
-          v-if="purgeResults[version.version]"
+          v-if="purgeResults[key(version)]"
           class="mt-2"
           color="neutral"
           variant="soft"
-          :description="purgeSummary(purgeResults[version.version]!)"
+          :description="purgeSummary(purgeResults[key(version)]!)"
         >
-          <template v-if="failedPods(purgeResults[version.version]!).length" #description>
-            <p>{{ purgeSummary(purgeResults[version.version]!) }}</p>
+          <template v-if="failedPods(purgeResults[key(version)]!).length" #description>
+            <p>{{ purgeSummary(purgeResults[key(version)]!) }}</p>
             <ul class="mt-1 ml-4 list-disc">
-              <li v-for="pod in failedPods(purgeResults[version.version]!)" :key="pod.pod_name">
+              <li v-for="pod in failedPods(purgeResults[key(version)]!)" :key="pod.pod_name">
                 <code>{{ pod.pod_name }}</code>: {{ pod.error }}
               </li>
             </ul>
@@ -56,11 +65,11 @@
         </UAlert>
 
         <UAlert
-          v-if="purgeErrors[version.version]"
+          v-if="purgeErrors[key(version)]"
           class="mt-2"
           color="error"
           variant="soft"
-          :description="purgeErrors[version.version]"
+          :description="purgeErrors[key(version)]"
         />
 
         <UTable class="mt-3" :data="version.ordinals" :columns="podColumns">
@@ -77,29 +86,29 @@
           </template>
         </UTable>
 
-        <div v-if="metricsByVersion[version.version] === null" class="mt-4 text-[13px] text-muted">
+        <div v-if="metricsByVersion[key(version)] === null" class="mt-4 text-[13px] text-muted">
           Metrics unavailable
         </div>
-        <div v-else-if="metricsByVersion[version.version]" class="mt-4">
+        <div v-else-if="metricsByVersion[key(version)]" class="mt-4">
           <h4 class="mb-2 font-semibold">Runner metrics</h4>
-          <div v-if="metricsByVersion[version.version]!.series.length === 0" class="text-[13px] text-muted">
+          <div v-if="metricsByVersion[key(version)]!.series.length === 0" class="text-[13px] text-muted">
             No metrics
           </div>
           <div v-else class="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-2.5">
             <MetricChart
-              v-for="s in metricsByVersion[version.version]!.series"
+              v-for="s in metricsByVersion[key(version)]!.series"
               :key="s.name"
               :series="s"
               :unit="s.unit"
             />
           </div>
-          <div v-if="storageOf(version.version)" class="mt-3 rounded border border-default p-3">
+          <div v-if="storageOf(version)" class="mt-3 rounded border border-default p-3">
             <span class="text-[13px] text-muted">Storage</span>
             <div class="mt-1 flex items-baseline gap-2">
-              <span class="text-lg font-semibold">{{ formatBytes(storageOf(version.version)!.used_bytes) }}</span>
+              <span class="text-lg font-semibold">{{ formatBytes(storageOf(version)!.used_bytes) }}</span>
               <span class="text-[13px] text-muted">
-                of {{ formatBytes(storageOf(version.version)!.capacity_bytes) }}
-                ({{ storagePercentOf(version.version) }}%)
+                of {{ formatBytes(storageOf(version)!.capacity_bytes) }}
+                ({{ storagePercentOf(version) }}%)
               </span>
             </div>
           </div>
@@ -137,6 +146,7 @@ const REFRESH_MS = 10_000
 
 const auth = useAuthStore()
 const fleet = ref<FleetInfo[]>([])
+const allOrgs = ref(false)
 const loading = ref(true)
 const error = ref<string | null>(null)
 const purging = ref<Record<string, boolean>>({})
@@ -158,13 +168,19 @@ const podColumns = [
   { id: 'startedAt', accessorKey: 'startedAt', header: 'Uptime' },
 ]
 
+// key uniquely identifies a (org, version) fleet entry: the org slug when
+// present (cross-org "all" view), else the version (single-org view).
+function key(v: FleetInfo): string {
+  return v.org_slug ? `${v.org_slug}:${v.version}` : v.version
+}
+
 async function load(): Promise<void> {
   if (loadingInFlight) return
   loadingInFlight = true
   try {
-    fleet.value = await fetchFleetInfo()
+    fleet.value = await fetchFleetInfo(allOrgs.value ? 'all' : undefined)
     error.value = null
-    await Promise.all(fleet.value.map((v) => loadVersionMetrics(v.version)))
+    await Promise.all(fleet.value.map((v) => loadVersionMetrics(v)))
   } catch (e) {
     error.value = e instanceof Error ? e.message : 'Failed to load fleet'
   } finally {
@@ -175,27 +191,27 @@ async function load(): Promise<void> {
 
 // Per-version metrics are best-effort: an error/disabled endpoint records
 // null so the card renders "Metrics unavailable" instead of failing the page.
-async function loadVersionMetrics(version: string): Promise<void> {
+async function loadVersionMetrics(v: FleetInfo): Promise<void> {
   try {
-    metricsByVersion.value = { ...metricsByVersion.value, [version]: await fetchFleetMetrics(version) }
+    metricsByVersion.value = { ...metricsByVersion.value, [key(v)]: await fetchFleetMetrics(v.version, v.org_slug) }
   } catch {
-    metricsByVersion.value = { ...metricsByVersion.value, [version]: null }
+    metricsByVersion.value = { ...metricsByVersion.value, [key(v)]: null }
   }
 }
 
-function storageOf(version: string): FleetStorage | null {
-  const s = metricsByVersion.value[version]?.storage
+function storageOf(v: FleetInfo): FleetStorage | null {
+  const s = metricsByVersion.value[key(v)]?.storage
   return s ? s : null
 }
 
-function storagePercentOf(version: string): string {
-  const p = storageOf(version)?.percent
+function storagePercentOf(v: FleetInfo): string {
+  const p = storageOf(v)?.percent
   return p !== undefined && p >= 0 ? p.toFixed(1) : '-'
 }
 
-function askPurge(version: string): void {
-  confirmMessage.value = `Purge the local BuildKit cache on every ${version} engine pod and delete the retained PVCs of scaled-down runners? Running pipelines are not interrupted.`
-  confirmAction = () => purge(version)
+function askPurge(v: FleetInfo): void {
+  confirmMessage.value = `Purge the local BuildKit cache on every ${v.version} engine pod and delete the retained PVCs of scaled-down runners? Running pipelines are not interrupted.`
+  confirmAction = () => purge(v)
   confirmOpen.value = true
 }
 
@@ -205,18 +221,19 @@ function runConfirmed() {
   confirmAction = null
 }
 
-async function purge(version: string): Promise<void> {
-  purging.value = { ...purging.value, [version]: true }
-  purgeErrors.value = { ...purgeErrors.value, [version]: '' }
+async function purge(v: FleetInfo): Promise<void> {
+  const k = key(v)
+  purging.value = { ...purging.value, [k]: true }
+  purgeErrors.value = { ...purgeErrors.value, [k]: '' }
   try {
-    const result = await purgeEngineCache(version)
-    purgeResults.value = { ...purgeResults.value, [version]: result }
+    const result = await purgeEngineCache(v.version, v.org_slug)
+    purgeResults.value = { ...purgeResults.value, [k]: result }
     void load()
   } catch (e) {
     const err = e as { response?: { data?: { message?: string } } }
-    purgeErrors.value = { ...purgeErrors.value, [version]: err.response?.data?.message || 'Purge failed' }
+    purgeErrors.value = { ...purgeErrors.value, [k]: err.response?.data?.message || 'Purge failed' }
   } finally {
-    purging.value = { ...purging.value, [version]: false }
+    purging.value = { ...purging.value, [k]: false }
   }
 }
 

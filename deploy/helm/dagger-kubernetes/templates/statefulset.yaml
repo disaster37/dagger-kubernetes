@@ -67,6 +67,10 @@ spec:
           env:
             - name: DAGGER_KUBERNETES_LOG_LEVEL
               value: {{ .Values.supervisor.config.logLevel | quote }}
+            {{- if .Values.supervisor.gomemlimit }}
+            - name: GOMEMLIMIT
+              value: {{ .Values.supervisor.gomemlimit | quote }}
+            {{- end }}
             # Stable node ID = StatefulSet pod name (<sts>-<ordinal>), which
             # matches the DNS peer IDs derived from the fixed
             # raft.statefulset_name / headless_service config.
@@ -100,6 +104,13 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.auth.oauth.clientSecretRef.name | default (printf "%s-oauth" (include "dagger-kubernetes.fullname" .)) }}
                   key: {{ .Values.auth.oauth.clientSecretRef.key | default "client_secret" }}
+            {{- end }}
+            {{- if or .Values.supervisor.config.forge.github.oauth.clientSecret .Values.supervisor.config.forge.github.oauth.clientSecretRef.name }}
+            - name: DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.supervisor.config.forge.github.oauth.clientSecretRef.name | default (printf "%s-github-integration-oauth" (include "dagger-kubernetes.fullname" .)) }}
+                  key: {{ .Values.supervisor.config.forge.github.oauth.clientSecretRef.key | default "client_secret" }}
             {{- end }}
             # S3 credentials for the supervisor's shared S3 client (CLI cache +
             # cache GC). Optional: without the secret the client falls back to
@@ -160,6 +171,8 @@ spec:
             {{- end }}
             - name: db
               mountPath: /var/lib/dagger-kubernetes
+            - name: cache-scratch
+              mountPath: /var/cache/dagger-kubernetes
             - name: tmp
               mountPath: /tmp
             {{- if .Values.supervisor.config.fleet.engineCaSecret }}
@@ -217,6 +230,9 @@ spec:
           secret:
             secretName: {{ .Values.dataIngress.tls.secretName | default .Values.dataCert.secretName | default (printf "%s-data-tls" (include "dagger-kubernetes.fullname" .)) }}
         {{- end }}
+        - name: cache-scratch
+          emptyDir:
+            sizeLimit: {{ .Values.supervisor.cacheScratch.sizeLimit | default "8Gi" | quote }}
         - name: tmp
           emptyDir: {}
         {{- if .Values.supervisor.config.fleet.engineCaSecret }}

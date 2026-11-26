@@ -37,8 +37,16 @@ func (r *ProjectRepo) Get(ctx context.Context, id string) (*domain.Project, erro
 	return r.store.fsmRead().readProjectByID(id)
 }
 
-func (r *ProjectRepo) GetByName(ctx context.Context, name string) (*domain.Project, error) {
-	return r.store.fsmRead().readProjectByName(name)
+func (r *ProjectRepo) GetByName(ctx context.Context, orgID, name string) (*domain.Project, error) {
+	return r.store.fsmRead().readProjectByName(orgID, name)
+}
+
+func (r *ProjectRepo) ListByOrg(ctx context.Context, orgID string) ([]*domain.Project, error) {
+	return r.store.fsmRead().listProjectsByOrg(orgID), nil
+}
+
+func (r *ProjectRepo) ListByNameAcrossOrgs(ctx context.Context, name string) ([]*domain.Project, error) {
+	return r.store.fsmRead().listProjectsByNameAcrossOrgs(name), nil
 }
 
 func (r *ProjectRepo) List(ctx context.Context) ([]*domain.Project, error) {

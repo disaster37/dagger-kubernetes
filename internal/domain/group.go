@@ -8,6 +8,7 @@ import (
 // Group is a collection of users sharing quota and project visibility.
 type Group struct {
 	ID                string    `json:"id"`
+	OrgID             string    `json:"org_id"`
 	Name              string    `json:"name"`
 	Description       string    `json:"description"`
 	MaxRunnerSessions int       `json:"max_runner_sessions"` // 0 = unlimited
@@ -21,8 +22,10 @@ type Group struct {
 type GroupRepository interface {
 	Create(ctx context.Context, g *Group) error
 	Get(ctx context.Context, id string) (*Group, error)
-	GetByName(ctx context.Context, name string) (*Group, error)
-	List(ctx context.Context) ([]*Group, error)
+	GetByName(ctx context.Context, orgID, name string) (*Group, error)
+	ListByOrg(ctx context.Context, orgID string) ([]*Group, error)
+	List(ctx context.Context) ([]*Group, error) // internal cross-org reads only
+	GroupsForUserInOrg(ctx context.Context, orgID, userID string) ([]*Group, error)
 	Update(ctx context.Context, g *Group) error
 	Delete(ctx context.Context, id string) error
 	SetMembers(ctx context.Context, groupID string, userIDs []string) error

@@ -1,8 +1,10 @@
 import axios from 'axios'
 import { installAuthInterceptors, type AuthRecoveryMode, type AuthRequestConfig } from '~/api/auth-interceptor'
 import { useAuthStore } from '~/stores/auth'
+import { useOrgStore } from '~/stores/org'
 import type {
   AuthUser,
+  CheckRunRecord,
   ConnectEnvSnapshot,
   EngineCachePurgeResult,
   FleetInfo,
@@ -16,10 +18,29 @@ import type {
   ImageCachePruneAllResult,
   ImageCachePruneRef,
   ImageCachePruneResult,
+  ForgeSource,
+  GitHubAccountSource,
+  GitHubConnectionState,
+  GitHubDeviceFlowStart,
+  GitHubOAuthCompleteResult,
+  GitHubOwner,
+  OrgRepoSettings,
+  RepoSetting,
+  SourceRepositoryItem,
   LogSearchPage,
   LogSearchRequest,
+  Org,
+  OrgMember,
+  OrgMemberRow,
+  OrgQuotaUsage,
+  OrgQuotas,
+  OrgSummary,
+  OrgTokenMeta,
   PlatformStatus,
   Project,
+  ProtectedEnvironment,
+  RemoteCacheStats,
+  SecretMeta,
   Providers,
   TokenMeta,
   TraceDetail,
@@ -28,6 +49,8 @@ import type {
   TraceMetrics,
   TraceRow,
   UserRow,
+  WorkflowDef,
+  WorkflowRun,
 } from '~/api/types'
 
 const api = axios.create({
@@ -50,6 +73,44 @@ installAuthInterceptors(
     }
   },
   () => (typeof window !== 'undefined' ? window.location : null),
+)
+
+// Inject the active organization into every request unless the caller set it
+// explicitly, or the request is an explicit `?org=all` cross-org admin view
+// (which must not send X-Dagger-Org). The store is resolved lazily so this
+// module can load before Pinia in tests/builds.
+api.interceptors.request.use((config) => {
+  try {
+    const org = useOrgStore()
+    const params = (config.params ?? {}) as Record<string, unknown>
+    if (org.activeSlug && !config.headers['X-Dagger-Org'] && params.org !== 'all') {
+      config.headers['X-Dagger-Org'] = org.activeSlug
+    }
+  } catch {
+    // Pinia not initialized (SSR/build): skip.
+  }
+  return config
+})
+
+// Surface soft-quota warnings and make 429 messages actionable.
+api.interceptors.response.use(
+  (response) => {
+    const warning = response.headers['x-dagger-quota-warning']
+    if (warning && typeof window !== 'undefined') {
+      useToast().add({ title: 'Organization quota warning', description: String(warning), color: 'warning' })
+    }
+    return response
+  },
+  (error) => {
+    if (error?.response?.status === 429 && typeof window !== 'undefined') {
+      useToast().add({
+        title: 'Organization quota exceeded',
+        description: String(error.response.data?.message ?? 'Organization quota exceeded'),
+        color: 'error',
+      })
+    }
+    return Promise.reject(error)
+  },
 )
 
 export default api
@@ -80,7 +141,7 @@ export async function changePassword(currentPassword: string, newPassword: strin
 // --- Users (admin) ---
 export async function listUsers(): Promise<UserRow[]> {
   const { data } = await api.get('/api/v1/users')
-  return data
+  return (data as UserRow[] | null) ?? []
 }
 export async function createUser(username: string, password: string, role: string): Promise<UserRow> {
   const { data } = await api.post('/api/v1/users', { username, password, role })
@@ -113,44 +174,50 @@ export async function revokeUserToken(id: string): Promise<void> {
 }
 
 // --- Groups (admin) ---
+function activeOrgPath(): string {
+  const org = useOrgStore()
+  if (!org.activeSlug) throw new Error('no active organization')
+  return `/api/v1/orgs/${encodeURIComponent(org.activeSlug)}`
+}
+
 export async function listGroups(): Promise<Group[]> {
-  const { data } = await api.get('/api/v1/groups')
-  return data
+  const { data } = await api.get(`${activeOrgPath()}/groups`)
+  return (data as Group[] | null) ?? []
 }
 export async function createGroup(payload: Partial<Group>): Promise<Group> {
-  const { data } = await api.post('/api/v1/groups', payload)
+  const { data } = await api.post(`${activeOrgPath()}/groups`, payload)
   return data
 }
 export async function updateGroup(id: string, payload: Partial<Group>): Promise<Group> {
-  const { data } = await api.put(`/api/v1/groups/${id}`, payload)
+  const { data } = await api.put(`${activeOrgPath()}/groups/${id}`, payload)
   return data
 }
 export async function deleteGroup(id: string): Promise<void> {
-  await api.delete(`/api/v1/groups/${id}`)
+  await api.delete(`${activeOrgPath()}/groups/${id}`)
 }
 export async function getGroupMembers(id: string): Promise<UserRow[]> {
-  const { data } = await api.get(`/api/v1/groups/${id}/members`)
-  return data
+  const { data } = await api.get(`${activeOrgPath()}/groups/${id}/members`)
+  return (data as UserRow[] | null) ?? []
 }
 export async function setGroupMembers(id: string, userIds: string[]): Promise<void> {
-  await api.put(`/api/v1/groups/${id}/members`, { user_ids: userIds })
+  await api.put(`${activeOrgPath()}/groups/${id}/members`, { user_ids: userIds })
 }
 
 // --- Projects (admin) ---
 export async function listProjects(): Promise<Project[]> {
-  const { data } = await api.get('/api/v1/projects')
-  return data
+  const { data } = await api.get(`${activeOrgPath()}/projects`)
+  return (data as Project[] | null) ?? []
 }
 export async function createProject(name: string, groupId: string): Promise<Project> {
-  const { data } = await api.post('/api/v1/projects', { name, group_id: groupId })
+  const { data } = await api.post(`${activeOrgPath()}/projects`, { name, group_id: groupId })
   return data
 }
 export async function updateProject(id: string, groupId: string): Promise<Project> {
-  const { data } = await api.put(`/api/v1/projects/${id}`, { group_id: groupId })
+  const { data } = await api.put(`${activeOrgPath()}/projects/${id}`, { group_id: groupId })
   return data
 }
 export async function deleteProject(id: string): Promise<void> {
-  await api.delete(`/api/v1/projects/${id}`)
+  await api.delete(`${activeOrgPath()}/projects/${id}`)
 }
 
 // --- Self-service tokens ---
@@ -176,8 +243,9 @@ export async function fetchTraces(filter: TraceFilterParams = {}): Promise<Trace
   if (filter.groupId) params.group_id = filter.groupId
   if (filter.ciRepo) params.ci_repo = filter.ciRepo
   if (filter.user) params.user = filter.user
+  if (filter.org) params.org = filter.org
   const { data } = await api.get('/api/v1/traces', { params })
-  return data
+  return (data as TraceRow[] | null) ?? []
 }
 export async function fetchTrace(id: string): Promise<TraceDetail> {
   const { data } = await api.get(`/api/v1/traces/${id}`)
@@ -194,22 +262,32 @@ export async function fetchTraceMetrics(id: string): Promise<TraceMetrics> {
 }
 export async function fetchTraceSearch(id: string, params: LogSearchRequest): Promise<LogSearchPage> {
   const { data } = await api.get(`/api/v1/traces/${id}/search`, { params })
-  const page = data as LogSearchPage
+  const page = (data as LogSearchPage | null) ?? ({} as LogSearchPage)
   // The server may omit/null `entries` on an empty page; normalise so callers
   // can always iterate the array. `counts` is only present on the first page.
   return { entries: page.entries ?? [], next: page.next, counts: page.counts ?? {} }
 }
-export async function fetchFleetInfo(): Promise<FleetInfo[]> {
-  const { data } = await api.get('/api/v1/fleet')
+export async function fetchFleetInfo(org?: string): Promise<FleetInfo[]> {
+  const params: Record<string, string> = {}
+  if (org) params.org = org
+  const { data } = await api.get('/api/v1/fleet', { params })
   return (data as FleetInfo[] | null) ?? []
 }
-export async function purgeEngineCache(version: string): Promise<EngineCachePurgeResult> {
-  const { data } = await api.post(`/api/v1/fleet/${encodeURIComponent(version)}/purge-cache`)
+export async function purgeEngineCache(version: string, orgSlug?: string): Promise<EngineCachePurgeResult> {
+  const params: Record<string, string> = {}
+  if (orgSlug) params.org = orgSlug
+  const headers: Record<string, string> = {}
+  if (orgSlug) headers['X-Dagger-Org'] = orgSlug
+  const { data } = await api.post(`/api/v1/fleet/${encodeURIComponent(version)}/purge-cache`, null, { params, headers })
   return data as EngineCachePurgeResult
 }
-export async function fetchFleetMetrics(version: string): Promise<FleetMetrics> {
-  const { data } = await api.get(`/api/v1/fleet/${encodeURIComponent(version)}/metrics`)
-  return data as FleetMetrics
+export async function fetchFleetMetrics(version: string, orgSlug?: string): Promise<FleetMetrics | null> {
+  const params: Record<string, string> = {}
+  if (orgSlug) params.org = orgSlug
+  const headers: Record<string, string> = {}
+  if (orgSlug) headers['X-Dagger-Org'] = orgSlug
+  const { data } = await api.get(`/api/v1/fleet/${encodeURIComponent(version)}/metrics`, { params, headers })
+  return (data as FleetMetrics | null) ?? null
 }
 export async function fetchHistoryInfo(): Promise<HistoryInfo> {
   const { data } = await api.get('/api/v1/history')
@@ -248,10 +326,11 @@ export async function pruneAllImageCache(mirrorId?: string): Promise<ImageCacheP
 }
 
 // --- Connect-env snapshot ---
-export async function fetchConnectEnv(version?: string, reveal?: boolean): Promise<ConnectEnvSnapshot> {
+export async function fetchConnectEnv(version?: string, reveal?: boolean, tokenType?: string): Promise<ConnectEnvSnapshot> {
   const params: Record<string, string> = {}
   if (version) params.version = version
   if (reveal) params.reveal = 'true'
+  if (tokenType) params.token_type = tokenType
   const { data } = await api.get('/api/v1/connect/env', { params })
   return data as ConnectEnvSnapshot
 }
@@ -265,4 +344,243 @@ export function connectLiveTrace(id: string): EventSource {
 // cookie; the supervisor also accepts ?token= via query fallback).
 export function connectLivePipelines(): EventSource {
   return new EventSource('/api/v1/traces/live')
+}
+
+// --- Cloud parity: orgs, environments, secrets, integrations ---
+export async function listOrgs(): Promise<Org[]> {
+  const { data } = await api.get('/api/v1/orgs')
+  return (data as Org[] | null) ?? []
+}
+export async function createOrg(payload: { name: string; display_name?: string; quotas?: Partial<OrgQuotas> }): Promise<Org> {
+  const { data } = await api.post('/api/v1/orgs', payload)
+  return data
+}
+export async function getOrg(org: string): Promise<Org> {
+  const { data } = await api.get(`/api/v1/orgs/${encodeURIComponent(org)}`)
+  return data
+}
+export async function updateOrg(org: string, payload: { display_name?: string; features?: string[] }): Promise<Org> {
+  const { data } = await api.put(`/api/v1/orgs/${encodeURIComponent(org)}`, payload)
+  return data
+}
+export async function deleteOrg(org: string, force = false): Promise<void> {
+  await api.delete(`/api/v1/orgs/${encodeURIComponent(org)}`, { params: { force } })
+}
+export async function getOrgQuotas(org: string): Promise<OrgQuotaUsage> {
+  const { data } = await api.get(`/api/v1/orgs/${encodeURIComponent(org)}/quotas`)
+  return data
+}
+export async function updateOrgQuotas(org: string, quotas: OrgQuotas): Promise<OrgQuotaUsage> {
+  const { data } = await api.put(`/api/v1/orgs/${encodeURIComponent(org)}/quotas`, quotas)
+  return data
+}
+export async function listOrgMemberRows(org: string): Promise<OrgMemberRow[]> {
+  const { data } = await api.get(`/api/v1/orgs/${encodeURIComponent(org)}/members`)
+  return (data as OrgMemberRow[] | null) ?? []
+}
+export async function setOrgMemberGroups(org: string, userId: string, groupIds: string[]): Promise<GroupSummary[]> {
+  const { data } = await api.put(`/api/v1/orgs/${encodeURIComponent(org)}/members/${userId}/groups`, { group_ids: groupIds })
+  return (data as GroupSummary[] | null) ?? []
+}
+export async function listOrgMembers(org: string): Promise<OrgMember[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/members`)
+  return (data as OrgMember[] | null) ?? []
+}
+export async function setOrgMember(org: string, userId: string, role: string): Promise<OrgMemberRow> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/members`, { user_id: userId, role })
+  return data as OrgMemberRow
+}
+export async function removeOrgMember(org: string, userId: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/members/${userId}`)
+}
+export async function getOrgToken(org: string): Promise<OrgTokenMeta> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/token`)
+  return data
+}
+export async function generateOrgToken(org: string): Promise<{ token: string; meta: TokenMeta }> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/token`)
+  return data
+}
+export async function revokeOrgToken(org: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/token`)
+}
+export async function listOrgSecrets(org: string): Promise<SecretMeta[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/secrets`)
+  return (data as SecretMeta[] | null) ?? []
+}
+export async function putOrgSecret(org: string, name: string, value: string): Promise<SecretMeta> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/secrets`, { name, value })
+  return data
+}
+export async function deleteOrgSecret(org: string, name: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/secrets/${name}`)
+}
+export async function listProjectSecrets(projectId: string): Promise<SecretMeta[]> {
+  const { data } = await api.get(`${activeOrgPath()}/projects/${projectId}/secrets`)
+  return (data as SecretMeta[] | null) ?? []
+}
+export async function putProjectSecret(projectId: string, name: string, value: string): Promise<SecretMeta> {
+  const { data } = await api.put(`${activeOrgPath()}/projects/${projectId}/secrets`, { name, value })
+  return data
+}
+export async function deleteProjectSecret(projectId: string, name: string): Promise<void> {
+  await api.delete(`${activeOrgPath()}/projects/${projectId}/secrets/${name}`)
+}
+export async function listEnvironments(org: string): Promise<ProtectedEnvironment[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/environments`)
+  return (data as ProtectedEnvironment[] | null) ?? []
+}
+export async function putEnvironment(org: string, env: string, payload: { approver_group_ids: string[]; prevent_self_approval: boolean; approval_timeout: string }): Promise<ProtectedEnvironment> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/environments/${env}`, payload)
+  return data
+}
+export async function deleteEnvironment(org: string, env: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/environments/${env}`)
+}
+export async function listEnvSecrets(org: string, env: string): Promise<SecretMeta[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/environments/${env}/secrets`)
+  return (data as SecretMeta[] | null) ?? []
+}
+export async function putEnvSecret(org: string, env: string, name: string, value: string): Promise<SecretMeta> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/environments/${env}/secrets`, { name, value })
+  return data
+}
+export async function deleteEnvSecret(org: string, env: string, name: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/environments/${env}/secrets/${name}`)
+}
+export async function listForgeSources(org: string): Promise<ForgeSource[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/integrations`)
+  return (data as ForgeSource[] | null) ?? []
+}
+export async function createForgeSource(org: string, payload: Record<string, unknown>): Promise<ForgeSource> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/integrations`, payload)
+  return data
+}
+export async function deleteForgeSource(org: string, sourceId: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/integrations/${sourceId}`)
+}
+
+// --- GitHub credential linking & repo claims ---
+export async function getGitHubConnection(): Promise<GitHubConnectionState> {
+  const { data } = await api.get('/api/v1/github/connection')
+  return data
+}
+export async function disconnectGitHub(): Promise<void> {
+  await api.delete('/api/v1/github/connection')
+}
+export async function completeGitHubOAuth(code: string, state: string): Promise<GitHubOAuthCompleteResult> {
+  const { data } = await api.post('/api/v1/github/oauth/complete', { code, state })
+  return data
+}
+export async function connectGitHubPAT(token: string, baseUrl = ''): Promise<{ connection: GitHubConnectionState['connection']; available_owners: GitHubOwner[] }> {
+  const { data } = await api.post('/api/v1/github/pat', { token, base_url: baseUrl })
+  return data
+}
+export async function startGitHubDeviceFlow(org = ''): Promise<GitHubDeviceFlowStart> {
+  const { data } = await api.post('/api/v1/github/device/code', { org })
+  return data
+}
+export async function pollGitHubDeviceFlow(sessionId: string): Promise<{ status: 'pending' | 'slow_down' | 'complete'; interval?: number; result?: GitHubOAuthCompleteResult }> {
+  const { data } = await api.post('/api/v1/github/device/poll', { session_id: sessionId })
+  return data
+}
+export async function listGitHubOwners(): Promise<GitHubOwner[]> {
+  const { data } = await api.get('/api/v1/github/owners')
+  return (data?.owners as GitHubOwner[] | null) ?? []
+}
+export async function startOrgGitHubOAuth(org: string, redirectUri: string): Promise<string> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/oauth/start`, { redirect_uri: redirectUri })
+  return data.authorize_url
+}
+export async function listOrgGitHubAccounts(org: string): Promise<GitHubAccountSource[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/github/accounts`)
+  return (data as GitHubAccountSource[] | null) ?? []
+}
+export async function createOrgGitHubAccount(org: string, payload: { owner: string; base_url?: string; token?: string }): Promise<GitHubAccountSource> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/accounts`, payload)
+  return data
+}
+export async function deleteOrgGitHubAccount(org: string, accountId: string, cascade = true): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/github/accounts/${accountId}`, { params: { cascade } })
+}
+export async function fetchOrgRepoSettings(org: string): Promise<OrgRepoSettings[]> {
+  const { data } = await api.post('/query', {
+    query: `query($org: String!) { org(name: $org) { repoSettings { repo isPublic effectiveRunChecksOnDefaultBranch effectiveRunChecksOnPullRequest effectiveRunChecksOnBranchPush } } }`,
+    variables: { org },
+  })
+  return (data?.data?.org?.repoSettings as OrgRepoSettings[] | null) ?? []
+}
+export async function listOrgGitHubRepositories(org: string, params: { account_id?: string; owner?: string; q?: string } = {}): Promise<SourceRepositoryItem[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/github/repositories`, { params })
+  return (data?.repositories as SourceRepositoryItem[] | null) ?? []
+}
+export async function enableOrgGitHubSources(org: string, accountId: string, repos: Array<{ repo: string; run_checks_on_default_branch?: boolean; run_checks_on_pull_request?: boolean; run_checks_on_branch_push?: boolean; is_public?: boolean }>): Promise<{ updated: number }> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/sources`, { account_id: accountId, repos })
+  return data
+}
+export async function updateOrgGitHubRepoSettings(org: string, owner: string, repo: string, payload: { run_checks_on_default_branch?: boolean; run_checks_on_pull_request?: boolean; run_checks_on_branch_push?: boolean; is_public?: boolean }): Promise<RepoSetting> {
+  const { data } = await api.put(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/settings`, payload)
+  return data
+}
+export async function deleteOrgGitHubRepoClaim(org: string, owner: string, repo: string): Promise<void> {
+  await api.delete(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/claim`)
+}
+
+// --- Cloud Checks ---
+export async function listOrgChecks(org: string, params: { status?: string; repo?: string; limit?: number } = {}): Promise<CheckRunRecord[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/checks`, { params })
+  return (data as CheckRunRecord[] | null) ?? []
+}
+export async function approveForkCheckRun(id: string, includeSecrets = false): Promise<CheckRunRecord> {
+  const { data } = await api.post(`/api/v1/checks/runs/${id}/approve`, { include_secrets: includeSecrets })
+  return data
+}
+export async function rerunCheckRun(id: string): Promise<CheckRunRecord> {
+  const { data } = await api.post(`/api/v1/checks/runs/${id}/rerun`)
+  return data
+}
+
+// --- Workflows ---
+export async function listOrgWorkflows(org: string, project?: string): Promise<WorkflowDef[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/workflows`, { params: { project } })
+  return (data as WorkflowDef[] | null) ?? []
+}
+export async function dispatchWorkflow(org: string, payload: { project_id: string; workflow: string; ref?: string; inputs?: Record<string, unknown> }): Promise<WorkflowRun> {
+  const { data } = await api.post(`/api/v1/orgs/${org}/workflows/dispatch`, payload)
+  return data
+}
+export async function listOrgWorkflowRuns(org: string, params: { project?: string; status?: string; limit?: number } = {}): Promise<WorkflowRun[]> {
+  const { data } = await api.get(`/api/v1/orgs/${org}/workflows/runs`, { params })
+  return (data as WorkflowRun[] | null) ?? []
+}
+export async function getWorkflowRun(runId: string): Promise<WorkflowRun> {
+  const { data } = await api.get(`/api/v1/workflows/runs/${runId}`)
+  return data
+}
+export async function approveWorkflowJob(runId: string, job: string): Promise<WorkflowRun> {
+  const { data } = await api.post(`/api/v1/workflows/runs/${runId}/approve/${job}`)
+  return data
+}
+export async function rejectWorkflowJob(runId: string, job: string, reason = ''): Promise<WorkflowRun> {
+  const { data } = await api.post(`/api/v1/workflows/runs/${runId}/reject/${job}`, { reason })
+  return data
+}
+
+// --- Artifacts ---
+export async function listArtifacts(params: { org: string; project?: string; run?: string }): Promise<string[]> {
+  const { data } = await api.get('/api/v1/artifacts', { params })
+  return (data as string[] | null) ?? []
+}
+export async function downloadArtifactBlob(key: string): Promise<Blob> {
+  const { data } = await api.get('/api/v1/artifacts/download', { params: { key }, responseType: 'blob' })
+  return data
+}
+
+// --- Remote cache ---
+export async function fetchRemoteCacheStats(namespace?: string): Promise<RemoteCacheStats | null> {
+  const { data } = await api.get('/api/v1/remote-cache', { params: { namespace } })
+  return (data as RemoteCacheStats | null) ?? null
+}
+export async function purgeRemoteCache(namespace: string): Promise<void> {
+  await api.post('/api/v1/remote-cache/purge', null, { params: { namespace } })
 }

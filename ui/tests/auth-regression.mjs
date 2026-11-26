@@ -66,8 +66,21 @@ for (const [input, want] of [
   ['/auth/callback?redirect=x', '/pipelines'],
   ['/api/v1/auth/me', '/pipelines'],
   [`/pipelines${String.fromCharCode(0)}`, '/pipelines'],
+  ['/github/callback?code=abc&state=def', '/github/callback?code=abc&state=def'],
+  ['/github/callback?code=abc%26x&state=0123', '/github/callback?code=abc%26x&state=0123'],
 ]) {
   check(`safeAuthRedirect(${JSON.stringify(input)})`, nav.safeAuthRedirect(input) === want, `got ${nav.safeAuthRedirect(input)}`)
+}
+
+// --- GitHub callback redirect preservation --------------------------------
+{
+  const cb = '/github/callback?code=abc&state=def'
+  const target = nav.authLoginTarget('session', cb)
+  const expected = `/auth/login?error=${encodeURIComponent('session')}&redirect=${encodeURIComponent(cb)}`
+  check('authLoginTarget preserves github callback code+state', target === expected, target)
+  const parsed = new URL(target, 'http://placeholder.invalid')
+  const redirected = parsed.searchParams.get('redirect')
+  check('redirect param round-trips the callback path', redirected === cb, String(redirected))
 }
 
 // --- authErrorMessage -------------------------------------------------------

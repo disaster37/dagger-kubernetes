@@ -31,6 +31,9 @@ server:
   data_addr: ":8443"           # Address the mTLS L4 data-plane proxy listens on.
   data_hostname: "data.supv.example.com"  # Public hostname clients dial for the data plane.
   public_url: "https://supv.example.com"  # Public base URL of the control plane (also serves the UI and is the base for pipeline-view links: /pipelines/<traceID>).
+  max_data_conns: 2048                    # concurrent data-plane tunnels (default 2048).
+  internal_control_url: ""                # in-cluster control URL injected into engine/runner pods, e.g. https://<release>-control.<namespace>.svc:8080.
+  internal_data_host: ""                  # in-cluster data host returned to in-cluster callers, e.g. <release>-data.<namespace>.svc:8443.
 
 # --- Authentication ----------------------------------------------------------
 auth:
@@ -62,6 +65,11 @@ auth:
   token:
     encryption_key: ""
 
+  # RFC 8628 device authorization (dagger login).
+  device:
+    code_ttl: "10m"
+    poll_interval: "5s"
+
   # Optional OAuth for human/UI login. Single active provider per deployment
   # (selected by `provider`); simultaneous multi-provider is not supported.
   oauth:
@@ -76,6 +84,7 @@ auth:
     group_mappings: []                 # regex provider-group -> supervisor-group mapping (first-match-wins; no match drops; empty = no mapping).
       # - pattern: '^github\.com/acme-(.*)$'   # Go regexp vs incoming provider group name (case-sensitive; (?i) for insensitive).
       #   replacement: 'acme-$1'               # target supervisor group name; $1/${name} capture substitution, $$ = literal $.
+      #   org: 'acme'                          # optional target org slug or org-<16hex> ID (empty = bootstrap org; unknown org fails closed).
     # NOTE: group_mappings assigns GROUP MEMBERSHIP only, never the admin ROLE.
     # Mapped target groups are AUTO-CREATED when missing, with
     # mapped_group_max_runner_sessions and agent_available=true; a group that
@@ -255,6 +264,18 @@ telemetry:
 # (cli.enabled). Engines keep their BuildKit local cache on their per-pod PVC;
 # the worker-cache sync and the remote-cache registry proxy were removed.
 cache:
+  # Read-through remote cache (GET /v1/engine, ADR-055).
+  remote:
+    enabled: false
+    bucket: ""                            # empty = cache.s3.bucket
+    prefix: "remote-cache"
+    s3_engine_endpoint: ""                # endpoint used to sign presigned URLs handed to engine pods
+    index_path: "/var/cache/dagger-kubernetes/remotecache.db"
+    ttl: "720h"
+    max_bytes: 107374182400               # 100 GiB
+    workers: 16                           # bounded concurrent export/upload work.
+    pack_max_member_bytes: 4194304        # 4 MiB: largest blob packed into a dagger-pack.
+    gc_interval: "5m"                     # background GC + S3 index checkpoint cadence.
   s3:                                # shared S3 client for the CLI cache (cli.s3_bucket).
     bucket: ""                       # default CLI-cache bucket. Empty + cli.enabled = config load error.
     region: "us-east-1"              # S3 region (required by AWS S3; ignored by MinIO).
@@ -320,6 +341,7 @@ fleet:
   engine_termination_grace_seconds: 120               # termination grace period for engine pods.
   engine_pull_policy: "IfNotPresent"                   # engine image pull policy.
   engine_privileged: false                        # run engine container as privileged (set to true only if a BuildKit feature requires it).
+  isolation: "per_org"                            # "per_org" (default) or "shared" engine/cache namespaces.
   engine_node_selector: {}                            # node selector for engine pods (map).
   engine_tolerations: []                              # tolerations in "key:value:effect" format.
   engine_extra_args: []                               # additional CLI args passed to dagger engine.
@@ -361,6 +383,9 @@ ca:
 # across pods via ca.minting_ca_secret (ordinal 0 generates it, others poll).
 # `provider` only decides where the server certificate comes from:
 supervisor:
+  cache_scratch:
+    size_limit: "8Gi"                     # dedicated emptyDir for the rebuildable remote-cache index
+  gomemlimit: ""                          # optional GOMEMLIMIT for the supervisor container
   dataplane:
     tls:
       provider: "embedded"              # "embedded" (minting CA issues a self-signed server cert) | "cert-manager" | "external" (custom/operator keypair).
@@ -404,7 +429,12 @@ pipeline:
 # --- Allowed Dagger engine versions ------------------------------------------
 version:
   floor: "v0.19.0"                          # minimum engine version admitted.
-  allowlist: ["0.19", "0.20", "0.21"]       # major.minor prefixes admitted (empty = admit all >= floor).
+  # allowlist entries may be, in any mix:
+  #   - a minor series      ("1.0"      admits v1.0.0-beta.* and v1.0.x),
+  #   - a pre-release track ("1.0.0-beta" admits v1.0.0-beta.*),
+  #   - an exact version    ("v1.0.0-beta.28" admits only that version).
+  # All entries remain subject to floor; empty = admit all >= floor.
+  allowlist: ["0.19", "0.20", "0.21", "1.0"]
 
 # --- CI integration feature flags -------------------------------------------
 # These toggle optional niceties; safe to leave at defaults.
@@ -436,6 +466,7 @@ cli:
     download_base: "https://github.com/dagger/dagger/releases/download"   # tarball + checksums.txt base (mirror-able).
     github_token: ""                  # optional; set via DAGGER_KUBERNETES_CLI_UPSTREAM_GITHUB_TOKEN (raises rate limit).
   ci_wrapper_path: "/usr/local/bin/dagger-kubernetes-ci"  # path to the pre-built CI wrapper binary served at /api/v1/cli/ci-wrapper/latest.
+  include_prereleases: false          # include vX.Y.Z-beta.* in "latest" resolution.
 
 # --- Project → group attribution ---------------------------------------------
 # Config-driven mapping of a project name (CI repo slug, e.g.
@@ -453,9 +484,28 @@ cli:
 # skipped with a WARN, never auto-created. An empty list (the default) disables
 # the feature and leaves auto_assign_pattern behavior unchanged.
 attribution:
-  project_mappings: []               # ordered list of {pattern, group}; empty = disabled.
+  project_mappings: []               # ordered list of {pattern, group, org}; empty = disabled.
     # - pattern: '^github\.com/acme/.*'   # Go regexp vs project name (case-sensitive; (?i) opt-in).
     #   group: 'acme'                      # literal target supervisor group name (must exist).
+    #   org: 'acme'                        # optional: restrict the rule to one org slug/ID (empty = trace's resolved org).
+
+# --- Organizations & multi-tenant quotas -------------------------------------
+# Organization is the root namespace (Org -> Group -> Project). Every deployment
+# bootstraps a single protected organization with a generated "org-<16hex>" UID
+# and the fixed immutable slug "default"; only its display name is configurable
+# here. Additional organizations can only be created by a global admin via the
+# API/UI. Self-hosted deployments leave all default_quotas at 0 (unlimited).
+org:
+  default:
+    display_name: "Default"           # Human-readable title shown in the UI switcher (max 128 chars).
+  default_quotas:
+    max_groups:              { soft: 0, hard: 0 } # 0 = unlimited
+    max_projects:            { soft: 0, hard: 0 }
+    max_members:             { soft: 0, hard: 0 }
+    max_concurrent_sessions: { soft: 0, hard: 0 }
+    max_engines:             { soft: 0, hard: 0 } # total engine pods across all versions in one org
+    max_cache_bytes:         { soft: 0, hard: 0 } # remote cache bytes per org
+    max_pipeline_retention: "0s"                  # 0s = inherit history.gc.max_age
 
 # --- Logging -----------------------------------------------------------------
 log_level: "info"    # debug | info | warn | error
@@ -463,9 +513,75 @@ log_format: "json"   # json | text — the supervisor's own log format.
 
 # --- Outgoing OTLP -----------------------------------------------------------
 otel:
+  max_inflight_bytes: 268435456           # 256 MiB weighted OTLP memory gate
   otlp_endpoint: ""  # if set, the Supervisor exports its own OTLP here; empty disables.
   # OTLP ingest request-body cap in bytes (0 = supervisor default 64 MiB). This
   # is separate from the 4 MiB control-API cap: OTLP log/trace batches are
   # legitimately large. Keep the ingress `proxy-body-size` annotation and the
   # collector's `max_request_body_size` at least this large.
   ingest_max_body_size: 67108864  # 64 MiB.
+
+# --- Cloud Checks (ADR-056) --------------------------------------------------
+checks:
+  enabled: false
+  namespace: ""                           # empty = fleet.namespace
+  job_image: "ghcr.io/disaster37/dagger-kubernetes:latest"
+  job_image_pull_secrets: []              # image pull secrets for check-runner Job pods
+  timeout: "30m"
+  github_oidc_issuer: "https://token.actions.githubusercontent.com"
+  gitlab_oidc_issuer: "https://gitlab.com"
+  oidc_audience: "dagger-kubernetes"
+
+# --- Dagger-native workflows (ADR-057) --------------------------------------
+workflows:
+  enabled: false
+  namespace: ""                           # empty = fleet.namespace
+  job_image: "ghcr.io/disaster37/dagger-kubernetes:latest"
+  job_image_pull_secrets: []              # image pull secrets for workflow Job pods
+  default_timeout: "30m"
+  max_parallel: 8
+
+# --- Cloud GraphQL hardening (ADR-053) --------------------------------------
+# POST /query is bounded to prevent introspection and expensive queries from
+# exhausting the leader. Introspection is disabled by default.
+graphql:
+  introspection_enabled: false
+  max_depth: 15
+  max_selections: 250
+  max_query_bytes: 65536
+  max_parallelism: 10
+
+# --- Forge integrations (ADR-056, ADR-059) ----------------------------------
+forge:
+  github_api_url: "https://api.github.com"
+  gitlab_api_url: "https://gitlab.com/api/v4"
+  gitea_api_url: ""
+  webhook_secret: ""                      # fallback HMAC secret; prefer per-source secrets
+  github:
+    # Additional GitHub Enterprise Server API base URLs accepted for linked
+    # accounts (the primary forge.github_api_url is always allowed). Each entry
+    # must be an absolute https:// URL (loopback http:// is allowed for tests).
+    allowed_api_urls: []
+    # Optional PEM CA bundle for self-hosted GHES TLS (loaded at startup).
+    ca_cert_path: ""
+    # Per-request outbound HTTP timeout (must be > 0 and <= 2m).
+    http_timeout: "15s"
+    # GitHub OAuth App used ONLY to link GitHub repository credentials. It is
+    # independent of auth.oauth: internal-auth-only and OIDC deployments can
+    # enable it, and it never changes how users log in. Register exactly one
+    # callback URL: <server.public_url>/github/callback.
+    oauth:
+      enabled: false
+      client_id: ""                       # DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_ID
+      client_secret: ""                   # DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_SECRET (set via Secret)
+      oauth_base_url: "https://github.com"
+      # repo + read:org + admin:repo_hook let the supervisor list repositories,
+      # enumerate GitHub organizations, clone private repos, post commit
+      # statuses, and manage repository webhooks.
+      scopes: ["repo", "read:org", "admin:repo_hook"]
+      state_ttl: "10m"                    # replicated single-use OAuth state lifetime (1m..1h)
+      device_flow_enabled: true           # UI fallback for port-forward / private hostnames
+      # Extra exact callback URLs (path must be /github/callback), e.g. a
+      # staging ingress origin. The public URL and auth.cors.allowed_origins
+      # origins are always allowed.
+      allowed_redirect_uris: []

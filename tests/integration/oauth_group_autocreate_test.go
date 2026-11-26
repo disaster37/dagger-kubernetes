@@ -155,7 +155,7 @@ func TestOAuthGroupMappingAutoCreateFlow(t *testing.T) {
 
 	// 3. The mapped group must have been auto-created with the default limit.
 	autoCtx := context.Background()
-	created, err := groupRepo.GetByName(autoCtx, "auto-created-dev")
+	created, err := groupRepo.GetByName(autoCtx, "", "auto-created-dev")
 	if err != nil {
 		t.Fatalf("auto-created group not persisted: %v", err)
 	}

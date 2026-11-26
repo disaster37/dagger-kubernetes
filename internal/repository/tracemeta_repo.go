@@ -24,12 +24,13 @@ func NewTraceMetaRepo(store *RaftStore) *TraceMetaRepo {
 // provision time. The user_id is set only when the existing row's user_id is
 // empty (first writer wins); the version follows the same first-non-empty-wins
 // rule so a later empty version never wipes a recorded one.
-func (r *TraceMetaRepo) UpsertProvision(ctx context.Context, traceID, userID, version string) error {
+func (r *TraceMetaRepo) UpsertProvision(ctx context.Context, orgID, traceID, userID, version string) error {
 	if !domain.ValidTraceIDKey(traceID) {
 		return fmt.Errorf("invalid trace ID: %w", domain.ErrValidation)
 	}
 	return r.store.applyCtx(ctx, kindUpsertTraceProvision, cmdUpsertTraceProvision{
 		TraceID:   traceID,
+		OrgID:     orgID,
 		UserID:    userID,
 		Version:   version,
 		UpdatedAt: time.Now().UTC(),
@@ -102,7 +103,7 @@ func (r *TraceMetaRepo) Delete(ctx context.Context, traceID string) error {
 }
 
 // Stats returns the total trace count and the oldest trace sort key.
-func (r *TraceMetaRepo) Stats(ctx context.Context) (int, time.Time, error) {
-	count, oldest := r.store.fsmRead().traceStats()
+func (r *TraceMetaRepo) Stats(ctx context.Context, orgID string) (int, time.Time, error) {
+	count, oldest := r.store.fsmRead().traceStats(orgID)
 	return count, oldest, nil
 }

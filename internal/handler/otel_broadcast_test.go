@@ -18,8 +18,11 @@ import (
 	"github.com/cloudwego/hertz/pkg/route"
 	logspb "go.opentelemetry.io/proto/otlp/logs/v1"
 	tracepb "go.opentelemetry.io/proto/otlp/trace/v1"
+
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
+
+	"github.com/disaster/dagger-kubernetes/internal/service"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 	"github.com/disaster/dagger-kubernetes/internal/repository"
@@ -161,7 +164,8 @@ func TestBroadcastOTelUpdateTraces(t *testing.T) {
 	s, _ := newTestServer(t)
 	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
-	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
+	b := service.ExtractOTLPBatch("traces", otlpTraceBody(t))
+	s.broadcastOTelUpdate("traces", &b)
 	waitForString(t, conn, `"type":"trace_update"`)
 }
 
@@ -169,7 +173,8 @@ func TestBroadcastOTelUpdateLogs(t *testing.T) {
 	s, _ := newTestServer(t)
 	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
-	s.broadcastOTelUpdate("logs", otlpLogsBody(t, testTraceID))
+	b := service.ExtractOTLPBatch("logs", otlpLogsBody(t, testTraceID))
+	s.broadcastOTelUpdate("logs", &b)
 	waitForString(t, conn, `"type":"logs_update"`)
 }
 
@@ -177,7 +182,8 @@ func TestBroadcastOTelUpdateMetricsNoop(t *testing.T) {
 	s, _ := newTestServer(t)
 	conn := subscribeCaptureClient(t, s.liveHub, testTraceID)
 
-	s.broadcastOTelUpdate("metrics", otlpTraceBody(t))
+	b := service.ExtractOTLPBatch("metrics", otlpTraceBody(t))
+	s.broadcastOTelUpdate("metrics", &b)
 
 	// Give any (incorrect) write a moment to appear.
 	time.Sleep(50 * time.Millisecond)
@@ -191,14 +197,16 @@ func TestBroadcastOTelUpdatePipelinesTopic(t *testing.T) {
 	conn := subscribeCaptureClient(t, s.liveHub, domain.PipelinesTopic)
 
 	// A logs ingest must not notify the pipelines-overview topic.
-	s.broadcastOTelUpdate("logs", otlpLogsBody(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+	b := service.ExtractOTLPBatch("logs", otlpLogsBody(t, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
+	s.broadcastOTelUpdate("logs", &b)
 	time.Sleep(50 * time.Millisecond)
 	if got := conn.String(); strings.Contains(got, "pipelines_update") {
 		t.Fatalf("logs ingest must not broadcast to the pipelines topic, got: %q", got)
 	}
 
 	// A trace ingest broadcasts one list-level re-fetch event per batch.
-	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
+	b2 := service.ExtractOTLPBatch("traces", otlpTraceBody(t))
+	s.broadcastOTelUpdate("traces", &b2)
 	waitForString(t, conn, `"type":"pipelines_update"`)
 }
 
@@ -206,8 +214,10 @@ func TestBroadcastOTelUpdateNilHub(t *testing.T) {
 	s, _ := newTestServer(t)
 	s.liveHub = nil
 	// Must not panic.
-	s.broadcastOTelUpdate("traces", otlpTraceBody(t))
-	s.broadcastOTelUpdate("logs", otlpLogsBody(t, testTraceID))
+	b := service.ExtractOTLPBatch("traces", otlpTraceBody(t))
+	s.broadcastOTelUpdate("traces", &b)
+	b2 := service.ExtractOTLPBatch("logs", otlpLogsBody(t, testTraceID))
+	s.broadcastOTelUpdate("logs", &b2)
 }
 
 func TestHandleOTelBroadcastsToLiveSubscriber(t *testing.T) {

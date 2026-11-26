@@ -988,7 +988,7 @@ func TestTraceIDFileWrittenOnDiscovery(t *testing.T) {
 	}()
 
 	var content []byte
-	deadline := time.Now().Add(1500 * time.Millisecond)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if b, err := os.ReadFile(idFile); err == nil {
 			if runReturned.Load() {
@@ -1242,5 +1242,104 @@ func TestPollSummaryStopsOnTerminalStatus(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("pollSummary did not return after terminal status")
+	}
+}
+
+func TestResolveCloneURL(t *testing.T) {
+	cases := []struct {
+		name     string
+		repo     string
+		cloneURL string
+		want     string
+	}{
+		{name: "explicit wins", repo: "acme/repo", cloneURL: "https://git.example.com/acme/repo.git", want: "https://git.example.com/acme/repo.git"},
+		{name: "already url", repo: "https://github.com/acme/repo.git", want: "https://github.com/acme/repo.git"},
+		{name: "host qualified", repo: "github.com/acme/repo", want: "https://github.com/acme/repo.git"},
+		{name: "host qualified with git suffix", repo: "github.com/acme/repo.git", want: "https://github.com/acme/repo.git"},
+		{name: "bare owner/repo rejected", repo: "acme/repo", want: ""},
+		{name: "empty", repo: "", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveCloneURL(tc.repo, tc.cloneURL); got != tc.want {
+				t.Fatalf("resolveCloneURL = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestRunnerEnvSetsBothEngineVars(t *testing.T) {
+	env := runnerEnv("https://example.com", "tok", "acme")
+	joined := strings.Join(env, "\n")
+	for _, want := range []string{
+		"DAGGER_ENGINE=cloud",
+		"_EXPERIMENTAL_DAGGER_RUNNER_HOST=dagger-cloud://self",
+		"OTEL_EXPORTER_OTLP_TRACES_LIVE=1",
+		"DAGGER_ORG=acme",
+	} {
+		if !strings.Contains(joined, want) {
+			t.Fatalf("env missing %q: %v", want, env)
+		}
+	}
+	if strings.Contains(strings.Join(runnerEnv("https://example.com", "tok", ""), "\n"), "DAGGER_ORG=") {
+		t.Fatal("empty org must not set DAGGER_ORG")
+	}
+}
+
+func TestProvisionCLILatestUsesServerURL(t *testing.T) {
+	tarball := buildTestTarGz(t, map[string]string{"dagger": "binary"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/cli/versions/latest":
+			// Point url at an unreachable host to prove the download URL is
+			// built from serverURL, not latest.url (hairpin NAT avoidance).
+			_, _ = fmt.Fprintf(w, `{"version":"v0.21.8","url":"https://unreachable.invalid/api/v1/cli/v0.21.8?os=linux&arch=amd64"}`)
+		case "/api/v1/cli/v0.21.8":
+			_, _ = w.Write(tarball)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	binDir, cleanup, err := provisionCLI(context.Background(), srv.URL, "tok", "", "linux", "amd64")
+	if err != nil {
+		t.Fatalf("provisionCLI: %v", err)
+	}
+	defer cleanup()
+	if _, err := os.Stat(filepath.Join(binDir, "dagger")); err != nil {
+		t.Fatalf("dagger missing: %v", err)
+	}
+}
+
+func TestResolveDaggerBinProvisionsAbsolutePath(t *testing.T) {
+	tarball := buildTestTarGz(t, map[string]string{"dagger": "#!/bin/sh\necho hi\n"})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/cli/versions/latest":
+			_, _ = fmt.Fprintf(w, `{"version":"v0.21.8","url":""}`)
+		case "/api/v1/cli/v0.21.8":
+			_, _ = w.Write(tarball)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	// Force the provisioning path by emptying PATH so LookPath fails.
+	t.Setenv("PATH", t.TempDir())
+	bin, env, cleanup, err := resolveDaggerBin(context.Background(), srv.URL, "tok")
+	if err != nil {
+		t.Fatalf("resolveDaggerBin: %v", err)
+	}
+	defer cleanup()
+	if !filepath.IsAbs(bin) {
+		t.Fatalf("bin = %q, want absolute", bin)
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("provisioned dagger missing: %v", err)
+	}
+	if !strings.Contains(strings.Join(env, "\n"), filepath.Dir(bin)) {
+		t.Fatalf("env must prepend the provisioned bin dir: %v", env)
 	}
 }

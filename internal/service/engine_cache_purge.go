@@ -52,12 +52,26 @@ func NewEngineCachePurgeService(provider domain.FleetProvider, pruner domain.Eng
 	}
 }
 
-// Status returns a copy of the last recorded result for version, or ok=false
-// when no purge has been recorded.
+// purgeKey scopes purge status and concurrency by (org, version).
+func purgeKey(orgID, version string) string {
+	return fmt.Sprintf("%s\x00%s", orgID, version)
+}
+
+// Purge is the unscoped compatibility wrapper (single-org/shared mode).
+func (s *EngineCachePurgeService) Purge(ctx context.Context, version string) (*domain.EngineCachePurgeResult, error) {
+	return s.PurgeForOrg(ctx, "", version)
+}
+
+// Status is the unscoped compatibility wrapper (single-org/shared mode).
 func (s *EngineCachePurgeService) Status(version string) (*domain.EngineCachePurgeResult, bool) {
+	return s.StatusForOrg("", version)
+}
+
+// StatusForOrg returns a copy of the last recorded result for (org, version).
+func (s *EngineCachePurgeService) StatusForOrg(orgID, version string) (*domain.EngineCachePurgeResult, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	r, ok := s.status[version]
+	r, ok := s.status[purgeKey(orgID, version)]
 	if !ok {
 		return nil, false
 	}
@@ -75,16 +89,18 @@ func (s *EngineCachePurgeService) Status(version string) (*domain.EngineCachePur
 // domain.ErrPurgeInProgress. Per-pod and per-PVC failures are reported in the
 // result (state "completed"); only precondition failures (missing fleet,
 // unconfigured collaborators) yield state "failed" + an error.
-func (s *EngineCachePurgeService) Purge(ctx context.Context, version string) (*domain.EngineCachePurgeResult, error) {
+func (s *EngineCachePurgeService) PurgeForOrg(ctx context.Context, orgID, version string) (*domain.EngineCachePurgeResult, error) {
 	startedAt := time.Now()
+	key := purgeKey(orgID, version)
 
 	s.mu.Lock()
-	if s.active[version] {
+	if s.active[key] {
 		s.mu.Unlock()
 		return nil, domain.ErrPurgeInProgress
 	}
-	s.active[version] = true
-	s.status[version] = &domain.EngineCachePurgeResult{
+	s.active[key] = true
+	s.status[key] = &domain.EngineCachePurgeResult{
+		Org:       orgID,
 		Version:   version,
 		State:     purgeStateRunning,
 		StartedAt: rfc3339(startedAt),
@@ -99,15 +115,16 @@ func (s *EngineCachePurgeService) Purge(ctx context.Context, version string) (*d
 	)
 	// finish even when runPurge panics: a wedged active flag would 409 every
 	// later purge of this version until the next supervisor restart.
-	defer func() { s.finish(version, result, startedAt) }()
-	result, err = s.runPurge(ctx, version, startedAt)
+	defer func() { s.finish(key, result, startedAt) }()
+	result, err = s.runPurge(ctx, orgID, version, startedAt)
 	return result, err
 }
 
 // runPurge performs the orchestration and returns the completed result. The
 // result is not published to the status map until finish runs.
-func (s *EngineCachePurgeService) runPurge(ctx context.Context, version string, startedAt time.Time) (*domain.EngineCachePurgeResult, error) {
+func (s *EngineCachePurgeService) runPurge(ctx context.Context, orgID, version string, startedAt time.Time) (*domain.EngineCachePurgeResult, error) {
 	result := &domain.EngineCachePurgeResult{
+		Org:       orgID,
 		Version:   version,
 		State:     purgeStateCompleted,
 		StartedAt: rfc3339(startedAt),
@@ -119,36 +136,86 @@ func (s *EngineCachePurgeService) runPurge(ctx context.Context, version string, 
 		return failedPurge(result, "engine cache purge not configured"), fmt.Errorf("engine cache purge not configured")
 	}
 
-	versions, err := s.provider.AllVersions()
+	// Resolve the providers that host this version. Under per_org isolation the
+	// same version can be deployed in several org scopes; each must be purged
+	// against its own scoped STS (for accurate PVC ordinals).
+	providers, err := s.providersForVersion(orgID, version)
 	if err != nil {
 		return failedPurge(result, "list engine fleets failed"), fmt.Errorf("list engine fleets: %w", err)
 	}
-	if !slices.Contains(versions, version) {
+	if len(providers) == 0 {
 		return failedPurge(result, domain.ErrEngineFleetNotFound.Error()), domain.ErrEngineFleetNotFound
 	}
 
-	replicas, err := s.provider.GetReplicas(version)
-	if err != nil {
-		return failedPurge(result, "list engine pods failed"), fmt.Errorf("list engine pods: %w", err)
+	var allPods []domain.EnginePodPurgeResult
+	var allPVCs []domain.EnginePVCDeleteResult
+	allPods = []domain.EnginePodPurgeResult{}
+	allPVCs = []domain.EnginePVCDeleteResult{}
+	for _, p := range providers {
+		replicas, err := p.GetReplicas(version)
+		if err != nil {
+			return failedPurge(result, "list engine pods failed"), fmt.Errorf("list engine pods: %w", err)
+		}
+		result.Replicas += len(replicas)
+
+		pods := s.pruneAll(ctx, version, replicas)
+		allPods = append(allPods, pods...)
+
+		pvcs, err := s.deleteOrphanedPVCs(p, version, replicas)
+		if err != nil {
+			return failedPurge(result, "list engine PVCs failed"), fmt.Errorf("list engine PVCs: %w", err)
+		}
+		allPVCs = append(allPVCs, pvcs...)
 	}
-	result.Replicas = len(replicas)
 
-	// 1. Prune the running pods (an empty step when the version has zero
-	// replicas).
-	pods := s.pruneAll(ctx, version, replicas)
-	sort.Slice(pods, func(i, j int) bool { return pods[i].Ordinal < pods[j].Ordinal })
-	result.Pods = pods
+	sort.Slice(allPods, func(i, j int) bool { return allPods[i].Ordinal < allPods[j].Ordinal })
+	result.Pods = allPods
+	sort.Slice(allPVCs, func(i, j int) bool { return allPVCs[i].Ordinal < allPVCs[j].Ordinal })
+	result.PVCs = allPVCs
 
-	// 2. Delete the PVCs of the runners that are not running.
-	pvcs, err := s.deleteOrphanedPVCs(version, replicas)
-	if err != nil {
-		return failedPurge(result, "list engine PVCs failed"), fmt.Errorf("list engine PVCs: %w", err)
-	}
-	sort.Slice(pvcs, func(i, j int) bool { return pvcs[i].Ordinal < pvcs[j].Ordinal })
-	result.PVCs = pvcs
-
-	result.Message = purgeMessage(pods, pvcs)
+	result.Message = purgeMessage(allPods, allPVCs)
 	return result, nil
+}
+
+// providersForVersion returns the org-scoped provider hosting the version.
+func (s *EngineCachePurgeService) providersForVersion(orgID, version string) ([]domain.FleetProvider, error) {
+	if orgID == "" {
+		// Unscoped compatibility: purge every deployed scope for the version.
+		if scoped, ok := s.provider.(domain.ScopedFleetProvider); ok {
+			scopes, err := scoped.AllScopes()
+			if err != nil {
+				return nil, err
+			}
+			providers := make([]domain.FleetProvider, 0, len(scopes))
+			seen := make(map[string]bool, len(scopes))
+			for _, fs := range scopes {
+				if fs.Version != version || seen[fs.OrgID] {
+					continue
+				}
+				seen[fs.OrgID] = true
+				if fs.OrgID == "" {
+					providers = append(providers, s.provider)
+				} else {
+					providers = append(providers, scoped.WithScope(fs.OrgID))
+				}
+			}
+			return providers, nil
+		}
+	}
+	provider := s.provider
+	if orgID != "" {
+		if scoped, ok := s.provider.(domain.ScopedFleetProvider); ok {
+			provider = scoped.WithScope(orgID)
+		}
+	}
+	versions, err := provider.AllVersions()
+	if err != nil {
+		return nil, err
+	}
+	if slices.Contains(versions, version) {
+		return []domain.FleetProvider{provider}, nil
+	}
+	return nil, nil
 }
 
 // pruneAll runs one prune job per replica, bounded by pruneConcurrency.
@@ -196,8 +263,8 @@ func (s *EngineCachePurgeService) prunePod(ctx context.Context, version string, 
 // every mounted PVC — ready, pending or starting pods alike — is protected.
 // Per-PVC failures are logged and recorded; the aggregate error is nil unless
 // listing PVCs itself fails.
-func (s *EngineCachePurgeService) deleteOrphanedPVCs(version string, replicas []domain.Replica) ([]domain.EnginePVCDeleteResult, error) {
-	pvcs, err := s.provider.ListPVCs(version)
+func (s *EngineCachePurgeService) deleteOrphanedPVCs(provider domain.FleetProvider, version string, replicas []domain.Replica) ([]domain.EnginePVCDeleteResult, error) {
+	pvcs, err := provider.ListPVCs(version)
 	if err != nil {
 		return nil, err
 	}
@@ -217,7 +284,7 @@ func (s *EngineCachePurgeService) deleteOrphanedPVCs(version string, replicas []
 			continue // keep the PVC of every running runner
 		}
 		out := domain.EnginePVCDeleteResult{PVCName: pvc.Name, Ordinal: pvc.Ordinal}
-		if err := s.provider.DeletePVC(pvc.Name); err != nil {
+		if err := provider.DeletePVC(pvc.Name); err != nil {
 			out.Error = err.Error()
 			s.logger.WithError(err).WithFields(logrus.Fields{
 				"pvc":     pvc.Name,
@@ -235,10 +302,9 @@ func (s *EngineCachePurgeService) deleteOrphanedPVCs(version string, replicas []
 // finish publishes the completed result and clears the in-flight marker. It
 // also runs when runPurge panicked (result == nil), so the version's active
 // flag can never wedge.
-func (s *EngineCachePurgeService) finish(version string, result *domain.EngineCachePurgeResult, startedAt time.Time) {
+func (s *EngineCachePurgeService) finish(key string, result *domain.EngineCachePurgeResult, startedAt time.Time) {
 	if result == nil {
 		result = &domain.EngineCachePurgeResult{
-			Version:   version,
 			State:     purgeStateFailed,
 			StartedAt: rfc3339(startedAt),
 			Pods:      []domain.EnginePodPurgeResult{},
@@ -248,8 +314,8 @@ func (s *EngineCachePurgeService) finish(version string, result *domain.EngineCa
 	}
 	result.FinishedAt = rfc3339(time.Now())
 	s.mu.Lock()
-	s.status[version] = result
-	delete(s.active, version)
+	s.status[key] = result
+	delete(s.active, key)
 	s.mu.Unlock()
 }
 

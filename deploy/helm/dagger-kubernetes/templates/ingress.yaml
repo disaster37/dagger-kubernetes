@@ -9,6 +9,17 @@ metadata:
   annotations:
     nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
     nginx.ingress.kubernetes.io/proxy-body-size: {{ .Values.ingress.proxyBodySize | default "64m" | quote }}
+    # /v1/engine is a long-lived WebSocket; keep the proxy from closing it.
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
+    # F5 NGINX Ingress Controller equivalents (ignored by the community controller):
+    nginx.org/ssl-services: "{{ include "dagger-kubernetes.fullname" . }}-control"
+    nginx.org/client-max-body-size: {{ .Values.ingress.proxyBodySize | default "64m" | quote }}
+    nginx.org/proxy-read-timeout: "3600s"
+    nginx.org/proxy-send-timeout: "3600s"
+    # The control Service uses a named targetPort ("control") that the F5
+    # controller cannot resolve to endpoints; proxy via the ClusterIP instead.
+    nginx.org/use-cluster-ip: "true"
     {{- with .Values.ingress.annotations }}
     {{- toYaml . | nindent 4 }}
     {{- end }}

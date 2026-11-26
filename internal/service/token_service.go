@@ -66,6 +66,28 @@ func (s *TokenService) Generate(ctx context.Context, userID string) (string, *do
 	return pt, fromGoAuthToken(t), nil
 }
 
+// GenerateFor issues a token with a dynamic prefix for a synthetic subject
+// (used for org-scoped dag_<org>_ tokens). The plaintext is returned once.
+func (s *TokenService) GenerateFor(ctx context.Context, subject, prefix string) (string, *domain.APIToken, error) {
+	if s.sealerErr != nil {
+		return "", nil, fmt.Errorf("encrypt token: %w", s.sealerErr)
+	}
+	var cryptoSealer authcrypto.Sealer
+	if s.sealer != nil {
+		cryptoSealer = s.sealer
+	}
+	svc := apitoken.NewService(&apiTokenStoreAdapter{repo: s.tokens}, apitoken.Config{
+		Prefix: prefix,
+		Sealer: cryptoSealer,
+		Logger: goauthobserv.NewLogrusAdapter(s.logger),
+	})
+	pt, t, err := svc.Regenerate(ctx, subject)
+	if err != nil {
+		return "", nil, fromGoAuthErr(err)
+	}
+	return pt, fromGoAuthToken(t), nil
+}
+
 // Regenerate replaces the user's token; the old token is invalid immediately.
 // The plaintext token is returned exactly once.
 func (s *TokenService) Regenerate(ctx context.Context, userID string) (string, *domain.APIToken, error) {

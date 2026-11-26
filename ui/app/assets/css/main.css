@@ -273,6 +273,15 @@ mark {
   padding: 3px 8px;
 }
 
+.subspan-clickable {
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.subspan-clickable:hover {
+  background: #1c2128;
+}
+
 .subspan-name {
   flex: 1;
   color: #c9d1d9;
@@ -283,6 +292,37 @@ mark {
 .subspan-duration {
   color: #8b949e;
   font-size: 12px;
+}
+
+/* Inline exec call summary on step rows and sub-spans: the command line or env
+   summary shown truncated next to the span name. */
+.step-exec,
+.subspan-exec {
+  max-width: 46%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #a5d6ff;
+  background: #0d1117;
+  border: 1px solid #30363d;
+  border-radius: 4px;
+  padding: 1px 6px;
+}
+
+.step-exec code,
+.subspan-exec code {
+  font-family: monospace;
+  font-size: 12px;
+  color: inherit;
+}
+
+.subspan-exec {
+  max-width: 42%;
+  font-size: 11px;
+}
+
+.step-exit {
+  font-variant-numeric: tabular-nums;
 }
 
 .service-port {

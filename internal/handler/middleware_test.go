@@ -41,22 +41,41 @@ func newAuthEngine(s *Server) *route.Engine {
 	e.PUT("/api/v1/users/:id/groups", s.adminOnly(s.handleUserGroups))
 	e.GET("/api/v1/users/:id/token", s.adminOnly(s.handleUserTokenMeta))
 	e.DELETE("/api/v1/users/:id/token", s.adminOnly(s.handleUserTokenRevoke))
-	e.GET("/api/v1/groups", s.adminOnly(s.handleGroupsList))
-	e.POST("/api/v1/groups", s.adminOnly(s.handleGroupCreate))
-	e.GET("/api/v1/groups/:id", s.adminOnly(s.handleGroupGet))
-	e.PUT("/api/v1/groups/:id", s.adminOnly(s.handleGroupUpdate))
-	e.DELETE("/api/v1/groups/:id", s.adminOnly(s.handleGroupDelete))
-	e.GET("/api/v1/groups/:id/members", s.adminOnly(s.handleGroupMembers))
-	e.PUT("/api/v1/groups/:id/members", s.adminOnly(s.handleGroupSetMembers))
-	e.GET("/api/v1/projects", s.adminOnly(s.handleProjectsList))
-	e.POST("/api/v1/projects", s.adminOnly(s.handleProjectCreate))
-	e.PUT("/api/v1/projects/:id", s.adminOnly(s.handleProjectUpdate))
-	e.DELETE("/api/v1/projects/:id", s.adminOnly(s.handleProjectDelete))
+	// Org-scoped group/project CRUD, mirroring production. The legacy unscoped
+	// /api/v1/groups and /api/v1/projects routes are gone (see
+	// TestUnscopedGroupProjectRoutesNotFound); tests select the bootstrap org
+	// through the :org path segment.
+	e.GET("/api/v1/orgs/:org/groups", s.handleGroupsList)
+	e.POST("/api/v1/orgs/:org/groups", s.handleGroupCreate)
+	e.GET("/api/v1/orgs/:org/groups/:id", s.handleGroupGet)
+	e.PUT("/api/v1/orgs/:org/groups/:id", s.handleGroupUpdate)
+	e.DELETE("/api/v1/orgs/:org/groups/:id", s.handleGroupDelete)
+	e.GET("/api/v1/orgs/:org/groups/:id/members", s.handleGroupMembers)
+	e.PUT("/api/v1/orgs/:org/groups/:id/members", s.handleGroupSetMembers)
+	e.GET("/api/v1/orgs/:org/projects", s.handleProjectsList)
+	e.POST("/api/v1/orgs/:org/projects", s.handleProjectCreate)
+	e.PUT("/api/v1/orgs/:org/projects/:id", s.handleProjectUpdate)
+	e.DELETE("/api/v1/orgs/:org/projects/:id", s.handleProjectDelete)
 	e.GET("/api/v1/tokens/me", s.handleMyTokenMeta)
 	e.POST("/api/v1/tokens/me", s.handleMyTokenCreate)
 	e.PUT("/api/v1/tokens/me/regenerate", s.handleMyTokenRegenerate)
 	e.DELETE("/api/v1/tokens/me", s.handleMyTokenRevoke)
 	e.GET("/api/v1/connect/env", s.handleConnectEnv)
+	e.GET("/api/v1/github/connection", s.handleGitHubConnectionGet)
+	e.DELETE("/api/v1/github/connection", s.handleGitHubConnectionDelete)
+	e.POST("/api/v1/github/oauth/complete", s.handleGitHubOAuthComplete)
+	e.POST("/api/v1/github/pat", s.handleGitHubPAT)
+	e.POST("/api/v1/github/device/code", s.handleGitHubDeviceCode)
+	e.POST("/api/v1/github/device/poll", s.handleGitHubDevicePoll)
+	e.GET("/api/v1/github/owners", s.handleGitHubOwners)
+	e.POST("/api/v1/orgs/:org/github/oauth/start", s.handleGitHubOrgOAuthStart)
+	e.GET("/api/v1/orgs/:org/github/accounts", s.handleGitHubOrgAccountsList)
+	e.POST("/api/v1/orgs/:org/github/accounts", s.handleGitHubOrgAccountCreate)
+	e.DELETE("/api/v1/orgs/:org/github/accounts/:accountID", s.handleGitHubOrgAccountDelete)
+	e.GET("/api/v1/orgs/:org/github/repositories", s.handleGitHubOrgRepositories)
+	e.POST("/api/v1/orgs/:org/github/sources", s.handleGitHubOrgSources)
+	e.PUT("/api/v1/orgs/:org/github/repos/:owner/:repo/settings", s.handleGitHubOrgRepoSettingsPut)
+	e.DELETE("/api/v1/orgs/:org/github/repos/:owner/:repo/claim", s.handleGitHubOrgRepoClaimDelete)
 	e.GET("/api/v1/traces", s.handleTracesList)
 	e.GET("/api/v1/traces/:traceID", s.handleTracesDetail)
 	e.GET("/api/v1/traces/:traceID/url", s.handleTracesURL)
@@ -104,7 +123,7 @@ func TestAuthorizeTraceOwnerSeesOwn(t *testing.T) {
 
 	bearer, u := env.createUserAndToken(t)
 	// Seed a trace owned by alice (unassigned).
-	if err := env.server.traceMeta.UpsertProvision(ctx, "trace-own", u.ID, ""); err != nil {
+	if err := env.server.traceMeta.UpsertProvision(ctx, "", "trace-own", u.ID, ""); err != nil {
 		t.Fatalf("upsert provision: %v", err)
 	}
 
@@ -128,10 +147,10 @@ func TestAuthorizeTraceNonMember404(t *testing.T) {
 	ctx := context.Background()
 
 	// Create a group + admin-owned trace in that group.
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
 	admin, _ := env.users.GetByUsername(ctx, "admin")
-	env.groups.SetMembers(ctx, g.ID, []string{admin.ID})
-	env.server.traceMeta.UpsertProvision(ctx, "trace-group", admin.ID, "")
+	env.groups.SetMembers(ctx, "", g.ID, []string{admin.ID})
+	env.server.traceMeta.UpsertProvision(ctx, "", "trace-group", admin.ID, "")
 	env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "trace-group", GroupID: g.ID, UserID: admin.ID})
 
 	// Non-member user gets 404 on detail.
@@ -147,7 +166,7 @@ func TestAuthorizeTraceAdminSeesAll(t *testing.T) {
 	e := newAuthEngine(env.server)
 	ctx := context.Background()
 
-	env.server.traceMeta.UpsertProvision(ctx, "trace-x", "admin", "")
+	env.server.traceMeta.UpsertProvision(ctx, "", "trace-x", "admin", "")
 	// Admin sees unknown traces too (Tempo-only).
 	bearer := env.loginAsAdmin(t)
 	resp := ut.PerformRequest(e, "GET", "/api/v1/traces/unknown-trace", nil, ut.Header{Key: "Authorization", Value: bearer})
@@ -174,7 +193,7 @@ func TestTracesListAdminUnassignedFilter(t *testing.T) {
 	ctx := context.Background()
 
 	// Seed one grouped trace and one unassigned trace.
-	g, _ := env.groups.Create(ctx, service.GroupInput{Name: "G1", AgentAvailable: true})
+	g, _ := env.groups.Create(ctx, env.orgID, service.GroupInput{Name: "G1", AgentAvailable: true})
 	admin, _ := env.users.GetByUsername(ctx, "admin")
 	env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "in-group", GroupID: g.ID, UserID: admin.ID})
 	env.server.traceMeta.UpsertIngest(ctx, &domain.TraceMeta{TraceID: "loose", UserID: admin.ID})

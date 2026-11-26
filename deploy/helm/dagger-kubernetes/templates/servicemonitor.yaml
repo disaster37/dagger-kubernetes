@@ -14,7 +14,7 @@ spec:
     matchLabels:
       {{- include "dagger-kubernetes.selectorLabels" . | nindent 6 }}
   endpoints:
-    - port: http
+    - port: control
       path: /metrics
       interval: {{ .Values.serviceMonitor.interval | quote }}
       scrapeTimeout: {{ .Values.serviceMonitor.scrapeTimeout | quote }}

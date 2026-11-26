@@ -59,6 +59,20 @@ func main() {
 		Usage:  "Dagger Kubernetes CI helper — runs a Dagger command against the Supervisor and prints the pipeline-view link",
 		Flags:  ciFlags(),
 		Action: run,
+		Commands: []*cli.Command{
+			{
+				Name:   "check-runner",
+				Usage:  "run Cloud Checks for a commit (used by leader-created Jobs)",
+				Flags:  checkRunnerFlags(),
+				Action: runCheckRunner,
+			},
+			{
+				Name:   "workflow-runner",
+				Usage:  "run one Dagger-native workflow job (used by leader-created Jobs)",
+				Flags:  workflowRunnerFlags(),
+				Action: runWorkflowRunner,
+			},
+		},
 	}
 	if err := app.Run(os.Args); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -77,6 +91,7 @@ func ciFlags() []cli.Flag {
 		// the process list (ps / /proc/<pid>/cmdline) to every local user on
 		// shared CI agents (CWE-214/CWE-532), so env is the preferred source.
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN"}, Usage: "Dagger Cloud token (required; prefer the DAGGER_KUBERNETES_TOKEN env var to keep it out of process argv)"},
+		&cli.StringFlag{Name: "org", EnvVars: []string{"DAGGER_ORG", "DAGGER_KUBERNETES_ORG"}, Usage: "organization slug or ID (sent as X-Dagger-Org; required when the token belongs to multiple organizations)"},
 		&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
 		&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
@@ -167,6 +182,7 @@ func run(c *cli.Context) error {
 		cmdCtx, cmdCancel = context.WithTimeout(rootCtx, timeout)
 	}
 	defer cmdCancel()
+	org := c.String("org")
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
@@ -179,13 +195,17 @@ func run(c *cli.Context) error {
 		cmd.Stdout = os.Stdout
 	}
 
+	cmd.Env = os.Environ()
+	if org != "" {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("DAGGER_ORG=%s", org))
+	}
 	if c.Bool("cli") {
 		binDir, cleanup, err := provisionCLI(rootCtx, serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
 		if err != nil {
 			return fmt.Errorf("provision dagger cli: %w", err)
 		}
 		defer cleanup()
-		cmd.Env = append(os.Environ(), fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+		cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
 	}
 
 	var logBuf strings.Builder
@@ -219,7 +239,7 @@ func run(c *cli.Context) error {
 
 	ctx, cancel := context.WithCancel(rootCtx)
 	stepsCancel = cancel
-	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout)
+	stepsSrc = repository.NewSupervisorTraceClient(serverURL, token, ciStepsHTTPTimeout).WithOrg(org)
 
 	if steps {
 		stepsBuilder = service.NewStepEventBuilder(maxDepth)
@@ -595,7 +615,13 @@ func provisionCLI(ctx context.Context, serverURL, token, version, osName, arch s
 		if err := getJSON(ctx, latestURL, token, &latest); err != nil {
 			return "", nil, fmt.Errorf("resolve latest cli version: %w", err)
 		}
-		downloadURL = latest.URL
+		if latest.Version == "" {
+			return "", nil, fmt.Errorf("resolve latest cli version: empty version")
+		}
+		// Build the download URL from the server URL (not latest.URL) so the
+		// runner dials the supervisor it already reaches, avoiding a hairpin
+		// NAT round-trip through the public ingress.
+		downloadURL = fmt.Sprintf("%s/api/v1/cli/%s?os=%s&arch=%s", serverURL, latest.Version, osName, arch)
 	} else {
 		downloadURL = fmt.Sprintf("%s/api/v1/cli/%s?os=%s&arch=%s", serverURL, version, osName, arch)
 	}

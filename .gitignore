@@ -65,3 +65,6 @@ out/
 # would also ignore the tracked cmd/ci/ sources)
 /ci
 .opencode
+
+# Playwright MCP session captures (local test artifacts)
+.playwright-mcp/

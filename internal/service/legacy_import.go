@@ -24,7 +24,7 @@ type LegacyImportResult struct {
 // user (legacy-N) with that exact token as its API token, member of an
 // auto-created "legacy" group. Idempotent: tokens already present (by hash)
 // are skipped. dryRun reports what would happen without writing.
-func ImportTokensFile(ctx context.Context, path string, users *UserService, tokens *TokenService, groups *GroupService, logger *logrus.Logger, dryRun bool) (*LegacyImportResult, error) {
+func ImportTokensFile(ctx context.Context, path, orgID string, users *UserService, tokens *TokenService, groups *GroupService, logger *logrus.Logger, dryRun bool) (*LegacyImportResult, error) {
 	data, err := os.ReadFile(path) //nolint:gosec // G304: path is admin-configured, not user input.
 	if err != nil {
 		return nil, fmt.Errorf("read tokens file %s: %w", path, err)
@@ -33,10 +33,10 @@ func ImportTokensFile(ctx context.Context, path string, users *UserService, toke
 	// Ensure the "legacy" group exists (ignore "already exists" errors).
 	var legacyGroup *domain.Group
 	if !dryRun {
-		g, err := groups.Create(ctx, GroupInput{Name: "legacy", AgentAvailable: true, MaxRunnerSessions: 0})
+		g, err := groups.Create(ctx, orgID, GroupInput{Name: "legacy", AgentAvailable: true, MaxRunnerSessions: 0})
 		if err != nil {
 			// Likely duplicate; fetch instead.
-			g, err = groups.GetByName(ctx, "legacy")
+			g, err = groups.GetByName(ctx, orgID, "legacy")
 			if err != nil {
 				return nil, fmt.Errorf("ensure legacy group: %w", err)
 			}
@@ -80,7 +80,7 @@ func ImportTokensFile(ctx context.Context, path string, users *UserService, toke
 			continue
 		}
 		if legacyGroup != nil {
-			if err := addGroupMember(ctx, groups, legacyGroup.ID, u.ID); err != nil {
+			if err := groups.SetMembers(ctx, orgID, legacyGroup.ID, append(memberIDsOf(ctx, groups, orgID, legacyGroup.ID), u.ID)); err != nil {
 				logger.WithError(err).WithField("username", username).Warn("legacy import: group membership failed")
 			}
 		}
@@ -103,4 +103,18 @@ func randomPassword() string {
 		panic(fmt.Sprintf("generate random password: %v", err))
 	}
 	return hex.EncodeToString(b)
+}
+
+// memberIDsOf returns the current member IDs of groupID.
+func memberIDsOf(ctx context.Context, groups *GroupService, orgID, groupID string) []string {
+	_ = orgID
+	members, err := groups.Members(ctx, groupID)
+	if err != nil {
+		return nil
+	}
+	ids := make([]string, 0, len(members))
+	for _, m := range members {
+		ids = append(ids, m.ID)
+	}
+	return ids
 }
