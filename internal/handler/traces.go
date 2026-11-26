@@ -133,6 +133,10 @@ func (s *Server) handleTracesDetail(ctx context.Context, c *app.RequestContext) 
 	// flattened span attributes + events. Additive: non-exec spans stay nil.
 	service.DeriveExec(trace.RootSpan)
 
+	// Derive the flattened per-test view from the same span tree (Cloud Checks
+	// test visibility). Additive: traces without test spans yield no tests.
+	trace.Tests = service.DeriveTests(trace.RootSpan)
+
 	writeJSON(c, trace)
 }
 
