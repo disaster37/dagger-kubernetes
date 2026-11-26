@@ -3111,9 +3111,11 @@ real terminal; check/workflow Jobs never pass `-i`.
 ## Dagger version support
 
 The version gate (`version.floor`, `version.allowlist`) admits every release in
-the changelog range **v0.21.8 → v1.0.0-beta.20** with the shipped defaults
-(`floor: v0.19.0`, no allowlist entries). Per-entry obligations and proofs are
-in [ADR-061](design/ADR-061-dagger-changelog-support-matrix.md).
+the changelog range **v0.21.8 → v1.0.0-beta.20**: the supervisor defaults are
+`floor: v0.19.0` with an empty allowlist, and the chart's allowlist
+(`0.19`, `0.20`, `0.21`, `1.0`) covers the same range. Per-entry obligations
+and proofs are in
+[ADR-061](design/ADR-061-dagger-changelog-support-matrix.md).
 
 | Range | Status | What is verified |
 |---|---|---|
