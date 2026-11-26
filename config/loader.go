@@ -268,6 +268,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("graphql.max_selections", 250)
 	v.SetDefault("graphql.max_query_bytes", 65536)
 	v.SetDefault("graphql.max_parallelism", 10)
+	v.SetDefault("graphql.log_queries", false)
 
 	v.SetDefault("image_cache.mirrors", []domain.ImageCacheMirror{})
 	v.SetDefault("image_cache.tls_ca_path", "")

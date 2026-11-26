@@ -668,6 +668,7 @@ func run(c *cli.Context) error {
 		InternalDataHost:      cfg.Server.InternalDataHost,
 		FleetIsolation:        cfg.Fleet.Isolation,
 		ClusterDomain:         cfg.Raft.ClusterDomain,
+		GraphQLLogQueries:     cfg.GraphQL.LogQueries,
 		InternalTLSCert:       &internalTLS,
 		ControlTLSProvider:    controlTLSProvider,
 		DataTLSProvider:       dataTLSProvider,

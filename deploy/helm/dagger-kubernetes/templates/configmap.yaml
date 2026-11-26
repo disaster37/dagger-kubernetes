@@ -313,6 +313,7 @@ data:
       max_selections: {{ .Values.supervisor.config.graphql.maxSelections }}
       max_query_bytes: {{ .Values.supervisor.config.graphql.maxQueryBytes }}
       max_parallelism: {{ .Values.supervisor.config.graphql.maxParallelism }}
+      log_queries: {{ .Values.supervisor.config.graphql.logQueries }}
 {{- with .Values.supervisor.config.pipeline }}
     pipeline:
       metrics:

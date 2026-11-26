@@ -719,4 +719,9 @@ type GraphQLConfig struct {
 	MaxSelections        int  `mapstructure:"max_selections"`
 	MaxQueryBytes        int  `mapstructure:"max_query_bytes"`
 	MaxParallelism       int  `mapstructure:"max_parallelism"`
+	// LogQueries logs one debug line per /query execution with the operation
+	// name, query byte length, query SHA-256, duration and error flag — never
+	// the query text (it can contain repo names and tokens). Used to capture
+	// which queries a CLI release sends without guessing.
+	LogQueries bool `mapstructure:"log_queries"`
 }

@@ -53,6 +53,7 @@ type Query {
   entireInstallations(org: ID!): [EntireInstallation!]!
   entireInstallURL(org: ID!, redirectURI: String!): String!
   getRepos: [Repo!]!
+  recommendedModules(repo: String!): [ModuleRecommendation!]!
 }
 type Mutation {
   createQuickstartOrg(name: String!): Org!
@@ -122,6 +123,7 @@ type GitLabSource { id: ID! instanceURL: String! namespacePath: String! access(o
 type GitLabSourceAccess { connectionID: String! }
 type EntireInstallation { id: ID! name: String! manageURL: String! }
 type Repo { name: String! fullName: String! private: Boolean! }
+type ModuleRecommendation { moduleRef: String! version: String! reason: String }
 type RepoSettings { repo: String! isPublic: Boolean! effectiveRunChecksOnDefaultBranch: Boolean! effectiveRunChecksOnPullRequest: Boolean! effectiveRunChecksOnBranchPush: Boolean! }
 input RepoSettingInput { repo: String! isPublic: Boolean sourceId: ID runChecksOnDefaultBranch: Boolean runChecksOnPullRequest: Boolean runChecksOnBranchPush: Boolean }
 `

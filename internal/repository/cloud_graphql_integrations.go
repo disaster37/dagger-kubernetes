@@ -1422,3 +1422,30 @@ type graphqlRepoSettingInput struct {
 	RunChecksOnPullRequest   *bool
 	RunChecksOnBranchPush    *bool
 }
+
+// RecommendedModules answers the beta CLI's module-recommendation query with
+// an empty list: this deployment runs no recommendation service, and an empty
+// list is a valid answer (NO-OP-BY-DESIGN, ADR-061 entry 35). The field exists
+// so an unknown-query validation error can never break the CLI.
+func (r *graphqlRoot) RecommendedModules(ctx context.Context, args struct{ Repo string }) ([]*graphqlModuleRecommendation, error) {
+	if _, err := r.requireAuthenticated(ctx); err != nil {
+		return nil, err
+	}
+	return []*graphqlModuleRecommendation{}, nil
+}
+
+// graphqlModuleRecommendation is the ModuleRecommendation GraphQL object type.
+type graphqlModuleRecommendation struct {
+	moduleRef string
+	version   string
+	reason    string
+}
+
+func (m *graphqlModuleRecommendation) ModuleRef() string { return m.moduleRef }
+func (m *graphqlModuleRecommendation) Version() string   { return m.version }
+func (m *graphqlModuleRecommendation) Reason() *string {
+	if m.reason == "" {
+		return nil
+	}
+	return &m.reason
+}

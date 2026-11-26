@@ -1307,3 +1307,49 @@ func TestParityRerunChecksFilters(t *testing.T) {
 		t.Fatalf("legacy rerunChecks errors: %v", errorMessages(t, old))
 	}
 }
+
+// TestParityBetaCLIQueries replays the query shapes the Dagger CLI 1.0-beta
+// command matrix (org, billing, usage, traces, checks, integration, modules)
+// sends against /query. Each must resolve with no GraphQL `errors`, so a beta
+// CLI command cannot fail with "Cannot query field …".
+//
+// The fixtures are derived from the commands documented for the deployment
+// (schema shapes), not captured byte-for-byte from a live CLI run; ADR-061
+// records that provenance. `recommendedModules` is an additive empty-list
+// answer (no recommendation service runs here).
+func TestParityBetaCLIQueries(t *testing.T) {
+	e := newParityEnv(t, true)
+	seedCheckRun(t, e.checks, &domain.CheckRunRecord{
+		ID: "check-beta", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s",
+		Status: "success", CreatedAt: time.Now().UTC(),
+		Checks: []domain.CheckItem{{Name: "test", State: domain.CheckSuccess}},
+	})
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{name: "org list", query: `query { user { id nickname orgs { id name createdAt subscription { planID hasCaching status } } } }`},
+		{name: "org info", query: `query { org(name: "acme") { id name features { name status } subscription { planID } cliNotice { level title body } } }`},
+		{name: "billing usage", query: `query { billingUsage(org: "acme", month: "2026-11") { month totalUSD: revision warnings } }`},
+		{name: "traces list", query: `query { org(name: "acme") { traces(first: 5) { nodes { id name status { code message } durationMS startedAt updatedAt } pageInfo { hasNextPage endCursor } } } }`},
+		{name: "checks list", query: `query { org(name: "acme") { checks(repos: ["github.com/acme/api"], first: 5) { nodes { repo commitSHA timestamp checks { id name status traceId spanId moduleRef moduleVersion internal filters } } } } }`},
+		{name: "sources", query: `query { sources { id name type configuredAt orgId orgName configUrl repositories { repository selected eligible claimedByOrgName } } }`},
+		{name: "github connection", query: `query { githubConnection { githubLogin connectedAt scopes status } }`},
+		{name: "module recommendations", query: `query { recommendedModules(repo: "github.com/acme/api") { moduleRef version reason } }`},
+		{name: "rerun checks with filters", query: `mutation { rerunChecks(org: "acme", checkIds: ["check-beta/test"], filters: ["go-test=TestGet"]) { id status filters } }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := execJSON(t, e.g, e.ctx(), tc.query, nil)
+			if hasErrors(res) {
+				t.Fatalf("query returned errors: %v", errorMessages(t, res))
+			}
+		})
+	}
+
+	// An unauthenticated recommendation query is rejected, not silently empty.
+	anon := execJSON(t, e.g, context.Background(), `query { recommendedModules(repo: "x/y") { moduleRef } }`, nil)
+	if !hasErrors(anon) {
+		t.Fatal("unauthenticated recommendedModules must fail")
+	}
+}

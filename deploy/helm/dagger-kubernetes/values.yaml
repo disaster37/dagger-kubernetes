@@ -518,6 +518,8 @@ supervisor:
       maxSelections: 250
       maxQueryBytes: 65536
       maxParallelism: 10
+## @param supervisor.config.graphql.logQueries Log one debug line per /query (operation name, byte length, SHA-256, duration, error flag; never the query text).
+      logQueries: false
 ## @param supervisor.config.pipeline.metrics.enabled Enable the trace-scoped engine resource metrics endpoint (GET /api/v1/traces/:id/metrics).
 ## @param supervisor.config.pipeline.metrics.step query_range resolution for engine metrics (Go duration; must be > 0 when enabled).
 ## @param supervisor.config.pipeline.metrics.rateWindow rate() lookback for cpu/disk/net engine series (Go duration; must be > 0 when enabled).

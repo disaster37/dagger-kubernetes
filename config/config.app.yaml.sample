@@ -555,6 +555,10 @@ graphql:
   max_selections: 250
   max_query_bytes: 65536
   max_parallelism: 10
+  # Log one debug line per /query (operation name, byte length, SHA-256,
+  # duration, error flag) — never the query text. Off by default; turn on
+  # temporarily to capture which fields a new CLI release asks for.
+  log_queries: false
 
 # --- Forge integrations (ADR-056, ADR-059) ----------------------------------
 forge:

@@ -1253,5 +1253,6 @@ kubectl delete pvc -n dagger-stack -l app.kubernetes.io/instance=dagger-kubernet
 | `supervisor.config.graphql.maxSelections` | int | `250` | Maximum expanded selection count. |
 | `supervisor.config.graphql.maxQueryBytes` | int | `65536` | Maximum query length in bytes. |
 | `supervisor.config.graphql.maxParallelism` | int | `10` | Maximum resolver parallelism. |
+| `supervisor.config.graphql.logQueries` | bool | `false` | Log one debug line per `/query` (operation name, byte length, SHA-256, duration, error flag; never the query text). |
 | `supervisor.config.fleet.isolation` | string | `"per_org"` | Engine/cache namespace isolation (`per_org` or `shared`). |
 | `supervisor.config.cli.includePrereleases` | bool | `false` | Include `vX.Y.Z-beta.*` in `latest` CLI resolution. |

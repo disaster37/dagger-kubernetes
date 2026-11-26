@@ -247,6 +247,9 @@ type ServerConfig struct {
 	// returned to engine/runner pods to avoid hairpin NAT.
 	InternalControlURL string
 	InternalDataHost   string
+	// GraphQLLogQueries logs one debug line per /query execution (no query
+	// text). Off by default (graphql.log_queries).
+	GraphQLLogQueries bool
 	// ClusterDomain is the Kubernetes cluster DNS suffix (raft.cluster_domain,
 	// e.g. "cluster.local"). When set, a configured internal host ending in
 	// ".svc" also matches its "<host>.<clusterDomain>" FQDN SNI form.
