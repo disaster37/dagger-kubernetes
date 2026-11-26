@@ -1353,6 +1353,108 @@ func TestSilentArgs(t *testing.T) {
 	}
 }
 
+// renderCheckTable renders an aligned table (2+ spaces between columns) so the
+// parser sees the same shape a CLI tablewriter produces.
+func renderCheckTable(header []string, rows [][]string) string {
+	widths := make([]int, len(header))
+	for i, h := range header {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for i := 0; i < len(row) && i < len(widths); i++ {
+			if len(row[i]) > widths[i] {
+				widths[i] = len(row[i])
+			}
+		}
+	}
+	renderRow := func(cells []string) string {
+		var b strings.Builder
+		for i := range header {
+			cell := ""
+			if i < len(cells) {
+				cell = cells[i]
+			}
+			b.WriteString(cell)
+			if i+1 < len(header) {
+				b.WriteString(strings.Repeat(" ", widths[i]-len(cell)+2))
+			}
+		}
+		return strings.TrimRight(b.String(), " ")
+	}
+	var b strings.Builder
+	b.WriteString(renderRow(header))
+	b.WriteString("\n")
+	sep := make([]string, len(header))
+	for i := range sep {
+		sep[i] = strings.Repeat("-", widths[i])
+	}
+	b.WriteString(renderRow(sep))
+	b.WriteString("\n")
+	for _, row := range rows {
+		b.WriteString(renderRow(row))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func TestParseCheckList(t *testing.T) {
+	legacy := renderCheckTable(
+		[]string{"NAME", "DESCRIPTION"},
+		[][]string{{"build", "Build the project"}, {"test", "Run the tests"}},
+	)
+	v1 := renderCheckTable(
+		[]string{"MODULE", "GO-PACKAGE", "GO-TEST", "VITEST-PROJECT", "VITEST-TEST-FILE", "CHECK", "DESCRIPTION"},
+		[][]string{
+			{"go", "./...", "TestGet", "", "", "get-item", "fetch one item"},
+			{"go", "./...", "", "", "", "list-items", "list every item"},
+			{"node", "", "", "web", "app.test.ts", "vitest", "run vitest"},
+		},
+	)
+	cases := []struct {
+		name string
+		out  string
+		want []string
+	}{
+		{name: "legacy name table", out: legacy, want: []string{"build", "test"}},
+		{name: "v1.0 multi-column table", out: v1, want: []string{"get-item", "list-items", "vitest"}},
+		{name: "header only", out: renderCheckTable([]string{"NAME", "DESCRIPTION"}, nil)},
+		{name: "empty output", out: ""},
+		{name: "short row skipped", out: strings.Join([]string{
+			"NAME    DESCRIPTION",
+			"------  -----------",
+			"build   Build it",
+			"",
+		}, "\n") + "\n", want: []string{"build"}},
+		{name: "name with separators", out: renderCheckTable(
+			[]string{"NAME", "DESCRIPTION"},
+			[][]string{{"go/pkg:Test=a", "unit test"}},
+		), want: []string{"go/pkg:Test=a"}},
+		{name: "tab separated", out: "NAME\tDESCRIPTION\nbuild\tBuild it\ntest\tRun it\n", want: []string{"build", "test"}},
+		{name: "headerless rows use first column", out: "build  Build it\ntest   Run it\n", want: []string{"build", "test"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseCheckList(tc.out)
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("parseCheckList = %v, want %v (input %q)", got, tc.want, tc.out)
+			}
+		})
+	}
+}
+
+func TestParseCheckListTruncatedTable(t *testing.T) {
+	// A row that ends before the CHECK column must be skipped, never reported
+	// with a DESCRIPTION value as its name.
+	out := strings.Join([]string{
+		"MODULE    GO-PACKAGE    CHECK    DESCRIPTION",
+		"------    ----------    -----    -----------",
+		"go        ./...",
+	}, "\n")
+	if got := parseCheckList(out); len(got) != 0 {
+		t.Fatalf("truncated row must be skipped, got %v", got)
+	}
+}
+
 func TestUpsertEnv(t *testing.T) {
 	base := []string{"PATH=/bin", "DAGGER_ORG=old", "DAGGER_ORG=duplicate", "OTHER=1"}
 	got := upsertEnv(base, "DAGGER_ORG", "new")

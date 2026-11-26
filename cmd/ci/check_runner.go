@@ -287,7 +287,147 @@ func gitAuthEnv() (env []string, cleanup func(), err error) {
 	return env, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-// listChecks runs `dagger check -l` and parses one check name per line.
+// checkColumnSep splits a table row on runs of 2+ spaces or any tab. Check
+// names never contain whitespace, so a single space inside a description is
+// preserved.
+var checkColumnSep = regexp.MustCompile(`\s{2,}|\t+`)
+
+// checkSeparatorRow matches the dashed/equals header separator emitted by the
+// CLI's table renderer.
+var checkSeparatorRow = regexp.MustCompile(`^[-=\s]+$`)
+
+// checkTable is the parsed `dagger check -l` output: an optional normalized
+// header (uppercase column names), the header column start offsets, and the
+// data rows split into columns. The header is nil when the output has none
+// (e.g. a headerless fixture).
+type checkTable struct {
+	header  []string
+	offsets []int
+	rows    [][]string
+}
+
+// parseCheckTable splits `dagger check -l` output into a header + rows. It
+// tolerates both the pre-1.0 NAME table and the v1.0 multi-column table
+// (MODULE, GO-PACKAGE, …, CHECK, DESCRIPTION).
+//
+// Space-aligned tables are sliced by the header column offsets rather than by
+// runs of spaces: the v1.0 table leaves whole column families empty (a Go
+// module has no VITEST-* values), and collapsing their padding would shift
+// every later column — including CHECK. Tab-separated output has no padding to
+// lose, so it is split on runs of whitespace.
+func parseCheckTable(out string) checkTable {
+	var t checkTable
+	tabular := false
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.TrimSpace(line) == "" || checkSeparatorRow.MatchString(line) {
+			continue
+		}
+		if t.header == nil {
+			fields := checkColumnSep.Split(strings.TrimSpace(line), -1)
+			if !isCheckHeader(fields) {
+				t.rows = append(t.rows, fields)
+				continue
+			}
+			t.header = make([]string, len(fields))
+			for i, f := range fields {
+				t.header[i] = strings.ToUpper(strings.TrimSpace(f))
+			}
+			if !strings.Contains(line, "\t") {
+				t.offsets = columnOffsets(line, fields)
+			}
+			tabular = len(t.offsets) == 0
+			continue
+		}
+		if tabular {
+			t.rows = append(t.rows, checkColumnSep.Split(strings.TrimSpace(line), -1))
+			continue
+		}
+		t.rows = append(t.rows, splitByOffsets(line, t.offsets))
+	}
+	return t
+}
+
+// columnOffsets returns the start index of each header field in line, in order.
+// Nil when a field cannot be located again (caller falls back to splitting).
+func columnOffsets(line string, fields []string) []int {
+	offsets := make([]int, 0, len(fields))
+	cursor := 0
+	for _, f := range fields {
+		i := strings.Index(line[cursor:], f)
+		if i < 0 {
+			return nil
+		}
+		start := cursor + i
+		offsets = append(offsets, start)
+		cursor = start + len(f)
+	}
+	return offsets
+}
+
+// splitByOffsets slices line into the header's columns. Missing trailing
+// columns (a short row) yield empty values.
+func splitByOffsets(line string, offsets []int) []string {
+	out := make([]string, len(offsets))
+	for i, start := range offsets {
+		end := len(line)
+		if i+1 < len(offsets) {
+			end = offsets[i+1]
+		}
+		if start >= len(line) || end <= start {
+			continue
+		}
+		if end > len(line) {
+			end = len(line)
+		}
+		out[i] = strings.TrimSpace(line[start:end])
+	}
+	return out
+}
+
+// isCheckHeader reports whether a row is the table header: it carries a CHECK
+// column (v1.0) or starts with the legacy NAME column.
+func isCheckHeader(fields []string) bool {
+	for i, f := range fields {
+		upper := strings.ToUpper(strings.TrimSpace(f))
+		if upper == "CHECK" || (i == 0 && upper == "NAME") {
+			return true
+		}
+	}
+	return false
+}
+
+// nameIndex returns the column that holds the check name: the CHECK column in
+// the v1.0 table, otherwise the first column.
+func (t checkTable) nameIndex() int {
+	for i, c := range t.header {
+		if c == "CHECK" {
+			return i
+		}
+	}
+	return 0
+}
+
+// parseCheckList returns the check names from `dagger check -l` output. When the
+// header contains a CHECK column, that column is used; otherwise the first
+// column is used. Rows shorter than the name column are skipped rather than
+// misparsed.
+func parseCheckList(out string) []string {
+	t := parseCheckTable(out)
+	idx := t.nameIndex()
+	checks := make([]string, 0, len(t.rows))
+	for _, fields := range t.rows {
+		if idx >= len(fields) {
+			continue
+		}
+		if name := strings.TrimSpace(fields[idx]); name != "" {
+			checks = append(checks, name)
+		}
+	}
+	return checks
+}
+
+// listChecks runs `dagger check -l` and parses the check-name column.
 func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]string, error) {
 	cmd := exec.CommandContext(ctx, daggerBin, silentArgs([]string{"check", "-l"})...)
 	cmd.Dir = dir
@@ -296,18 +436,7 @@ func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]str
 	if err != nil {
 		return nil, fmt.Errorf("dagger check -l: %w", err)
 	}
-	var checks []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Name") || strings.HasPrefix(line, "---") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) > 0 {
-			checks = append(checks, fields[0])
-		}
-	}
-	return checks, nil
+	return parseCheckList(string(out)), nil
 }
 
 // postJSON posts payload to the supervisor and requires a 2xx response.
