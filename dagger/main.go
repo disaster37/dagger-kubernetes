@@ -1,11 +1,12 @@
 // dagger-kubernetes is the local Dagger CI module for the dagger-kubernetes project.
 //
-// It delegates lint and build to the golang module, helm lint to the helm
-// module, and the publish push to the image module, all from
+// It delegates build to the golang module, helm lint to the helm module, and
+// the publish push to the image module, all from
 // github.com/disaster37/dagger-library-go (golang/helm pinned at 2.0.12, image
-// at 2.0.19). Test, UI, docker, and the helm template matrix are implemented
-// locally because the upstream modules cannot express -race, the UI build, the
-// Dockerfile smoke test, or helm template.
+// at 2.0.19). Lint, test, UI, docker, and the helm template matrix are
+// implemented locally: the upstream modules cannot express -race, the UI
+// build, the Dockerfile smoke test, or helm template, and the upstream lint
+// download path is incompatible with recent engines.
 package main
 
 import (

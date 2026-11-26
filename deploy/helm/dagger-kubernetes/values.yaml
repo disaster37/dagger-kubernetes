@@ -923,13 +923,6 @@ dataIngress:
   host: "data.supv.example.com"
   className: ""
   annotations: {}
-  ## How the TLS passthrough is implemented, depending on the ingress controller:
-  ##   annotation      - kubernetes/ingress-nginx (community, EOL): creates an
-  ##                     Ingress with nginx.ingress.kubernetes.io/ssl-passthrough: "true"
-  ##   transportServer - F5 NGINX Ingress Controller: creates a TransportServer
-  ##                     (k8s.nginx.org) instead of an Ingress. Requires
-  ##                     controller.enableTLSPassthrough=true on the controller.
-  ##                     The host must NOT be claimed by any other Ingress.
   passthroughVia: "annotation"
   sessionTimeout: "24h"
   tls:
