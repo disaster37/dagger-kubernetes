@@ -26,11 +26,7 @@ const (
 	// library source directory packaged by JenkinsLibs.
 	jenkinsLibsDir = "ci-integrations/jenkins"
 
-	// Pinned tool images and versions. Keep in sync with DAGGER.md.
-	golangImage         = "golang:1.27"
-	nodeImage           = "node:22-alpine"
-	helmImage           = "alpine/helm:3.14.0"
-	golangciLintVersion = "v2.14.0"
+	nodeImage = "node:22-alpine"
 )
 
 // binaries lists the Go binaries produced by Build.
@@ -326,15 +322,8 @@ func New(
 // there, which hides whatever the base image installed, making the module fall
 // back to downloading whatever release GitHub reports as latest.
 func (m *DaggerKubernetes) Lint(ctx context.Context) (string, error) {
-	install := fmt.Sprintf(
-		"curl -sSfL https://github.com/golangci/golangci-lint/releases/download/%s/golangci-lint-%s-linux-amd64.tar.gz -o /tmp/golangci-lint.tar.gz && tar -C /usr/local/bin -xzf /tmp/golangci-lint.tar.gz --strip-components=1 golangci-lint-%s-linux-amd64/golangci-lint && rm /tmp/golangci-lint.tar.gz",
-		golangciLintVersion, strings.TrimPrefix(golangciLintVersion, "v"), strings.TrimPrefix(golangciLintVersion, "v"),
-	)
-	base := dag.Container().
-		From(golangImage).
-		WithExec([]string{"bash", "-c", install})
 
-	out, err := dag.Golang(m.Src, dagger.GolangOpts{Base: base}).Lint(ctx)
+	out, err := dag.Golang(m.Src).Lint(ctx)
 	if err != nil {
 		return "", fmt.Errorf("golangci-lint: %w", err)
 	}
@@ -348,7 +337,6 @@ func (m *DaggerKubernetes) Lint(ctx context.Context) (string, error) {
 // used and CGO_ENABLED is not set to 0.
 func (m *DaggerKubernetes) Test(ctx context.Context) (*dagger.File, error) {
 	ctr := dag.Container().
-		From(golangImage).
 		WithMountedDirectory("/src", m.Src).
 		WithWorkdir("/src").
 		WithExec([]string{"go", "vet", "./..."}).
@@ -437,10 +425,8 @@ func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 
 	// The subchart archives are gitignored, so fetch the dependencies first;
 	// each template variant runs in a fresh container without charts/.
-	base := dag.Container().
-		From(helmImage).
-		WithMountedDirectory("/src", m.Src).
-		WithWorkdir("/src").
+	base := dag.Helm(m.Src).
+		HelmContainer().
 		WithExec([]string{"helm", "dependency", "update", chartDir})
 
 	for i, variant := range helmTemplateMatrix {
@@ -581,9 +567,8 @@ func (m *DaggerKubernetes) JenkinsLibs(
 	}
 
 	outPath := fmt.Sprintf("/out/%s", name)
-	ctr := dag.Container().
-		From(golangImage).
-		WithMountedDirectory("/src", src).
+	ctr := dag.Golang(src).
+		Container().
 		WithExec([]string{"bash", "-c", fmt.Sprintf(
 			"set -o pipefail && mkdir -p /out && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C /src . | gzip -n > '%s'",
 			outPath)})
