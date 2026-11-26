@@ -97,6 +97,7 @@ func ciFlags() []cli.Flag {
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
 		&cli.StringFlag{Name: "runner-host", EnvVars: []string{runnerHostEnvName}, Value: defaultRunnerHost, Usage: "Dagger engine driver for the wrapped CLI; an explicit --engine argument always wins (empty = do not export)"},
 		&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
+		&cli.BoolFlag{Name: "silent", EnvVars: []string{"DAGGER_SILENT"}, Usage: "run Dagger with --silent (suppresses progress and per-session frontend telemetry)"},
 		&cli.BoolFlag{Name: "cli", Usage: "Provision the Dagger CLI binary on the fly from the supervisor"},
 		&cli.StringFlag{Name: "cli-version", Usage: "Dagger CLI version to provision (empty = latest allowed)"},
 		&cli.StringFlag{Name: "cli-os", Value: "linux", Usage: "CLI target OS (linux, darwin)"},
@@ -163,6 +164,9 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("no dagger command specified")
 	}
 
+	silent := c.Bool("silent")
+	cmdArgs = withSilentFlag(cmdArgs, silent)
+
 	runnerHost := resolveRunnerHost(c.String("runner-host"), cmdArgs)
 	org := c.String("org")
 	env := daggerEnv(os.Environ(), daggerEnvOpts{
@@ -172,6 +176,10 @@ func run(c *cli.Context) error {
 		EngineVersion: version,
 		Org:           org,
 	})
+	if silent {
+		// Nested SDK sessions in the same process tree inherit silent mode.
+		env = upsertEnv(env, "DAGGER_SILENT", "1")
+	}
 
 	// Resolve the CLI the wrapper will actually exec (PATH lookup happens in
 	// the parent process, so a provisioned PATH entry does not change it).

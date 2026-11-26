@@ -1306,6 +1306,53 @@ func envKeyCount(env []string, key string) int {
 	return n
 }
 
+func TestWithSilentFlag(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   []string
+		silent bool
+		want   []string
+	}{
+		{name: "off", args: []string{"call", "build"}, want: []string{"call", "build"}},
+		{name: "prepends before subcommand", args: []string{"call", "build"}, silent: true, want: []string{"--silent", "call", "build"}},
+		{name: "already present", args: []string{"--silent", "call"}, silent: true, want: []string{"--silent", "call"}},
+		{name: "short form present", args: []string{"call", "-s", "build"}, silent: true, want: []string{"call", "-s", "build"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := withSilentFlag(tc.args, tc.silent)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("withSilentFlag = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSilentArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		args []string
+		want []string
+	}{
+		{name: "unset", env: "", args: []string{"check", "-l"}, want: []string{"check", "-l"}},
+		{name: "true", env: "1", args: []string{"check", "-l"}, want: []string{"--silent", "check", "-l"}},
+		{name: "parse bool true", env: "TRUE", args: []string{"check", "-l"}, want: []string{"--silent", "check", "-l"}},
+		{name: "false", env: "0", args: []string{"check", "-l"}, want: []string{"check", "-l"}},
+		{name: "unparseable", env: "maybe", args: []string{"check", "-l"}, want: []string{"check", "-l"}},
+		{name: "idempotent", env: "1", args: []string{"--silent", "check"}, want: []string{"--silent", "check"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DAGGER_SILENT", tc.env)
+			got := silentArgs(tc.args)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("silentArgs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestUpsertEnv(t *testing.T) {
 	base := []string{"PATH=/bin", "DAGGER_ORG=old", "DAGGER_ORG=duplicate", "OTHER=1"}
 	got := upsertEnv(base, "DAGGER_ORG", "new")

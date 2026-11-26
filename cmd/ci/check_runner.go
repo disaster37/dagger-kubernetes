@@ -143,7 +143,7 @@ func runCheck(ctx context.Context, daggerBin, dir string, env []string, check st
 	_ = traceFile.Close()
 	defer func() { _ = os.Remove(tracePath) }()
 
-	cmd := exec.CommandContext(ctx, daggerBin, "check", check) // #nosec G204 -- check names come from the repository's own dagger module
+	cmd := exec.CommandContext(ctx, daggerBin, silentArgs([]string{"check", check})...) // #nosec G204 -- check names come from the repository's own dagger module
 	cmd.Dir = dir
 	cmd.Env = append(append([]string(nil), env...), fmt.Sprintf("DAGGER_KUBERNETES_TRACE_ID_FILE=%s", tracePath))
 	cmd.Stdout = os.Stdout
@@ -289,7 +289,7 @@ func gitAuthEnv() (env []string, cleanup func(), err error) {
 
 // listChecks runs `dagger check -l` and parses one check name per line.
 func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, daggerBin, "check", "-l")
+	cmd := exec.CommandContext(ctx, daggerBin, silentArgs([]string{"check", "-l"})...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.Output()

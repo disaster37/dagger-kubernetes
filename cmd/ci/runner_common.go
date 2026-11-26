@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -112,6 +113,28 @@ func upsertEnv(env []string, key, value string) []string {
 func runnerEnv(server, token, org, runnerHost string) []string {
 	env := daggerEnv(os.Environ(), daggerEnvOpts{Server: server, Token: token, Org: org, RunnerHost: runnerHost})
 	return upsertEnv(env, "DAGGER_ENGINE", "cloud")
+}
+
+// withSilentFlag prepends --silent (before the subcommand) unless the caller
+// already asked for it. Idempotent.
+func withSilentFlag(args []string, silent bool) []string {
+	if !silent || hasFlag(args, "--silent") || hasFlag(args, "-s") {
+		return args
+	}
+	out := make([]string, 0, len(args)+1)
+	out = append(out, "--silent")
+	return append(out, args...)
+}
+
+// silentArgs prepends --silent when DAGGER_SILENT parses true, matching the
+// CLI's strconv.ParseBool semantics (an unparseable value is not silent).
+// Idempotent.
+func silentArgs(args []string) []string {
+	enabled, err := strconv.ParseBool(os.Getenv("DAGGER_SILENT"))
+	if err != nil || !enabled {
+		return args
+	}
+	return withSilentFlag(args, true)
 }
 
 // resolveRunnerHost returns the host to export, or "" when the caller passed an// explicit engine selector (--engine / --engine=) that must win on its own.

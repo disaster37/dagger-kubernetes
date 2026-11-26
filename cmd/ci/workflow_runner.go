@@ -76,7 +76,7 @@ func runWorkflowRunner(c *cli.Context) error {
 	defer binCleanup()
 	env := append(runnerEnv(server, token, c.String("org"), defaultRunnerHost), binExtraEnv...)
 	args := strings.Fields(c.String("call"))
-	cmd := exec.CommandContext(ctx, daggerBin, append([]string{"call"}, args...)...) // #nosec G204 -- call expression comes from the repository's own workflow
+	cmd := exec.CommandContext(ctx, daggerBin, silentArgs(append([]string{"call"}, args...))...) // #nosec G204 -- call expression comes from the repository's own workflow
 	cmd.Dir = workdir
 	cmd.Env = env
 	cmd.Stdout = os.Stdout
