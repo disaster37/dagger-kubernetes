@@ -372,6 +372,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("checks.github_oidc_issuer", "https://token.actions.githubusercontent.com")
 	v.SetDefault("checks.gitlab_oidc_issuer", "https://gitlab.com")
 	v.SetDefault("checks.oidc_audience", "dagger-kubernetes")
+	v.SetDefault("checks.silent", false)
 
 	v.SetDefault("workflows.enabled", false)
 	v.SetDefault("workflows.namespace", "")
@@ -379,6 +380,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("workflows.job_image_pull_secrets", []string{})
 	v.SetDefault("workflows.default_timeout", 30*time.Minute)
 	v.SetDefault("workflows.max_parallel", 8)
+	v.SetDefault("workflows.silent", false)
 
 	v.SetDefault("forge.github_api_url", "https://api.github.com")
 	v.SetDefault("forge.gitlab_api_url", "https://gitlab.com/api/v4")

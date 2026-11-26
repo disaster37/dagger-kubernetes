@@ -276,3 +276,36 @@ func containsArg(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+// TestJobSecretCarriesSilent proves checks.silent reaches the Job Secret (and
+// therefore the runner process and every nested CLI child), and that the
+// default leaves the variable untouched.
+func TestJobSecretCarriesSilent(t *testing.T) {
+	cases := []struct {
+		name   string
+		silent bool
+		want   string // "" = absent
+	}{
+		{name: "default off", silent: false, want: ""},
+		{name: "configured on", silent: true, want: "1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			r := NewK8sJobRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "").
+				WithSilent(tc.silent)
+			spec := &domain.CheckRunSpec{ID: "check-silent", OrgID: "acme", ProjectID: "proj", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main"}
+			if err := r.Run(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+			secret, err := cs.CoreV1().Secrets("resolved-ns").Get(context.Background(), "check-env-"+refHash(spec.ID), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := secret.StringData["DAGGER_SILENT"]
+			if got != tc.want {
+				t.Fatalf("DAGGER_SILENT = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}

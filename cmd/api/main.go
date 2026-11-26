@@ -306,7 +306,8 @@ func run(c *cli.Context) error {
 	var checkRunner domain.CheckJobRunner
 	if cfg.Checks.Enabled && clientset != nil {
 		checkRunner = repository.NewK8sJobRunner(clientset, effectiveNamespace(cfg.Checks.Namespace, cfg.Fleet.Namespace), cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
-			WithImagePullSecrets(cfg.Checks.JobImagePullSecrets)
+			WithImagePullSecrets(cfg.Checks.JobImagePullSecrets).
+			WithSilent(cfg.Checks.Silent)
 	}
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
@@ -556,7 +557,8 @@ func run(c *cli.Context) error {
 	var workflowRunner domain.WorkflowJobRunner
 	if cfg.Workflows.Enabled && clientset != nil {
 		workflowRunner = repository.NewK8sWorkflowRunner(clientset, effectiveNamespace(cfg.Workflows.Namespace, cfg.Fleet.Namespace), cfg.Workflows.JobImage, cfg.Workflows.DefaultTimeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
-			WithImagePullSecrets(cfg.Workflows.JobImagePullSecrets)
+			WithImagePullSecrets(cfg.Workflows.JobImagePullSecrets).
+			WithSilent(cfg.Workflows.Silent)
 	}
 	envRepo := repository.NewEnvironmentRepo(raftStore)
 	workflowRepo := repository.NewWorkflowRepo(raftStore)
@@ -569,6 +571,7 @@ func run(c *cli.Context) error {
 	).WithEnabled(cfg.Workflows.Enabled)
 	checksSvc := service.NewChecksService(forgeSourceRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, cfg.Server.PublicURL, cfg.Forge.WebhookSecret, logger).
 		WithEnabled(cfg.Checks.Enabled).
+		WithSilent(cfg.Checks.Silent).
 		WithRepoSettings(repoSettingRepo)
 	cloudGraphQL.WithForgeSources(forgeSourceRepo).WithProjects(projectRepo).WithPublicURL(cfg.Server.PublicURL).
 		WithGitHubConnections(githubConnRepo).

@@ -32,6 +32,7 @@ type K8sJobRunner struct {
 	internalControlURL string
 	caSecret           string
 	imagePullSecrets   []string
+	silent             bool
 }
 
 var _ domain.CheckJobRunner = (*K8sJobRunner)(nil)
@@ -47,6 +48,13 @@ func NewK8sJobRunner(clientset kubernetes.Interface, namespace, image string, ti
 // WithImagePullSecrets attaches the given image pull secrets to every Job pod.
 func (r *K8sJobRunner) WithImagePullSecrets(secrets []string) *K8sJobRunner {
 	r.imagePullSecrets = secrets
+	return r
+}
+
+// WithSilent runs the check-runner CLI with --silent (checks.silent). The flag
+// travels in the Job Secret so nested SDK sessions inherit DAGGER_SILENT too.
+func (r *K8sJobRunner) WithSilent(silent bool) *K8sJobRunner {
+	r.silent = silent
 	return r
 }
 
@@ -88,6 +96,9 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 	}
 	for k, v := range spec.Secrets {
 		stringData[k] = v
+	}
+	if r.silent {
+		stringData["DAGGER_SILENT"] = "1"
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: r.namespace, Labels: labels},

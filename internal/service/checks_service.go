@@ -39,6 +39,7 @@ type ChecksService struct {
 	publicURL     string
 	webhookSecret string
 	enabled       atomic.Bool
+	silent        atomic.Bool
 	logger        *logrus.Logger
 }
 
@@ -70,6 +71,13 @@ func NewChecksService(sources domain.ForgeSourceRepository, secrets *SecretServi
 // WithEnabled gates check-run creation and dispatch. Reads always work.
 func (s *ChecksService) WithEnabled(enabled bool) *ChecksService {
 	s.enabled.Store(enabled)
+	return s
+}
+
+// WithSilent records whether check-runner Jobs run with --silent (checks.silent)
+// so dispatch logs state the effective mode.
+func (s *ChecksService) WithSilent(silent bool) *ChecksService {
+	s.silent.Store(silent)
 	return s
 }
 
@@ -239,6 +247,10 @@ func (s *ChecksService) dispatchCheckJob(ctx context.Context, src *domain.ForgeS
 	if err := s.checkRuns.Upsert(ctx, record); err != nil {
 		return fmt.Errorf("persist check run token: %w", err)
 	}
+	s.logger.WithFields(logrus.Fields{
+		"check_run_id": record.ID,
+		"silent":       s.silent.Load(),
+	}).Info("dispatching check run")
 	spec := &domain.CheckRunSpec{
 		ID: record.ID, OrgID: record.OrgID, ProjectID: record.ProjectID, SourceID: record.SourceID,
 		Provider: record.Provider, Repo: record.Repo, SHA: record.SHA, Ref: record.Ref,

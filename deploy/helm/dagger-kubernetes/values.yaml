@@ -474,6 +474,8 @@ supervisor:
       gitlabOidcIssuer: "https://gitlab.com"
 ## @param supervisor.config.checks.oidcAudience Expected audience of CI OIDC ID tokens.
       oidcAudience: "dagger-kubernetes"
+## @param supervisor.config.checks.silent Run check-runner CLI calls with --silent (0.21.8+ skips the per-session frontend telemetry DB, lowering memory for concurrent runs).
+      silent: false
     workflows:
 ## @param supervisor.config.workflows.enabled Enable Dagger-native CD workflows (ADR-057).
       enabled: false
@@ -487,6 +489,8 @@ supervisor:
       defaultTimeout: "30m"
 ## @param supervisor.config.workflows.maxParallel Max concurrently running jobs in one workflow run.
       maxParallel: 8
+## @param supervisor.config.workflows.silent Run workflow-runner CLI calls with --silent (same semantics as checks.silent).
+      silent: false
     forge:
       githubApiUrl: "https://api.github.com"
       gitlabApiUrl: "https://gitlab.com/api/v4"

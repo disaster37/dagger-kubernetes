@@ -655,6 +655,11 @@ type ChecksConfig struct {
 	GitLabOIDCIssuer string `mapstructure:"gitlab_oidc_issuer"`
 	// OIDCAudience is the expected audience of CI OIDC ID tokens.
 	OIDCAudience string `mapstructure:"oidc_audience"`
+	// Silent runs check-runner CLI invocations with --silent. Engines/CLIs
+	// >= v0.21.8 then skip the per-session frontend telemetry DB (much lower
+	// memory for concurrent runs). Older CLIs still get the flag, which they
+	// always supported.
+	Silent bool `mapstructure:"silent"`
 }
 
 // WorkflowConfig configures Dagger-native CD workflows (ADR-057).
@@ -670,6 +675,9 @@ type WorkflowConfig struct {
 	DefaultTimeout time.Duration `mapstructure:"default_timeout"`
 	// MaxParallel bounds concurrently running jobs in one workflow run.
 	MaxParallel int `mapstructure:"max_parallel"`
+	// Silent runs workflow-runner CLI invocations with --silent (same
+	// semantics as ChecksConfig.Silent).
+	Silent bool `mapstructure:"silent"`
 }
 
 // ForgeConfig configures outbound forge API endpoints (ADR-056).

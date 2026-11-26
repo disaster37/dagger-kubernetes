@@ -24,6 +24,7 @@ type K8sWorkflowRunner struct {
 	internalControlURL string
 	caSecret           string
 	imagePullSecrets   []string
+	silent             bool
 }
 
 var _ domain.WorkflowJobRunner = (*K8sWorkflowRunner)(nil)
@@ -47,6 +48,13 @@ func NewK8sWorkflowRunner(clientset kubernetes.Interface, namespace, image strin
 // WithImagePullSecrets attaches the given image pull secrets to every Job pod.
 func (r *K8sWorkflowRunner) WithImagePullSecrets(secrets []string) *K8sWorkflowRunner {
 	r.imagePullSecrets = secrets
+	return r
+}
+
+// WithSilent runs the workflow-runner CLI with --silent (workflows.silent). The
+// flag travels in the Job Secret so nested SDK sessions inherit DAGGER_SILENT.
+func (r *K8sWorkflowRunner) WithSilent(silent bool) *K8sWorkflowRunner {
+	r.silent = silent
 	return r
 }
 
@@ -87,6 +95,9 @@ func (r *K8sWorkflowRunner) RunCall(ctx context.Context, spec *domain.WorkflowCa
 	}
 	for k, v := range spec.Secrets {
 		stringData[k] = v
+	}
+	if r.silent {
+		stringData["DAGGER_SILENT"] = "1"
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: r.namespace, Labels: labels},
