@@ -222,6 +222,22 @@ function makeApi(handler) {
   check('stale-epoch 401 does not clear or navigate', cleared === 0 && navCalls.length === 0, `cleared=${cleared} nav=${navCalls.length}`)
 }
 
+// 8. local mode on a protected request: one refresh, never clears or navigates.
+{
+  const { installAuthInterceptors } = await freshInterceptor()
+  let attempts = 0
+  const api = makeApi(async (config) => { attempts++; throw fakeAxiosError(config, 401) })
+  let refreshed = 0
+  let cleared = 0
+  const navCalls = []
+  const auth = { authEpoch: 0, async refreshSession() { refreshed++; return true }, clearLocalSession() { cleared++; this.authEpoch++ } }
+  installAuthInterceptors(api, () => auth, () => ({ pathname: '/orgs/acme/integrations/github', search: '', hash: '', assign: (u) => navCalls.push(u) }))
+  let rejected = false
+  await api.get('/api/v1/github/owners', { authRecovery: 'local' }).catch(() => { rejected = true })
+  check('local protected 401 refreshes exactly once and rejects', refreshed === 1 && attempts === 2 && rejected, `refreshed=${refreshed} attempts=${attempts} rejected=${rejected}`)
+  check('local protected 401 never clears the session or navigates', cleared === 0 && navCalls.length === 0, `cleared=${cleared} nav=${navCalls.length}`)
+}
+
 rmSync(harnessDir, { recursive: true, force: true })
 
 if (failures > 0) {
