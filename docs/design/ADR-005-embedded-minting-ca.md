@@ -10,7 +10,10 @@
 **Updated:** 2026-08-28 — `tls.provider` config key renamed to
 `supervisor.dataplane.tls.provider`; the Helm chart now auto-switches the
 provider value when `dataCert.enabled` or `dataIngress.tls.secretName` is set,
-so operators no longer need to manually set it. See also the data-plane TLS
+so operators no longer need to manually set it. When
+`dataIngress.passthroughVia: transportServer` (F5 NGINX Ingress Controller) no
+data-plane Ingress renders, so cert-manager renewal uses `dataCert.enabled:
+true` rather than `dataIngress.annotations`. See also the data-plane TLS
 troubleshooting section in `docs/README.md`.
 
 ## Context

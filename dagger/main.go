@@ -86,6 +86,14 @@ var helmTemplateMatrix = []helmVariant{
 			`path: relay.yaml`,
 			`job_image: "ghcr.io/disaster37/dagger-kubernetes:`,
 			`job_image_pull_secrets: []`,
+			"app.kubernetes.io/component: supervisor",
+			"targetPort: 8080",
+			"targetPort: 8443",
+			"targetPort: 8081",
+			// Exact supervisor Service selector block: proves the Services
+			// select on component: supervisor (not name+instance alone), the
+			// regression this fix addresses.
+			"selector:\n    app.kubernetes.io/name: dagger-kubernetes\n    app.kubernetes.io/instance: dagger-kubernetes\n    app.kubernetes.io/component: supervisor",
 		},
 	},
 	{
@@ -158,6 +166,31 @@ var helmTemplateMatrix = []helmVariant{
 	{
 		sets:   []string{"--set", "dex.enabled=true", "--set", "openldap.enabled=true"},
 		expect: []string{"name: dagger-kubernetes-dex"},
+	},
+	// F5 NGINX Ingress Controller data-plane passthrough: a TransportServer
+	// replaces the data Ingress, so cert-manager renewal must come from
+	// dataCert. Also proves the supervisor component selector keeps the
+	// image-cache mirror pods out of the supervisor Services/PDB/ServiceMonitor.
+	{
+		sets: []string{
+			"--set", "dataIngress.enabled=true",
+			"--set", "dataIngress.host=data.example.com",
+			"--set", "dataIngress.passthroughVia=transportServer",
+			"--set", "dataCert.enabled=true",
+			"--set", "imageCache.enabled=true",
+			"--set", "serviceMonitor.enabled=true",
+		},
+		expect: []string{
+			"kind: TransportServer",
+			"protocol: TLS_PASSTHROUGH",
+			"kind: Certificate",
+			"app.kubernetes.io/component: supervisor",
+			"app.kubernetes.io/component: image-cache",
+			// Generous idle timeout so the controller's 10m default does not
+			// cut long-lived idle engine sessions.
+			"sessionParameters:",
+			`timeout: "24h"`,
+		},
 	},
 }
 

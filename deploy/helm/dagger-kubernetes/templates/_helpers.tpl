@@ -28,6 +28,20 @@ app.kubernetes.io/name: {{ include "dagger-kubernetes.name" . }}
 app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end -}}
 
+{{/* Supervisor-only selection: selectorLabels plus
+app.kubernetes.io/component: supervisor, so supervisor Services/PDB/
+ServiceMonitor never match the image-cache mirror pods (which carry
+app.kubernetes.io/component: image-cache). */}}
+{{- define "dagger-kubernetes.supervisorSelectorLabels" -}}
+{{ include "dagger-kubernetes.selectorLabels" . }}
+app.kubernetes.io/component: supervisor
+{{- end -}}
+
+{{- define "dagger-kubernetes.supervisorLabels" -}}
+{{ include "dagger-kubernetes.labels" . }}
+app.kubernetes.io/component: supervisor
+{{- end -}}
+
 {{- define "dagger-kubernetes.namespace" -}}
 {{- default .Release.Namespace .Values.namespace -}}
 {{- end -}}
