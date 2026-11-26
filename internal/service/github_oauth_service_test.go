@@ -94,6 +94,17 @@ func (f *failingRepoSettingRepo) BatchUpsert(context.Context, string, []domain.R
 	return errors.New("raft apply failed")
 }
 
+// failingGitHubConnectionRepo injects a transient store failure for error
+// mapping tests.
+type failingGitHubConnectionRepo struct {
+	domain.GitHubConnectionRepository
+	err error
+}
+
+func (f *failingGitHubConnectionRepo) GetByUser(context.Context, string) (*domain.UserGitHubConnection, error) {
+	return nil, f.err
+}
+
 type gitHubEnv struct {
 	svc         *GitHubIntegrationService
 	gh          *fakeGitHubAPI
@@ -505,6 +516,44 @@ func TestGitHubIntegrationRevokedTokenStatus(t *testing.T) {
 	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
 	if err != nil || conn.Status != domain.GitHubConnectionRevoked {
 		t.Fatalf("connection status = %+v err=%v", conn, err)
+	}
+}
+
+func TestGitHubIntegrationUserTokenErrorMapping(t *testing.T) {
+	cases := []struct {
+		name        string
+		storeErr    error
+		wantNotConn bool
+	}{
+		{
+			name:        "missing connection is a business state",
+			wantNotConn: true,
+		},
+		{
+			name:     "transient store error is not an auth failure",
+			storeErr: errors.New("raft apply timeout"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newGitHubEnv(t)
+			if tc.storeErr != nil {
+				env.svc.connections = &failingGitHubConnectionRepo{GitHubConnectionRepository: env.connections, err: tc.storeErr}
+			}
+			_, err := env.svc.ListUserOwners(context.Background(), env.alice.ID)
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, domain.ErrGitHubNotConnected); got != tc.wantNotConn {
+				t.Fatalf("ErrGitHubNotConnected = %v, want %v (err=%v)", got, tc.wantNotConn, err)
+			}
+			if errors.Is(err, domain.ErrUnauthenticated) {
+				t.Fatalf("business/store error must not be ErrUnauthenticated: %v", err)
+			}
+			if tc.storeErr != nil && !strings.Contains(err.Error(), "get github connection") {
+				t.Fatalf("store error = %v, want a wrapped store failure", err)
+			}
+		})
 	}
 }
 

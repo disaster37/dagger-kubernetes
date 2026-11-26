@@ -14,6 +14,7 @@ var (
 	ErrGitHubOAuthDisabled            = errors.New("github oauth integration is disabled")
 	ErrGitHubDeviceFlowDisabled       = errors.New("github device flow integration is disabled")
 	ErrGitHubTokenRevoked             = errors.New("github token is expired or revoked")
+	ErrGitHubNotConnected             = errors.New("github account not connected")
 	ErrRepoClaimedByOtherOrg          = errors.New("repository is already claimed by another organization")
 	ErrRepoNotInInstallation          = errors.New("repository does not belong to installation")
 	ErrRepoInaccessible               = errors.New("repository is not available through this connection")

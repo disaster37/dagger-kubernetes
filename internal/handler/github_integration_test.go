@@ -107,6 +107,44 @@ func newGitHubHandlerEnv(t *testing.T) (*testEnv, *handlerFakeGitHub) {
 	return env, gh
 }
 
+func TestGitHubIntegrationNoConnectionIsConflict(t *testing.T) {
+	env, _ := newGitHubHandlerEnv(t)
+	e := newAuthEngine(env.server)
+	admin := env.loginAsAdmin(t)
+
+	// Anonymous callers are still a genuine auth failure.
+	resp := ut.PerformRequest(e, "GET", "/api/v1/github/owners", nil)
+	if resp.Result().StatusCode() != http.StatusUnauthorized {
+		t.Fatalf("anonymous owners status = %d", resp.Result().StatusCode())
+	}
+
+	resp = ut.PerformRequest(e, "GET", "/api/v1/github/owners", nil, ut.Header{Key: "Authorization", Value: admin})
+	if resp.Result().StatusCode() != http.StatusConflict {
+		t.Fatalf("owners without connection status = %d body=%s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+	if resp.Result().StatusCode() == http.StatusUnauthorized {
+		t.Fatal("a missing GitHub connection must not be reported as 401")
+	}
+	if !strings.Contains(string(resp.Result().Body()), "no GitHub account is connected") {
+		t.Fatalf("owners body = %s", resp.Result().Body())
+	}
+
+	// Linking an org account without a PAT and without a personal connection is
+	// also a business state, not an auth failure.
+	body := `{"owner":"acme"}`
+	resp = ut.PerformRequest(e, "POST", env.orgPath("")+"/github/accounts", &ut.Body{Body: strings.NewReader(body), Len: len(body)},
+		ut.Header{Key: "Authorization", Value: admin}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusConflict {
+		t.Fatalf("account create without connection status = %d body=%s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+	if resp.Result().StatusCode() == http.StatusUnauthorized {
+		t.Fatal("ConnectOrgAccount without PAT must not be reported as 401")
+	}
+	if !strings.Contains(string(resp.Result().Body()), "no GitHub account is connected") {
+		t.Fatalf("account create body = %s", resp.Result().Body())
+	}
+}
+
 func TestGitHubIntegrationRoutes(t *testing.T) {
 	env, gh := newGitHubHandlerEnv(t)
 	e := newAuthEngine(env.server)

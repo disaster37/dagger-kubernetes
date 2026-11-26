@@ -321,6 +321,8 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusBadRequest, err.Error())
 	case errors.Is(err, domain.ErrGitHubTokenRevoked):
 		writeError(c, consts.StatusConflict, "github connection token is expired or revoked; please reconnect")
+	case errors.Is(err, domain.ErrGitHubNotConnected):
+		writeError(c, consts.StatusConflict, "no GitHub account is connected; link a GitHub account first")
 	case errors.Is(err, domain.ErrRepoClaimedByOtherOrg):
 		writeError(c, consts.StatusConflict, "repository is already claimed by another organization")
 	default:
