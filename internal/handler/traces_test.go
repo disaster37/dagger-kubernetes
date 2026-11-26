@@ -360,3 +360,55 @@ func TestHandleTracesDetailPromotesRootSpanStatus(t *testing.T) {
 		})
 	}
 }
+
+// TestTerminalTraceIgnoresLateNestedSpan proves a nested span that arrives (or
+// is indexed) after the trace reached a terminal state never downgrades it: the
+// status and duration stay authoritative, and adoption does not recompute them
+// from children (ADR-061 G5).
+func TestTerminalTraceIgnoresLateNestedSpan(t *testing.T) {
+	env := newTestEnv(t)
+	bearer := env.loginAsAdmin(t)
+	const traceID = "trace-late-nested"
+
+	late := &domain.SpanNode{
+		SpanID: "nested", ParentSpanID: "root", Name: "nested-run",
+		Status: "running", StartTime: time.Now().Add(-time.Minute), DurationMS: 0,
+	}
+	root := &domain.SpanNode{
+		SpanID: "root", Name: "build", Status: "failed", DurationMS: 1200,
+		Children: []*domain.SpanNode{late},
+	}
+	env.server.traces = &stubTraceRepo{trace: &domain.TraceInfo{
+		TraceID: traceID, RootSpan: root, Status: "failed", DurationMS: 1200,
+	}}
+
+	e := newAuthEngine(env.server)
+	resp := ut.PerformRequest(e, "GET", "/api/v1/traces/"+traceID, nil, ut.Header{Key: "Authorization", Value: bearer})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.Result().StatusCode())
+	}
+	var body struct {
+		Status   string `json:"status"`
+		Duration int64  `json:"duration_ms"`
+		RootSpan struct {
+			Status   string `json:"status"`
+			Duration int64  `json:"duration_ms"`
+			Children []struct {
+				Name   string `json:"name"`
+				Status string `json:"status"`
+			} `json:"children"`
+		} `json:"root_span"`
+	}
+	if err := json.Unmarshal(resp.Result().Body(), &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if body.Status != "failed" || body.RootSpan.Status != "failed" {
+		t.Fatalf("status = %q / root %q, want failed", body.Status, body.RootSpan.Status)
+	}
+	if body.Duration != 1200 || body.RootSpan.Duration != 1200 {
+		t.Fatalf("duration = %d / root %d, want 1200 (never recomputed)", body.Duration, body.RootSpan.Duration)
+	}
+	if len(body.RootSpan.Children) != 1 || body.RootSpan.Children[0].Name != "nested-run" {
+		t.Fatalf("late nested span lost: %+v", body.RootSpan.Children)
+	}
+}

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 func TestNewLogsClient(t *testing.T) {
@@ -1227,5 +1229,108 @@ func TestMapToSpanNodeEndTimeStatus(t *testing.T) {
 				t.Fatalf("duration = %v, want %v", node.Duration, time.Duration(tc.wantDuration))
 			}
 		})
+	}
+}
+
+// TestOrphanAdoptionNestedPipeline locks in nested-pipeline adoption: Tempo can
+// return a child span before its parent (a nested Dagger session's spans land
+// in a later batch). The child must nest under its parent in the tree, and the
+// trace root must stay the outer span (changelog 1.0, entry 30; ADR-061 G5).
+func TestOrphanAdoptionNestedPipeline(t *testing.T) {
+	r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
+	info := r.reconstruct("test-trace", map[string]interface{}{
+		"batches": []interface{}{
+			map[string]interface{}{
+				"scopeSpans": []interface{}{
+					map[string]interface{}{
+						"spans": []interface{}{
+							// Nested work arrives first, parent second.
+							map[string]interface{}{
+								"spanId": "nested-child", "parentSpanId": "nested-root",
+								"traceId": "test-trace", "name": "nested-op",
+								"startTimeUnixNano": "3000000",
+							},
+							map[string]interface{}{
+								"spanId": "nested-root", "parentSpanId": "root",
+								"traceId": "test-trace", "name": "nested-run",
+								"startTimeUnixNano": "2000000",
+							},
+							map[string]interface{}{
+								"spanId": "root", "traceId": "test-trace", "name": "outer",
+								"startTimeUnixNano": "1000000", "endTimeUnixNano": "4000000",
+								"status": map[string]interface{}{"code": float64(1)},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if info.RootSpan == nil || info.RootSpan.Name != "outer" {
+		t.Fatalf("root = %+v, want outer", info.RootSpan)
+	}
+	if len(info.RootSpan.Children) != 1 || info.RootSpan.Children[0].Name != "nested-run" {
+		t.Fatalf("nested run must be a child of the root: %+v", info.RootSpan.Children)
+	}
+	grand := info.RootSpan.Children[0]
+	if len(grand.Children) != 1 || grand.Children[0].Name != "nested-op" {
+		t.Fatalf("nested op must be a child of the nested run: %+v", grand.Children)
+	}
+}
+
+// TestAttachDeferredReparentsLateParent proves the deferred pass attaches a
+// span whose parent was indexed after the first linking pass.
+func TestAttachDeferredReparentsLateParent(t *testing.T) {
+	parent := &domain.SpanNode{SpanID: "parent", Name: "parent"}
+	child := &domain.SpanNode{SpanID: "child", ParentSpanID: "parent", Name: "child"}
+	orphan := &domain.SpanNode{SpanID: "orphan", ParentSpanID: "missing", Name: "orphan"}
+	self := &domain.SpanNode{SpanID: "self", ParentSpanID: "self", Name: "self"}
+
+	byID := map[string]*domain.SpanNode{"parent": parent, "child": child, "orphan": orphan, "self": self}
+	still := attachDeferred(byID, []*domain.SpanNode{child, orphan, self})
+
+	if len(parent.Children) != 1 || parent.Children[0] != child {
+		t.Fatalf("child was not re-parented: %+v", parent.Children)
+	}
+	if len(still) != 2 || still[0] != orphan || still[1] != self {
+		t.Fatalf("still parentless = %+v, want [orphan self]", still)
+	}
+	if len(self.Children) != 0 {
+		t.Fatal("self-referencing span must not become its own child")
+	}
+}
+
+// TestCachedAttributeIngest proves the OTLP bool attribute Dagger uses for
+// cache hits (dagger.io/dag.cached) survives reconstruction as "true" — the
+// evidence the shared-cache proofs (entries 1, 9, 38) assert against.
+func TestCachedAttributeIngest(t *testing.T) {
+	r := &SpanTreeReconstructor{tempoURL: "http://tempo:3200"}
+	info := r.reconstruct("test-trace", map[string]interface{}{
+		"batches": []interface{}{
+			map[string]interface{}{
+				"scopeSpans": []interface{}{
+					map[string]interface{}{
+						"spans": []interface{}{
+							map[string]interface{}{
+								"spanId": "root", "traceId": "test-trace", "name": "root",
+								"startTimeUnixNano": "1000000",
+								"attributes": []interface{}{
+									map[string]interface{}{
+										"key":   "dagger.io/dag.cached",
+										"value": map[string]interface{}{"boolValue": true},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	})
+	if info.RootSpan == nil {
+		t.Fatal("nil root")
+	}
+	if got := info.RootSpan.Attributes["dagger.io/dag.cached"]; got != "true" {
+		t.Fatalf("dagger.io/dag.cached = %q, want true", got)
 	}
 }
