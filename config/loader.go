@@ -382,6 +382,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("workflows.default_timeout", 30*time.Minute)
 	v.SetDefault("workflows.max_parallel", 8)
 	v.SetDefault("workflows.silent", false)
+	v.SetDefault("workflows.discovery_paths", []string{".dagger/workflows"})
 
 	v.SetDefault("forge.github_api_url", "https://api.github.com")
 	v.SetDefault("forge.gitlab_api_url", "https://gitlab.com/api/v4")

@@ -345,3 +345,26 @@ func TestJobArgsCarryFilters(t *testing.T) {
 		t.Fatal("invalid filter must not create a Job")
 	}
 }
+
+// TestJobArgsCarryWorkflowPaths proves workflows.discovery_paths reaches the
+// check runner as repeatable --workflow-path flags.
+func TestJobArgsCarryWorkflowPaths(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	r := NewK8sJobRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "").
+		WithWorkflowPaths([]string{".dagger/workflows", "ci/workflows"})
+	spec := &domain.CheckRunSpec{ID: "check-paths", OrgID: "acme", ProjectID: "proj", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main"}
+	if err := r.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	job, err := cs.BatchV1().Jobs("resolved-ns").Get(context.Background(), "check-"+refHash(spec.ID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := job.Spec.Template.Spec.Containers[0].Args
+	if !containsArg(args, "--workflow-path", ".dagger/workflows") {
+		t.Fatalf("args missing default workflow path: %v", args)
+	}
+	if !containsArg(args, "--workflow-path", "ci/workflows") {
+		t.Fatalf("args missing configured workflow path: %v", args)
+	}
+}

@@ -920,6 +920,7 @@ subchart values.
 | `supervisor.config.workflows.defaultTimeout` | string | `"30m"` | Default workflow job timeout when a job declares none. |
 | `supervisor.config.workflows.maxParallel` | int | `8` | Max concurrently running jobs in one workflow run. |
 | `supervisor.config.workflows.silent` | bool | `false` | Run workflow-runner CLI calls with `--silent` (same semantics as `checks.silent`). |
+| `supervisor.config.workflows.discoveryPaths` | array | `[]` | Workdir-relative directories scanned for workflow files. Empty = the supervisor default (`.dagger/workflows`); the chart omits the key so future defaults apply. |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 | `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |

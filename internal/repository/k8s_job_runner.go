@@ -33,6 +33,7 @@ type K8sJobRunner struct {
 	caSecret           string
 	imagePullSecrets   []string
 	silent             bool
+	workflowPaths      []string
 }
 
 var _ domain.CheckJobRunner = (*K8sJobRunner)(nil)
@@ -55,6 +56,13 @@ func (r *K8sJobRunner) WithImagePullSecrets(secrets []string) *K8sJobRunner {
 // travels in the Job Secret so nested SDK sessions inherit DAGGER_SILENT too.
 func (r *K8sJobRunner) WithSilent(silent bool) *K8sJobRunner {
 	r.silent = silent
+	return r
+}
+
+// WithWorkflowPaths passes the configured workflow discovery directories to the
+// check runner (workflows.discovery_paths). Empty keeps the runner default.
+func (r *K8sJobRunner) WithWorkflowPaths(paths []string) *K8sJobRunner {
+	r.workflowPaths = paths
 	return r
 }
 
@@ -87,7 +95,7 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		checkRunRefLabel:     refHash(spec.Ref),
 	}
 	serverURL := r.controlURL()
-	args, err := checkRunnerArgs(spec, serverURL)
+	args, err := r.checkRunnerArgs(spec, serverURL)
 	if err != nil {
 		return err
 	}
@@ -205,7 +213,7 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 // checkRunnerArgs builds the check-runner argv: the run metadata, the optional
 // clone URL/PR/release flags, and the validated typed filters (each passed as
 // --filter key=value so the runner appends --key=value to `dagger check`).
-func checkRunnerArgs(spec *domain.CheckRunSpec, serverURL string) ([]string, error) {
+func (r *K8sJobRunner) checkRunnerArgs(spec *domain.CheckRunSpec, serverURL string) ([]string, error) {
 	args := []string{
 		"check-runner",
 		"--run-id", spec.ID,
@@ -235,6 +243,9 @@ func checkRunnerArgs(spec *domain.CheckRunSpec, serverURL string) ([]string, err
 			return nil, fmt.Errorf("check run filters: %w", err)
 		}
 		args = append(args, "--filter", value)
+	}
+	for _, path := range r.workflowPaths {
+		args = append(args, "--workflow-path", path)
 	}
 	return args, nil
 }

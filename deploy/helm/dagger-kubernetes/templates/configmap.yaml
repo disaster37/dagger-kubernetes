@@ -289,6 +289,12 @@ data:
       default_timeout: {{ .Values.supervisor.config.workflows.defaultTimeout | quote }}
       max_parallel: {{ .Values.supervisor.config.workflows.maxParallel }}
       silent: {{ .Values.supervisor.config.workflows.silent }}
+      {{- with .Values.supervisor.config.workflows.discoveryPaths }}
+      discovery_paths:
+        {{- range . }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
     forge:
       github_api_url: {{ .Values.supervisor.config.forge.githubApiUrl | quote }}
       gitlab_api_url: {{ .Values.supervisor.config.forge.gitlabApiUrl | quote }}

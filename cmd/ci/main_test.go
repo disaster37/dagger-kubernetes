@@ -1760,3 +1760,56 @@ func TestGuardInteractive(t *testing.T) {
 		})
 	}
 }
+
+func TestScanWorkflowFilesDiscoveryPaths(t *testing.T) {
+	workdir := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(workdir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".dagger/workflows/release.yaml", "name: release\njobs: {build: {call: build}}\n")
+	write("ci/workflows/test.yml", "name: test\njobs: {test: {call: test}}\n")
+	write("ci/context/payload.json", `{"a":1}`)
+	write("ci/workflows/refs.yaml", `jobs: {x: {call: file("ci/context/payload.json")}}`)
+
+	files, contextFiles := scanWorkflowFiles(workdir, []string{".dagger/workflows", "ci/workflows"})
+	if len(files) != 3 {
+		t.Fatalf("workflow files = %v, want 3", files)
+	}
+	if _, ok := files["release.yaml"]; !ok {
+		t.Fatalf("missing release.yaml: %v", files)
+	}
+	if _, ok := contextFiles["ci/context/payload.json"]; !ok {
+		t.Fatalf("context file not captured: %v", contextFiles)
+	}
+
+	// An escaping path is ignored and does not leak files outside the checkout.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("name: secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escaped, _ := scanWorkflowFiles(workdir, []string{filepath.Join("..", filepath.Base(outside))})
+	if len(escaped) != 0 {
+		t.Fatalf("escaping path must be ignored: %v", escaped)
+	}
+
+	// Missing directories are skipped silently.
+	if files, ctx := scanWorkflowFiles(workdir, []string{"absent"}); len(files) != 0 || len(ctx) != 0 {
+		t.Fatalf("missing dir = %v / %v", files, ctx)
+	}
+}
+
+func TestWorkflowPaths(t *testing.T) {
+	if got := workflowPaths(nil); len(got) != 1 || got[0] != defaultWorkflowPath {
+		t.Fatalf("default workflow paths = %v", got)
+	}
+	if got := workflowPaths([]string{"a", "b"}); len(got) != 2 || got[0] != "a" {
+		t.Fatalf("configured workflow paths = %v", got)
+	}
+}

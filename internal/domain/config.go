@@ -678,6 +678,11 @@ type WorkflowConfig struct {
 	// Silent runs workflow-runner CLI invocations with --silent (same
 	// semantics as ChecksConfig.Silent).
 	Silent bool `mapstructure:"silent"`
+	// DiscoveryPaths are the workdir-relative directories scanned for workflow
+	// files. Beta workspaces may keep them outside .dagger/workflows
+	// (dagger.toml layouts), so discovery is declarative. Empty = the built-in
+	// default (.dagger/workflows).
+	DiscoveryPaths []string `mapstructure:"discovery_paths"`
 }
 
 // ForgeConfig configures outbound forge API endpoints (ADR-056).

@@ -40,6 +40,7 @@ func checkRunnerFlags() []cli.Flag {
 		&cli.StringFlag{Name: "run-token", EnvVars: []string{"DAGGER_RUN_TOKEN"}, Usage: "per-run callback token"},
 		&cli.StringFlag{Name: "workdir", Usage: "checkout directory (default: temp dir)"},
 		&cli.StringSliceFlag{Name: "filter", Usage: "typed check filter as key=value (repeatable; appended to dagger check as --key=value)"},
+		&cli.StringSliceFlag{Name: "workflow-path", Usage: "workdir-relative directory to scan for workflow files (repeatable; default .dagger/workflows)"},
 		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "overall check-run timeout"},
 	}
 }
@@ -104,7 +105,7 @@ func runCheckRunner(c *cli.Context) error {
 		return err
 	}
 
-	workflowFiles, contextFiles := scanWorkflowFiles(workdir)
+	workflowFiles, contextFiles := scanWorkflowFiles(workdir, workflowPaths(c.StringSlice("workflow-path")))
 	checks, err := listChecks(ctx, daggerBin, workdir, env)
 	if err != nil {
 		// A repository without a Dagger module has zero checks; treat a
@@ -171,51 +172,91 @@ func runCheck(ctx context.Context, daggerBin, dir string, env []string, check st
 	return result
 }
 
-// scanWorkflowFiles reads .dagger/workflows/*.y{a,}ml and the jailed context
-// files referenced by file()/next_semver().
-func scanWorkflowFiles(workdir string) (workflowFiles map[string]string, contextFiles map[string][]byte) {
-	dir := filepath.Join(workdir, ".dagger", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, nil
+// defaultWorkflowPath is the built-in workflow discovery directory.
+const defaultWorkflowPath = ".dagger/workflows"
+
+// workflowPaths returns the configured discovery directories, falling back to
+// the built-in default when none are supplied.
+func workflowPaths(configured []string) []string {
+	if len(configured) == 0 {
+		return []string{defaultWorkflowPath}
 	}
-	workflowFiles = make(map[string]string)
-	contextFiles = make(map[string][]byte)
+	return configured
+}
+
+// scanWorkflowFiles reads */*.y{a,}ml from each discovery directory and the
+// jailed context files referenced by file()/next_semver(). Missing directories
+// are skipped silently (a repository without workflows is valid). Paths are
+// confined to workdir: an escaping entry is ignored rather than read.
+func scanWorkflowFiles(workdir string, paths []string) (workflowFiles map[string]string, contextFiles map[string][]byte) {
 	root, err := os.OpenRoot(workdir)
 	if err != nil {
 		return nil, nil
 	}
 	defer func() { _ = root.Close() }()
-	for _, entry := range entries {
-		if entry.IsDir() {
+
+	workflowFiles = make(map[string]string)
+	contextFiles = make(map[string][]byte)
+	for _, path := range paths {
+		dir, ok := confinedPath(workdir, path)
+		if !ok {
 			continue
 		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- directory entry under the repo workflow dir
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		workflowFiles[name] = string(data)
-		for _, match := range workflowFileRefRe.FindAllStringSubmatch(string(data), -1) {
-			path := filepath.Clean(match[1])
-			if _, ok := contextFiles[path]; ok {
+		for _, entry := range entries {
+			if entry.IsDir() {
 				continue
 			}
-			f, err := root.Open(path)
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+				continue
+			}
+			if _, exists := workflowFiles[name]; exists {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- directory entry under a confined workflow dir
 			if err != nil {
 				continue
 			}
-			content, err := io.ReadAll(io.LimitReader(f, 1<<20))
-			_ = f.Close()
-			if err == nil {
-				contextFiles[path] = content
+			workflowFiles[name] = string(data)
+			for _, match := range workflowFileRefRe.FindAllStringSubmatch(string(data), -1) {
+				ref := filepath.Clean(match[1])
+				if _, ok := contextFiles[ref]; ok {
+					continue
+				}
+				f, err := root.Open(ref)
+				if err != nil {
+					continue
+				}
+				content, err := io.ReadAll(io.LimitReader(f, 1<<20))
+				_ = f.Close()
+				if err == nil {
+					contextFiles[ref] = content
+				}
 			}
 		}
 	}
 	return workflowFiles, contextFiles
+}
+
+// confinedPath resolves rel under workdir and reports whether it stays inside
+// it (a configured ".." path must never read outside the checkout).
+func confinedPath(workdir, rel string) (string, bool) {
+	base, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", false
+	}
+	abs, err := filepath.Abs(filepath.Join(base, rel))
+	if err != nil {
+		return "", false
+	}
+	if abs != base && !strings.HasPrefix(abs, fmt.Sprintf("%s%c", base, os.PathSeparator)) {
+		return "", false
+	}
+	return abs, true
 }
 
 // cloneRepo clones repo at sha/ref without persisting credentials in

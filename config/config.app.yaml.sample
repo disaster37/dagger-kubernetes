@@ -545,6 +545,10 @@ workflows:
   max_parallel: 8
   # pass --silent to workflow-runner CLI calls (0.21.8+: lower per-session memory)
   silent: false
+  # workdir-relative directories scanned for workflow files (empty = the
+  # built-in .dagger/workflows). Add paths for dagger.toml workspaces that
+  # keep workflows elsewhere.
+  discovery_paths: [".dagger/workflows"]
 
 # --- Cloud GraphQL hardening (ADR-053) --------------------------------------
 # POST /query is bounded to prevent introspection and expensive queries from

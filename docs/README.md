@@ -1179,6 +1179,11 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   `workflows.job_image_pull_secrets` and `workflows.namespace` (default
   `fleet.namespace`). `workflows.silent: true` applies the same `--silent` +
   `DAGGER_SILENT=1` treatment to workflow-runner calls.
+  `workflows.discovery_paths` lists the workdir-relative directories scanned for
+  workflow files (default `[".dagger/workflows"]`); entries outside the checkout
+  are ignored. Use it for beta workspaces that keep workflows elsewhere; the
+  chart's `discoveryPaths: []` omits the key so the supervisor default (and any
+  future default change) applies.
 - **Environment secrets.** Secrets are scoped `org`, `project`, or
   `environment` (`<orgID>/<envName>`). Resolution precedence is
   `org/env > project > org`; environment secrets are only injected into a job

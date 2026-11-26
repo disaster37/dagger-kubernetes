@@ -307,7 +307,8 @@ func run(c *cli.Context) error {
 	if cfg.Checks.Enabled && clientset != nil {
 		checkRunner = repository.NewK8sJobRunner(clientset, effectiveNamespace(cfg.Checks.Namespace, cfg.Fleet.Namespace), cfg.Checks.JobImage, cfg.Checks.Timeout, cfg.Server.PublicURL, cfg.Server.InternalControlURL, cfg.CA.MintingCASecret).
 			WithImagePullSecrets(cfg.Checks.JobImagePullSecrets).
-			WithSilent(cfg.Checks.Silent)
+			WithSilent(cfg.Checks.Silent).
+			WithWorkflowPaths(cfg.Workflows.DiscoveryPaths)
 	}
 	// Legacy flat-file validator (nil when no tokens_file configured).
 	var legacyValidator domain.TokenValidator
