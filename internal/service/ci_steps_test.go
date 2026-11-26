@@ -1063,3 +1063,74 @@ func TestResolveLogOwner(t *testing.T) {
 		})
 	}
 }
+
+// TestAdvanceProgressSpans locks in the v1.0 progress spans (image pull, layer
+// unpack, git fetch, download, file sync): they are user-visible progress, so
+// they surface as ordinary steps under their parent — not folded as internal
+// spans, and without polluting the parent's status or duration (ADR-061 G9).
+func TestAdvanceProgressSpans(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	parent := span("exec", "r", "exec", "success", nil,
+		span("pull", "exec", "pull image", "success", nil),
+		span("unpack", "exec", "unpack layer", "success", nil),
+		span("fetch", "exec", "fetch git", "success", nil),
+		span("download", "exec", "download", "success", nil),
+		span("sync", "exec", "sync files", "success", nil),
+	)
+	root := span("r", "", "dagger call", "success", nil, parent)
+
+	events, err := b.Advance(tr(root, "success"), nil)
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	assertEvents(t, events, []string{
+		"started:r:running::0",
+		"started:exec:running:r:1",
+		"started:pull:running:exec:2",
+		"finished:pull:succeeded:",
+		"started:unpack:running:exec:2",
+		"finished:unpack:succeeded:",
+		"started:fetch:running:exec:2",
+		"finished:fetch:succeeded:",
+		"started:download:running:exec:2",
+		"finished:download:succeeded:",
+		"started:sync:running:exec:2",
+		"finished:sync:succeeded:",
+		"finished:exec:succeeded:",
+		"finished:r:succeeded:",
+		"done:success:",
+	})
+}
+
+// TestProgressSpansDoNotPolluteParent asserts a progress span never changes its
+// parent's state or duration, and that its logs are attributed to itself.
+func TestProgressSpansDoNotPolluteParent(t *testing.T) {
+	b := NewStepEventBuilder(0)
+	parent := span("exec", "r", "exec", "success", nil,
+		span("pull", "exec", "pull image", "success", nil),
+	)
+	parent.DurationMS = 500
+	parent.Duration = 500 * time.Millisecond
+	root := span("r", "", "dagger call", "success", nil, parent)
+	ts := time.Unix(200, 0)
+
+	events, err := b.Advance(tr(root, "success"), []domain.LogEntry{logEntry(ts, "pull", "pulled 3 layers")})
+	if err != nil {
+		t.Fatalf("Advance: %v", err)
+	}
+	var sawPullLog bool
+	for _, e := range events {
+		if e.Type == domain.CIEventLogChunk && e.Log.NodeID == "pull" {
+			sawPullLog = true
+		}
+	}
+	if !sawPullLog {
+		t.Fatalf("pull log was not attributed to the progress span: %v", summarize(events))
+	}
+	if parent.Status != "success" || parent.DurationMS != 500 {
+		t.Fatalf("parent mutated by child: status=%q duration=%d", parent.Status, parent.DurationMS)
+	}
+	if got := stepStateForStatus(parent.Status); got != domain.StepStateSucceeded {
+		t.Fatalf("parent state = %v", got)
+	}
+}
