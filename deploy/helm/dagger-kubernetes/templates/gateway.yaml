@@ -1,0 +1,127 @@
+{{- if and .Values.gateway.enabled .Values.gateway.create }}
+{{- $ns := include "dagger-kubernetes.namespace" . }}
+{{- $fullname := include "dagger-kubernetes.fullname" . }}
+{{- $mirrorEnabled := eq (include "dagger-kubernetes.gatewayMirrorEnabled" .) "true" }}
+{{- $dexEnabled := eq (include "dagger-kubernetes.gatewayDexEnabled" .) "true" }}
+{{/* Fail closed on overlapping :443 hostnames: a single Gateway cannot bind two
+HTTPS/TLS listeners to the same hostname+port. */}}
+{{- $hosts443 := list }}
+{{- if and .Values.supervisor.enabled .Values.gateway.control.enabled .Values.gateway.control.tls.enabled }}
+{{- $hosts443 = append $hosts443 .Values.gateway.control.host }}
+{{- end }}
+{{- if and .Values.supervisor.enabled .Values.gateway.data.enabled }}
+{{- $hosts443 = append $hosts443 .Values.gateway.data.host }}
+{{- end }}
+{{- if and $mirrorEnabled .Values.gateway.registryMirror.tls.enabled }}
+{{- $hosts443 = append $hosts443 .Values.gateway.registryMirror.host }}
+{{- end }}
+{{- if and $dexEnabled .Values.gateway.dex.tls.enabled }}
+{{- $hosts443 = append $hosts443 .Values.gateway.dex.host }}
+{{- end }}
+{{- $seen := dict }}
+{{- range $hosts443 }}
+{{- if hasKey $seen . }}
+{{- fail (printf "gateway: hostname %q is bound to more than one :443 listener (control/data/registryMirror/dex must use distinct hosts)" .) }}
+{{- end }}
+{{- $_ := set $seen . true }}
+{{- end }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: {{ include "dagger-kubernetes.gatewayName" . }}
+  namespace: {{ include "dagger-kubernetes.gatewayNamespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    {{- with .Values.gateway.labels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- with .Values.gateway.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  gatewayClassName: {{ .Values.gateway.className | quote }}
+  {{- with .Values.gateway.infrastructure }}
+  {{- if . }}
+  infrastructure:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.gateway.addresses }}
+  {{- if . }}
+  addresses:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  {{- with .Values.gateway.allowedListeners }}
+  {{- if . }}
+  allowedListeners:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- end }}
+  listeners:
+    - name: {{ .Values.gateway.httpSectionName | quote }}
+      protocol: HTTP
+      port: {{ .Values.gateway.ports.http }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
+    {{- if and .Values.supervisor.enabled .Values.gateway.control.enabled .Values.gateway.control.tls.enabled }}
+    - name: {{ .Values.gateway.control.sectionName | quote }}
+      protocol: HTTPS
+      port: {{ .Values.gateway.ports.https }}
+      hostname: {{ .Values.gateway.control.host | quote }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: {{ .Values.gateway.control.tls.secretName | default (printf "%s-gateway-tls" $fullname) | quote }}
+    {{- end }}
+    {{- if and .Values.supervisor.enabled .Values.gateway.data.enabled }}
+    - name: {{ .Values.gateway.data.sectionName | default "tls-data" | quote }}
+      protocol: TLS
+      port: {{ .Values.gateway.ports.tls }}
+      hostname: {{ .Values.gateway.data.host | quote }}
+      allowedRoutes:
+        namespaces:
+          from: {{ .Values.gateway.allowedRoutes.namespaces.from }}
+          {{- if eq .Values.gateway.allowedRoutes.namespaces.from "Selector" }}
+          selector:
+            {{- toYaml .Values.gateway.allowedRoutes.namespaces.selector | nindent 12 }}
+          {{- end }}
+        kinds:
+          - group: gateway.networking.k8s.io
+            kind: TLSRoute
+      tls:
+        mode: Passthrough
+    {{- end }}
+    {{- if and $mirrorEnabled .Values.gateway.registryMirror.tls.enabled }}
+    - name: {{ .Values.gateway.registryMirror.sectionName | quote }}
+      protocol: HTTPS
+      port: {{ .Values.gateway.ports.https }}
+      hostname: {{ .Values.gateway.registryMirror.host | quote }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: {{ .Values.gateway.registryMirror.tls.secretName | default (printf "%s-mirror-tls" $fullname) | quote }}
+    {{- end }}
+    {{- if and $dexEnabled .Values.gateway.dex.tls.enabled }}
+    - name: {{ .Values.gateway.dex.sectionName | quote }}
+      protocol: HTTPS
+      port: {{ .Values.gateway.ports.https }}
+      hostname: {{ .Values.gateway.dex.host | quote }}
+      {{- include "dagger-kubernetes.gatewayAllowedRoutes" (dict "root" $) | nindent 6 }}
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - group: ""
+            kind: Secret
+            name: {{ .Values.gateway.dex.tls.secretName | default (printf "%s-dex-tls" $fullname) | quote }}
+    {{- end }}
+    {{- with .Values.gateway.extraListeners }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}

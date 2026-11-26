@@ -165,13 +165,21 @@ func run(c *cli.Context) error {
 	const raftInitRetryDelay = 5 * time.Second
 
 	// The FSM meta hook installs the replicated Minting CA keyring on every
-	// pod as it is applied/restored.
+	// pod as it is applied/restored. A successful install also nudges the CA
+	// sync loop so the public trust-bundle ConfigMap is refreshed promptly
+	// through the phased-rotation terms instead of waiting for the 30s ticker.
+	caSyncNotify := make(chan struct{}, 1)
 	metaHook := func(key, value string) {
 		if key != repository.MintingKeyringMetaKey {
 			return
 		}
 		if err := dynamicCA.SetKeyringJSON(value); err != nil {
 			logger.WithError(err).Warn("install minting CA keyring failed")
+			return
+		}
+		select {
+		case caSyncNotify <- struct{}{}:
+		default:
 		}
 	}
 
@@ -215,8 +223,8 @@ func run(c *cli.Context) error {
 		go rotator.Start(ctx)
 	}
 
-	// --- Sync settled CAs back to the Kubernetes Secrets (leader-only) ---
-	go syncCASecretLoop(ctx, cfg, clientset, raftStore, dynamicCA, logger)
+	// --- Sync settled CAs back to the Kubernetes Secrets/ConfigMap (leader-only) ---
+	go syncCASecretLoop(ctx, cfg, clientset, raftStore, dynamicCA, caSyncNotify, logger)
 
 	jwtSvc := service.NewJWTService(jwtSecret, cfg.Auth.JWT.AccessTTL, cfg.Auth.JWT.RefreshTTL)
 
@@ -1342,8 +1350,14 @@ func raftCABootstrap(cfg *domain.Config, hostname string) bool {
 // syncCASecretLoop (leader-only) writes every settled active CA back to its
 // Kubernetes Secret so future scale-up or empty-PVC pods bootstrap with the
 // current CA rather than a retired one. It syncs both the Raft CA
-// (<release>-raft-ca) and the Minting CA (<release>-minting-ca).
-func syncCASecretLoop(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, raftStore *repository.RaftStore, dynamicCA *repository.DynamicMintingCA, logger *logrus.Logger) {
+// (<release>-raft-ca) and the Minting CA (<release>-minting-ca), and keeps the
+// public Minting CA trust-bundle ConfigMap (<fullname>-minting-ca-bundle) in
+// sync for Gateway API BackendTLSPolicy. It runs one pass immediately (so the
+// bundle is populated as soon as initRaftStore completes on the leader), wakes
+// on every keyring install via caSyncNotify (so phased-rotation terms update
+// within milliseconds), and keeps the 30s ticker for leadership handoff and
+// drift self-healing.
+func syncCASecretLoop(ctx context.Context, cfg *domain.Config, clientset kubernetes.Interface, raftStore *repository.RaftStore, dynamicCA *repository.DynamicMintingCA, notify <-chan struct{}, logger *logrus.Logger) {
 	if clientset == nil {
 		return
 	}
@@ -1351,18 +1365,30 @@ func syncCASecretLoop(ctx context.Context, cfg *domain.Config, clientset kuberne
 	if namespace == "" {
 		namespace = cfg.Fleet.Namespace
 	}
+	runLeaderCASync := func() {
+		if !raftStore.IsLeader() {
+			return
+		}
+		// Bound each pass so an unresponsive API server cannot stall the loop.
+		syncCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		syncRaftCASecret(syncCtx, clientset, namespace, cfg.Raft.TLS.CASecret, raftStore, logger)
+		syncMintingCASecret(syncCtx, clientset, namespace, cfg.CA.MintingCASecret, dynamicCA, logger)
+		syncMintingCAConfigMap(syncCtx, clientset, namespace, cfg.CA.MintingCAConfigMap, dynamicCA, logger)
+	}
+
+	runLeaderCASync()
+
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-notify:
+			runLeaderCASync()
 		case <-ticker.C:
-			if !raftStore.IsLeader() {
-				continue
-			}
-			syncRaftCASecret(ctx, clientset, namespace, cfg.Raft.TLS.CASecret, raftStore, logger)
-			syncMintingCASecret(ctx, clientset, namespace, cfg.CA.MintingCASecret, dynamicCA, logger)
+			runLeaderCASync()
 		}
 	}
 }
@@ -1432,6 +1458,71 @@ func updateCASecret(ctx context.Context, clientset kubernetes.Interface, namespa
 		return
 	}
 	logger.WithFields(logrus.Fields{"secret": secretName, "key_id": keyID}).Info("synced settled CA to Kubernetes Secret")
+}
+
+// syncMintingCAConfigMap publishes the public Minting CA trust bundle (key
+// ca.crt, certificates only) into the ConfigMap named by
+// ca.minting_ca_configmap so a Gateway API BackendTLSPolicy can reference it as
+// a Core caCertificateRef. It is idempotent: a no-op when the stored bundle is
+// already current, and it preserves the Helm-managed labels/annotations.
+func syncMintingCAConfigMap(ctx context.Context, clientset kubernetes.Interface, namespace, configMapName string, dynamicCA *repository.DynamicMintingCA, logger *logrus.Logger) {
+	if configMapName == "" || dynamicCA == nil {
+		return
+	}
+	bundlePEM, ok := dynamicCA.TrustBundlePEM()
+	if !ok || len(bundlePEM) == 0 {
+		return
+	}
+	updateCAConfigMap(ctx, clientset, namespace, configMapName, bundlePEM, logger)
+}
+
+// updateCAConfigMap creates or updates the CA bundle ConfigMap key ca.crt when
+// it differs from the published trust bundle.
+func updateCAConfigMap(ctx context.Context, clientset kubernetes.Interface, namespace, configMapName string, bundlePEM []byte, logger *logrus.Logger) {
+	configMaps := clientset.CoreV1().ConfigMaps(namespace)
+	cm, err := configMaps.Get(ctx, configMapName, metav1.GetOptions{})
+	if err != nil {
+		if !apierrors.IsNotFound(err) {
+			logger.WithError(err).WithField("configmap", configMapName).Warn("sync CA configmap: get failed")
+			return
+		}
+		cm = &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: configMapName, Namespace: namespace}}
+	}
+	if cm.Data["ca.crt"] == string(bundlePEM) {
+		return
+	}
+	if cm.Data == nil {
+		cm.Data = map[string]string{}
+	}
+	cm.Data["ca.crt"] = string(bundlePEM)
+	if cm.ResourceVersion == "" {
+		if _, err := configMaps.Create(ctx, cm, metav1.CreateOptions{}); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				logger.WithError(err).WithField("configmap", configMapName).Warn("sync CA configmap: create failed")
+				return
+			}
+			existing, getErr := configMaps.Get(ctx, configMapName, metav1.GetOptions{})
+			if getErr != nil {
+				logger.WithError(getErr).WithField("configmap", configMapName).Warn("sync CA configmap: re-get after create race failed")
+				return
+			}
+			if existing.Data["ca.crt"] == string(bundlePEM) {
+				return
+			}
+			if existing.Data == nil {
+				existing.Data = map[string]string{}
+			}
+			existing.Data["ca.crt"] = string(bundlePEM)
+			if _, err := configMaps.Update(ctx, existing, metav1.UpdateOptions{}); err != nil {
+				logger.WithError(err).WithField("configmap", configMapName).Warn("sync CA configmap: update after create race failed")
+				return
+			}
+		}
+	} else if _, err := configMaps.Update(ctx, cm, metav1.UpdateOptions{}); err != nil {
+		logger.WithError(err).WithField("configmap", configMapName).Warn("sync CA configmap: update failed")
+		return
+	}
+	logger.WithField("configmap", configMapName).Info("synced Minting CA trust bundle to Kubernetes ConfigMap")
 }
 
 func selectTLSProvider(cfg *domain.Config, dynamicCA *repository.DynamicMintingCA) (domain.CAProvider, error) {

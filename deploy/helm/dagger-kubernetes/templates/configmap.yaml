@@ -1,5 +1,5 @@
 {{- if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" }}
-{{- if not (or .Values.dataCert.enabled .Values.dataIngress.tls.secretName) }}
+{{- if not (or .Values.dataCert.enabled (ne (include "dagger-kubernetes.dataTLSSecretName" .) "")) }}
 {{- if not (and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key) }}
 {{- if not (and .Values.supervisor.dataplane.tls.certPath .Values.supervisor.dataplane.tls.keyPath) }}
 {{- fail "supervisor.dataplane.tls.provider=external requires either supervisor.dataplane.tls.crt + supervisor.dataplane.tls.key (rendered into the <fullname>-tls Secret and mounted at /etc/dagger-kubernetes/tls) or supervisor.dataplane.tls.certPath + supervisor.dataplane.tls.keyPath (operator-managed PEM files). Without a server keypair the supervisor cannot serve the mTLS data plane (fail-closed check). (dataCert.enabled / dataIngress.tls.secretName auto-wire the mounted data-tls Secret, so they are exempt.)" }}
@@ -170,8 +170,8 @@ data:
           host: {{ .host | quote }}
           upstream: {{ .remoteUrl | quote }}
           internal_addr: {{ $addr | quote }}
-          {{- if and (eq .host "registry.dagger.io") $.Values.imageCache.registryIngress.enabled }}
-          external_addr: {{ $.Values.imageCache.registryIngress.host | quote }}
+          {{- if and (eq .host "registry.dagger.io") (ne (include "dagger-kubernetes.registryMirrorExternalHost" $) "") }}
+          external_addr: {{ include "dagger-kubernetes.registryMirrorExternalHost" $ | quote }}
           {{- end }}
           backend: {{ $.Values.imageCache.storage.backend | default "s3" | quote }}
           tls: {{ $.Values.imageCache.tls.enabled }}
@@ -224,7 +224,8 @@ data:
 {{ include "dagger-kubernetes.imageCacheMirrorHosts" . | indent 8 }}
       isolation: {{ .Values.supervisor.config.fleet.isolation | quote }}
     ca:
-      minting_ca_secret: {{ include "dagger-kubernetes.fullname" . }}-minting-ca
+      minting_ca_secret: {{ printf "%s-minting-ca" (include "dagger-kubernetes.fullname" .) | quote }}
+      minting_ca_configmap: {{ include "dagger-kubernetes.supervisorMintingCAConfigMap" . | quote }}
       client_cert_ttl: {{ .Values.supervisor.dataplane.tls.clientCertTtl | quote }}
     supervisor:
       dataplane:
@@ -318,5 +319,26 @@ data:
         rate_window: {{ .metrics.rateWindow | quote }}
         record_interval: {{ .metrics.recordInterval | quote }}
         max_record_window: {{ .metrics.maxRecordWindow | quote }}
+{{- end }}
+---
+# Helm-owned shell for the public Minting CA trust bundle (certificates only,
+# key ca.crt). The leader supervisor keeps data.ca.crt in sync on bootstrap and
+# through phased rotation via ca.minting_ca_configmap; Gateway API
+# BackendTLSPolicy reads it as a Core caCertificateRef.
+#
+# CRITICAL: when supervisor.dataplane.tls.caCrt is empty, omit `data:` entirely
+# (never render `data: {}` or `ca.crt: ""`). Under Helm's 3-way strategic merge
+# patch, a manifest with no `data` field produces zero patch diff on `data`
+# during `helm upgrade`, preserving the supervisor's runtime-written ca.crt.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "dagger-kubernetes.supervisorMintingCAConfigMap" . }}
+  namespace: {{ include "dagger-kubernetes.namespace" . }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+{{- if .Values.supervisor.dataplane.tls.caCrt }}
+data:
+  ca.crt: {{ .Values.supervisor.dataplane.tls.caCrt | quote }}
 {{- end }}
 {{- end }}

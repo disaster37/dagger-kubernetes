@@ -37,6 +37,12 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Auth.Internal.Enabled != true {
 		t.Fatal("auth.internal.enabled default should be true")
 	}
+	if cfg.CA.MintingCASecret != "supervisor-minting-ca" {
+		t.Fatalf("ca.minting_ca_secret default = %q, want supervisor-minting-ca", cfg.CA.MintingCASecret)
+	}
+	if cfg.CA.MintingCAConfigMap != "supervisor-minting-ca-bundle" {
+		t.Fatalf("ca.minting_ca_configmap default = %q, want supervisor-minting-ca-bundle", cfg.CA.MintingCAConfigMap)
+	}
 	if cfg.Auth.Internal.TokensFile != "/etc/dagger-kubernetes/tokens" {
 		t.Fatalf("tokens_file default = %q", cfg.Auth.Internal.TokensFile)
 	}
@@ -409,6 +415,34 @@ func TestLoadHistoryEnvOverride(t *testing.T) {
 	if !cfg.History.GC.Enabled {
 		t.Fatal("env override history.gc.enabled = false, want true")
 	}
+}
+
+func TestLoadMintingCAConfigMapOverride(t *testing.T) {
+	t.Run("env override", func(t *testing.T) {
+		t.Setenv("DAGGER_KUBERNETES_CA_MINTING_CA_CONFIGMAP", "custom-ca-bundle")
+		cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.CA.MintingCAConfigMap != "custom-ca-bundle" {
+			t.Fatalf("env override ca.minting_ca_configmap = %q, want custom-ca-bundle", cfg.CA.MintingCAConfigMap)
+		}
+	})
+
+	t.Run("empty disables publishing", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "config.app.yaml")
+		if err := os.WriteFile(path, []byte("ca:\n  minting_ca_configmap: \"\"\n"), 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+		cfg, err := Load(path)
+		if err != nil {
+			t.Fatalf("Load: %v", err)
+		}
+		if cfg.CA.MintingCAConfigMap != "" {
+			t.Fatalf("ca.minting_ca_configmap = %q, want empty (disabled)", cfg.CA.MintingCAConfigMap)
+		}
+	})
 }
 
 func TestPipelineDefaults(t *testing.T) {

@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"net"
 	"os"
 	"path/filepath"
@@ -746,6 +747,120 @@ func TestDynamicMintingCAPhasedRotationPreservesInFlightClientCert(t *testing.T)
 	if !verifyClientCert(t, c2, pool, realNow) {
 		t.Fatal("a fresh cert under M1 must verify after pruning M0")
 	}
+}
+
+// TestDynamicMintingCATrustBundlePEMPhasedRotation proves TrustBundlePEM
+// publishes the public CA certificates only (never the private keys) and
+// tracks the phased-rotation dual-trust window: [M0] before staging, [M0, M1]
+// through stage/activate, and [M1] after pruning.
+func TestDynamicMintingCATrustBundlePEMPhasedRotation(t *testing.T) {
+	dir := t.TempDir()
+	provider := NewEmbeddedProvider(dir, 24*time.Hour)
+	sealer, err := DeriveSealer("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("DeriveSealer: %v", err)
+	}
+	dynamicCA, err := NewDynamicMintingCA(DynamicMintingCAConfig{Provider: provider, Sealer: sealer, Logger: testLogger()})
+	if err != nil {
+		t.Fatalf("NewDynamicMintingCA: %v", err)
+	}
+
+	countCerts := func(t *testing.T, pemBytes []byte) int {
+		t.Helper()
+		block, rest := pem.Decode(pemBytes)
+		n := 0
+		for block != nil {
+			if block.Type == "CERTIFICATE" {
+				n++
+			}
+			block, rest = pem.Decode(rest)
+		}
+		return n
+	}
+	assertNoPrivateKey := func(t *testing.T, pemBytes []byte) {
+		t.Helper()
+		if bytes.Contains(pemBytes, []byte("PRIVATE KEY")) {
+			t.Fatal("trust bundle must never contain a PRIVATE KEY block")
+		}
+	}
+
+	// Pre-keyring bootstrap (keyring == nil, active CA only).
+	bundle, ok := dynamicCA.TrustBundlePEM()
+	if !ok {
+		t.Fatal("pre-keyring TrustBundlePEM must be ok")
+	}
+	if got := countCerts(t, bundle); got != 1 {
+		t.Fatalf("pre-keyring bundle certs = %d, want 1", got)
+	}
+	assertNoPrivateKey(t, bundle)
+
+	store := newTestRaftStore(t)
+	store.SetMetaHook(func(key, value string) {
+		if key == MintingKeyringMetaKey {
+			if err := dynamicCA.SetKeyringJSON(value); err != nil {
+				t.Errorf("SetKeyringJSON: %v", err)
+			}
+		}
+	})
+
+	now := time.Now()
+	rotator := NewMintingRotator(&MintingRotatorConfig{
+		Store:          store,
+		CA:             dynamicCA,
+		Bootstrap:      provider.BootstrapProvider(),
+		Sealer:         sealer,
+		ClientCertTTL:  24 * time.Hour,
+		RotationPeriod: time.Hour,
+		CheckInterval:  time.Second,
+		CommonName:     "dagger-kubernetes-minting-ca",
+		Organization:   "dagger-kubernetes",
+		CAValidity:     30 * 365 * 24 * time.Hour,
+		Logger:         testLogger(),
+		Now:            func() time.Time { return now },
+	})
+	ctx := context.Background()
+
+	// Seed (Term 1): single active CA M0.
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	bundle, ok = dynamicCA.TrustBundlePEM()
+	if !ok || countCerts(t, bundle) != 1 {
+		t.Fatalf("post-seed bundle = %v certs (ok=%v), want 1", countCerts(t, bundle), ok)
+	}
+	assertNoPrivateKey(t, bundle)
+
+	// Stage (Term 2): dual-trust [M0, M1].
+	now = now.Add(2 * time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	bundle, ok = dynamicCA.TrustBundlePEM()
+	if !ok || countCerts(t, bundle) != 2 {
+		t.Fatalf("stage bundle = %v certs (ok=%v), want 2", countCerts(t, bundle), ok)
+	}
+	assertNoPrivateKey(t, bundle)
+
+	// Activate (Term 3): still dual-trust [M0, M1].
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	bundle, ok = dynamicCA.TrustBundlePEM()
+	if !ok || countCerts(t, bundle) != 2 {
+		t.Fatalf("activate bundle = %v certs (ok=%v), want 2", countCerts(t, bundle), ok)
+	}
+	assertNoPrivateKey(t, bundle)
+
+	// Prune (Term 4): single active CA M1.
+	now = now.Add(2*24*time.Hour + time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	bundle, ok = dynamicCA.TrustBundlePEM()
+	if !ok || countCerts(t, bundle) != 1 {
+		t.Fatalf("prune bundle = %v certs (ok=%v), want 1", countCerts(t, bundle), ok)
+	}
+	assertNoPrivateKey(t, bundle)
 }
 
 // TestMintingRotatorStageIdempotent proves a crash between the two stage

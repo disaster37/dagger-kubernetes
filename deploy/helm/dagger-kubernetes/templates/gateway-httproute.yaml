@@ -1,0 +1,102 @@
+{{- if .Values.gateway.enabled }}
+{{- $ns := include "dagger-kubernetes.namespace" . }}
+{{- $fullname := include "dagger-kubernetes.fullname" . }}
+{{- $gwName := include "dagger-kubernetes.gatewayName" . }}
+{{- $gwNamespace := include "dagger-kubernetes.gatewayNamespace" . }}
+{{- $mirrorEnabled := eq (include "dagger-kubernetes.gatewayMirrorEnabled" .) "true" }}
+{{- $dexEnabled := eq (include "dagger-kubernetes.gatewayDexEnabled" .) "true" }}
+{{- if and .Values.supervisor.enabled .Values.gateway.control.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+  {{- with .Values.gateway.control.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: {{ $gwName | quote }}
+      namespace: {{ $gwNamespace | quote }}
+      sectionName: {{ if .Values.gateway.control.tls.enabled }}{{ .Values.gateway.control.sectionName | quote }}{{ else }}{{ .Values.gateway.httpSectionName | quote }}{{ end }}
+  hostnames:
+    - {{ .Values.gateway.control.host | quote }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      backendRefs:
+        - name: {{ printf "%s-control" $fullname }}
+          port: {{ .Values.service.control.port }}
+---
+{{- end }}
+{{- if and .Values.supervisor.enabled .Values.gateway.control.enabled .Values.gateway.control.backendTLS.enabled }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: BackendTLSPolicy
+metadata:
+  name: {{ printf "%s-control-tls" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ printf "%s-control" $fullname }}
+  validation:
+    hostname: {{ .Values.gateway.control.backendTLS.hostname | default (printf "%s-control.%s.svc" $fullname $ns) | quote }}
+    {{- if .Values.gateway.control.backendTLS.wellKnownCACertificates }}
+    wellKnownCACertificates: {{ .Values.gateway.control.backendTLS.wellKnownCACertificates | quote }}
+    {{- else }}
+    caCertificateRefs:
+      - group: {{ .Values.gateway.control.backendTLS.caCertificateRef.group | quote }}
+        kind: {{ .Values.gateway.control.backendTLS.caCertificateRef.kind | default "ConfigMap" | quote }}
+        name: {{ .Values.gateway.control.backendTLS.caCertificateRef.name | default (include "dagger-kubernetes.supervisorMintingCAConfigMap" .) | quote }}
+    {{- end }}
+---
+{{- end }}
+{{- if .Values.gateway.tlsRedirect }}
+{{- $tlsHosts := list }}
+{{- if and .Values.supervisor.enabled .Values.gateway.control.enabled .Values.gateway.control.tls.enabled }}
+{{- $tlsHosts = append $tlsHosts .Values.gateway.control.host }}
+{{- end }}
+{{- if and $mirrorEnabled .Values.gateway.registryMirror.tls.enabled }}
+{{- $tlsHosts = append $tlsHosts .Values.gateway.registryMirror.host }}
+{{- end }}
+{{- if and $dexEnabled .Values.gateway.dex.tls.enabled }}
+{{- $tlsHosts = append $tlsHosts .Values.gateway.dex.host }}
+{{- end }}
+{{- if $tlsHosts }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: {{ printf "%s-tls-redirect" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  parentRefs:
+    - name: {{ $gwName | quote }}
+      namespace: {{ $gwNamespace | quote }}
+      sectionName: {{ .Values.gateway.httpSectionName | quote }}
+  hostnames:
+    {{- range $tlsHosts }}
+    - {{ . | quote }}
+    {{- end }}
+  rules:
+    - matches:
+        - path:
+            type: PathPrefix
+            value: /
+      filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+{{- end }}
+{{- end }}
+{{- end }}

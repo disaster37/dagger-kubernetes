@@ -5,7 +5,7 @@ metadata:
   name: {{ include "dagger-kubernetes.fullname" . }}
   namespace: {{ include "dagger-kubernetes.namespace" . }}
   labels:
-    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    {{- include "dagger-kubernetes.supervisorLabels" . | nindent 4 }}
 spec:
   {{- if .Values.podDisruptionBudget.minAvailable }}
   minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
@@ -14,5 +14,5 @@ spec:
   {{- end }}
   selector:
     matchLabels:
-      {{- include "dagger-kubernetes.selectorLabels" . | nindent 6 }}
+      {{- include "dagger-kubernetes.supervisorSelectorLabels" . | nindent 6 }}
 {{- end }}

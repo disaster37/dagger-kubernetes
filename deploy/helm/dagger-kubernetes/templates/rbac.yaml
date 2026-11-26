@@ -40,6 +40,8 @@ rules:
   - apiGroups: [""]
     resources: ["persistentvolumeclaims", "configmaps"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # configmaps also covers the supervisor's public Minting CA trust-bundle
+  # ConfigMap (<fullname>-minting-ca-bundle) reconciliation (ca.minting_ca_configmap).
   # Secrets: the supervisor mints per-engine client certs from the minting
   # CA and stores them in Secrets. It also creates/updates/deletes the
   # per-run check/workflow env Secrets (and replaces them on rerun), so

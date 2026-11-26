@@ -167,7 +167,13 @@ with `supervisor.enabled`.
 The chart never asks for URLs: `server.public_url` (UI + API) and
 `server.data_hostname` (engine data plane) are computed from the exposition
 (ingress host + TLS presence, `dataIngress.host`, LoadBalancer/NodePort
-`service.*.host`, or the internal `<release>-*.<namespace>.svc` URLs).
+`service.*.host`, or the internal `<release>-*.<namespace>.svc` URLs). With
+Gateway API exposition (`gateway.enabled`, [ADR-060](design/ADR-060-gateway-api-exposition.md))
+the URLs follow `gateway.control.host` / `gateway.data.host`, and the Gateway
+takes precedence over the Ingress when both are enabled (useful during a
+migration). See
+[Exposition & URLs](../deploy/helm/dagger-kubernetes/README.md#exposition--urls)
+for the full precedence table.
 
 The chart also bundles the **S3 cache store**: MinIO is installed as an
 optional subchart (`minio.enabled`, default `true`) — a standalone server
@@ -475,6 +481,7 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
 |                 | `engine_registry_mirrors_http`            | `[]` (chart: generated plaintext mirror hosts)           | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors and omits TLS mirrors, which BuildKit dials over HTTPS). |
 | `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
+|                 | `minting_ca_configmap`                    | `supervisor-minting-ca-bundle`                           | K8s ConfigMap the leader keeps in sync with the public minting CA trust bundle (key `ca.crt`, certificates only — never the private key) for Gateway API `BackendTLSPolicy`; tracks phased rotation (dual-trust during the overlap). `""` disables publishing. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
 |                 | `keyring_rotation_enabled`                | `true`                                                   | Zero-downtime phased Minting CA rotation for the engine/data-plane/internal-control mTLS plane.                                               |
 |                 | `rotation_period`                         | `24h`                                                    | Minting CA rotation cadence; must be `>= 2 * client_cert_ttl` when rotation is enabled.                                                       |
@@ -502,7 +509,7 @@ inline comments. The sections below summarise the most important ones.
 | `log_level`     | —                                         | `info`                                                   | `debug`/`info`/`warn`/`error`.                                                                                                                |
 | `log_format`    | —                                         | `json`                                                   | Supervisor log format: `json` / `text`.                                                                                                       |
 | `otel`          | `otlp_endpoint`                           | `""`                                                     | If set, the Supervisor exports its own OTLP here.                                                                                             |
-|                 | `ingest_max_body_size`                    | `67108864` (64 MiB)                                      | OTLP ingest request-body cap in bytes (`0` = default). Separate from the 4 MiB control-API cap.                                               |
+|                 | `ingest_max_body_size`                    | `67108864` (64 MiB)                                      | OTLP ingest request-body cap in bytes (`0` = default). Separate from the 4 MiB control-API cap. Keep the exposition in lock step: `ingress.proxyBodySize` (Ingress) or `gateway.control.maxBodySize` (`ClientSettingsPolicy`). |
 
 Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 
@@ -929,17 +936,20 @@ exactly that), the supervisor automatically rewrites the engine image so the
 fleet runner StatefulSet pulls `registry.dagger.io/engine:<version>` through
 the mirror — no extra supervisor flag. The mirror's `external_addr` (the
 node-reachable hostname of the dedicated, TLS-terminated mirror ingress,
-`imageCache.registryIngress`) wins whenever it is set: the kubelet dials
-`mirror-registry.example.com:443` and the ingress terminates TLS in front of
-the mirror, so no node-level `/etc/hosts` pin or CA trust is needed — only a
-DNS-resolvable ingress host (and, in practice, a real cert in
-`imageCache.registryIngress.tls.secretName`). Without `external_addr` the
-legacy ADR-043 path applies: a `tls: true` mirror rewrites to its
-`internal_addr` (`<release>-registry-dagger-io-mirror.<namespace>.svc:5000/engine:<version>`),
+`imageCache.registryIngress`, or the mirror `HTTPRoute` when Gateway API
+exposition is on, `gateway.registryMirror`) wins whenever it is set: the kubelet
+dials `mirror-registry.example.com:443` and the ingress/Gateway terminates TLS
+in front of the mirror, so no node-level `/etc/hosts` pin or CA trust is needed
+— only a DNS-resolvable host (and, in practice, a real cert in
+`imageCache.registryIngress.tls.secretName` or `gateway.registryMirror.tls.secretName`).
+Without `external_addr` the legacy ADR-043 path applies: a `tls: true` mirror
+rewrites to its `internal_addr`
+(`<release>-registry-dagger-io-mirror.<namespace>.svc:5000/engine:<version>`),
 and a plaintext mirror never triggers the rewrite, because the kubelet cannot
 pull from it without node-level insecure-registry configuration. See
-[ADR-046](design/ADR-046-engine-image-via-mirror-ingress.md) and
-[ADR-043](design/ADR-043-engine-image-via-cache.md).
+[ADR-046](design/ADR-046-engine-image-via-mirror-ingress.md),
+[ADR-043](design/ADR-043-engine-image-via-cache.md), and
+[ADR-060](design/ADR-060-gateway-api-exposition.md).
 
 Operator prerequisite (not automated by the chart): the ingress hostname must
 resolve from the engine nodes, and with the legacy TLS path nodes must trust
@@ -2096,8 +2106,9 @@ The data plane is mTLS-only. The Supervisor:
 
 1. Holds a **server cert** — where it comes from depends on
    `supervisor.dataplane.tls.provider` (see below). The Helm chart auto-switches
-   this value when you enable `dataCert.enabled` (→ `"cert-manager"`) or set
-   `dataIngress.tls.secretName` (→ `"external"`), and auto-wires the cert/key
+   this value when you enable `dataCert.enabled` (→ `"cert-manager"`) or set a
+   data TLS secret — `dataIngress.tls.secretName` or `gateway.data.tls.secretName`
+   with Gateway API exposition (→ `"external"`) — and auto-wires the cert/key
    paths to the mounted secret.
 2. Holds a **minting CA** in `ca.minting_ca_secret`; it signs short-lived
     (`ca.client_cert_ttl`) client certs at lease grant. The minting CA is
@@ -2107,7 +2118,10 @@ The data plane is mTLS-only. The Supervisor:
     issuing anything. The `supervisor.dataplane.tls.ca_path` files are kept as
     a local cache. The Secret contains the CA **private key** (any pod may mint
     client certs) and must be RBAC-restricted to the supervisor ServiceAccount —
-    the chart already does this.
+    the chart already does this. The leader additionally publishes the
+    **public** trust bundle (certificates only) into the
+    `<release>-minting-ca-bundle` ConfigMap (`ca.minting_ca_configmap`, key
+    `ca.crt`) for Gateway API `BackendTLSPolicy`, tracking the phased rotation.
 3. Pins each minted cert's lease to a specific engine pod via the L4 proxy.
 
 The **Raft transport** is likewise mTLS (chart default) with its own
@@ -2128,9 +2142,9 @@ disk every `supervisor.dataplane.tls.reload_poll_interval` (default `5s`).
 
 | `supervisor.dataplane.tls.provider` | Server certificate source | Minting CA | Notes |
 |---|---|---|---|
-| `embedded` (default) | Self-signed, issued by the auto-generated minting CA | auto-bootstrapped | Zero config. Server cert SANs cover the data host, cache vhost, and pod names automatically. The Helm chart auto-switches to `"cert-manager"` when `dataCert.enabled` is set, or to `"external"` when `dataIngress.tls.secretName` is set — you do not need to set this manually in those cases. |
+| `embedded` (default) | Self-signed, issued by the auto-generated minting CA | auto-bootstrapped | Zero config. Server cert SANs cover the data host, cache vhost, and pod names automatically. The Helm chart auto-switches to `"cert-manager"` when `dataCert.enabled` is set, or to `"external"` when a data TLS secret (`dataIngress.tls.secretName` / `gateway.data.tls.secretName`) is set — you do not need to set this manually in those cases. |
 | `cert-manager` | cert-manager `Certificate` (e.g. Let's Encrypt) | auto-bootstrapped | Publicly trusted server cert; the minting CA is still internal. Set `dataCert.enabled: true` (the chart auto-wires paths). |
-| `external` | Operator-managed PEM files (`supervisor.dataplane.tls.certPath`/`keyPath`) or `<fullname>-tls` Secret | auto-bootstrapped | Bring your own keypair (e.g. from an external PKI). When `dataIngress.tls.secretName` is set, the chart auto-switches to `"external"` and auto-wires paths to the mounted secret. |
+| `external` | Operator-managed PEM files (`supervisor.dataplane.tls.certPath`/`keyPath`) or `<fullname>-tls` Secret | auto-bootstrapped | Bring your own keypair (e.g. from an external PKI). When `dataIngress.tls.secretName` / `gateway.data.tls.secretName` is set, the chart auto-switches to `"external"` and auto-wires paths to the mounted secret. |
 
 **Zero certificate generation:** with `embedded` (the default) or
 `cert-manager`, you never run `openssl` by hand — the minting CA, the Raft CA,
@@ -2138,6 +2152,49 @@ and the server cert (embedded) are all generated automatically. To bring an
 existing minting CA (e.g. migrating a prior deployment), set
 `supervisor.dataplane.tls.caCrt`/`caKey` in the chart values; the supervisor
 reuses it instead of generating a new one.
+
+### cert-manager with Gateway API exposition
+
+When the platform is exposed through the Gateway API
+([ADR-060](design/ADR-060-gateway-api-exposition.md)), cert-manager issues the
+Gateway listener certificates through its gateway-shim:
+
+1. Install the Gateway API CRDs **before** cert-manager, with Gateway support
+   enabled — `config.enableGatewayAPI: true` on cert-manager v1.15–1.20,
+   `config.gatewayAPI.enabled: true` on v1.21+.
+2. Point the ClusterIssuer's HTTP-01 solver at the Gateway (the `http` listener
+   has no `hostname`, so its challenge `HTTPRoute` covers every host, including
+   the data host):
+
+   ```yaml
+   solvers:
+     - http01:
+         gatewayHTTPRoute:
+           parentRefs:
+             - name: <release>
+               namespace: <namespace>
+               sectionName: http
+   ```
+
+3. Set `gateway.annotations: {cert-manager.io/cluster-issuer: <issuer>}` — the
+   shim creates the `Certificate`s for the HTTPS `Terminate` listeners
+   (control / mirror / Dex). `dataCert.enabled: true` keeps issuing the
+   data-host `Certificate` from the existing template (its `dnsNames[0]` follows
+   `gateway.data.host` when gateway + data are enabled).
+
+The ACME challenge route uses an `Exact` path match on the `http` listener, so
+it takes precedence over the `PathPrefix: /` HTTP→HTTPS redirect route.
+
+The control `BackendTLSPolicy` verifies the supervisor's HTTPS `:8080` listener
+against the Core `ConfigMap` `<release>-minting-ca-bundle` (key `ca.crt`), which
+the leader supervisor keeps in sync with the full public minting CA trust bundle
+— including the dual-trust bundle during phased rotation — so no operator action
+is needed. For a **private mirror CA**, provide a `ConfigMap` (key `ca.crt`) in
+the release namespace (naming it equal to `imageCache.tls.caSecretName` works
+with no extra overrides), or set
+`gateway.registryMirror.backendTLS.caCertificateRef.name` explicitly. NGF
+`2.9.1` rejects `Opaque` Secret `caCertificateRefs`; a `kubernetes.io/tls`
+Secret additionally needs valid `tls.crt` + `tls.key` *and* `ca.crt`.
 
 ### Troubleshooting data-plane TLS failures
 
@@ -2216,6 +2273,30 @@ The chart renders a cert-manager `Certificate` (`dataCert.enabled: true` +
 (`/etc/dagger-kubernetes/data-tls/tls.crt` + `.key`). The `dataIngress` (nginx
 `ssl-passthrough`) forwards the raw mTLS handshake to the supervisor, which
 serves the cert-manager certificate.
+
+**Passthrough mode (`dataIngress.passthroughVia`).** The data-plane passthrough
+resource depends on the ingress controller:
+
+- `annotation` (default) — community `kubernetes/ingress-nginx` (EOL): the chart
+  renders an `Ingress` with `nginx.ingress.kubernetes.io/ssl-passthrough:
+  "true"`. cert-manager annotations placed in `dataIngress.annotations` (e.g.
+  `cert-manager.io/cluster-issuer`) work because an Ingress exists for the data
+  host.
+- `transportServer` — F5 NGINX Ingress Controller: the chart renders a
+  `TransportServer` (`k8s.nginx.org/v1`) instead of an `Ingress`, and the
+  controller must run with `enableTLSPassthrough=true`. Because **no Ingress
+  exists for the data host**, `dataIngress.annotations` cert-manager annotations
+  are inert; operators must set `dataCert.enabled: true` (with
+  `dataIngress.tls.secretName` empty) so cert-manager still issues and renews the
+  data-plane certificate. The `TransportServer` claims the host globally, so no
+  other `Ingress`/`VirtualServer` may use it; if an HTTP-01 solver Ingress is
+  rejected for that reason, switch the `ClusterIssuer` to a DNS-01 solver.
+
+`dataIngress.sessionTimeout` (default `24h`) sets the F5 `TransportServer`
+`sessionParameters.timeout` — the idle timeout between successive read/write
+operations on the passthrough stream. The controller default is 10m, which cuts
+long-lived idle connections (e.g. a Dagger CLI control connection while a CI
+pipeline runs); raise it for long engine sessions.
 
 > **Two alternative flows:** Use **either** `dataCert.enabled` (chart-rendered
 > cert-manager `Certificate`) **or** `dataIngress.tls.secretName` (operator-
@@ -3027,7 +3108,7 @@ all delegate to (or mirror) this script.
 - [ ] Configure persistent storage for all stateful components
 - [ ] Change the MinIO root credentials (`minio.rootUser`/`minio.rootPassword`) and/or the `engine-s3-auth` Secret for production
 - [ ] Set appropriate resource requests/limits per component
-- [ ] Configure ingress with TLS for the control plane
+- [ ] Configure ingress with TLS for the control plane (or expose via the Gateway API, `gateway.enabled`, with `gateway.annotations.cert-manager.io/cluster-issuer` for listener certs — ADR-060)
 - [ ] Enable Prometheus ServiceMonitor if using Prometheus Operator
 - [ ] Configure object storage (S3/GCS) for Loki and Tempo in production
 - [ ] Use external OAuth provider (GitHub) with org restrictions for UI access
