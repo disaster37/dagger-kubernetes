@@ -68,3 +68,4 @@ the decision.
 | 058  | [Organization as root namespace: tenancy, quotas, and storage](ADR-058-organization-root-tenancy-quotas-storage.md) |
 | 059  | [GitHub CLI integration: OAuth, sealed tokens, repo claims](ADR-059-github-cli-integration-oauth-sealed-tokens-repo-claims.md) |
 | 060  | [Gateway API exposition support (NGINX Gateway Fabric)](ADR-060-gateway-api-exposition.md) |
+| 061  | [Dagger changelog support matrix (v0.21.8 → v1.0.0-beta.20)](ADR-061-dagger-changelog-support-matrix.md) |

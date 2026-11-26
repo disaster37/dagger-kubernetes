@@ -1194,7 +1194,8 @@ New configuration keys: `server.max_data_conns`,
 `server.internal_control_url`, `server.internal_data_host`,
 `otel.max_inflight_bytes`, `cli.include_prereleases`, `fleet.isolation`,
 `cache.remote.*` (including `pack_max_member_bytes` and `gc_interval`),
-`graphql.*`, `checks.*`, `workflows.*`, `forge.*`,
+`graphql.*` (including `log_queries`), `checks.*` (including `silent`),
+`workflows.*` (including `silent` and `discovery_paths`), `forge.*`,
 `supervisor.cache_scratch.size_limit`, and `supervisor.gomemlimit`. See
 `config/config.app.yaml.sample` for the full reference.
 
@@ -3106,6 +3107,29 @@ TTY-less CI job hang until `--timeout`. Run dev shells without `--steps` from a
 real terminal; check/workflow Jobs never pass `-i`.
 
 ---
+
+## Dagger version support
+
+The version gate (`version.floor`, `version.allowlist`) admits every release in
+the changelog range **v0.21.8 → v1.0.0-beta.20** with the shipped defaults
+(`floor: v0.19.0`, no allowlist entries). Per-entry obligations and proofs are
+in [ADR-061](design/ADR-061-dagger-changelog-support-matrix.md).
+
+| Range | Status | What is verified |
+|---|---|---|
+| v0.19.0 – v0.21.7 | admitted | version gate; runner/env plumbing unchanged |
+| v0.21.8 – v0.21.10 | admitted, fully supported | version gate, silent sessions, `--x-release` host preservation, multi-column `check -l`, idle scale-down guard |
+| v1.0.0-beta.1 – v1.0.0-beta.20 | admitted, supported with documented NO-OPs | per-test results, typed filters, nested traces, progress spans, workspace discovery, Cloud GraphQL parity |
+| later betas / 0.21.11+ | admitted | the live fleet serves them; they are outside ADR-061's matrix |
+
+What the platform does **not** do (by design): set `disableDaggerInDagger`
+(it breaks self-orchestrating tests), run a module-recommendation service
+(`recommendedModules` returns an empty list), or migrate this repository to
+`dagger.toml` (`dagger/dagger.json` stays).
+
+**Config keys added for this range:** `checks.silent` (default `false`),
+`workflows.silent` (default `false`), `workflows.discovery_paths` (default
+`[".dagger/workflows"]`), `graphql.log_queries` (default `false`).
 
 ## Operations
 
