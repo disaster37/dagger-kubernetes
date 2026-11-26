@@ -1434,11 +1434,46 @@ func TestParseCheckList(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := parseCheckList(tc.out)
+			got := parseCheckTable(tc.out).names()
 			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
-				t.Fatalf("parseCheckList = %v, want %v (input %q)", got, tc.want, tc.out)
+				t.Fatalf("check names = %v, want %v (input %q)", got, tc.want, tc.out)
 			}
 		})
+	}
+}
+
+func TestCheckDescriptors(t *testing.T) {
+	out := renderCheckTable(
+		[]string{"MODULE", "GO-PACKAGE", "GO-TEST", "VITEST-PROJECT", "VITEST-TEST-FILE", "CHECK", "DESCRIPTION"},
+		[][]string{
+			{"go", "./...", "TestGet", "", "", "get-item", "fetch one item"},
+			{"node", "", "", "web", "app.test.ts", "vitest", "run vitest"},
+		},
+	)
+	got := parseCheckTable(out).descriptors()
+	if len(got) != 2 {
+		t.Fatalf("descriptors = %+v, want 2", got)
+	}
+	if got[0].Name != "get-item" || got[0].Filters["MODULE"] != "go" || got[0].Filters["GO-TEST"] != "TestGet" {
+		t.Fatalf("first descriptor = %+v", got[0])
+	}
+	if _, ok := got[0].Filters["CHECK"]; ok {
+		t.Fatal("CHECK column must not be a filter")
+	}
+	if _, ok := got[0].Filters["DESCRIPTION"]; ok {
+		t.Fatal("DESCRIPTION column must not be a filter")
+	}
+	if _, ok := got[0].Filters["VITEST-PROJECT"]; ok {
+		t.Fatal("empty columns must be omitted")
+	}
+	if got[1].Name != "vitest" || got[1].Filters["VITEST-TEST-FILE"] != "app.test.ts" {
+		t.Fatalf("second descriptor = %+v", got[1])
+	}
+
+	// Legacy NAME/DESCRIPTION table: no filters, names still reported.
+	legacy := parseCheckTable(renderCheckTable([]string{"NAME", "DESCRIPTION"}, [][]string{{"build", "Build it"}})).descriptors()
+	if len(legacy) != 1 || legacy[0].Name != "build" || len(legacy[0].Filters) != 0 {
+		t.Fatalf("legacy descriptors = %+v", legacy)
 	}
 }
 
@@ -1450,7 +1485,7 @@ func TestParseCheckListTruncatedTable(t *testing.T) {
 		"------    ----------    -----    -----------",
 		"go        ./...",
 	}, "\n")
-	if got := parseCheckList(out); len(got) != 0 {
+	if got := parseCheckTable(out).names(); len(got) != 0 {
 		t.Fatalf("truncated row must be skipped, got %v", got)
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -12,11 +13,18 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// CheckDescriptorInput is one discovered check plus its typed-artifact columns.
+type CheckDescriptorInput struct {
+	Name    string            `json:"name"`
+	Filters map[string]string `json:"filters,omitempty"`
+}
+
 // LoadReportInput is the check-runner load-phase report.
 type LoadReportInput struct {
-	Checks        []string          `json:"checks"`
-	WorkflowFiles map[string]string `json:"workflow_files,omitempty"`
-	ContextFiles  map[string][]byte `json:"context_files,omitempty"`
+	Checks           []string               `json:"checks"`
+	CheckDescriptors []CheckDescriptorInput `json:"check_descriptors,omitempty"`
+	WorkflowFiles    map[string]string      `json:"workflow_files,omitempty"`
+	ContextFiles     map[string][]byte      `json:"context_files,omitempty"`
 }
 
 // CompleteReportInput is the check-runner completion report.
@@ -272,9 +280,21 @@ func (s *ChecksService) RecordLoad(ctx context.Context, callerOrgID, runID strin
 		return nil, fmt.Errorf("%w: check run belongs to another org", domain.ErrForbidden)
 	}
 	now := time.Now().UTC()
+	descriptors := make(map[string]map[string]string, len(in.CheckDescriptors))
+	for _, d := range in.CheckDescriptors {
+		if d.Name == "" || len(d.Filters) == 0 {
+			continue
+		}
+		descriptors[d.Name] = d.Filters
+	}
 	record.Checks = make([]domain.CheckItem, 0, len(in.Checks))
+	record.Artifacts = make([]domain.ArtifactRef, 0, len(in.Checks))
 	for _, name := range in.Checks {
-		record.Checks = append(record.Checks, domain.CheckItem{Name: name, State: domain.CheckPending, UpdatedAt: now})
+		filters := descriptors[name]
+		record.Checks = append(record.Checks, domain.CheckItem{Name: name, State: domain.CheckPending, UpdatedAt: now, Filters: filters})
+		if len(filters) > 0 {
+			record.Artifacts = append(record.Artifacts, artifactFromFilters(name, filters))
+		}
 	}
 	record.WorkflowFiles = in.WorkflowFiles
 	record.ContextFiles = in.ContextFiles
@@ -297,6 +317,24 @@ func (s *ChecksService) RecordLoad(ctx context.Context, callerOrgID, runID strin
 		}
 	}
 	return record, nil
+}
+
+// artifactFromFilters names the typed artifact one check covers: the module
+// column (e.g. "go", "vitest") is the kind, every column is kept as a filter,
+// and a dag:// link supplied by the CLI is passed through verbatim.
+func artifactFromFilters(name string, filters map[string]string) domain.ArtifactRef {
+	ref := domain.ArtifactRef{Name: name, Filters: filters}
+	for key, value := range filters {
+		switch strings.ToUpper(key) {
+		case "MODULE":
+			ref.Kind = strings.ToLower(value)
+		case "LINK", "DAG-LINK":
+			if strings.HasPrefix(value, "dag://") {
+				ref.Link = value
+			}
+		}
+	}
+	return ref
 }
 
 // RecordComplete stores terminal check states and starts after_checks workflows.

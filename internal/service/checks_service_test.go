@@ -731,3 +731,61 @@ func TestRerunWithFilters(t *testing.T) {
 		t.Fatalf("fork rerun err = %v, want ErrForbidden", err)
 	}
 }
+
+// TestRecordLoadDescriptors proves the additive load descriptors become check
+// filters and typed-artifact refs, and that an old payload without descriptors
+// still works.
+func TestRecordLoadDescriptors(t *testing.T) {
+	svc, _, _, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	ctx := context.Background()
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo","default_branch":"main"}}`)
+	if _, err := svc.HandleWebhook(ctx, domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body); err != nil {
+		t.Fatal(err)
+	}
+	records, err := svc.List(ctx, &domain.CheckRunFilter{OrgID: "acme"})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %v err=%v", records, err)
+	}
+	runID := records[0].ID
+
+	loaded, err := svc.RecordLoad(ctx, "acme", runID, LoadReportInput{
+		Checks: []string{"get-item", "plain"},
+		CheckDescriptors: []CheckDescriptorInput{
+			{Name: "get-item", Filters: map[string]string{"MODULE": "go", "GO-TEST": "TestGet", "LINK": "dag://go/test/TestGet"}},
+			{Name: "plain"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Checks) != 2 {
+		t.Fatalf("checks = %+v", loaded.Checks)
+	}
+	if loaded.Checks[0].Filters["GO-TEST"] != "TestGet" {
+		t.Fatalf("check filters = %+v", loaded.Checks[0].Filters)
+	}
+	if len(loaded.Checks[1].Filters) != 0 {
+		t.Fatalf("descriptor-less check must have no filters: %+v", loaded.Checks[1].Filters)
+	}
+	if len(loaded.Artifacts) != 1 {
+		t.Fatalf("artifacts = %+v", loaded.Artifacts)
+	}
+	artifact := loaded.Artifacts[0]
+	if artifact.Kind != "go" || artifact.Name != "get-item" || artifact.Link != "dag://go/test/TestGet" {
+		t.Fatalf("artifact = %+v", artifact)
+	}
+	if artifact.Filters["GO-TEST"] != "TestGet" {
+		t.Fatalf("artifact filters = %+v", artifact.Filters)
+	}
+
+	// Old payload shape (names only) remains accepted.
+	legacy, err := svc.RecordLoad(ctx, "acme", runID, LoadReportInput{Checks: []string{"build"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy.Checks) != 1 || len(legacy.Artifacts) != 0 {
+		t.Fatalf("legacy load = %+v", legacy)
+	}
+}

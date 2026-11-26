@@ -52,10 +52,19 @@ type checkResult struct {
 	Summary string `json:"summary,omitempty"`
 }
 
+// checkDescriptor is one discovered check plus its typed-artifact columns
+// (header column -> value, minus CHECK and DESCRIPTION). Additive: older
+// supervisors ignore it and still read Checks.
+type checkDescriptor struct {
+	Name    string            `json:"name"`
+	Filters map[string]string `json:"filters,omitempty"`
+}
+
 type loadReport struct {
-	Checks        []string          `json:"checks"`
-	WorkflowFiles map[string]string `json:"workflow_files,omitempty"`
-	ContextFiles  map[string][]byte `json:"context_files,omitempty"`
+	Checks           []string          `json:"checks"`
+	CheckDescriptors []checkDescriptor `json:"check_descriptors,omitempty"`
+	WorkflowFiles    map[string]string `json:"workflow_files,omitempty"`
+	ContextFiles     map[string][]byte `json:"context_files,omitempty"`
 }
 
 type completeReport struct {
@@ -106,15 +115,16 @@ func runCheckRunner(c *cli.Context) error {
 	}
 
 	workflowFiles, contextFiles := scanWorkflowFiles(workdir, workflowPaths(c.StringSlice("workflow-path")))
-	checks, err := listChecks(ctx, daggerBin, workdir, env)
+	table, err := listChecks(ctx, daggerBin, workdir, env)
 	if err != nil {
 		// A repository without a Dagger module has zero checks; treat a
 		// missing module as a valid GitOps-only result.
-		checks = nil
+		table = checkTable{}
 	}
+	checks := table.names()
 	if runID != "" {
 		if err := postJSON(ctx, server, token, runToken, fmt.Sprintf("/api/v1/checks/runs/%s/load", runID), loadReport{
-			Checks: checks, WorkflowFiles: workflowFiles, ContextFiles: contextFiles,
+			Checks: checks, CheckDescriptors: table.descriptors(), WorkflowFiles: workflowFiles, ContextFiles: contextFiles,
 		}); err != nil {
 			return fmt.Errorf("report load phase: %w", err)
 		}
@@ -460,12 +470,10 @@ func (t checkTable) nameIndex() int {
 	return 0
 }
 
-// parseCheckList returns the check names from `dagger check -l` output. When the
-// header contains a CHECK column, that column is used; otherwise the first
-// column is used. Rows shorter than the name column are skipped rather than
-// misparsed.
-func parseCheckList(out string) []string {
-	t := parseCheckTable(out)
+// names returns the check names in table order. When the header contains a
+// CHECK column, that column is used; otherwise the first column is used. Rows
+// shorter than the name column are skipped rather than misparsed.
+func (t checkTable) names() []string {
 	idx := t.nameIndex()
 	checks := make([]string, 0, len(t.rows))
 	for _, fields := range t.rows {
@@ -479,8 +487,40 @@ func parseCheckList(out string) []string {
 	return checks
 }
 
-// listChecks runs `dagger check -l` and parses the check-name column.
-func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]string, error) {
+// descriptors returns one descriptor per named row, carrying the typed column
+// values. CHECK (the name itself) and DESCRIPTION (prose) are not filters.
+func (t checkTable) descriptors() []checkDescriptor {
+	nameIdx := t.nameIndex()
+	out := make([]checkDescriptor, 0, len(t.rows))
+	for _, fields := range t.rows {
+		if nameIdx >= len(fields) {
+			continue
+		}
+		name := strings.TrimSpace(fields[nameIdx])
+		if name == "" {
+			continue
+		}
+		d := checkDescriptor{Name: name}
+		for i, column := range t.header {
+			if i == nameIdx || column == "DESCRIPTION" || i >= len(fields) {
+				continue
+			}
+			value := strings.TrimSpace(fields[i])
+			if value == "" {
+				continue
+			}
+			if d.Filters == nil {
+				d.Filters = make(map[string]string, len(t.header))
+			}
+			d.Filters[column] = value
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// listChecks runs `dagger check -l` and returns the parsed table.
+func listChecks(ctx context.Context, daggerBin, dir string, env []string) (checkTable, error) {
 	args := silentArgs([]string{"check", "-l"})
 	//nolint:gosec // intentional: shell out to the dagger CLI with fixed args
 	cmd := exec.CommandContext(ctx, daggerBin, args...)
@@ -488,9 +528,9 @@ func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]str
 	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("dagger check -l: %w", err)
+		return checkTable{}, fmt.Errorf("dagger check -l: %w", err)
 	}
-	return parseCheckList(string(out)), nil
+	return parseCheckTable(string(out)), nil
 }
 
 // checkFilterArgv validates the repeatable --filter values and returns the
