@@ -309,3 +309,39 @@ func TestJobSecretCarriesSilent(t *testing.T) {
 		})
 	}
 }
+
+// TestJobArgsCarryFilters proves validated typed filters reach the check-runner
+// argv as repeatable --filter key=value pairs, and that an invalid stored filter
+// fails before any Job or Secret is created.
+func TestJobArgsCarryFilters(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	r := NewK8sJobRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "")
+	spec := &domain.CheckRunSpec{
+		ID: "check-filters", OrgID: "acme", ProjectID: "proj", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main",
+		Filters: []string{"--go-test=TestGet", "--vitest-test-file=app.test.ts"},
+	}
+	if err := r.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	job, err := cs.BatchV1().Jobs("resolved-ns").Get(context.Background(), "check-"+refHash(spec.ID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := job.Spec.Template.Spec.Containers[0].Args
+	if !containsArg(args, "--filter", "go-test=TestGet") {
+		t.Fatalf("args missing go-test filter: %v", args)
+	}
+	if !containsArg(args, "--filter", "vitest-test-file=app.test.ts") {
+		t.Fatalf("args missing vitest filter: %v", args)
+	}
+
+	bad := *spec
+	bad.ID = "check-bad-filter"
+	bad.Filters = []string{"--rm -rf /"}
+	if err := r.Run(context.Background(), &bad); err == nil {
+		t.Fatal("invalid filter must be rejected")
+	}
+	if _, err := cs.BatchV1().Jobs("resolved-ns").Get(context.Background(), "check-"+refHash(bad.ID), metav1.GetOptions{}); err == nil {
+		t.Fatal("invalid filter must not create a Job")
+	}
+}

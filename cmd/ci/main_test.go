@@ -1489,7 +1489,7 @@ func TestUpsertEnv(t *testing.T) {
 
 func TestDaggerEnvUpsert(t *testing.T) {
 	base := []string{"DAGGER_ORG=stale", "PATH=/bin"}
-	env := daggerEnv(base, daggerEnvOpts{
+	env := daggerEnv(base, &daggerEnvOpts{
 		Server: "https://example.com", Token: "tok", RunnerHost: defaultRunnerHost,
 		EngineVersion: "v1.0.0-beta.20", Org: "acme",
 	})
@@ -1519,7 +1519,7 @@ func TestDaggerEnvUpsert(t *testing.T) {
 	}
 
 	// Empty optional values are omitted, not blanked.
-	minimal := daggerEnv([]string{"PATH=/bin"}, daggerEnvOpts{Server: "s", Token: "t"})
+	minimal := daggerEnv([]string{"PATH=/bin"}, &daggerEnvOpts{Server: "s", Token: "t"})
 	joined := strings.Join(minimal, "\n")
 	for _, absent := range []string{runnerHostEnvName, "_EXPERIMENTAL_DAGGER_TAG", "DAGGER_ORG="} {
 		if strings.Contains(joined, absent) {
@@ -1708,5 +1708,22 @@ func TestResolveDaggerBinProvisionsAbsolutePath(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(env, "\n"), filepath.Dir(bin)) {
 		t.Fatalf("env must prepend the provisioned bin dir: %v", env)
+	}
+}
+
+func TestCheckFilterArgv(t *testing.T) {
+	got, err := checkFilterArgv([]string{"go-test=TestGet", "vitest-test-file=app.test.ts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--go-test=TestGet", "--vitest-test-file=app.test.ts"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("checkFilterArgv = %v, want %v", got, want)
+	}
+	if empty, err := checkFilterArgv(nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty filters = %v, %v", empty, err)
+	}
+	if _, err := checkFilterArgv([]string{"--rm -rf"}); err == nil {
+		t.Fatal("invalid filter must be rejected")
 	}
 }

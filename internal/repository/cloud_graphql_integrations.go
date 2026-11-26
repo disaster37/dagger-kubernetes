@@ -146,6 +146,7 @@ func checkFromItem(rec *domain.CheckRunRecord, item *domain.CheckItem) *graphqlC
 		traceID:       item.TraceID,
 		moduleRef:     canonicalCheckModuleRef(rec),
 		moduleVersion: rec.SHA,
+		filters:       append([]string{}, rec.Filters...),
 	}
 	if !rec.CreatedAt.IsZero() {
 		c.startedAt = graphqlTime{time: rec.CreatedAt}
@@ -181,6 +182,7 @@ func synthesizedLoadCheck(rec *domain.CheckRunRecord) *graphqlCheck {
 		moduleRef:     canonicalCheckModuleRef(rec),
 		moduleVersion: rec.SHA,
 		internal:      true,
+		filters:       append([]string{}, rec.Filters...),
 	}
 	if !rec.CreatedAt.IsZero() {
 		c.startedAt = graphqlTime{time: rec.CreatedAt}
@@ -291,11 +293,13 @@ func moduleVersionMatches(version string, rec *domain.CheckRunRecord) bool {
 	return ref == version || rec.Tag == version
 }
 
-// RerunChecks re-dispatches the runs referenced by checkIds.
+// RerunChecks re-dispatches the runs referenced by checkIds. filters are
+// optional validated typed filters ("key=value") applied to the rerun.
 func (r *graphqlRoot) RerunChecks(ctx context.Context, args struct {
 	Org        graphql.ID
 	CheckIds   []graphql.ID
 	CleanSlate *bool
+	Filters    *[]string
 }) ([]*graphqlCheck, error) {
 	org, err := r.resolveAccessibleOrg(ctx, string(args.Org))
 	if err != nil {
@@ -321,8 +325,17 @@ func (r *graphqlRoot) RerunChecks(ctx context.Context, args struct {
 		if rec.OrgID != org.ID {
 			return nil, fmt.Errorf("check not found")
 		}
-		if _, err := r.checkRerunner(ctx, runID); err != nil {
+		var filters domain.CheckRunFilters
+		if args.Filters != nil {
+			filters = domain.CheckRunFilters{Checks: *args.Filters}
+		}
+		updated, err := r.checkRerunner(ctx, runID, filters)
+		if err != nil {
 			return nil, err
+		}
+		effectiveFilters := rec.Filters
+		if updated != nil && updated.Filters != nil {
+			effectiveFilters = updated.Filters
 		}
 		seen[runID] = true
 		out = append(out, &graphqlCheck{
@@ -332,6 +345,7 @@ func (r *graphqlRoot) RerunChecks(ctx context.Context, args struct {
 			traceID:       "",
 			moduleRef:     canonicalCheckModuleRef(rec),
 			moduleVersion: rec.SHA,
+			filters:       append([]string{}, effectiveFilters...),
 		})
 	}
 	return out, nil
@@ -363,7 +377,7 @@ func (r *graphqlRoot) RerunLoad(ctx context.Context, args struct {
 	if rec.Status != "failed" && rec.Status != "canceled" {
 		return nil, fmt.Errorf("only a failed load check can be re-run")
 	}
-	if _, err := r.checkRerunner(ctx, runID); err != nil {
+	if _, err := r.checkRerunner(ctx, runID, domain.CheckRunFilters{}); err != nil {
 		return nil, err
 	}
 	return &graphqlCheck{
@@ -1223,6 +1237,7 @@ type graphqlCheck struct {
 	moduleRef     string
 	moduleVersion string
 	internal      bool
+	filters       []string
 }
 
 func (c *graphqlCheck) ID() graphql.ID          { return graphql.ID(c.id) }
@@ -1236,6 +1251,7 @@ func (c *graphqlCheck) SpanId() string          { return c.spanID }
 func (c *graphqlCheck) ModuleRef() string       { return c.moduleRef }
 func (c *graphqlCheck) ModuleVersion() string   { return c.moduleVersion }
 func (c *graphqlCheck) Internal() bool          { return c.internal }
+func (c *graphqlCheck) Filters() []string       { return c.filters }
 
 type graphqlSource struct {
 	root         *graphqlRoot

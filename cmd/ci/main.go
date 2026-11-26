@@ -169,7 +169,7 @@ func run(c *cli.Context) error {
 
 	runnerHost := resolveRunnerHost(c.String("runner-host"), cmdArgs)
 	org := c.String("org")
-	env := daggerEnv(os.Environ(), daggerEnvOpts{
+	env := daggerEnv(os.Environ(), &daggerEnvOpts{
 		Server:        serverURL,
 		Token:         token,
 		RunnerHost:    runnerHost,

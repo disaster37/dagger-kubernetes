@@ -68,7 +68,7 @@ type daggerEnvOpts struct {
 // appends OTEL_EXPORTER_OTLP_TRACES_LIVE=1. The live span export is required
 // for the pipeline view: without it the engine exports spans only at
 // completion, so per-step state never appears while a run is live.
-func daggerEnv(base []string, o daggerEnvOpts) []string {
+func daggerEnv(base []string, o *daggerEnvOpts) []string {
 	env := upsertEnv(base, "DAGGER_CLOUD_URL", o.Server)
 	env = upsertEnv(env, "DAGGER_CLOUD_TOKEN", o.Token)
 	env = upsertEnv(env, "OTEL_EXPORTER_OTLP_TRACES_LIVE", "1")
@@ -111,7 +111,7 @@ func upsertEnv(env []string, key, value string) []string {
 // and the runner host are set because 0.21.x ignores DAGGER_ENGINE; the
 // live-trace and org vars wire the pipeline view.
 func runnerEnv(server, token, org, runnerHost string) []string {
-	env := daggerEnv(os.Environ(), daggerEnvOpts{Server: server, Token: token, Org: org, RunnerHost: runnerHost})
+	env := daggerEnv(os.Environ(), &daggerEnvOpts{Server: server, Token: token, Org: org, RunnerHost: runnerHost})
 	return upsertEnv(env, "DAGGER_ENGINE", "cloud")
 }
 
@@ -161,7 +161,7 @@ func hasFlag(args []string, flag string) bool {
 
 // xReleaseRequested reports whether the invocation will take the x-release
 // path, via the --x-release flag or the DAGGER_X_RELEASE env var.
-func xReleaseRequested(args []string, env []string) bool {
+func xReleaseRequested(args, env []string) bool {
 	if hasFlag(args, "--x-release") {
 		return true
 	}

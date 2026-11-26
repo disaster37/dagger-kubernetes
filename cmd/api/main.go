@@ -579,7 +579,7 @@ func run(c *cli.Context) error {
 		WithRepoSettings(repoSettingRepo).
 		WithGitHubIntegrator(githubIntegrationSvc)
 	if cfg.Checks.Enabled {
-		cloudGraphQL.WithCheckRerunner(checksSvc.Rerun)
+		cloudGraphQL.WithCheckRerunner(checksSvc.RerunWithFilters)
 	}
 	historyPurgeSvc := service.NewHistoryPurgeService(traceMetaRepo, logsClient, metricsClient, cfg.History.GC, logger, metrics)
 	historyPurgeSvc.SetOTLPArchive(otlpArchive)

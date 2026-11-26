@@ -257,7 +257,7 @@ func (s *ChecksService) dispatchCheckJob(ctx context.Context, src *domain.ForgeS
 		DefaultBranch: record.DefaultBranch, TargetBranch: record.TargetBranch, Tag: record.Tag,
 		PRNumber: record.PRNumber, IsFork: record.IsFork, IsRelease: record.IsRelease,
 		Event: record.Event, Token: token, RunToken: runToken, CloneToken: cloneToken, Secrets: secrets,
-		CloneURL: domain.ForgeCloneURL(src.Provider, src.BaseURL, record.Repo),
+		CloneURL: domain.ForgeCloneURL(src.Provider, src.BaseURL, record.Repo), Filters: record.Filters,
 	}
 	return s.runner.Run(ctx, spec)
 }
@@ -383,8 +383,15 @@ func (s *ChecksService) ApproveForkRun(ctx context.Context, runID, approverUserI
 	return record, nil
 }
 
-// Rerun resets a run and re-dispatches it.
+// Rerun resets a run and re-dispatches it with the filters it already carries.
 func (s *ChecksService) Rerun(ctx context.Context, runID string) (*domain.CheckRunRecord, error) {
+	return s.RerunWithFilters(ctx, runID, domain.CheckRunFilters{})
+}
+
+// RerunWithFilters resets a run, merges the requested typed filters into the
+// record, re-validates them, and re-dispatches. Invalid filters fail with
+// ErrValidation before the record is mutated. Fork runs still require approval.
+func (s *ChecksService) RerunWithFilters(ctx context.Context, runID string, f domain.CheckRunFilters) (*domain.CheckRunRecord, error) {
 	if !s.enabled.Load() {
 		return nil, fmt.Errorf("%w: cloud checks are disabled (checks.enabled is false)", domain.ErrValidation)
 	}
@@ -395,6 +402,11 @@ func (s *ChecksService) Rerun(ctx context.Context, runID string) (*domain.CheckR
 	if record.IsFork && record.ApprovedAt == nil {
 		return nil, fmt.Errorf("%w: fork PR run requires approval", domain.ErrForbidden)
 	}
+	filters, err := domain.MergeCheckFilters(record.Filters, f)
+	if err != nil {
+		return nil, err
+	}
+	record.Filters = filters
 	record.Status = "running"
 	record.Error = ""
 	record.UpdatedAt = time.Now().UTC()

@@ -649,3 +649,85 @@ func (f *fakeCheckRunRepo) Delete(_ context.Context, id string) error {
 	delete(f.records, id)
 	return nil
 }
+
+// TestRerunWithFilters proves typed filters merge into the record, reach the
+// dispatched spec as validated argv, and that an invalid filter fails with
+// ErrValidation before the record is mutated or a Job is dispatched.
+func TestRerunWithFilters(t *testing.T) {
+	svc, _, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	ctx := context.Background()
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo","default_branch":"main"}}`)
+	if _, err := svc.HandleWebhook(ctx, domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body); err != nil {
+		t.Fatal(err)
+	}
+	runID := "check-src-1-abc123"
+	if len(runner.runs) != 1 {
+		t.Fatalf("dispatch count = %d, want 1", len(runner.runs))
+	}
+
+	record, err := svc.RerunWithFilters(ctx, runID, domain.CheckRunFilters{Tests: []string{"TestGet"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := record.Filters; len(got) != 1 || got[0] != "--go-test=TestGet" {
+		t.Fatalf("record filters = %v, want [--go-test=TestGet]", got)
+	}
+	if got := runner.runs[len(runner.runs)-1].Filters; len(got) != 1 || got[0] != "--go-test=TestGet" {
+		t.Fatalf("spec filters = %v, want [--go-test=TestGet]", got)
+	}
+
+	// A second rerun merges rather than replaces.
+	record, err = svc.RerunWithFilters(ctx, runID, domain.CheckRunFilters{
+		Tests: []string{"TestGet", "vitest-test-file=app.test.ts"},
+		Files: []string{"./pkg/..."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--go-test=TestGet", "--vitest-test-file=app.test.ts", "--go-package=./pkg/..."}
+	if len(record.Filters) != len(want) {
+		t.Fatalf("merged filters = %v, want %v", record.Filters, want)
+	}
+	for i := range want {
+		if record.Filters[i] != want[i] {
+			t.Fatalf("merged filters = %v, want %v", record.Filters, want)
+		}
+	}
+
+	dispatched := len(runner.runs)
+	for _, bad := range []domain.CheckRunFilters{
+		{Tests: []string{"--rm -rf /"}},
+		{Files: []string{"$(whoami)"}},
+		{Checks: []string{""}},
+	} {
+		if _, err := svc.RerunWithFilters(ctx, runID, bad); !errors.Is(err, domain.ErrValidation) {
+			t.Fatalf("filter %+v err = %v, want ErrValidation", bad, err)
+		}
+	}
+	if len(runner.runs) != dispatched {
+		t.Fatal("invalid filters must not dispatch")
+	}
+	unchanged, err := svc.Get(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchanged.Filters) != len(want) {
+		t.Fatalf("record mutated by invalid filters: %v", unchanged.Filters)
+	}
+
+	// A plain rerun keeps the stored filters.
+	if _, err := svc.Rerun(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.runs[len(runner.runs)-1].Filters; len(got) != len(want) {
+		t.Fatalf("plain rerun lost filters: %v", got)
+	}
+
+	// Fork runs still require approval, filters or not.
+	svc.checkRuns.Upsert(ctx, &domain.CheckRunRecord{ID: "check-src-1-fork", OrgID: "acme", ProjectID: "p1", SourceID: "src-1", IsFork: true, Status: "waiting_approval"})
+	if _, err := svc.RerunWithFilters(ctx, "check-src-1-fork", domain.CheckRunFilters{Tests: []string{"TestGet"}}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("fork rerun err = %v, want ErrForbidden", err)
+	}
+}

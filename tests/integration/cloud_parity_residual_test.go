@@ -93,7 +93,7 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	checksSvc := service.NewChecksService(forgeRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, "https://example.com", "", logger)
 	graphql.WithForgeSources(forgeRepo).WithProjects(projectRepo).WithPublicURL("https://example.com")
 	if checkRunner != nil {
-		graphql.WithCheckRerunner(checksSvc.Rerun)
+		graphql.WithCheckRerunner(checksSvc.RerunWithFilters)
 	}
 
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)

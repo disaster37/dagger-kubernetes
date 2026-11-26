@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v2"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 // checkRunnerFlags configures the `check-runner` subcommand.
@@ -37,6 +39,7 @@ func checkRunnerFlags() []cli.Flag {
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN", "DAGGER_CLOUD_TOKEN"}, Usage: "supervisor token"},
 		&cli.StringFlag{Name: "run-token", EnvVars: []string{"DAGGER_RUN_TOKEN"}, Usage: "per-run callback token"},
 		&cli.StringFlag{Name: "workdir", Usage: "checkout directory (default: temp dir)"},
+		&cli.StringSliceFlag{Name: "filter", Usage: "typed check filter as key=value (repeatable; appended to dagger check as --key=value)"},
 		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "overall check-run timeout"},
 	}
 }
@@ -96,6 +99,11 @@ func runCheckRunner(c *cli.Context) error {
 	defer binCleanup()
 	env := append(runnerEnv(server, token, c.String("org"), defaultRunnerHost), binExtraEnv...)
 
+	filters, err := checkFilterArgv(c.StringSlice("filter"))
+	if err != nil {
+		return err
+	}
+
 	workflowFiles, contextFiles := scanWorkflowFiles(workdir)
 	checks, err := listChecks(ctx, daggerBin, workdir, env)
 	if err != nil {
@@ -115,7 +123,7 @@ func runCheckRunner(c *cli.Context) error {
 	var runErr error
 	for _, check := range checks {
 		fmt.Printf("running check %s\n", check)
-		result := runCheck(ctx, daggerBin, workdir, env, check)
+		result := runCheck(ctx, daggerBin, workdir, env, check, filters)
 		results = append(results, result)
 		if result.State != "success" && runErr == nil {
 			runErr = fmt.Errorf("check %s failed", check)
@@ -134,7 +142,9 @@ func runCheckRunner(c *cli.Context) error {
 }
 
 // runCheck executes one check and captures its trace ID and terminal state.
-func runCheck(ctx context.Context, daggerBin, dir string, env []string, check string) checkResult {
+// filters are canonical "--key=value" argv entries appended after the check
+// name (typed artifact/test filters).
+func runCheck(ctx context.Context, daggerBin, dir string, env []string, check string, filters []string) checkResult {
 	traceFile, err := os.CreateTemp("", "dagger-trace-*")
 	if err != nil {
 		return checkResult{Name: check, State: "failure", Summary: err.Error()}
@@ -143,7 +153,8 @@ func runCheck(ctx context.Context, daggerBin, dir string, env []string, check st
 	_ = traceFile.Close()
 	defer func() { _ = os.Remove(tracePath) }()
 
-	cmd := exec.CommandContext(ctx, daggerBin, silentArgs([]string{"check", check})...) // #nosec G204 -- check names come from the repository's own dagger module
+	argv := append([]string{"check", check}, filters...)
+	cmd := exec.CommandContext(ctx, daggerBin, silentArgs(argv)...) // #nosec G204 -- check names and validated filters come from the repository's own dagger module / run request
 	cmd.Dir = dir
 	cmd.Env = append(append([]string(nil), env...), fmt.Sprintf("DAGGER_KUBERNETES_TRACE_ID_FILE=%s", tracePath))
 	cmd.Stdout = os.Stdout
@@ -429,7 +440,9 @@ func parseCheckList(out string) []string {
 
 // listChecks runs `dagger check -l` and parses the check-name column.
 func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, daggerBin, silentArgs([]string{"check", "-l"})...)
+	args := silentArgs([]string{"check", "-l"})
+	//nolint:gosec // intentional: shell out to the dagger CLI with fixed args
+	cmd := exec.CommandContext(ctx, daggerBin, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.Output()
@@ -437,6 +450,20 @@ func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]str
 		return nil, fmt.Errorf("dagger check -l: %w", err)
 	}
 	return parseCheckList(string(out)), nil
+}
+
+// checkFilterArgv validates the repeatable --filter values and returns the
+// canonical "--key=value" forms appended to `dagger check`.
+func checkFilterArgv(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		argv, err := domain.CheckFilterArgv(value)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, argv)
+	}
+	return out, nil
 }
 
 // postJSON posts payload to the supervisor and requires a 2xx response.

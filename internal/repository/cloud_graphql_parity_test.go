@@ -48,7 +48,7 @@ func newParityEnv(t *testing.T, withRerunner bool) *parityEnv {
 	g := NewCloudGraphQL(NewUserRepo(store), orgRepo, NewGroupRepo(store), traceRepo, checkRepo, parityConfig()).
 		WithForgeSources(forgeRepo).WithProjects(projectRepo).WithPublicURL("https://example.com")
 	if withRerunner {
-		g.WithCheckRerunner(func(_ context.Context, runID string) (*domain.CheckRunRecord, error) {
+		g.WithCheckRerunner(func(_ context.Context, runID string, _ domain.CheckRunFilters) (*domain.CheckRunRecord, error) {
 			return &domain.CheckRunRecord{ID: runID, Status: "running"}, nil
 		})
 	}
@@ -1270,5 +1270,40 @@ func TestParitySourcesDedupStandaloneOwners(t *testing.T) {
 	sources := res["data"].(map[string]any)["sources"].([]any)
 	if len(sources) != 1 || sources[0].(map[string]any)["name"] != "acme" {
 		t.Fatalf("sources = %v", sources)
+	}
+}
+
+// TestParityRerunChecksFilters proves the additive `filters` argument on
+// rerunChecks is accepted by the schema and that Check.filters resolves, while
+// an older query without the argument still works (additive change).
+func TestParityRerunChecksFilters(t *testing.T) {
+	e := newParityEnv(t, true)
+	seedCheckRun(t, e.checks, &domain.CheckRunRecord{
+		ID: "check-filtered", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s",
+		Status: "failed", CreatedAt: time.Now().UTC(),
+		Filters: []string{"--go-test=TestGet"},
+		Checks:  []domain.CheckItem{{Name: "test", State: domain.CheckFailure}},
+	})
+	res := execJSON(t, e.g, e.ctx(), `mutation {
+		rerunChecks(org: "acme", checkIds: ["check-filtered/test"], cleanSlate: true, filters: ["go-test=TestGet"]) {
+			id name status filters
+		}
+	}`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	arr := res["data"].(map[string]any)["rerunChecks"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("rerunChecks = %v", arr)
+	}
+	got, _ := arr[0].(map[string]any)["filters"].([]any)
+	if len(got) != 1 || got[0] != "--go-test=TestGet" {
+		t.Fatalf("filters = %v, want [--go-test=TestGet]", got)
+	}
+
+	// Old query shape (no filters argument, no filters field) stays valid.
+	old := execJSON(t, e.g, e.ctx(), `mutation { rerunChecks(org: "acme", checkIds: ["check-filtered/test"]) { id name status } }`, nil)
+	if hasErrors(old) {
+		t.Fatalf("legacy rerunChecks errors: %v", errorMessages(t, old))
 	}
 }

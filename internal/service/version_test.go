@@ -149,12 +149,12 @@ func TestResolverAdmitsChangelogRange(t *testing.T) {
 		}
 	}
 
-	min, err := r.ResolveMinimal("0.21")
+	minimum, err := r.ResolveMinimal("0.21")
 	if err != nil {
 		t.Fatalf("ResolveMinimal: %v", err)
 	}
-	if min.Patch != 10 {
-		t.Errorf("ResolveMinimal(0.21) patch = %d, want 10", min.Patch)
+	if minimum.Patch != 10 {
+		t.Errorf("ResolveMinimal(0.21) patch = %d, want 10", minimum.Patch)
 	}
 }
 

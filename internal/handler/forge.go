@@ -391,7 +391,11 @@ func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext)
 	if !ok {
 		return
 	}
-	updated, err := s.checks.Rerun(ctx, record.ID)
+	var filters domain.CheckRunFilters
+	if !decodeOptionalBody(c, &filters) {
+		return
+	}
+	updated, err := s.checks.RerunWithFilters(ctx, record.ID, filters)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return
