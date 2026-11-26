@@ -30,9 +30,9 @@ func TestCheckRunRerunFilters(t *testing.T) {
 	if len(record.Filters) != 1 || record.Filters[0] != "--go-test=TestGet" {
 		t.Fatalf("record filters = %v, want [--go-test=TestGet]", record.Filters)
 	}
-	last := runner.runs[len(runner.runs)-1]
-	if len(last.Filters) != 1 || last.Filters[0] != "--go-test=TestGet" {
-		t.Fatalf("runner filters = %v", last.Filters)
+	last := runner.last()
+	if last == nil || len(last.Filters) != 1 || last.Filters[0] != "--go-test=TestGet" {
+		t.Fatalf("runner filters = %+v", last)
 	}
 
 	// An invalid filter is rejected with a 400 before anything is dispatched.

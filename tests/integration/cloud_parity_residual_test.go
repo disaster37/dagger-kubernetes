@@ -431,6 +431,16 @@ func (r *recordingCheckRunner) count() int {
 	return len(r.runs)
 }
 
+// last returns the most recently recorded spec (nil when none).
+func (r *recordingCheckRunner) last() *domain.CheckRunSpec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.runs) == 0 {
+		return nil
+	}
+	return r.runs[len(r.runs)-1]
+}
+
 func (r *recordingCheckRunner) tokenFor(runID string) string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
