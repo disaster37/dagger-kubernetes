@@ -46,6 +46,82 @@ app.kubernetes.io/component: supervisor
 {{- default .Release.Namespace .Values.namespace -}}
 {{- end -}}
 
+{{/* Resolve the Gateway name for Gateway API exposition: the rendered Gateway
+when gateway.create is true (gateway.name overrides <fullname>), else the
+existing shared Gateway named by gateway.parentRef.name (required). */}}
+{{- define "dagger-kubernetes.gatewayName" -}}
+{{- if .Values.gateway.create -}}
+{{- default (include "dagger-kubernetes.fullname" .) .Values.gateway.name -}}
+{{- else -}}
+{{- required "gateway.parentRef.name is required when gateway.enabled=true and gateway.create=false" .Values.gateway.parentRef.name -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the Gateway namespace: the release namespace when the chart renders
+its own Gateway, else gateway.parentRef.namespace (empty = release namespace). */}}
+{{- define "dagger-kubernetes.gatewayNamespace" -}}
+{{- if .Values.gateway.create -}}
+{{- include "dagger-kubernetes.namespace" . -}}
+{{- else -}}
+{{- default (include "dagger-kubernetes.namespace" .) .Values.gateway.parentRef.namespace -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the Dex subchart Service name (honors its fullnameOverride/nameOverride). */}}
+{{- define "dagger-kubernetes.dexServiceName" -}}
+{{- include "dagger-kubernetes.subchartServiceName" (dict "name" "dex" "values" .Values.dex "release" .Release.Name) -}}
+{{- end -}}
+
+{{/* Resolve the node-reachable mirror hostname (image_cache.mirrors[].external_addr,
+ADR-046): the Gateway API registryMirror host when gateway exposition is enabled
+and the mirror route is on, else the Ingress mirror host when registryIngress is
+enabled, else empty. */}}
+{{- define "dagger-kubernetes.registryMirrorExternalHost" -}}
+{{- if and .Values.gateway.enabled .Values.gateway.registryMirror.enabled -}}
+{{- .Values.gateway.registryMirror.host -}}
+{{- else if .Values.imageCache.registryIngress.enabled -}}
+{{- .Values.imageCache.registryIngress.host -}}
+{{- else -}}
+{{- "" -}}
+{{- end -}}
+{{- end -}}
+
+{{/* Resolve the data-plane TLS Secret name (mounted into the supervisor):
+gateway.data.tls.secretName when gateway exposition + data are enabled, else
+dataIngress.tls.secretName, else empty. */}}
+{{- define "dagger-kubernetes.dataTLSSecretName" -}}
+{{- if and .Values.gateway.enabled .Values.gateway.data.enabled .Values.gateway.data.tls.secretName -}}
+{{- .Values.gateway.data.tls.secretName -}}
+{{- else -}}
+{{- .Values.dataIngress.tls.secretName -}}
+{{- end -}}
+{{- end -}}
+
+{{/* True when the registry.dagger.io mirror is exposed through the Gateway:
+imageCache enabled + the registry.dagger.io preset + gateway.registryMirror. */}}
+{{- define "dagger-kubernetes.gatewayMirrorEnabled" -}}
+{{- $preset := index .Values.imageCache.presets "registry.dagger.io" | default dict -}}
+{{- and .Values.imageCache.enabled $preset.enabled .Values.gateway.registryMirror.enabled -}}
+{{- end -}}
+
+{{/* True when Dex is exposed through the Gateway: dex.enabled + gateway.dex. */}}
+{{- define "dagger-kubernetes.gatewayDexEnabled" -}}
+{{- and .Values.dex.enabled .Values.gateway.dex.enabled -}}
+{{- end -}}
+
+{{/* Render a Gateway listener's allowedRoutes block (namespaces from + optional
+selector). The caller re-indents the whole block with `nindent 6`, so the
+selector keys use a relative indent of 6. Args (dict): root. */}}
+{{- define "dagger-kubernetes.gatewayAllowedRoutes" -}}
+allowedRoutes:
+  namespaces:
+    from: {{ .root.Values.gateway.allowedRoutes.namespaces.from }}
+    {{- if eq .root.Values.gateway.allowedRoutes.namespaces.from "Selector" }}
+    selector:
+      {{- toYaml .root.Values.gateway.allowedRoutes.namespaces.selector | nindent 6 }}
+    {{- end }}
+{{- end -}}
+
 {{/* Compute a dependency subchart's Service name using that subchart's own
 fullname rule (the shared "contains" pattern of grafana/tempo, grafana/loki,
 minio, and opentelemetry-collector). Args (dict):
@@ -338,11 +414,28 @@ in the <service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 {{- end -}}
 
 {{/* Resolve the public control-plane URL (UI + API) from the exposition:
+- gateway (when gateway.enabled and gateway.control.enabled): https when
+  control.tls.enabled, http otherwise, host = gateway.control.host
 - ingress: https when ingress.tls is set, http otherwise, host = first ingress host
 - LoadBalancer/NodePort: https://<service.control.host>[:port]
 - ClusterIP: internal https://<release>-control.<namespace>.svc:<port> */}}
 {{- define "dagger-kubernetes.publicUrl" -}}
-{{- if .Values.ingress.enabled -}}
+{{- if and .Values.gateway.enabled .Values.gateway.control.enabled -}}
+{{- $host := required "gateway.control.host is required when gateway.enabled and gateway.control.enabled" .Values.gateway.control.host -}}
+{{- if .Values.gateway.control.tls.enabled -}}
+{{- if eq (int .Values.gateway.ports.https) 443 -}}
+{{- printf "https://%s" $host -}}
+{{- else -}}
+{{- printf "https://%s:%v" $host .Values.gateway.ports.https -}}
+{{- end -}}
+{{- else -}}
+{{- if eq (int .Values.gateway.ports.http) 80 -}}
+{{- printf "http://%s" $host -}}
+{{- else -}}
+{{- printf "http://%s:%v" $host .Values.gateway.ports.http -}}
+{{- end -}}
+{{- end -}}
+{{- else if .Values.ingress.enabled -}}
 {{- $host := "" -}}
 {{- range .Values.ingress.hosts -}}
 {{- if not $host -}}{{- $host = .host -}}{{- end -}}
@@ -367,12 +460,20 @@ in the <service>.<namespace>.svc form (see CONTRIBUTING.md). */}}
 
 {{/* Resolve the data-plane hostname (host[:port], no scheme — the supervisor
 appends :443 itself when no port is given) from the exposition:
+- gateway (when gateway.enabled and gateway.data.enabled): the passthrough host
 - dataIngress: the passthrough host (TLS, port 443)
 - LoadBalancer: <service.data.host>[:port]
 - NodePort: <service.data.host>:<service.data.nodePort> (nodePort required)
 - ClusterIP: internal <release>-data.<namespace>.svc:<port> */}}
 {{- define "dagger-kubernetes.dataHostname" -}}
-{{- if .Values.dataIngress.enabled -}}
+{{- if and .Values.gateway.enabled .Values.gateway.data.enabled -}}
+{{- $host := required "gateway.data.host is required when gateway.enabled and gateway.data.enabled" .Values.gateway.data.host -}}
+{{- if eq (int .Values.gateway.ports.tls) 443 -}}
+{{- $host -}}
+{{- else -}}
+{{- printf "%s:%v" $host .Values.gateway.ports.tls -}}
+{{- end -}}
+{{- else if .Values.dataIngress.enabled -}}
 {{- .Values.dataIngress.host -}}
 {{- else if eq .Values.service.data.type "LoadBalancer" -}}
 {{- $host := required "service.data.host is required when the data plane is exposed via LoadBalancer without dataIngress" .Values.service.data.host -}}
@@ -408,17 +509,25 @@ back the stable pod names used for discovery: <fullname>-headless. */}}
 {{- printf "%s-raft-ca" (include "dagger-kubernetes.fullname" .) -}}
 {{- end -}}
 
+{{/* Resolve the public Minting CA trust-bundle ConfigMap name (key ca.crt,
+certificates only). The supervisor keeps it in sync on bootstrap and through
+phased rotation; Gateway API BackendTLSPolicy reads it as a Core caCertificateRef. */}}
+{{- define "dagger-kubernetes.supervisorMintingCAConfigMap" -}}
+{{- printf "%s-minting-ca-bundle" (include "dagger-kubernetes.fullname" .) -}}
+{{- end -}}
+
 {{/* Resolve the data-plane server TLS provider. The chart auto-switches:
-- dataIngress.tls.secretName -> "external" (operator/cert-manager-managed
-  tls.crt/tls.key Secret, mounted at /etc/dagger-kubernetes/data-tls)
+- dataTLSSecretName (gateway.data.tls.secretName or dataIngress.tls.secretName)
+  -> "external" (operator/cert-manager-managed tls.crt/tls.key Secret, mounted
+  at /etc/dagger-kubernetes/data-tls)
 - dataCert.enabled -> "cert-manager" (chart-rendered Certificate, mounted at
   /etc/dagger-kubernetes/data-tls)
 - otherwise the configured supervisor.dataplane.tls.provider (default
-  "embedded"). When both dataCert.enabled and dataIngress.tls.secretName are
-  set, dataIngress.tls.secretName wins (that secret is mounted and served;
-  cert-manager's dataCert secret is unused). */}}
+  "embedded"). When both dataCert.enabled and a data TLS secret are set, the
+  secret wins (that secret is mounted and served; cert-manager's dataCert
+  secret is unused). */}}
 {{- define "dagger-kubernetes.dataplaneTLSProvider" -}}
-{{- if .Values.dataIngress.tls.secretName -}}
+{{- if ne (include "dagger-kubernetes.dataTLSSecretName" .) "" -}}
 external
 {{- else if .Values.dataCert.enabled -}}
 cert-manager
@@ -437,7 +546,7 @@ provider reads the <fullname>-tls Secret mounted at
 (the chart auto-wires certPath/keyPath to it), or the operator-supplied path
 when supervisor.dataplane.tls.certPath/tls.keyPath are set explicitly. */}}
 {{- define "dagger-kubernetes.dataplaneTLSCertPath" -}}
-{{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName -}}
+{{- if or .Values.dataCert.enabled (ne (include "dagger-kubernetes.dataTLSSecretName" .) "") -}}
 /etc/dagger-kubernetes/data-tls/tls.crt
 {{- else if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" -}}
 {{- if and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key -}}
@@ -451,7 +560,7 @@ when supervisor.dataplane.tls.certPath/tls.keyPath are set explicitly. */}}
 {{- end -}}
 
 {{- define "dagger-kubernetes.dataplaneTLSKeyPath" -}}
-{{- if or .Values.dataCert.enabled .Values.dataIngress.tls.secretName -}}
+{{- if or .Values.dataCert.enabled (ne (include "dagger-kubernetes.dataTLSSecretName" .) "") -}}
 /etc/dagger-kubernetes/data-tls/tls.key
 {{- else if eq (include "dagger-kubernetes.dataplaneTLSProvider" .) "external" -}}
 {{- if and .Values.supervisor.dataplane.tls.crt .Values.supervisor.dataplane.tls.key -}}

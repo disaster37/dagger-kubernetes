@@ -64,3 +64,10 @@ startup and persists it:
 - In multi-node, the `ca.minting_ca_secret` Secret holds the CA **private
   key** (any pod may mint client certs) and must be RBAC-restricted to the
   supervisor ServiceAccount.
+- With Gateway API exposition ([ADR-060](ADR-060-gateway-api-exposition.md)),
+  the leader supervisor publishes the **public** minting CA trust bundle
+  (certificates only, key `ca.crt`) into the `<fullname>-minting-ca-bundle`
+  ConfigMap (`ca.minting_ca_configmap`), which backs the control
+  `BackendTLSPolicy` verifying the supervisor's HTTPS `:8080` listener. The
+  bundle carries the full dual-trust set during phased rotation and never the
+  CA private key (that stays only in the `<fullname>-minting-ca` Secret).

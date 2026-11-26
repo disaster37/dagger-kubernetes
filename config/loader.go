@@ -316,6 +316,7 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("fleet.isolation", "per_org")
 
 	v.SetDefault("ca.minting_ca_secret", "supervisor-minting-ca")
+	v.SetDefault("ca.minting_ca_configmap", "supervisor-minting-ca-bundle")
 	v.SetDefault("ca.client_cert_ttl", 2*time.Hour)
 	v.SetDefault("ca.keyring_rotation_enabled", true)
 	v.SetDefault("ca.rotation_period", 24*time.Hour)

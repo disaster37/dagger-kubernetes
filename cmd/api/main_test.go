@@ -14,6 +14,7 @@ import (
 
 	"github.com/disaster37/go-raft/discovery"
 	"github.com/sirupsen/logrus"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
@@ -1063,5 +1064,256 @@ func TestSyncCASecretsAfterRotation(t *testing.T) {
 	}
 	if len(secret.Data["ca.crt"]) == 0 || len(secret.Data["ca.key"]) == 0 {
 		t.Fatal("minting-ca secret missing ca.crt/ca.key")
+	}
+}
+
+// newDynamicCAForTest builds a DynamicMintingCA over a fresh provider/sealer.
+func newDynamicCAForTest(t *testing.T) *repository.DynamicMintingCA {
+	t.Helper()
+	provider := repository.NewEmbeddedProvider(t.TempDir(), 2*time.Hour)
+	sealer, err := repository.DeriveSealer("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("DeriveSealer: %v", err)
+	}
+	dynamicCA, err := repository.NewDynamicMintingCA(repository.DynamicMintingCAConfig{
+		Provider: provider,
+		Sealer:   sealer,
+		Logger:   observ.NewTestLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewDynamicMintingCA: %v", err)
+	}
+	return dynamicCA
+}
+
+// TestSyncMintingCAConfigMapBootstrap proves the ConfigMap is created with the
+// single bootstrap CA certificate (key ca.crt) when no keyring is installed.
+func TestSyncMintingCAConfigMapBootstrap(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	dynamicCA := newDynamicCAForTest(t)
+	ctx := context.Background()
+
+	syncMintingCAConfigMap(ctx, clientset, "ns", "minting-ca-bundle", dynamicCA, observ.NewTestLogger())
+	cm, err := clientset.CoreV1().ConfigMaps("ns").Get(ctx, "minting-ca-bundle", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("minting-ca-bundle configmap not created: %v", err)
+	}
+	if cm.Data["ca.crt"] == "" {
+		t.Fatal("minting-ca-bundle missing ca.crt")
+	}
+	if strings.Contains(cm.Data["ca.crt"], "PRIVATE KEY") {
+		t.Fatal("minting-ca-bundle must never contain a private key")
+	}
+}
+
+// TestSyncMintingCAConfigMapPreservesHelmShell proves the sync populates ca.crt
+// on a pre-existing Helm-rendered shell (with labels/annotations, nil Data),
+// preserves those labels/annotations, and is a no-op on a second call.
+func TestSyncMintingCAConfigMapPreservesHelmShell(t *testing.T) {
+	shell := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "minting-ca-bundle",
+			Namespace:   "ns",
+			Labels:      map[string]string{"app.kubernetes.io/managed-by": "Helm", "helm.sh/chart": "dagger-kubernetes-0.1.1"},
+			Annotations: map[string]string{"meta.helm.sh/release-name": "dagger-kubernetes"},
+		},
+	}
+	clientset := fake.NewSimpleClientset(shell)
+	dynamicCA := newDynamicCAForTest(t)
+	ctx := context.Background()
+
+	syncMintingCAConfigMap(ctx, clientset, "ns", "minting-ca-bundle", dynamicCA, observ.NewTestLogger())
+	cm, err := clientset.CoreV1().ConfigMaps("ns").Get(ctx, "minting-ca-bundle", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("get configmap: %v", err)
+	}
+	if cm.Data["ca.crt"] == "" {
+		t.Fatal("ca.crt not populated on the Helm shell")
+	}
+	if cm.Labels["app.kubernetes.io/managed-by"] != "Helm" || cm.Labels["helm.sh/chart"] != "dagger-kubernetes-0.1.1" {
+		t.Fatalf("Helm labels not preserved: %v", cm.Labels)
+	}
+	if cm.Annotations["meta.helm.sh/release-name"] != "dagger-kubernetes" {
+		t.Fatalf("Helm annotations not preserved: %v", cm.Annotations)
+	}
+
+	// Second call with the same bundle must be an idempotent no-op (no new
+	// ResourceVersion, so the API server performs no write).
+	rv := cm.ResourceVersion
+	syncMintingCAConfigMap(ctx, clientset, "ns", "minting-ca-bundle", dynamicCA, observ.NewTestLogger())
+	cm2, err := clientset.CoreV1().ConfigMaps("ns").Get(ctx, "minting-ca-bundle", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("re-get configmap: %v", err)
+	}
+	if cm2.ResourceVersion != rv {
+		t.Fatalf("second sync rewrote the ConfigMap (rv %q -> %q)", rv, cm2.ResourceVersion)
+	}
+}
+
+// TestSyncMintingCAConfigMapEmptyNameNoOp proves an empty config-map name
+// disables publishing (mirrors ca.minting_ca_secret == "").
+func TestSyncMintingCAConfigMapEmptyNameNoOp(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	dynamicCA := newDynamicCAForTest(t)
+	ctx := context.Background()
+
+	syncMintingCAConfigMap(ctx, clientset, "ns", "", dynamicCA, observ.NewTestLogger())
+	list, err := clientset.CoreV1().ConfigMaps("ns").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		t.Fatalf("list configmaps: %v", err)
+	}
+	if len(list.Items) != 0 {
+		t.Fatalf("empty name must not create any ConfigMap, got %d", len(list.Items))
+	}
+}
+
+// TestSyncMintingCAConfigMapRotation proves the bundle tracks the phased
+// rotation: [M0] seeded, [M0, M1] during stage/activate, [M1] after pruning.
+func TestSyncMintingCAConfigMapRotation(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	provider := repository.NewEmbeddedProvider(t.TempDir(), 2*time.Hour)
+	sealer, err := repository.DeriveSealer("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatalf("DeriveSealer: %v", err)
+	}
+	dynamicCA, err := repository.NewDynamicMintingCA(repository.DynamicMintingCAConfig{
+		Provider: provider,
+		Sealer:   sealer,
+		Logger:   observ.NewTestLogger(),
+	})
+	if err != nil {
+		t.Fatalf("NewDynamicMintingCA: %v", err)
+	}
+
+	store := newRaftStoreForTest(t)
+	store.SetMetaHook(func(key, value string) {
+		if key == repository.MintingKeyringMetaKey {
+			if err := dynamicCA.SetKeyringJSON(value); err != nil {
+				t.Errorf("SetKeyringJSON: %v", err)
+			}
+		}
+	})
+
+	now := time.Now()
+	rotator := repository.NewMintingRotator(&repository.MintingRotatorConfig{
+		Store:          store,
+		CA:             dynamicCA,
+		Bootstrap:      provider.BootstrapProvider(),
+		Sealer:         sealer,
+		ClientCertTTL:  2 * time.Hour,
+		RotationPeriod: time.Hour,
+		CheckInterval:  time.Second,
+		CommonName:     "dagger-kubernetes-minting-ca",
+		Organization:   "dagger-kubernetes",
+		CAValidity:     30 * 365 * 24 * time.Hour,
+		Logger:         observ.NewTestLogger(),
+		Now:            func() time.Time { return now },
+	})
+	ctx := context.Background()
+
+	certCount := func(t *testing.T) int {
+		t.Helper()
+		cm, err := clientset.CoreV1().ConfigMaps("ns").Get(ctx, "minting-ca-bundle", metav1.GetOptions{})
+		if err != nil {
+			t.Fatalf("get configmap: %v", err)
+		}
+		return strings.Count(cm.Data["ca.crt"], "BEGIN CERTIFICATE")
+	}
+
+	// Seed [M0].
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+	syncMintingCAConfigMap(ctx, clientset, "ns", "minting-ca-bundle", dynamicCA, observ.NewTestLogger())
+	if got := certCount(t); got != 1 {
+		t.Fatalf("seed bundle certs = %d, want 1", got)
+	}
+
+	// Stage + Activate [M0, M1].
+	now = now.Add(2 * time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("stage: %v", err)
+	}
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+	syncMintingCAConfigMap(ctx, clientset, "ns", "minting-ca-bundle", dynamicCA, observ.NewTestLogger())
+	if got := certCount(t); got != 2 {
+		t.Fatalf("overlap bundle certs = %d, want 2", got)
+	}
+
+	// Prune [M1].
+	now = now.Add(2*2*time.Hour + time.Hour)
+	if err := rotator.RotateOnce(ctx); err != nil {
+		t.Fatalf("prune: %v", err)
+	}
+	syncMintingCAConfigMap(ctx, clientset, "ns", "minting-ca-bundle", dynamicCA, observ.NewTestLogger())
+	if got := certCount(t); got != 1 {
+		t.Fatalf("pruned bundle certs = %d, want 1", got)
+	}
+}
+
+// TestSyncCASecretLoopImmediateAndNotify proves the loop runs an immediate
+// leader pass on entry (populating the bundle before any tick) and re-syncs on
+// a caSyncNotify wake-up.
+func TestSyncCASecretLoopImmediateAndNotify(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	store := newRaftStoreForTest(t)
+	if !store.IsLeader() {
+		t.Skip("single-node store did not become leader")
+	}
+	dynamicCA := newDynamicCAForTest(t)
+	cfg := &domain.Config{}
+	cfg.Raft.Namespace = "ns"
+	cfg.CA.MintingCASecret = "minting-ca"
+	cfg.CA.MintingCAConfigMap = "minting-ca-bundle"
+	cfg.Raft.TLS.CASecret = ""
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	notify := make(chan struct{}, 1)
+	done := make(chan struct{})
+	go func() {
+		syncCASecretLoop(ctx, cfg, clientset, store, dynamicCA, notify, observ.NewTestLogger())
+		close(done)
+	}()
+
+	// Immediate pass: the bundle appears without any ticker/notify.
+	deadline := time.After(10 * time.Second)
+	for {
+		cm, err := clientset.CoreV1().ConfigMaps("ns").Get(ctx, "minting-ca-bundle", metav1.GetOptions{})
+		if err == nil && cm.Data["ca.crt"] != "" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("immediate CA sync pass did not populate the bundle")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	// Wake-up: delete the bundle and notify; it must be recreated.
+	if err := clientset.CoreV1().ConfigMaps("ns").Delete(ctx, "minting-ca-bundle", metav1.DeleteOptions{}); err != nil {
+		t.Fatalf("delete configmap: %v", err)
+	}
+	notify <- struct{}{}
+	deadline = time.After(10 * time.Second)
+	for {
+		cm, err := clientset.CoreV1().ConfigMaps("ns").Get(ctx, "minting-ca-bundle", metav1.GetOptions{})
+		if err == nil && cm.Data["ca.crt"] != "" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("caSyncNotify wake-up did not re-sync the bundle")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("syncCASecretLoop did not return after cancel")
 	}
 }

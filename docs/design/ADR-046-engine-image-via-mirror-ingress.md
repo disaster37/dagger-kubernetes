@@ -94,3 +94,7 @@ stateless function; no new logging or concurrency.
   supervisor does not orchestrate pulls (unchanged, ADR-033/ADR-043).
 - Follow-up unchanged from ADR-043: cert-manager auto-issuance and
   private-upstream credentials remain open.
+- With Gateway API exposition ([ADR-060](ADR-060-gateway-api-exposition.md)),
+  the mirror is exposed through an `HTTPRoute` (`gateway.registryMirror.*`)
+  instead of an `Ingress`; `external_addr` then follows
+  `gateway.registryMirror.host`.

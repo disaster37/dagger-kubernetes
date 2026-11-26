@@ -43,16 +43,19 @@ var binaries = []struct {
 }
 
 // helmVariant is one helm template matrix case: the --set arguments to render
-// with, plus substrings that must appear in the rendered manifests. A variant
-// with no expectations only has to render successfully; a variant with
-// expectations additionally proves the rendered auto-wired URLs are correct
-// (a successful render alone would mask a URL that silently points at a
-// renamed — or nonexistent — dependency Service). Substrings stop right after
-// the Service name (before the namespace) so they stay stable across
-// environments, because helm template picks up the kubeconfig's namespace.
+// with, plus substrings that must appear (expect) or must NOT appear (forbid)
+// in the rendered manifests. A variant with no expectations only has to render
+// successfully; a variant with expectations additionally proves the rendered
+// auto-wired URLs are correct (a successful render alone would mask a URL that
+// silently points at a renamed — or nonexistent — dependency Service).
+// Substrings stop right after the Service name (before the namespace) so they
+// stay stable across environments, because helm template picks up the
+// kubeconfig's namespace. `forbid` proves a resource is NOT rendered (e.g. the
+// shared-Gateway variant must not emit a Gateway).
 type helmVariant struct {
 	sets   []string
 	expect []string
+	forbid []string
 }
 
 // helmTemplateMatrix lists the --set combinations from the original CI.
@@ -94,6 +97,10 @@ var helmTemplateMatrix = []helmVariant{
 			// select on component: supervisor (not name+instance alone), the
 			// regression this fix addresses.
 			"selector:\n    app.kubernetes.io/name: dagger-kubernetes\n    app.kubernetes.io/instance: dagger-kubernetes\n    app.kubernetes.io/component: supervisor",
+			// The public Minting CA trust-bundle ConfigMap is rendered by
+			// default (supervisor.enabled) and wired through ca.minting_ca_configmap.
+			`minting_ca_configmap: "dagger-kubernetes-dagger-kubernetes-minting-ca-bundle"`,
+			"name: dagger-kubernetes-dagger-kubernetes-minting-ca-bundle",
 		},
 	},
 	{
@@ -190,6 +197,109 @@ var helmTemplateMatrix = []helmVariant{
 			// cut long-lived idle engine sessions.
 			"sessionParameters:",
 			`timeout: "24h"`,
+		},
+	},
+	// Gateway API exposition (NGINX Gateway Fabric): a dedicated Gateway with
+	// HTTP/HTTPS/TLS listeners, HTTPRoute/TLSRoute/BackendTLSPolicy, and the
+	// NGF v1alpha1 policies, alongside the dataCert Certificate and the
+	// registry mirror. Proves the rendered URLs follow the gateway precedence
+	// (public_url from gateway.control.host, data_hostname from
+	// gateway.data.host, external_addr from gateway.registryMirror.host) and
+	// that the data Cert SAN follows gateway.data.host.
+	{
+		sets: []string{
+			"--set", "ingress.enabled=false",
+			"--set", "gateway.enabled=true",
+			"--set", `gateway.annotations.cert-manager\.io/cluster-issuer=letsencrypt-prod`,
+			"--set", "gateway.control.host=supv.example.com",
+			"--set", "gateway.data.enabled=true",
+			"--set", "gateway.data.host=data.example.com",
+			"--set", "dataCert.enabled=true",
+			"--set", "imageCache.enabled=true",
+			"--set", `imageCache.presets.registry\.dagger\.io.enabled=true`,
+			"--set", "imageCache.tls.enabled=true",
+			"--set", "imageCache.tls.secretName=mirror-tls",
+			"--set", "imageCache.tls.caSecretName=mirror-ca",
+			"--set", "gateway.registryMirror.enabled=true",
+			"--set", "gateway.registryMirror.host=mirror.example.com",
+			"--set", "dex.enabled=true",
+			"--set", "dex.ingress.enabled=false",
+			"--set", "gateway.dex.enabled=true",
+			"--set", "gateway.dex.host=dex.example.com",
+		},
+		expect: []string{
+			"kind: Gateway",
+			`gatewayClassName: "nginx"`,
+			"mode: Passthrough",
+			"kind: HTTPRoute",
+			// TLSRoute must be GA v1 (Gateway API v1.7.0 serves v1 only).
+			"apiVersion: gateway.networking.k8s.io/v1\nkind: TLSRoute",
+			"kind: BackendTLSPolicy",
+			"kind: ClientSettingsPolicy",
+			"kind: ProxySettingsPolicy",
+			"kind: SnippetsPolicy",
+			`context: "stream.server"`,
+			`value: "proxy_timeout 24h;"`,
+			`public_url: "https://supv.example.com"`,
+			`data_hostname: "data.example.com"`,
+			`external_addr: "mirror.example.com"`,
+			`- "data.example.com"`,
+			"-control.",
+			// HTTP->HTTPS redirect route and the mirror BackendTLSPolicy
+			// hostname (the mirror Service) plus the Dex route host.
+			"statusCode: 301",
+			"-registry-dagger-io-mirror.",
+			"dex.example.com",
+			// Control BackendTLSPolicy reads the Core ConfigMap bundle the
+			// supervisor syncs; the mirror policy reads the explicit/default
+			// mirror CA ConfigMap.
+			`kind: "ConfigMap"`,
+			`name: "dagger-kubernetes-dagger-kubernetes-minting-ca-bundle"`,
+			`name: "mirror-ca"`,
+		},
+		forbid: []string{
+			"gateway.networking.k8s.io/v1alpha2",
+			"gateway.networking.k8s.io/v1alpha3",
+			"gateway.networking.k8s.io/v1beta1",
+		},
+	},
+	// Shared-Gateway mode: no dedicated Gateway is rendered; every route
+	// attaches to the existing Gateway named by gateway.parentRef (cross
+	// namespace), and the NGF-specific policies are disabled for portability
+	// to other Gateway API implementations. The forbid list proves neither a
+	// Gateway nor a SnippetsPolicy leaks into the shared-mode render.
+	{
+		sets: []string{
+			"--set", "ingress.enabled=false",
+			"--set", "gateway.enabled=true",
+			"--set", "gateway.create=false",
+			"--set", "gateway.parentRef.name=shared-gw",
+			"--set", "gateway.parentRef.namespace=gateway-system",
+			"--set", "gateway.nginxPolicies.enabled=false",
+			"--set", "gateway.data.enabled=true",
+			"--set", "gateway.data.host=data.example.com",
+		},
+		expect: []string{
+			`name: "shared-gw"`,
+			`namespace: "gateway-system"`,
+			"kind: HTTPRoute",
+			"kind: TLSRoute",
+		},
+		forbid: []string{"kind: Gateway", "kind: SnippetsPolicy", "gateway.networking.k8s.io/v1alpha2"},
+	},
+	// allowedRoutes.namespaces.from=Selector: the rendered Gateway listeners
+	// carry a valid selector block (the gatewayAllowedRoutes helper indents it
+	// correctly — a regression here fails rendering outright).
+	{
+		sets: []string{
+			"--set", "gateway.enabled=true",
+			"--set", "gateway.allowedRoutes.namespaces.from=Selector",
+			"--set", "gateway.allowedRoutes.namespaces.selector.matchLabels.gateway=shared",
+		},
+		expect: []string{
+			"from: Selector",
+			"matchLabels:",
+			"gateway: shared",
 		},
 	},
 }
@@ -339,7 +449,7 @@ func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 		if _, err := ctr.Sync(ctx); err != nil {
 			return fmt.Errorf("helm template variant %d: %w", i, err)
 		}
-		if len(variant.expect) == 0 {
+		if len(variant.expect) == 0 && len(variant.forbid) == 0 {
 			continue
 		}
 		out, err := ctr.Stdout(ctx)
@@ -349,6 +459,11 @@ func (m *DaggerKubernetes) Helm(ctx context.Context) error {
 		for _, want := range variant.expect {
 			if !strings.Contains(out, want) {
 				return fmt.Errorf("helm template variant %d: rendered output does not contain %q", i, want)
+			}
+		}
+		for _, unwanted := range variant.forbid {
+			if strings.Contains(out, unwanted) {
+				return fmt.Errorf("helm template variant %d: rendered output unexpectedly contains %q", i, unwanted)
 			}
 		}
 	}

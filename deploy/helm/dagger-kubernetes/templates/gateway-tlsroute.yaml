@@ -1,0 +1,28 @@
+{{- if and .Values.supervisor.enabled .Values.gateway.enabled .Values.gateway.data.enabled }}
+{{- $ns := include "dagger-kubernetes.namespace" . }}
+{{- $fullname := include "dagger-kubernetes.fullname" . }}
+apiVersion: gateway.networking.k8s.io/v1
+kind: TLSRoute
+metadata:
+  name: {{ printf "%s-data" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+  {{- with .Values.gateway.data.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  parentRefs:
+    - name: {{ include "dagger-kubernetes.gatewayName" . | quote }}
+      namespace: {{ include "dagger-kubernetes.gatewayNamespace" . | quote }}
+      {{- if .Values.gateway.data.sectionName }}
+      sectionName: {{ .Values.gateway.data.sectionName | quote }}
+      {{- end }}
+  hostnames:
+    - {{ .Values.gateway.data.host | quote }}
+  rules:
+    - backendRefs:
+        - name: {{ printf "%s-data" $fullname }}
+          port: {{ .Values.service.data.port }}
+{{- end }}

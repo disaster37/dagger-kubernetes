@@ -1,0 +1,75 @@
+{{- if and .Values.gateway.enabled .Values.gateway.nginxPolicies.enabled }}
+{{- $ns := include "dagger-kubernetes.namespace" . }}
+{{- $fullname := include "dagger-kubernetes.fullname" . }}
+{{- $mirrorEnabled := eq (include "dagger-kubernetes.gatewayMirrorEnabled" .) "true" }}
+{{- $mirrorSvc := printf "%s-%s-mirror" .Release.Name (include "dagger-kubernetes.imageCacheSlug" "registry.dagger.io") }}
+{{- if and .Values.supervisor.enabled .Values.gateway.control.enabled }}
+apiVersion: gateway.nginx.org/v1alpha1
+kind: ClientSettingsPolicy
+metadata:
+  name: {{ printf "%s-control-client" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: HTTPRoute
+    name: {{ $fullname }}
+  body:
+    maxSize: {{ .Values.gateway.control.maxBodySize | quote }}
+---
+apiVersion: gateway.nginx.org/v1alpha1
+kind: ProxySettingsPolicy
+metadata:
+  name: {{ printf "%s-control-proxy" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $fullname }}
+  timeout:
+    read: {{ .Values.gateway.control.readTimeout | quote }}
+    send: {{ .Values.gateway.control.sendTimeout | quote }}
+---
+{{- end }}
+{{- if $mirrorEnabled }}
+apiVersion: gateway.nginx.org/v1alpha1
+kind: ProxySettingsPolicy
+metadata:
+  name: {{ printf "%s-proxy" $mirrorSvc }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+    app.kubernetes.io/component: image-cache
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: HTTPRoute
+      name: {{ $mirrorSvc }}
+  timeout:
+    read: {{ .Values.gateway.registryMirror.readTimeout | quote }}
+    send: {{ .Values.gateway.registryMirror.sendTimeout | quote }}
+---
+{{- end }}
+{{- if and .Values.supervisor.enabled .Values.gateway.create .Values.gateway.data.enabled .Values.gateway.nginxPolicies.snippets.enabled }}
+apiVersion: gateway.nginx.org/v1alpha1
+kind: SnippetsPolicy
+metadata:
+  name: {{ printf "%s-stream-timeout" $fullname }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "dagger-kubernetes.labels" . | nindent 4 }}
+spec:
+  targetRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: {{ include "dagger-kubernetes.gatewayName" . }}
+  snippets:
+    - context: "stream.server"
+      value: {{ printf "proxy_timeout %s;" .Values.gateway.data.sessionTimeout | quote }}
+{{- end }}
+{{- end }}
