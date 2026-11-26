@@ -696,13 +696,18 @@ func TestParityRerunChecksIDOR(t *testing.T) {
 func TestParityRerunLoad(t *testing.T) {
 	e := newParityEnv(t, true)
 	seedCheckRun(t, e.checks, &domain.CheckRunRecord{ID: "check-loadfail", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s", Status: "failed", CreatedAt: time.Now().UTC()})
-	res := execJSON(t, e.g, e.ctx(), `mutation { rerunLoad(org: "acme", checkId: "check-loadfail/load") { id name status internal } }`, nil)
+	res := execJSON(t, e.g, e.ctx(), `mutation { rerunLoad(org: "acme", checkId: "check-loadfail/load") { id name status internal filters } }`, nil)
 	if hasErrors(res) {
 		t.Fatalf("errors: %v", errorMessages(t, res))
 	}
 	c := res["data"].(map[string]any)["rerunLoad"].(map[string]any)
 	if c["name"] != "load" || c["status"] != "pending" || c["internal"] != true {
 		t.Fatalf("rerunLoad = %v", c)
+	}
+	// filters is [String!]! in the schema: it must serialize as an empty list,
+	// never null, so a beta CLI selecting Check.filters cannot error.
+	if f, ok := c["filters"].([]any); !ok || f == nil {
+		t.Fatalf("rerunLoad filters = %v, want a non-null empty list", c["filters"])
 	}
 }
 

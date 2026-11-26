@@ -320,7 +320,6 @@ var checkFilterRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,40}=[A-Za-z0-9_./:@+\[
 var checkFilterPrefixes = []struct {
 	category string
 	key      string
-	values   []string
 }{
 	{category: "tests", key: "go-test"},
 	{category: "files", key: "go-package"},

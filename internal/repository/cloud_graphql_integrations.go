@@ -387,6 +387,9 @@ func (r *graphqlRoot) RerunLoad(ctx context.Context, args struct {
 		moduleRef:     canonicalCheckModuleRef(rec),
 		moduleVersion: rec.SHA,
 		internal:      true,
+		// Non-null in the schema: an empty (not nil) list keeps the field
+		// serializing as [] regardless of graphql-go's nil-slice handling.
+		filters: append([]string{}, rec.Filters...),
 	}, nil
 }
 
