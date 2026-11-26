@@ -316,14 +316,20 @@ func New(
 
 // Lint runs golangci-lint against the Go source.
 //
-// It delegates to the golang module with a custom base container that has
-// golangci-lint preinstalled, preserving the CI version pin. The binary must
-// live outside $(go env GOPATH)/bin: the golang module mounts a cache volume
-// there, which hides whatever the base image installed, making the module fall
-// back to downloading whatever release GitHub reports as latest.
+// Implemented locally (in the golang module's own container) because the
+// module's Lint downloads golangci-lint through the Dagger core GitHub module
+// when the binary is missing, and that module is incompatible with recent
+// engines (OTel import cycle). Installing through the Go module proxy keeps
+// the step deterministic and independent of the GitHub API (which rate-limits
+// unauthenticated CI calls). The latest release is installed, so code must
+// pass with the current latest golangci-lint.
 func (m *DaggerKubernetes) Lint(ctx context.Context) (string, error) {
+	ctr := dag.Golang(m.Src).
+		Container().
+		WithExec([]string{"go", "install", "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@latest"}).
+		WithExec([]string{"golangci-lint", "run", "--timeout", "5m", "--output.text.colors"})
 
-	out, err := dag.Golang(m.Src).Lint(ctx)
+	out, err := ctr.Stdout(ctx)
 	if err != nil {
 		return "", fmt.Errorf("golangci-lint: %w", err)
 	}
@@ -333,12 +339,14 @@ func (m *DaggerKubernetes) Lint(ctx context.Context) (string, error) {
 // Test runs go vet and go test -race with coverage.
 //
 // Implemented locally because the upstream golang module hardcodes test flags
-// (no -race, -vet=off). -race requires CGO, so a debian (not alpine) image is
-// used and CGO_ENABLED is not set to 0.
+// (no -race, -vet=off). It reuses the golang module's own base container — the
+// debian-based golang image resolved from go.mod, with the Go caches mounted
+// and the source at /src — so the toolchain matches the module's other
+// functions. -race requires CGO, which that image provides; CGO_ENABLED is
+// left at its default.
 func (m *DaggerKubernetes) Test(ctx context.Context) (*dagger.File, error) {
-	ctr := dag.Container().
-		WithMountedDirectory("/src", m.Src).
-		WithWorkdir("/src").
+	ctr := dag.Golang(m.Src).
+		Container().
 		WithExec([]string{"go", "vet", "./..."}).
 		WithExec([]string{
 			"go", "test",
@@ -566,8 +574,16 @@ func (m *DaggerKubernetes) JenkinsLibs(
 		return nil, fmt.Errorf("%s is empty: nothing to package (is the submodule initialized? run: git submodule update --init)", jenkinsLibsDir)
 	}
 
+	// The Jenkins library has no go.mod, so the golang module cannot resolve a
+	// version from it; pass the repository's Go version so the module resolves
+	// its own base image (no image override).
+	goVersion, err := dag.Golang(m.Src).ModVersion(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("resolve go version: %w", err)
+	}
+
 	outPath := fmt.Sprintf("/out/%s", name)
-	ctr := dag.Golang(src).
+	ctr := dag.Golang(src, dagger.GolangOpts{Version: goVersion}).
 		Container().
 		WithExec([]string{"bash", "-c", fmt.Sprintf(
 			"set -o pipefail && mkdir -p /out && tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner -cf - -C /src . | gzip -n > '%s'",

@@ -180,7 +180,7 @@ Requirements to mirror CI locally:
 
 The CI pipeline is a local Dagger module in `dagger/` (module name `dagger-kubernetes`).
 It delegates lint and build to the `golang` module and helm lint to the `helm`
-module from `github.com/disaster37/dagger-library-go` (pinned at `2.0.10`); test,
+module from `github.com/disaster37/dagger-library-go` (pinned in `dagger/dagger.json`: `golang`/`helm` at `2.0.12`, `image` at `2.0.19`); test,
 UI, docker, and the helm template matrix are implemented locally because the
 upstream modules cannot express `-race`, the UI build, the Dockerfile smoke
 test, or `helm template`. See [`DAGGER.md`](./DAGGER.md) for the full reference.
@@ -215,12 +215,10 @@ source of breakage. The three recurring failures are:
        _ = srv.Shutdown(shutdownCtx)
    })
    ```
-3. **Assuming the pinned lint version is what runs.** The Dagger `golang`
-   module re-installs `golangci-lint` if its binary is not found on `PATH` in
-   the base image, falling back to the **latest release** (not the pinned
-   `golangciLintVersion` in `dagger/main.go`). Code must therefore pass with
-   the current latest `golangci-lint`, not just the pinned version. Bump the
-   pin deliberately and re-run the full `ci` afterwards.
+3. **Assuming a pinned lint version runs.** There is no local golangci-lint
+   pin: the `lint` step installs the **latest release** through the Go module
+   proxy. Code must pass with the current latest `golangci-lint`; run
+   `dagger call -m ./dagger --src . lint` after tooling changes.
 
 ```bash
 # Full CI pipeline (lint + test + ui + build + docker + helm + jenkins-libs) — what the workflow runs
@@ -329,7 +327,7 @@ directory. When editing one, copy it verbatim to the other and verify with
 - [ ] In-cluster component URLs (cache registry, loki, victoria, ...) use the `<service>.<namespace>.svc` suffix
 - [ ] Tests cover new code (target 100% coverage)
 - [ ] Integration test proves feature works with real Dagger client
-- [ ] `golangci-lint run ./...` passes (CI may run a newer golangci-lint than the pinned version in `dagger/main.go` — the latest release must also pass)
+- [ ] `golangci-lint run ./...` passes (CI runs the latest golangci-lint release — it must pass too)
 - [ ] No string concatenation (`+`), use `fmt.Sprintf`
 - [ ] Config fields have defaults in `config.Load()`
 - [ ] Errors are wrapped with `%w`
