@@ -95,6 +95,7 @@ func ciFlags() []cli.Flag {
 		&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
 		&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
+		&cli.StringFlag{Name: "runner-host", EnvVars: []string{runnerHostEnvName}, Value: defaultRunnerHost, Usage: "Dagger engine driver for the wrapped CLI; an explicit --engine argument always wins (empty = do not export)"},
 		&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
 		&cli.BoolFlag{Name: "cli", Usage: "Provision the Dagger CLI binary on the fly from the supervisor"},
 		&cli.StringFlag{Name: "cli-version", Usage: "Dagger CLI version to provision (empty = latest allowed)"},
@@ -119,6 +120,7 @@ func run(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	// Only trust config values when an actual regular config file was
 	// present; config.LoadForCIWrapper otherwise returns compiled-in
@@ -161,17 +163,27 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("no dagger command specified")
 	}
 
-	_ = os.Setenv("DAGGER_CLOUD_URL", serverURL)
-	_ = os.Setenv("DAGGER_CLOUD_TOKEN", token)
-	_ = os.Setenv("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "dagger-cloud://self")
-	// Live span export: without this the engine only exports spans at
-	// completion, so per-step state would never appear while the run is live.
-	_ = os.Setenv("OTEL_EXPORTER_OTLP_TRACES_LIVE", "1")
+	runnerHost := resolveRunnerHost(c.String("runner-host"), cmdArgs)
+	org := c.String("org")
+	env := daggerEnv(os.Environ(), daggerEnvOpts{
+		Server:        serverURL,
+		Token:         token,
+		RunnerHost:    runnerHost,
+		EngineVersion: version,
+		Org:           org,
+	})
 
-	if version != "" {
-		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", version)
+	// Resolve the CLI the wrapper will actually exec (PATH lookup happens in
+	// the parent process, so a provisioned PATH entry does not change it).
+	// The x-release guard must inspect that exact binary: before 0.21.8 the
+	// re-exec drops the runner host and would dial a local engine.
+	daggerBin := "dagger"
+	if p, lerr := exec.LookPath("dagger"); lerr == nil {
+		daggerBin = p
 	}
-
+	if gerr := checkXReleaseRunnerHost(rootCtx, logger, daggerBin, cmdArgs, env, runnerHost); gerr != nil {
+		return gerr
+	}
 	timeout := c.Duration("timeout")
 	if timeout < 0 {
 		return fmt.Errorf("--timeout must be >= 0")
@@ -182,7 +194,6 @@ func run(c *cli.Context) error {
 		cmdCtx, cmdCancel = context.WithTimeout(rootCtx, timeout)
 	}
 	defer cmdCancel()
-	org := c.String("org")
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
@@ -195,17 +206,14 @@ func run(c *cli.Context) error {
 		cmd.Stdout = os.Stdout
 	}
 
-	cmd.Env = os.Environ()
-	if org != "" {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("DAGGER_ORG=%s", org))
-	}
+	cmd.Env = env
 	if c.Bool("cli") {
 		binDir, cleanup, err := provisionCLI(rootCtx, serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
 		if err != nil {
 			return fmt.Errorf("provision dagger cli: %w", err)
 		}
 		defer cleanup()
-		cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+		cmd.Env = upsertEnv(cmd.Env, "PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
 	}
 
 	var logBuf strings.Builder
@@ -227,8 +235,6 @@ func run(c *cli.Context) error {
 	)
 
 	cmd.Stderr = io.MultiWriter(os.Stderr, &logBuf)
-
-	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	timeoutDisplay := "none"
 	if timeout > 0 {

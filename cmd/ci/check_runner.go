@@ -94,7 +94,7 @@ func runCheckRunner(c *cli.Context) error {
 		return err
 	}
 	defer binCleanup()
-	env := append(runnerEnv(server, token, c.String("org")), binExtraEnv...)
+	env := append(runnerEnv(server, token, c.String("org"), defaultRunnerHost), binExtraEnv...)
 
 	workflowFiles, contextFiles := scanWorkflowFiles(workdir)
 	checks, err := listChecks(ctx, daggerBin, workdir, env)

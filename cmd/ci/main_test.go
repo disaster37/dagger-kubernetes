@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -1269,7 +1270,7 @@ func TestResolveCloneURL(t *testing.T) {
 }
 
 func TestRunnerEnvSetsBothEngineVars(t *testing.T) {
-	env := runnerEnv("https://example.com", "tok", "acme")
+	env := runnerEnv("https://example.com", "tok", "acme", defaultRunnerHost)
 	joined := strings.Join(env, "\n")
 	for _, want := range []string{
 		"DAGGER_ENGINE=cloud",
@@ -1281,8 +1282,225 @@ func TestRunnerEnvSetsBothEngineVars(t *testing.T) {
 			t.Fatalf("env missing %q: %v", want, env)
 		}
 	}
-	if strings.Contains(strings.Join(runnerEnv("https://example.com", "tok", ""), "\n"), "DAGGER_ORG=") {
+	if strings.Contains(strings.Join(runnerEnv("https://example.com", "tok", "", defaultRunnerHost), "\n"), "DAGGER_ORG=") {
 		t.Fatal("empty org must not set DAGGER_ORG")
+	}
+	// No runner host means no export: an explicit --engine selector must win.
+	// The inherited process env is left untouched (it is neither replaced nor
+	// duplicated).
+	noHost := runnerEnv("https://example.com", "tok", "", "")
+	if got, want := envKeyCount(noHost, runnerHostEnvName), envKeyCount(os.Environ(), runnerHostEnvName); got != want {
+		t.Fatalf("empty runner host changed %s entries: got %d, want %d", runnerHostEnvName, got, want)
+	}
+}
+
+// envKeyCount counts entries for key in env.
+func envKeyCount(env []string, key string) int {
+	prefix := fmt.Sprintf("%s=", key)
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestUpsertEnv(t *testing.T) {
+	base := []string{"PATH=/bin", "DAGGER_ORG=old", "DAGGER_ORG=duplicate", "OTHER=1"}
+	got := upsertEnv(base, "DAGGER_ORG", "new")
+	if got[0] != "PATH=/bin" {
+		t.Errorf("unrelated entry lost: %v", got)
+	}
+	if got[2] != "OTHER=1" {
+		t.Errorf("unrelated entry lost: %v", got)
+	}
+	count := 0
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "DAGGER_ORG=") {
+			count++
+			if kv != "DAGGER_ORG=new" {
+				t.Errorf("value = %q, want DAGGER_ORG=new", kv)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("duplicate keys left behind: %v", got)
+	}
+	appended := upsertEnv([]string{"PATH=/bin"}, "NEW", "v")
+	if len(appended) != 2 || appended[1] != "NEW=v" {
+		t.Errorf("append failed: %v", appended)
+	}
+	// A key that is a prefix of another must not match.
+	kept := upsertEnv([]string{"FOOBAR=1"}, "FOO", "2")
+	if len(kept) != 2 || kept[0] != "FOOBAR=1" {
+		t.Errorf("prefix key matched: %v", kept)
+	}
+}
+
+func TestDaggerEnvUpsert(t *testing.T) {
+	base := []string{"DAGGER_ORG=stale", "PATH=/bin"}
+	env := daggerEnv(base, daggerEnvOpts{
+		Server: "https://example.com", Token: "tok", RunnerHost: defaultRunnerHost,
+		EngineVersion: "v1.0.0-beta.20", Org: "acme",
+	})
+	want := map[string]string{
+		"DAGGER_CLOUD_URL":               "https://example.com",
+		"DAGGER_CLOUD_TOKEN":             "tok",
+		"OTEL_EXPORTER_OTLP_TRACES_LIVE": "1",
+		runnerHostEnvName:                defaultRunnerHost,
+		"_EXPERIMENTAL_DAGGER_TAG":       "v1.0.0-beta.20",
+		"DAGGER_ORG":                     "acme",
+	}
+	seen := make(map[string]int, len(env))
+	for _, kv := range env {
+		key, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			t.Fatalf("malformed env entry %q", kv)
+		}
+		seen[key]++
+		if w, ok := want[key]; ok && value != w {
+			t.Errorf("%s = %q, want %q", key, value, w)
+		}
+	}
+	for key := range want {
+		if seen[key] != 1 {
+			t.Errorf("%s appears %d times, want 1 (%v)", key, seen[key], env)
+		}
+	}
+
+	// Empty optional values are omitted, not blanked.
+	minimal := daggerEnv([]string{"PATH=/bin"}, daggerEnvOpts{Server: "s", Token: "t"})
+	joined := strings.Join(minimal, "\n")
+	for _, absent := range []string{runnerHostEnvName, "_EXPERIMENTAL_DAGGER_TAG", "DAGGER_ORG="} {
+		if strings.Contains(joined, absent) {
+			t.Errorf("optional %q must be omitted: %v", absent, minimal)
+		}
+	}
+}
+
+func TestResolveRunnerHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		requested string
+		args      []string
+		want      string
+	}{
+		{name: "default", requested: defaultRunnerHost, args: []string{"call", "build"}, want: defaultRunnerHost},
+		{name: "explicit engine flag", requested: defaultRunnerHost, args: []string{"call", "--engine", "ssh://host", "build"}, want: ""},
+		{name: "inline engine flag", requested: defaultRunnerHost, args: []string{"call", "--engine=k8s://ctx", "build"}, want: ""},
+		{name: "empty requested stays empty", requested: "", args: []string{"call"}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveRunnerHost(tc.requested, tc.args); got != tc.want {
+				t.Fatalf("resolveRunnerHost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestXReleaseRequested(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		env  []string
+		want bool
+	}{
+		{name: "flag", args: []string{"call", "--x-release", "v1.0.0"}, want: true},
+		{name: "flag with value", args: []string{"call", "--x-release=v1.0.0"}, want: true},
+		{name: "env", args: []string{"call"}, env: []string{"DAGGER_X_RELEASE=v1.0.0"}, want: true},
+		{name: "empty env", args: []string{"call"}, env: []string{"DAGGER_X_RELEASE="}, want: false},
+		{name: "absent", args: []string{"call"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := xReleaseRequested(tc.args, tc.env); got != tc.want {
+				t.Fatalf("xReleaseRequested = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeCLI writes an executable that prints version as its `version` output.
+func fakeCLI(t *testing.T, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dagger")
+	script := fmt.Sprintf("#!/bin/sh\necho \"dagger %s (dagger-cloud://self) linux/amd64\"\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test helper must be executable
+		t.Fatalf("write fake cli: %v", err)
+	}
+	return path
+}
+
+func TestCheckXReleaseRunnerHost(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	ctx := context.Background()
+
+	cases := []struct {
+		name       string
+		version    string
+		args       []string
+		env        []string
+		runnerHost string
+		wantErr    bool
+	}{
+		{name: "no x-release", version: "v0.21.7", args: []string{"call"}, runnerHost: defaultRunnerHost},
+		{name: "explicit engine wins", version: "v0.21.7", args: []string{"call", "--x-release", "--engine", "ssh://h"}, runnerHost: ""},
+		{name: "old cli rejected", version: "v0.21.7", args: []string{"call", "--x-release"}, runnerHost: defaultRunnerHost, wantErr: true},
+		{name: "minimum accepted", version: "v0.21.8", args: []string{"call", "--x-release"}, runnerHost: defaultRunnerHost},
+		{name: "beta accepted", version: "v1.0.0-beta.28", args: []string{"call", "--x-release"}, runnerHost: defaultRunnerHost},
+		{name: "env-triggered rejected", version: "v0.21.7", args: []string{"call"}, env: []string{"DAGGER_X_RELEASE=v1.0.0"}, runnerHost: defaultRunnerHost, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := fakeCLI(t, tc.version)
+			err := checkXReleaseRunnerHost(ctx, logger, bin, tc.args, tc.env, tc.runnerHost)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkXReleaseRunnerHost error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), runnerHostEnvName) {
+				t.Fatalf("error must name the dropped env var: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckXReleaseRunnerHostUnknownVersion(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	bin := fakeCLI(t, "devel")
+	if err := checkXReleaseRunnerHost(context.Background(), logger, bin, []string{"call", "--x-release"}, nil, defaultRunnerHost); err != nil {
+		t.Fatalf("unknown CLI version must warn and proceed, got %v", err)
+	}
+	// A missing binary is also "unknown": warn, do not fail the run here (the
+	// dispatch itself reports the real exec error).
+	if err := checkXReleaseRunnerHost(context.Background(), logger, filepath.Join(t.TempDir(), "absent"), []string{"call", "--x-release"}, nil, defaultRunnerHost); err != nil {
+		t.Fatalf("missing CLI must warn and proceed, got %v", err)
+	}
+}
+
+func TestCliSemver(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{name: "0.21 form", version: "v0.21.10", want: "v0.21.10"},
+		{name: "beta form", version: "v1.0.0-beta.28", want: "v1.0.0-beta.28"},
+		{name: "unparseable", version: "devel", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cliSemver(context.Background(), fakeCLI(t, tc.version), nil); got != tc.want {
+				t.Fatalf("cliSemver = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := cliSemver(context.Background(), filepath.Join(t.TempDir(), "absent"), nil); got != "" {
+		t.Fatalf("missing binary must yield empty version, got %q", got)
 	}
 }
 
