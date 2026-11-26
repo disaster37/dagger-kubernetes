@@ -128,22 +128,23 @@ const openTests = ref<Record<string, boolean>>({})
 const statuses = ['all', 'waiting_approval', 'running', 'success', 'failed']
 const orgOptions = computed(() => orgs.value.map(o => ({ label: o.name, value: o.id })))
 
+function filterKeysFor(run: CheckRunRecord): string[] {
+  const keys = new Set<string>()
+  for (const check of run.checks || []) {
+    for (const key of Object.keys(check.filters || {})) keys.add(key)
+  }
+  return [...keys].sort()
+}
 const filterColumns = computed(() => {
   const keys = new Set<string>()
   for (const run of runs.value) {
-    for (const check of run.checks || []) {
-      for (const key of Object.keys(check.filters || {})) keys.add(key)
-    }
+    for (const key of filterKeysFor(run)) keys.add(key)
   }
   return [...keys].sort()
 })
 const visibleFilterColumns = computed(() => filterColumns.value.slice(0, MAX_FILTER_COLUMNS))
 function overflowFilterColumns(run: CheckRunRecord): string[] {
-  const keys = new Set<string>()
-  for (const check of run.checks || []) {
-    for (const key of Object.keys(check.filters || {})) keys.add(key)
-  }
-  return [...keys].sort().slice(MAX_FILTER_COLUMNS)
+  return filterKeysFor(run).filter(key => !visibleFilterColumns.value.includes(key))
 }
 function filterCell(run: CheckRunRecord, key: string): string {
   return (run.checks || [])
