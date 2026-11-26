@@ -81,10 +81,11 @@ func (r *SpanTreeReconstructor) reconstruct(traceID string, raw map[string]inter
 		parent.Children = append(parent.Children, s)
 	}
 
-	// A nested pipeline span whose parent arrived in a later batch/query is
-	// still parentless at this point; attach it under its parent instead of
-	// leaving it at the root (where the UI would show nested work as a
-	// parallel root step).
+	// A nested pipeline span whose parent arrived in a later batch/query would
+	// still be parentless at this point; re-check the complete span map so it
+	// attaches under its parent instead of surfacing at the root (where the UI
+	// would show nested work as a parallel root step). With a complete Tempo
+	// response this is a no-op; it hardens a streaming/partial response.
 	parentless = attachDeferred(nodes, parentless)
 
 	// Prefer the earliest-starting parentless span (the true root starts

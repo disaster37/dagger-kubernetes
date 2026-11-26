@@ -131,9 +131,11 @@ Honest record of what was verified against real binaries and what was inferred:
 
 - **Measured (live/CLI):** the version-gate behaviour (`TestResolverAdmitsChangelogRange`);
   the check-run Job path (clone → CLI provisioning → `check -l` → `/load` →
-  `/complete`) on the live cluster with the provisioned CLI; the OTLP
-  `/v1/metrics` accept-and-forward path; the GraphQL beta query matrix (against
-  the live schema); `dagger publish` (engine push retry, entries 16/38).
+  `/complete`) as recorded in the live runbook and re-exercised by this
+  deploy's E2E; the OTLP `/v1/metrics` accept-and-forward path
+  (`TestEngineMetricsIngest`); the GraphQL beta query matrix (in-process parity
+  tests against the same schema the live instance serves); `dagger publish`
+  (engine push retry, entries 16/38).
 - **Captured from the module graph, not from a live nested run:** the test-span
   attribute keys (`test.case.name`, `test.suite.name`,
   `test.case.result.status`) and the check attributes
@@ -142,12 +144,18 @@ Honest record of what was verified against real binaries and what was inferred:
   `attrs.go`). They are centralized in `testAttrKeys`, so one edit corrects
   them if a capture later shows a different key.
 - **Inferred (no capture available):** the nested-pipeline span shape (entry 30)
-  is implemented for the *same trace id* case (deferred re-parenting) because
-  the nested run needs a working engine session that the test environment could
-  not establish; the GraphQL recommendation field name (`recommendedModules`)
-  is the documented candidate and returns an empty list either way; the
-  `dag://` link column key is accepted as `LINK`/`DAG-LINK` when the CLI
-  provides it.
+  could not be captured because a nested run needs an engine session the test
+  environment could not establish. The existing single-pass reconstruction
+  already nests same-trace children whose parent is present in the response, so
+  the shipped change adds a defensive deferred re-parent pass (a no-op for a
+  complete Tempo response, load-bearing for a future partial/streaming one) and
+  locks the behaviour with `TestOrphanAdoptionNestedPipeline` /
+  `TestNestedPipelineTreeNests`. Cross-trace linking (a separate child trace
+  id + link attribute) is **not** implemented: it needs a capture to avoid
+  double-counting durations, and is listed as a follow-up. The GraphQL
+  recommendation field name (`recommendedModules`) is the documented candidate
+  and returns an empty list either way; the `dag://` link column key is
+  accepted as `LINK`/`DAG-LINK` when the CLI provides it.
 - **Not fabricated:** no captured trace or query is claimed as measured. The
   parity fixtures are schema-shaped replays, marked as such in the test.
 
