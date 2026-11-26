@@ -535,8 +535,8 @@ export async function approveForkCheckRun(id: string, includeSecrets = false): P
   const { data } = await api.post(`/api/v1/checks/runs/${id}/approve`, { include_secrets: includeSecrets })
   return data
 }
-export async function rerunCheckRun(id: string): Promise<CheckRunRecord> {
-  const { data } = await api.post(`/api/v1/checks/runs/${id}/rerun`)
+export async function rerunCheckRun(id: string, filters: { tests?: string[]; files?: string[]; checks?: string[] } = {}): Promise<CheckRunRecord> {
+  const { data } = await api.post(`/api/v1/checks/runs/${id}/rerun`, filters)
   return data
 }
 

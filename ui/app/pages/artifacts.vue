@@ -1,6 +1,11 @@
 <template>
   <div>
     <h1 class="mb-6 text-2xl font-semibold">Artifacts</h1>
+    <p class="mb-4 text-[13px] text-muted">
+      Workflow artifacts (stored objects uploaded by workflow jobs). Typed artifacts discovered by
+      Dagger — module, package, and test selectors — are shown on the
+      <NuxtLink to="/checks" class="underline">Checks</NuxtLink> page, not here.
+    </p>
     <UAlert v-if="error" color="error" variant="soft" :description="error" class="mb-4" />
     <UCard>
       <div class="mb-4 flex flex-wrap items-end gap-3">

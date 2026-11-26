@@ -597,12 +597,25 @@ export interface GitHubDeviceFlowStart {
   interval: number
 }
 
+export interface TestResult {
+  name: string
+  suite?: string
+  file?: string
+  status: 'passed' | 'failed' | 'skipped' | 'running'
+  duration_ms?: number
+  span_id?: string
+}
+
 export interface CheckItem {
   name: string
   state: 'pending' | 'success' | 'failure' | 'error'
   trace_id?: string
   summary?: string
   updated_at: string
+  // Per-test results derived at read time from the check's trace.
+  tests?: TestResult[]
+  // Typed artifact columns discovered by `dagger check -l --all`.
+  filters?: Record<string, string>
 }
 
 export interface CheckRunRecord {
@@ -626,6 +639,8 @@ export interface CheckRunRecord {
   approved_by?: string
   approved_at?: string
   checks?: CheckItem[]
+  // Canonical "--key=value" typed filters applied to a rerun.
+  filters?: string[]
   error?: string
   created_at: string
   updated_at: string
