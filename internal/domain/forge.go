@@ -184,6 +184,9 @@ type CheckItem struct {
 	TraceID   string     `json:"trace_id,omitempty"`
 	Summary   string     `json:"summary,omitempty"`
 	UpdatedAt time.Time  `json:"updated_at"`
+	// Tests is filled at read time from the check's trace (never persisted) so
+	// GET /api/v1/checks/runs exposes per-test results.
+	Tests []TestResult `json:"tests,omitempty"`
 }
 
 // CheckRunRecord is the replicated Cloud Checks run state.
