@@ -55,6 +55,22 @@ callback URL can be registered. Default scopes are `repo`, `read:org`, and
 token. A revoked token is surfaced as `ErrGitHubTokenRevoked` and can be replaced
 by re-running OAuth/device flow or pasting a new PAT.
 
+#### Device-only configuration
+
+Device flow is gated on `client_id != "" && device_flow_enabled`, independently
+of `oauth.enabled`. A deployment can therefore enable credential linking with
+only the public OAuth App client ID — no client secret and no callback URL —
+while keeping `forge.github.oauth.enabled: false` for the redirect flow. The
+redirect flow keeps its stricter validation (client secret, scopes, state TTL)
+and callback URL registration unchanged. Config validation does not require a
+client ID merely because `device_flow_enabled` defaults to `true`; with an empty
+client ID device flow is simply unavailable (`ErrGitHubDeviceFlowDisabled`,
+HTTP 400) and PAT linking remains the zero-config fallback. The app must be a
+GitHub **OAuth App** with "Enable Device Flow" ticked; GitHub Apps do not support
+device flow. The UI renders the device flow in a modal (copyable user code,
+verification link, expiry countdown, polling) and never displays the access
+token, which stays sealed server-side.
+
 ### C. Three-tier token/claim ownership
 
 1. **User scope (`UserGitHubConnection`)** — owned by one supervisor

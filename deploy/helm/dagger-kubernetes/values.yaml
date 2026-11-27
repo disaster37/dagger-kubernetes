@@ -503,16 +503,26 @@ supervisor:
         caCertPath: ""
         httpTimeout: "15s"
         oauth:
+## @param supervisor.config.forge.github.oauth.enabled Enable the GitHub OAuth App redirect flow for credential linking (independent of auth.oauth). Requires clientId and clientSecret (or clientSecretRef). Leave false for a device-flow-only or PAT-only setup.
           enabled: false
+## @param supervisor.config.forge.github.oauth.clientId GitHub OAuth App client ID (public; safe in the ConfigMap). With deviceFlowEnabled=true it enables device-flow-only linking without a secret or callback URL; required when enabled=true.
           clientId: ""
+## @param supervisor.config.forge.github.oauth.clientSecret GitHub OAuth App client secret (rendered into the `<release>-github-integration-oauth` Secret). Required only for the redirect flow (enabled=true); leave empty for device-flow-only.
           clientSecret: ""
+## @param supervisor.config.forge.github.oauth.clientSecretRef.name K8s Secret holding the client secret (takes precedence over clientSecret; the chart-managed Secret is not rendered).
+## @param supervisor.config.forge.github.oauth.clientSecretRef.key Key inside the client secret Secret.
           clientSecretRef:
             name: ""
             key: "client_secret"
+## @param supervisor.config.forge.github.oauth.oauthBaseUrl GitHub base URL (set for GitHub Enterprise Server).
           oauthBaseUrl: "https://github.com"
+## @param supervisor.config.forge.github.oauth.scopes OAuth scopes requested by the redirect and device flows.
           scopes: ["repo", "read:org", "admin:repo_hook"]
+## @param supervisor.config.forge.github.oauth.stateTtl Redirect-flow OAuth state lifetime (Go duration; 1m..1h; only validated when enabled=true).
           stateTtl: "10m"
+## @param supervisor.config.forge.github.oauth.deviceFlowEnabled Enable the RFC 8628 device-flow fallback. Needs clientId (and "Enable Device Flow" ticked on a GitHub OAuth App); enabled is not required.
           deviceFlowEnabled: true
+## @param supervisor.config.forge.github.oauth.allowedRedirectUris Extra exact callback URLs (path must be /github/callback) allowed for the redirect flow.
           allowedRedirectUris: []
     graphql:
       introspectionEnabled: false
