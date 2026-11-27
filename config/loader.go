@@ -1121,8 +1121,8 @@ func validateForgeConfig(cfg *domain.Config) error {
 			return fmt.Errorf("forge.github.oauth.allowed_redirect_uris: %w", err)
 		}
 	}
-	if o.RefreshEnabled && (o.RefreshSkew < 0 || o.RefreshSkew > time.Hour) {
-		return fmt.Errorf("forge.github.oauth.refresh_skew must be within 0..1h")
+	if err := validateGitHubRefreshConfig(&o); err != nil {
+		return err
 	}
 	if !o.Enabled {
 		return nil
@@ -1143,6 +1143,14 @@ func validateForgeConfig(cfg *domain.Config) error {
 	}
 	if o.StateTTL < time.Minute || o.StateTTL > time.Hour {
 		return fmt.Errorf("forge.github.oauth.state_ttl must be >= 1m and <= 1h when forge.github.oauth.enabled is true")
+	}
+	return nil
+}
+
+// validateGitHubRefreshConfig bounds the refresh-token rotation knobs.
+func validateGitHubRefreshConfig(o *domain.ForgeGitHubOAuthConfig) error {
+	if o.RefreshEnabled && (o.RefreshSkew < 0 || o.RefreshSkew > time.Hour) {
+		return fmt.Errorf("forge.github.oauth.refresh_skew must be within 0..1h")
 	}
 	return nil
 }

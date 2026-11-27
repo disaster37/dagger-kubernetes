@@ -326,7 +326,7 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 	if len(cred.Scopes) == 0 {
 		cred.Scopes = apiScopes
 	}
-	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, cred)
+	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, &cred)
 	if err != nil {
 		return nil, fmt.Errorf("seal github user token: %w", err)
 	}
@@ -350,7 +350,7 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 	}
 	available := dedupeOwners(profile, owners)
 	adminOrgs := s.adminOrgs(ctx, userID, callerIsGlobalAdmin)
-	acct, targetSlug, err := s.autoConnect(ctx, userID, boundOrgID, profile, cred, adminOrgs)
+	acct, targetSlug, err := s.autoConnect(ctx, userID, boundOrgID, profile, &cred, adminOrgs)
 	if err != nil {
 		return nil, err
 	}
@@ -372,7 +372,7 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 
 // autoConnect provisions a personal GitHubAccountSource for an explicitly
 // bound org or the caller's only administered org.
-func (s *GitHubIntegrationService) autoConnect(ctx context.Context, userID, boundOrgID string, profile *domain.GitHubUserProfile, cred githubCredential, adminOrgs []GitHubAdminOrg) (*domain.GitHubAccountSource, string, error) {
+func (s *GitHubIntegrationService) autoConnect(ctx context.Context, userID, boundOrgID string, profile *domain.GitHubUserProfile, cred *githubCredential, adminOrgs []GitHubAdminOrg) (*domain.GitHubAccountSource, string, error) {
 	var target *domain.Org
 	if boundOrgID != "" {
 		for _, candidate := range adminOrgs {
@@ -530,7 +530,7 @@ func (s *GitHubIntegrationService) ConnectOrgAccount(ctx context.Context, actorU
 	if !githubOwnerAllowed(owner, profile, orgs) {
 		return nil, fmt.Errorf("%w: github owner %q is not accessible through this token", domain.ErrForbidden, owner)
 	}
-	acct, err := s.upsertAccountSource(ctx, orgID, owner, ownerType(owner, profile, orgs), base, cred, actorUserID)
+	acct, err := s.upsertAccountSource(ctx, orgID, owner, ownerType(owner, profile, orgs), base, &cred, actorUserID)
 	if err != nil {
 		return nil, err
 	}
@@ -539,7 +539,7 @@ func (s *GitHubIntegrationService) ConnectOrgAccount(ctx context.Context, actorU
 
 // upsertAccountSource seals the credential under the org-account AAD and
 // re-seals child forge sources when the account token rotates.
-func (s *GitHubIntegrationService) upsertAccountSource(ctx context.Context, orgID, owner, ownerType, baseURL string, cred githubCredential, connectedBy string) (*domain.GitHubAccountSource, error) {
+func (s *GitHubIntegrationService) upsertAccountSource(ctx context.Context, orgID, owner, ownerType, baseURL string, cred *githubCredential, connectedBy string) (*domain.GitHubAccountSource, error) {
 	acctID := domain.GitHubAccountSourceID(orgID, baseURL, owner)
 	scopeID, err := domain.GitHubOrgAccountScopeID(orgID, acctID)
 	if err != nil {
@@ -1111,7 +1111,7 @@ func (s *GitHubIntegrationService) credentialFromUserConnection(conn *domain.Use
 
 // sealCredential seals the access token and, when present, the refresh token
 // under scope/scopeID.
-func (s *GitHubIntegrationService) sealCredential(scope domain.SecretScope, scopeID string, cred githubCredential) (sealedTokenPair, error) {
+func (s *GitHubIntegrationService) sealCredential(scope domain.SecretScope, scopeID string, cred *githubCredential) (sealedTokenPair, error) {
 	access, err := s.sealer.SealRaw(scope, scopeID, cred.AccessToken)
 	if err != nil {
 		return sealedTokenPair{}, err
@@ -1344,7 +1344,7 @@ func (s *GitHubIntegrationService) rotateUserToken(ctx context.Context, observed
 	if err != nil {
 		return s.refreshError(githubScopeUser, userID, err, func() { s.markUserRevoked(ctx, userID) })
 	}
-	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, cred)
+	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, &cred)
 	if err != nil {
 		return fmt.Errorf("seal rotated github user token: %w", err)
 	}
@@ -1395,7 +1395,7 @@ func (s *GitHubIntegrationService) rotateAccountToken(ctx context.Context, acct 
 	if err != nil {
 		return s.refreshError(githubScopeOrgAccount, current.ID, err, func() { s.markAccountRevoked(ctx, current) })
 	}
-	pair, err := s.sealCredential(domain.SecretScopeGitHubOrgAccount, scopeID, cred)
+	pair, err := s.sealCredential(domain.SecretScopeGitHubOrgAccount, scopeID, &cred)
 	if err != nil {
 		return fmt.Errorf("seal rotated github account token: %w", err)
 	}

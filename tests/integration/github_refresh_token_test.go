@@ -44,10 +44,10 @@ func newFakeGitHubTokenServer(t *testing.T) *fakeGitHubTokenServer {
 
 func (f *fakeGitHubTokenServer) handle(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	switch {
-	case r.URL.Path == "/login/device/code":
+	switch r.URL.Path {
+	case "/login/device/code":
 		_, _ = io.WriteString(w, `{"device_code":"dev-1","user_code":"ABCD-EFGH","verification_uri":"https://github.com/login/device","expires_in":900,"interval":5}`)
-	case r.URL.Path == "/login/oauth/access_token":
+	case "/login/oauth/access_token":
 		body, _ := io.ReadAll(r.Body)
 		form, _ := url.ParseQuery(string(body))
 		f.mu.Lock()
@@ -64,13 +64,13 @@ func (f *fakeGitHubTokenServer) handle(w http.ResponseWriter, r *http.Request) {
 		}
 		// Device-code grant: 60 s access token, inside the 5 m refresh skew.
 		_, _ = fmt.Fprintf(w, `{"access_token":%q,"token_type":"bearer","scope":"repo","refresh_token":%q,"expires_in":60,"refresh_token_expires_in":15897600}`, f.access, f.refresh)
-	case r.URL.Path == "/user":
+	case "/user":
 		if !f.accepts(r) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
 		_, _ = io.WriteString(w, `{"id":7,"login":"alice","type":"User"}`)
-	case r.URL.Path == "/user/orgs":
+	case "/user/orgs":
 		if !f.accepts(r) {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
@@ -218,7 +218,7 @@ func newGitHubRefreshEnv(t *testing.T) *githubRefreshEnv {
 	return &githubRefreshEnv{base: fmt.Sprintf("http://%s", control.Addr().String()), fake: fake, cookie: client}
 }
 
-func (e *githubRefreshEnv) do(t *testing.T, method, path string, body any) (int, []byte) {
+func (e *githubRefreshEnv) do(t *testing.T, method, path string, body any) (status int, respBody []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != nil {
@@ -237,11 +237,11 @@ func (e *githubRefreshEnv) do(t *testing.T, method, path string, body any) (int,
 		t.Fatal(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-	out, _ := io.ReadAll(resp.Body)
-	return resp.StatusCode, out
+	respBody, _ = io.ReadAll(resp.Body)
+	return resp.StatusCode, respBody
 }
 
-func (e *githubRefreshEnv) connection(t *testing.T) map[string]any {
+func (e *githubRefreshEnv) connection(t *testing.T) (conn map[string]any) {
 	t.Helper()
 	status, body := e.do(t, http.MethodGet, "/api/v1/github/connection", nil)
 	if status != http.StatusOK {
@@ -251,7 +251,7 @@ func (e *githubRefreshEnv) connection(t *testing.T) map[string]any {
 	if err := json.Unmarshal(body, &out); err != nil {
 		t.Fatal(err)
 	}
-	conn, _ := out["connection"].(map[string]any)
+	conn, _ = out["connection"].(map[string]any)
 	return conn
 }
 

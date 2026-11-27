@@ -640,10 +640,10 @@ func TestMemoryGitHubDeviceSessionStoreBounds(t *testing.T) {
 
 // seedRefreshableUser stores a user connection with sealed access/refresh
 // tokens expiring in expiresIn, so the proactive-refresh window is controllable.
-func (env *gitHubEnv) seedRefreshableUser(t *testing.T, userID, accessToken, refreshToken string, expiresIn time.Duration) *domain.UserGitHubConnection {
+func (env *gitHubEnv) seedRefreshableUser(t *testing.T, userID, refreshToken string, expiresIn time.Duration) *domain.UserGitHubConnection {
 	t.Helper()
 	ctx := context.Background()
-	accessCT, err := env.svc.sealer.SealRaw(domain.SecretScopeGitHubUser, userID, accessToken)
+	accessCT, err := env.svc.sealer.SealRaw(domain.SecretScopeGitHubUser, userID, "gho_old")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -705,7 +705,7 @@ func TestGitHubIntegrationProactiveRefreshWindow(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newGitHubEnv(t)
-			env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", tc.expiresIn)
+			env.seedRefreshableUser(t, env.alice.ID, "ghr_old", tc.expiresIn)
 			if _, err := env.svc.ListUserOwners(context.Background(), env.alice.ID); err != nil {
 				t.Fatal(err)
 			}
@@ -734,7 +734,7 @@ func TestGitHubIntegrationProactiveRefreshWindow(t *testing.T) {
 func TestGitHubIntegrationReactiveRefreshRetriesOnce(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Hour)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Hour)
 	env.gh.mu.Lock()
 	env.gh.profileRevokedCalls = 1
 	env.gh.mu.Unlock()
@@ -754,7 +754,7 @@ func TestGitHubIntegrationReactiveRefreshRetriesOnce(t *testing.T) {
 func TestGitHubIntegrationRefreshInvalidRevokes(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	env.gh.mu.Lock()
 	env.gh.refreshErr = fmt.Errorf("%w: bad_refresh_token", domain.ErrGitHubRefreshInvalid)
 	env.gh.mu.Unlock()
@@ -775,7 +775,7 @@ func TestGitHubIntegrationRefreshInvalidRevokes(t *testing.T) {
 func TestGitHubIntegrationRefreshTransientDoesNotRevoke(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	env.gh.mu.Lock()
 	env.gh.refreshErr = errors.New("github token endpoint: status 503")
 	env.gh.mu.Unlock()
@@ -796,7 +796,7 @@ func TestGitHubIntegrationRefreshTransientDoesNotRevoke(t *testing.T) {
 func TestGitHubIntegrationExpiredRefreshTokenRevokesWithoutRoundTrip(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	conn := env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	conn := env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	conn.RefreshExpiresAt = time.Now().UTC().Add(-time.Minute)
 	if err := env.connections.Upsert(ctx, conn); err != nil {
 		t.Fatal(err)
@@ -826,7 +826,7 @@ func TestGitHubIntegrationWithoutRefreshTokenKeepsLegacyBehavior(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newGitHubEnv(t)
 			ctx := context.Background()
-			env.seedRefreshableUser(t, env.alice.ID, "gho_old", tc.refreshToken, tc.expiresIn)
+			env.seedRefreshableUser(t, env.alice.ID, tc.refreshToken, tc.expiresIn)
 			env.gh.mu.Lock()
 			env.gh.profileRevokedCalls = 1
 			env.gh.mu.Unlock()
@@ -848,7 +848,7 @@ func TestGitHubIntegrationLegacyRecordSkipsRefresh(t *testing.T) {
 	// A pre-refresh Raft record encodes the new fields as zero values.
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "", 0)
+	env.seedRefreshableUser(t, env.alice.ID, "", 0)
 	legacy, err := env.connections.GetByUser(ctx, env.alice.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -870,7 +870,7 @@ func TestGitHubIntegrationLegacyRecordSkipsRefresh(t *testing.T) {
 func TestGitHubIntegrationFollowerNeverRotates(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	env.svc.leaderFn = func() bool { return false }
 
 	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
@@ -898,7 +898,7 @@ func TestGitHubIntegrationFollowerNeverRotates(t *testing.T) {
 func TestGitHubIntegrationRefreshSingleFlight(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 
 	const goroutines = 16
 	var wg sync.WaitGroup
@@ -926,7 +926,7 @@ func TestGitHubIntegrationRefreshSingleFlight(t *testing.T) {
 func TestGitHubIntegrationRefreshPersistRetriesThenFails(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	flaky := &flakyConnectionRepo{GitHubConnectionRepository: env.connections, failures: githubRefreshPersistAttempts, err: domain.ErrNotLeader}
 	env.svc.connections = flaky
 
@@ -949,7 +949,7 @@ func TestGitHubIntegrationRefreshPersistRetriesThenFails(t *testing.T) {
 func TestGitHubIntegrationRefreshPersistRecoversOnRetry(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	flaky := &flakyConnectionRepo{GitHubConnectionRepository: env.connections, failures: 1, err: domain.ErrRaftTimeout}
 	env.svc.connections = flaky
 
@@ -968,7 +968,7 @@ func TestGitHubIntegrationRefreshPersistRecoversOnRetry(t *testing.T) {
 func TestGitHubIntegrationRefreshKillSwitch(t *testing.T) {
 	env := newGitHubEnv(t)
 	ctx := context.Background()
-	env.seedRefreshableUser(t, env.alice.ID, "gho_old", "ghr_old", time.Minute)
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
 	env.svc.cfg.RefreshEnabled = false
 	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
 		t.Fatal(err)
