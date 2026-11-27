@@ -1106,3 +1106,63 @@ func TestGitHubIntegrationFileTransferGuard(t *testing.T) {
 		t.Fatalf("account refresh token = %q err=%v", refresh, err)
 	}
 }
+
+func TestGitHubIntegrationReauthBumpsUserTokenVersion(t *testing.T) {
+	// Re-authing must advance TokenVersion (existing+1), not reset it to 1.
+	// Otherwise a rotation already in flight (holding the old version) would
+	// pass its CAS and clobber the fresh re-auth token pair.
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+
+	env.gh.pollToken = &domain.GitHubTokenResult{
+		AccessToken: "gho_v1", RefreshToken: "ghr_v1", Scope: "repo",
+		ExpiresIn: 28800, RefreshTokenExpiresIn: 15897600,
+	}
+	start, err := env.svc.StartDeviceFlow(ctx, env.alice.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.PollDeviceFlow(ctx, env.alice.ID, false, start.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.TokenVersion != 1 {
+		t.Fatalf("initial version = %+v err=%v", conn, err)
+	}
+
+	env.gh.pollToken = &domain.GitHubTokenResult{
+		AccessToken: "gho_v2", RefreshToken: "ghr_v2", Scope: "repo",
+		ExpiresIn: 28800, RefreshTokenExpiresIn: 15897600,
+	}
+	start, err = env.svc.StartDeviceFlow(ctx, env.alice.ID, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.PollDeviceFlow(ctx, env.alice.ID, false, start.SessionID); err != nil {
+		t.Fatal(err)
+	}
+	conn, err = env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.TokenVersion != 2 {
+		t.Fatalf("re-auth version = %d (want 2) conn=%+v err=%v", conn.TokenVersion, conn, err)
+	}
+}
+
+func TestGitHubIntegrationAccountRelinkBumpsTokenVersion(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+
+	if _, err := env.svc.ConnectOrgAccount(ctx, env.alice.ID, false, env.org.ID, "alice", "", "ghp_org"); err != nil {
+		t.Fatal(err)
+	}
+	acct, err := env.accounts.GetByOrgAndOwner(ctx, env.org.ID, "alice")
+	if err != nil || acct.TokenVersion != 1 {
+		t.Fatalf("initial account = %+v err=%v", acct, err)
+	}
+	if _, err := env.svc.ConnectOrgAccount(ctx, env.alice.ID, false, env.org.ID, "alice", "", "ghp_org"); err != nil {
+		t.Fatal(err)
+	}
+	acct, err = env.accounts.GetByOrgAndOwner(ctx, env.org.ID, "alice")
+	if err != nil || acct.TokenVersion != 2 {
+		t.Fatalf("re-link account version = %d (want 2) acct=%+v err=%v", acct.TokenVersion, acct, err)
+	}
+}
