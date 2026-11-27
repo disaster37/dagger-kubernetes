@@ -340,6 +340,10 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 	}
 	if existing, err := s.connections.GetByUser(ctx, userID); err == nil {
 		conn.ConnectedAt = existing.ConnectedAt
+		// Re-authing replaces the whole token pair, so advance the version
+		// rather than resetting it: a rotation already in flight holds the old
+		// version and must fail its CAS instead of clobbering this re-auth.
+		conn.TokenVersion = existing.TokenVersion + 1
 	}
 	if err := s.connections.Upsert(ctx, conn); err != nil {
 		return nil, err
@@ -432,6 +436,7 @@ func (s *GitHubIntegrationService) ConnectUserPAT(ctx context.Context, userID, b
 	}
 	if existing, err := s.connections.GetByUser(ctx, userID); err == nil {
 		conn.ConnectedAt = existing.ConnectedAt
+		conn.TokenVersion = existing.TokenVersion + 1
 	}
 	if err := s.connections.Upsert(ctx, conn); err != nil {
 		return nil, err
@@ -560,6 +565,10 @@ func (s *GitHubIntegrationService) upsertAccountSource(ctx context.Context, orgI
 	}
 	if existing, err := s.accountSources.Get(ctx, acctID); err == nil {
 		acct.CreatedAt = existing.CreatedAt
+		// A re-link replaces the whole token pair: advance the version so an
+		// in-flight rotation holding the old version fails its CAS instead of
+		// clobbering this re-link.
+		acct.TokenVersion = existing.TokenVersion + 1
 	}
 	if err := s.accountSources.Upsert(ctx, acct); err != nil {
 		return nil, err
