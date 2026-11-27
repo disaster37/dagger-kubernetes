@@ -27,6 +27,9 @@ type fakeGitHubAPI struct {
 	exchangeCalls int
 	pollToken     *domain.GitHubTokenResult
 	pollErr       error
+	refreshToken  *domain.GitHubTokenResult
+	refreshErr    error
+	refreshCalls  int
 }
 
 func (f *fakeGitHubAPI) AuthorizeURL(clientID, redirectURI, state, codeChallenge string, scopes []string) string {
@@ -51,6 +54,19 @@ func (f *fakeGitHubAPI) PollDeviceFlow(context.Context, string) (*domain.GitHubT
 		return f.pollToken, nil
 	}
 	return &domain.GitHubTokenResult{AccessToken: "gho_device", TokenType: "bearer", Scopes: f.scopes}, nil
+}
+
+func (f *fakeGitHubAPI) RefreshToken(context.Context, string) (*domain.GitHubTokenResult, error) {
+	f.refreshCalls++
+	if f.refreshErr != nil {
+		return nil, f.refreshErr
+	}
+	cp := f.refreshToken
+	if cp == nil {
+		cp = &domain.GitHubTokenResult{AccessToken: "gho_refreshed", TokenType: "bearer", Scopes: f.scopes}
+	}
+	out := *cp
+	return &out, nil
 }
 
 func (f *fakeGitHubAPI) GetAuthenticatedUser(context.Context, string, string) (*domain.GitHubUserProfile, []string, error) {

@@ -23,6 +23,16 @@ var (
 	ErrGitHubDeviceAuthorizationDelay = errors.New("github device authorization pending")
 	ErrGitHubDeviceSlowDown           = errors.New("github device flow slow down")
 	ErrGitHubDeviceFlowDenied         = errors.New("github device authorization was denied or expired")
+	// ErrGitHubRefreshInvalid means GitHub rejected the refresh token itself
+	// (bad_refresh_token / incorrect_client_credentials): the connection must
+	// be re-authorized. Distinct from ErrGitHubTokenRevoked so a transient
+	// refresh failure is never conflated with revocation.
+	ErrGitHubRefreshInvalid = errors.New("github refresh token is invalid or expired")
+	// ErrGitHubRefreshUnavailable means the refresh could not be completed for
+	// a transient reason (token endpoint 5xx/timeout, Raft persist failure):
+	// the stored credential is intact and the request should be retried, never
+	// reconnected.
+	ErrGitHubRefreshUnavailable = errors.New("github token refresh is temporarily unavailable")
 )
 
 // GitHubConnectionStatus represents the health of a stored GitHub token.
@@ -35,34 +45,46 @@ const (
 
 // UserGitHubConnection is a user-scoped GitHub identity + sealed OAuth/PAT token.
 type UserGitHubConnection struct {
-	UserID          string                 `json:"user_id"`
-	GitHubUserID    int64                  `json:"github_user_id"`
-	GitHubLogin     string                 `json:"github_login"`
-	AvatarURL       string                 `json:"avatar_url,omitempty"`
-	BaseURL         string                 `json:"base_url"`
-	Scopes          []string               `json:"scopes,omitempty"`
-	TokenCiphertext string                 `json:"-"`
-	Status          GitHubConnectionStatus `json:"status"`
-	ConnectedAt     time.Time              `json:"connected_at"`
-	UpdatedAt       time.Time              `json:"updated_at"`
+	UserID          string   `json:"user_id"`
+	GitHubUserID    int64    `json:"github_user_id"`
+	GitHubLogin     string   `json:"github_login"`
+	AvatarURL       string   `json:"avatar_url,omitempty"`
+	BaseURL         string   `json:"base_url"`
+	Scopes          []string `json:"scopes,omitempty"`
+	TokenCiphertext string   `json:"-"`
+	// RefreshTokenCiphertext seals the OAuth refresh token. Empty for PATs and
+	// for non-expiring OAuth Apps (GitHub returns no refresh token there).
+	RefreshTokenCiphertext string                 `json:"-"`
+	TokenExpiresAt         time.Time              `json:"token_expires_at,omitempty"`   // UTC; zero = non-expiring / unknown
+	RefreshExpiresAt       time.Time              `json:"refresh_expires_at,omitempty"` // UTC; zero = non-expiring / unknown
+	TokenVersion           uint64                 `json:"token_version,omitempty"`      // monotonic rotation counter (CAS)
+	Status                 GitHubConnectionStatus `json:"status"`
+	ConnectedAt            time.Time              `json:"connected_at"`
+	UpdatedAt              time.Time              `json:"updated_at"`
 }
 
 // GitHubAccountSource is an org-scoped, owner-level GitHub integration
 // ("installation"). One record per (OrgID, normalized BaseURL, lower(Owner)).
 type GitHubAccountSource struct {
-	ID                string                 `json:"id"`
-	OrgID             string                 `json:"org_id"`
-	Owner             string                 `json:"owner"`
-	OwnerType         string                 `json:"owner_type"` // "User" | "Organization" | "PAT"
-	BaseURL           string                 `json:"base_url"`
-	ConnectedByUserID string                 `json:"connected_by_user_id,omitempty"`
-	Scopes            []string               `json:"scopes,omitempty"`
-	TokenCiphertext   string                 `json:"-"`
-	AppID             string                 `json:"app_id,omitempty"`
-	InstallationID    string                 `json:"installation_id,omitempty"`
-	Status            GitHubConnectionStatus `json:"status"`
-	CreatedAt         time.Time              `json:"created_at"`
-	UpdatedAt         time.Time              `json:"updated_at"`
+	ID                string   `json:"id"`
+	OrgID             string   `json:"org_id"`
+	Owner             string   `json:"owner"`
+	OwnerType         string   `json:"owner_type"` // "User" | "Organization" | "PAT"
+	BaseURL           string   `json:"base_url"`
+	ConnectedByUserID string   `json:"connected_by_user_id,omitempty"`
+	Scopes            []string `json:"scopes,omitempty"`
+	TokenCiphertext   string   `json:"-"`
+	// RefreshTokenCiphertext seals the OAuth refresh token. Empty for PATs and
+	// for non-expiring OAuth Apps (GitHub returns no refresh token there).
+	RefreshTokenCiphertext string                 `json:"-"`
+	TokenExpiresAt         time.Time              `json:"token_expires_at,omitempty"`   // UTC; zero = non-expiring / unknown
+	RefreshExpiresAt       time.Time              `json:"refresh_expires_at,omitempty"` // UTC; zero = non-expiring / unknown
+	TokenVersion           uint64                 `json:"token_version,omitempty"`      // monotonic rotation counter (CAS)
+	AppID                  string                 `json:"app_id,omitempty"`
+	InstallationID         string                 `json:"installation_id,omitempty"`
+	Status                 GitHubConnectionStatus `json:"status"`
+	CreatedAt              time.Time              `json:"created_at"`
+	UpdatedAt              time.Time              `json:"updated_at"`
 }
 
 // GitHubAccountSourceID computes the deterministic 23-char ID "ghacct-<16hex>"
@@ -181,11 +203,32 @@ type GitHubRemoteRepo struct {
 	AdminPerm     bool   `json:"admin_perm"`
 }
 
-// GitHubTokenResult is the result of exchanging an OAuth code or device code with GitHub.
+// GitHubTokenResult is the normalized result of exchanging an OAuth code,
+// polling a device code, or refreshing a token with GitHub. JSON tags match
+// GitHub's /login/oauth/access_token response fields so the repository layer
+// can decode the upstream body directly.
 type GitHubTokenResult struct {
-	AccessToken string
-	TokenType   string
-	Scopes      []string
+	AccessToken           string `json:"access_token"`
+	TokenType             string `json:"token_type"`
+	Scope                 string `json:"scope"` // comma-separated, as GitHub returns it
+	RefreshToken          string `json:"refresh_token"`
+	ExpiresIn             int    `json:"expires_in"`               // seconds until access-token expiry
+	RefreshTokenExpiresIn int    `json:"refresh_token_expires_in"` // seconds until refresh-token expiry
+
+	Scopes []string `json:"-"` // derived from Scope by Normalize
+}
+
+// Normalize derives Scopes from Scope and defaults TokenType to "bearer".
+func (r *GitHubTokenResult) Normalize() {
+	r.Scopes = nil
+	for _, s := range strings.Split(r.Scope, ",") {
+		if s = strings.TrimSpace(s); s != "" {
+			r.Scopes = append(r.Scopes, s)
+		}
+	}
+	if r.TokenType == "" {
+		r.TokenType = "bearer"
+	}
 }
 
 // GitHubDeviceCodePrompt is returned by GitHub's POST /login/device/code.
@@ -310,6 +353,7 @@ type GitHubAPIClient interface {
 	ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (*GitHubTokenResult, error)
 	StartDeviceFlow(ctx context.Context, scopes []string) (*GitHubDeviceCodePrompt, error)
 	PollDeviceFlow(ctx context.Context, deviceCode string) (*GitHubTokenResult, error)
+	RefreshToken(ctx context.Context, refreshToken string) (*GitHubTokenResult, error)
 	GetAuthenticatedUser(ctx context.Context, apiBaseURL, token string) (*GitHubUserProfile, []string, error)
 	ListUserOrgs(ctx context.Context, apiBaseURL, token string) ([]GitHubOwner, error)
 	ListAccessibleRepos(ctx context.Context, apiBaseURL, token string) ([]GitHubRemoteRepo, error)
