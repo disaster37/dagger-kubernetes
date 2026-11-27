@@ -918,6 +918,8 @@ subchart values.
 | `supervisor.config.workflows.jobImagePullSecrets` | array | `[]` | Image pull secrets for workflow Job pods (empty = `supervisor.image.pullSecrets`). |
 | `supervisor.config.workflows.defaultTimeout` | string | `"30m"` | Default workflow job timeout when a job declares none. |
 | `supervisor.config.workflows.maxParallel` | int | `8` | Max concurrently running jobs in one workflow run. |
+| `supervisor.config.forge.github.oauth.refreshEnabled` | bool | `true` | Rotate expiring GitHub OAuth App tokens (device flow refreshes without a client secret; redirect flow needs `clientSecret`). Disable to fall back to token-expiry-then-reconnect. |
+| `supervisor.config.forge.github.oauth.refreshSkew` | string | `"5m"` | Proactive-rotation window before access-token expiry (Go duration; 0..1h). |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 | `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |

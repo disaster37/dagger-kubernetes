@@ -510,6 +510,8 @@ inline comments. The sections below summarise the most important ones.
 | `log_format`    | —                                         | `json`                                                   | Supervisor log format: `json` / `text`.                                                                                                       |
 | `otel`          | `otlp_endpoint`                           | `""`                                                     | If set, the Supervisor exports its own OTLP here.                                                                                             |
 |                 | `ingest_max_body_size`                    | `67108864` (64 MiB)                                      | OTLP ingest request-body cap in bytes (`0` = default). Separate from the 4 MiB control-API cap. Keep the exposition in lock step: `ingress.proxyBodySize` (Ingress) or `gateway.control.maxBodySize` (`ClientSettingsPolicy`). |
+| `forge.github.oauth` | `refresh_enabled`                    | `true`                                                   | Rotate expiring GitHub OAuth App tokens (device flow refreshes without a secret; redirect flow needs `client_secret`). `false` = pre-refresh behavior (token dies at expiry → `revoked` + reconnect). |
+|                 | `refresh_skew`                            | `5m`                                                     | Proactive-rotation window before access-token expiry (0..1h).                                                                                  |
 
 Durations are parsed by Viper (e.g. `"5m"`, `"24h"`, `"2m"`).
 
@@ -1089,6 +1091,21 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
     GitHub source also idempotently mirrors the parent account and claim.
   - **Device flow.** `POST /api/v1/github/device/code` + `/device/poll` power
     the UI fallback for `kubectl port-forward` / single-callback-URL setups.
+  - **Expiring tokens (refresh rotation).** GitHub OAuth Apps with *"Expire user
+    access tokens"* keep working past the 8-hour access-token lifetime.
+    `forge.github.oauth.refresh_enabled` (default `true`) rotates the token
+    proactively `refresh_skew` (default `5m`) before expiry and reactively on a
+    GitHub 401 (one retry). Rotation is leader-only and single-flighted, and the
+    rotated pair is sealed and persisted with a `TokenVersion` CAS.
+    Device-flow tokens refresh **without** a `client_secret`; redirect-flow
+    tokens need `forge.github.oauth.client_secret` set. Only a rejected refresh
+    token (`bad_refresh_token` / `incorrect_client_credentials`, or a refresh
+    token idle for 6 months) revokes the connection (`409`, "please
+    reconnect"); transient GitHub/Raft failures return `503` and never revoke.
+    Connections created before this feature have no refresh token and must
+    reconnect **once** to capture one. Rollback is safe: the fields are
+    additive (`json:"-"` ciphertext, zero expiries = never refresh) and the old
+    binary simply stops refreshing.
   - **Internal-auth & OIDC deployments.** Internal username/password
     (`auth.oauth.enabled: false`) and OIDC users can link any GitHub account;
     the browser completing `/github/callback` must be signed in as the **same
