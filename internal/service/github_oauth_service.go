@@ -1116,16 +1116,15 @@ func (s *GitHubIntegrationService) sealCredential(scope domain.SecretScope, scop
 	if err != nil {
 		return sealedTokenPair{}, err
 	}
-	pair := sealedTokenPair{access: access, accessExp: cred.TokenExpiresAt, refreshExp: cred.RefreshExpiresAt}
+	pair := sealedTokenPair{access: access, accessExp: cred.TokenExpiresAt}
 	if cred.RefreshToken == "" {
-		pair.refreshExp = time.Time{}
 		return pair, nil
 	}
 	refresh, err := s.sealer.SealRaw(scope, scopeID, cred.RefreshToken)
 	if err != nil {
 		return sealedTokenPair{}, err
 	}
-	pair.refresh = refresh
+	pair.refresh, pair.refreshExp = refresh, cred.RefreshExpiresAt
 	return pair, nil
 }
 
@@ -1210,7 +1209,7 @@ func (s *GitHubIntegrationService) resolveUserToken(ctx context.Context, userID 
 	if !s.refreshable(conn.RefreshTokenCiphertext) || !refreshDue(conn.TokenExpiresAt, time.Now().UTC(), s.cfg.RefreshSkew) || !s.isLeader() {
 		return conn, token, nil
 	}
-	return s.refreshUserToken(ctx, userID)
+	return s.refreshUserToken(ctx, conn)
 }
 
 // resolveAccountToken returns an active access token for an org account source,
@@ -1251,7 +1250,7 @@ func (s *GitHubIntegrationService) callWithUserToken(ctx context.Context, userID
 	if !s.isLeader() {
 		return s.notLeaderRefresh(githubScopeUser, userID)
 	}
-	conn, token, err = s.refreshUserToken(ctx, userID)
+	conn, token, err = s.refreshUserToken(ctx, conn)
 	if err != nil {
 		return err
 	}
@@ -1268,37 +1267,41 @@ func (s *GitHubIntegrationService) callWithAccountToken(ctx context.Context, acc
 	if err == nil || !errors.Is(err, domain.ErrGitHubTokenRevoked) {
 		return err
 	}
-	if !s.refreshable(acct.RefreshTokenCiphertext) {
-		s.markAccountRevoked(ctx, acct)
+	latest, loadErr := s.accountSources.Get(ctx, acct.ID)
+	if loadErr != nil {
+		return loadErr
+	}
+	if !s.refreshable(latest.RefreshTokenCiphertext) {
+		s.markAccountRevoked(ctx, latest)
 		return err
 	}
 	if !s.isLeader() {
 		return s.notLeaderRefresh(githubScopeOrgAccount, acct.ID)
 	}
-	token, err = s.refreshAccountToken(ctx, acct)
+	token, err = s.refreshAccountToken(ctx, latest)
 	if err != nil {
 		return err
 	}
 	return fn(token)
 }
 
-// refreshUserToken rotates a user-scope credential (leader-only, single-flight)
-// and returns the freshly persisted token.
-func (s *GitHubIntegrationService) refreshUserToken(ctx context.Context, userID string) (*domain.UserGitHubConnection, string, error) {
-	scopeKey := fmt.Sprintf("%s:%s", githubScopeUser, userID)
-	err := s.refreshes.do(ctx, scopeKey, func(ctx context.Context) error {
-		return s.rotateUserToken(ctx, userID)
+// refreshUserToken rotates the credential observed on conn (leader-only,
+// single-flight) and returns the freshly persisted token. Concurrent callers
+// share one rotation; a rotation already applied by someone else surfaces as
+// ErrConflict from the gate and is served by reloading.
+func (s *GitHubIntegrationService) refreshUserToken(ctx context.Context, conn *domain.UserGitHubConnection) (*domain.UserGitHubConnection, string, error) {
+	err := s.refreshes.do(ctx, fmt.Sprintf("%s:%s", githubScopeUser, conn.UserID), func(ctx context.Context) error {
+		return s.rotateUserToken(ctx, conn)
 	})
 	if err != nil && !errors.Is(err, domain.ErrConflict) {
 		return nil, "", err
 	}
-	return s.userToken(ctx, userID)
+	return s.userToken(ctx, conn.UserID)
 }
 
 // refreshAccountToken is refreshUserToken for an org account source.
 func (s *GitHubIntegrationService) refreshAccountToken(ctx context.Context, acct *domain.GitHubAccountSource) (string, error) {
-	scopeKey := fmt.Sprintf("%s:%s", githubScopeOrgAccount, acct.ID)
-	err := s.refreshes.do(ctx, scopeKey, func(ctx context.Context) error {
+	err := s.refreshes.do(ctx, fmt.Sprintf("%s:%s", githubScopeOrgAccount, acct.ID), func(ctx context.Context) error {
 		return s.rotateAccountToken(ctx, acct)
 	})
 	if err != nil && !errors.Is(err, domain.ErrConflict) {
@@ -1311,8 +1314,11 @@ func (s *GitHubIntegrationService) refreshAccountToken(ctx context.Context, acct
 	return s.accountToken(latest)
 }
 
-// rotateUserToken performs one rotation of the caller's stored credential.
-func (s *GitHubIntegrationService) rotateUserToken(ctx context.Context, userID string) error {
+// rotateUserToken performs one rotation of the credential observed on observed.
+// A credential already replaced (concurrent rotation or re-auth) is reported as
+// ErrConflict so the caller reloads instead of rotating twice.
+func (s *GitHubIntegrationService) rotateUserToken(ctx context.Context, observed *domain.UserGitHubConnection) error {
+	userID := observed.UserID
 	conn, err := s.connections.GetByUser(ctx, userID)
 	if err != nil {
 		return err
@@ -1323,17 +1329,20 @@ func (s *GitHubIntegrationService) rotateUserToken(ctx context.Context, userID s
 	if !s.refreshable(conn.RefreshTokenCiphertext) {
 		return nil
 	}
+	if conn.RefreshTokenCiphertext != observed.RefreshTokenCiphertext {
+		return fmt.Errorf("github connection %s: %w", userID, domain.ErrConflict)
+	}
 	now := time.Now().UTC()
 	if refreshTokenExpired(conn.RefreshExpiresAt, now) {
-		return s.revokeUserByRefresh(ctx, userID, "refresh_token_expired")
+		return s.revokeByRefresh(githubScopeUser, userID, "refresh_token_expired", func() { s.markUserRevoked(ctx, userID) })
 	}
 	plaintext, err := s.sealer.OpenRaw(domain.SecretScopeGitHubUser, userID, conn.RefreshTokenCiphertext)
 	if err != nil {
-		return s.revokeUserByRefresh(ctx, userID, "unseal_failed")
+		return s.revokeByRefresh(githubScopeUser, userID, "unseal_failed", func() { s.markUserRevoked(ctx, userID) })
 	}
 	cred, err := s.rotateToken(ctx, plaintext)
 	if err != nil {
-		return s.refreshError(ctx, githubScopeUser, userID, err, func() { s.markUserRevoked(ctx, userID) })
+		return s.refreshError(githubScopeUser, userID, err, func() { s.markUserRevoked(ctx, userID) })
 	}
 	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, cred)
 	if err != nil {
@@ -1353,8 +1362,9 @@ func (s *GitHubIntegrationService) rotateUserToken(ctx context.Context, userID s
 	})
 }
 
-// rotateAccountToken performs one rotation of an org account credential and
-// re-seals its per-repo forge sources.
+// rotateAccountToken performs one rotation of the credential observed on acct
+// and re-seals its per-repo forge sources. A credential already replaced is
+// reported as ErrConflict (see rotateUserToken).
 func (s *GitHubIntegrationService) rotateAccountToken(ctx context.Context, acct *domain.GitHubAccountSource) error {
 	current, err := s.accountSources.Get(ctx, acct.ID)
 	if err != nil {
@@ -1366,21 +1376,24 @@ func (s *GitHubIntegrationService) rotateAccountToken(ctx context.Context, acct 
 	if !s.refreshable(current.RefreshTokenCiphertext) {
 		return nil
 	}
+	if current.RefreshTokenCiphertext != acct.RefreshTokenCiphertext {
+		return fmt.Errorf("github account source %s: %w", acct.ID, domain.ErrConflict)
+	}
 	scopeID, err := domain.GitHubOrgAccountScopeID(current.OrgID, current.ID)
 	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
 	if refreshTokenExpired(current.RefreshExpiresAt, now) {
-		return s.revokeAccountByRefresh(ctx, current, "refresh_token_expired")
+		return s.revokeByRefresh(githubScopeOrgAccount, current.ID, "refresh_token_expired", func() { s.markAccountRevoked(ctx, current) })
 	}
 	plaintext, err := s.sealer.OpenRaw(domain.SecretScopeGitHubOrgAccount, scopeID, current.RefreshTokenCiphertext)
 	if err != nil {
-		return s.revokeAccountByRefresh(ctx, current, "unseal_failed")
+		return s.revokeByRefresh(githubScopeOrgAccount, current.ID, "unseal_failed", func() { s.markAccountRevoked(ctx, current) })
 	}
 	cred, err := s.rotateToken(ctx, plaintext)
 	if err != nil {
-		return s.refreshError(ctx, githubScopeOrgAccount, current.ID, err, func() { s.markAccountRevoked(ctx, current) })
+		return s.refreshError(githubScopeOrgAccount, current.ID, err, func() { s.markAccountRevoked(ctx, current) })
 	}
 	pair, err := s.sealCredential(domain.SecretScopeGitHubOrgAccount, scopeID, cred)
 	if err != nil {
@@ -1465,15 +1478,9 @@ func retryableRefreshPersist(err error) bool {
 // refreshError converts a failed rotation into the caller-visible error: a
 // rejected refresh token revokes the credential, every other failure is
 // transient and must never revoke.
-func (s *GitHubIntegrationService) refreshError(ctx context.Context, scope, scopeID string, err error, revoke func()) error {
+func (s *GitHubIntegrationService) refreshError(scope, scopeID string, err error, revoke func()) error {
 	if errors.Is(err, domain.ErrGitHubRefreshInvalid) {
-		revoke()
-		s.recordRefresh(scope, "bad_refresh_token")
-		s.logger.WithFields(logrus.Fields{
-			"event": "github_connection_revoked_by_refresh", "scope": scope, "scope_id": scopeID,
-			"reason": "bad_refresh_token",
-		}).Warn("github connection revoked: refresh token rejected")
-		return fmt.Errorf("%w: github rejected the refresh token; reconnect the account", domain.ErrGitHubTokenRevoked)
+		return s.revokeByRefresh(scope, scopeID, "bad_refresh_token", revoke)
 	}
 	reason := "transient"
 	switch {
@@ -1499,23 +1506,13 @@ func (s *GitHubIntegrationService) notLeaderRefresh(scope, scopeID string) error
 	return fmt.Errorf("%w: github token refresh requires the raft leader", domain.ErrNotLeader)
 }
 
-// revokeUserByRefresh marks a user connection revoked for a locally-detected
-// dead refresh token.
-func (s *GitHubIntegrationService) revokeUserByRefresh(ctx context.Context, userID, reason string) error {
-	s.markUserRevoked(ctx, userID)
-	s.recordRefresh(githubScopeUser, "bad_refresh_token")
+// revokeByRefresh marks a credential revoked because its refresh token can no
+// longer be used (rejected by GitHub, already expired, or unopenable).
+func (s *GitHubIntegrationService) revokeByRefresh(scope, scopeID, reason string, revoke func()) error {
+	revoke()
+	s.recordRefresh(scope, "bad_refresh_token")
 	s.logger.WithFields(logrus.Fields{
-		"event": "github_connection_revoked_by_refresh", "scope": githubScopeUser, "scope_id": userID, "reason": reason,
-	}).Warn("github connection revoked: refresh token unusable")
-	return fmt.Errorf("%w: the github refresh token is no longer usable; reconnect the account", domain.ErrGitHubTokenRevoked)
-}
-
-// revokeAccountByRefresh is revokeUserByRefresh for an org account source.
-func (s *GitHubIntegrationService) revokeAccountByRefresh(ctx context.Context, acct *domain.GitHubAccountSource, reason string) error {
-	s.markAccountRevoked(ctx, acct)
-	s.recordRefresh(githubScopeOrgAccount, "bad_refresh_token")
-	s.logger.WithFields(logrus.Fields{
-		"event": "github_connection_revoked_by_refresh", "scope": githubScopeOrgAccount, "scope_id": acct.ID, "reason": reason,
+		"event": "github_connection_revoked_by_refresh", "scope": scope, "scope_id": scopeID, "reason": reason,
 	}).Warn("github connection revoked: refresh token unusable")
 	return fmt.Errorf("%w: the github refresh token is no longer usable; reconnect the account", domain.ErrGitHubTokenRevoked)
 }
