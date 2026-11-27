@@ -613,7 +613,8 @@ async function remove(id: string) {
 
 onMounted(load)
 onBeforeUnmount(() => {
-  stopPolling()
-  stopExpiryCountdown()
+  // Null device so an in-flight poll that resolves after unmount cannot
+  // reschedule itself and keep polling the device endpoint post-navigation.
+  cancelDeviceFlow()
 })
 </script>
