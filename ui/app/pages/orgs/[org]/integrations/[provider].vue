@@ -30,7 +30,7 @@
             v-if="!connection?.oauth_enabled && !connection?.device_flow_enabled"
             color="warning"
             variant="soft"
-            description="No GitHub sign-in is configured on this deployment. Use a personal access token to link repositories."
+            description="No GitHub sign-in is configured on this deployment. Use a personal access token to link repositories. An administrator can enable one-click linking with a GitHub OAuth App client_id."
           />
           <div class="flex flex-wrap gap-2">
             <UButton v-if="connection?.oauth_enabled" :loading="oauthStarting" @click="startOAuth">Connect via GitHub OAuth</UButton>
@@ -155,14 +155,8 @@
       </form>
     </UCard>
 
-    <UModal v-model:open="deviceModalOpen" @update:open="onDeviceModalOpen">
-      <UCard>
-        <template #header>
-          <div class="flex items-center justify-between gap-2">
-            <h2 class="font-semibold">Authorize GitHub device</h2>
-            <UButton color="neutral" variant="ghost" icon="i-lucide-x" aria-label="Close" @click="cancelDeviceFlow" />
-          </div>
-        </template>
+    <UModal v-model:open="deviceModalOpen" title="Authorize GitHub device" @update:open="onDeviceModalOpen">
+      <template #body>
         <div v-if="device" class="space-y-4 text-[13px]">
           <p class="text-muted">Enter this code on GitHub to authorize {{ org }}:</p>
           <div class="flex flex-wrap items-center gap-2">
@@ -180,13 +174,19 @@
             <span class="tabular-nums">({{ countdownLabel }})</span>
           </p>
         </div>
-        <template #footer>
-          <div class="flex justify-end gap-2">
-            <UButton v-if="deviceExpired" @click="startDeviceFlow">Start again</UButton>
-            <UButton color="neutral" variant="outline" @click="cancelDeviceFlow">Cancel</UButton>
+        <div v-else class="space-y-4 text-[13px]">
+          <p class="text-muted">Device authorization is unavailable on this deployment.</p>
+          <div class="flex justify-end">
+            <UButton color="neutral" variant="outline" @click="cancelDeviceFlow">Close</UButton>
           </div>
-        </template>
-      </UCard>
+        </div>
+      </template>
+      <template #footer>
+        <div class="flex justify-end gap-2">
+          <UButton v-if="deviceExpired" @click="startDeviceFlow">Start again</UButton>
+          <UButton color="neutral" variant="outline" @click="cancelDeviceFlow">Cancel</UButton>
+        </div>
+      </template>
     </UModal>
   </div>
 </template>
@@ -388,13 +388,21 @@ async function startDeviceFlow() {
   deviceStarting.value = true
   error.value = ''
   copyState.value = ''
-  deviceStatus.value = 'Waiting for authorization…'
+  deviceStatus.value = ''
   deviceExpired.value = false
+  device.value = null
+  deviceModalOpen.value = false
   try {
-    device.value = await startGitHubDeviceFlow(org.value)
+    const started = await startGitHubDeviceFlow(org.value)
+    if (!started?.user_code || !started?.verification_uri) {
+      error.value = 'GitHub returned an incomplete device authorization response'
+      return
+    }
+    device.value = started
+    deviceStatus.value = 'Waiting for authorization…'
     deviceModalOpen.value = true
     startExpiryCountdown()
-    schedulePoll(device.value.interval)
+    schedulePoll(started.interval)
   } catch (e: any) {
     error.value = e?.response?.data?.message ?? 'Failed to start device flow'
     device.value = null
