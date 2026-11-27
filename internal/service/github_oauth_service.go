@@ -136,8 +136,10 @@ func NewGitHubIntegrationService(cfg GitHubIntegrationConfig, deps GitHubIntegra
 func (s *GitHubIntegrationService) OAuthEnabled() bool { return s.cfg.OAuthEnabled }
 
 // DeviceFlowEnabled reports whether the UI device-flow fallback is available.
+// Device flow only needs an OAuth App client ID (no secret and no callback
+// URL), so it is independent of the redirect flow's OAuthEnabled gate.
 func (s *GitHubIntegrationService) DeviceFlowEnabled() bool {
-	return s.cfg.OAuthEnabled && s.cfg.DeviceFlowEnabled
+	return s.cfg.ClientID != "" && s.cfg.DeviceFlowEnabled
 }
 
 // BuildOAuthURL creates a replicated single-use state and returns the GitHub

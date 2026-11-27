@@ -1107,7 +1107,14 @@ func validateForgeConfig(cfg *domain.Config) error {
 			return fmt.Errorf("forge.github.allowed_api_urls: %w", err)
 		}
 	}
-	o := g.OAuth
+	return validateForgeGitHubOAuth(&g.OAuth)
+}
+
+// validateForgeGitHubOAuth validates the GitHub OAuth App used for credential
+// linking. The redirect flow (enabled) requires a client secret, scopes, and a
+// state TTL. Device flow only needs the public client ID and its scopes, so a
+// device-only deployment is valid with enabled=false and no secret.
+func validateForgeGitHubOAuth(o *domain.ForgeGitHubOAuthConfig) error {
 	if o.OAuthBaseURL == "" {
 		return fmt.Errorf("forge.github.oauth.oauth_base_url must not be empty")
 	}
@@ -1119,25 +1126,34 @@ func validateForgeConfig(cfg *domain.Config) error {
 			return fmt.Errorf("forge.github.oauth.allowed_redirect_uris: %w", err)
 		}
 	}
-	if !o.Enabled {
+	// Device flow is not gated on enabled: device_flow_enabled defaults to true,
+	// so requiring a client ID here would invalidate every existing config at
+	// startup. With an empty client ID, device flow is simply unavailable.
+	deviceFlowConfigured := o.ClientID != "" && o.DeviceFlowEnabled
+	if !o.Enabled && !deviceFlowConfigured {
 		return nil
 	}
-	if o.ClientID == "" {
-		return fmt.Errorf("forge.github.oauth.client_id must not be empty when forge.github.oauth.enabled is true")
-	}
-	if o.ClientSecret == "" {
-		return fmt.Errorf("forge.github.oauth.client_secret must not be empty when forge.github.oauth.enabled is true")
+	if o.Enabled {
+		if o.ClientID == "" {
+			return fmt.Errorf("forge.github.oauth.client_id must not be empty when forge.github.oauth.enabled is true")
+		}
+		if o.ClientSecret == "" {
+			return fmt.Errorf("forge.github.oauth.client_secret must not be empty when forge.github.oauth.enabled is true")
+		}
+		if o.StateTTL < time.Minute || o.StateTTL > time.Hour {
+			return fmt.Errorf("forge.github.oauth.state_ttl must be >= 1m and <= 1h when forge.github.oauth.enabled is true")
+		}
 	}
 	if len(o.Scopes) == 0 {
-		return fmt.Errorf("forge.github.oauth.scopes must not be empty when forge.github.oauth.enabled is true")
+		if o.Enabled {
+			return fmt.Errorf("forge.github.oauth.scopes must not be empty when forge.github.oauth.enabled is true")
+		}
+		return fmt.Errorf("forge.github.oauth.scopes must not be empty when forge.github.oauth.client_id is set and device flow is enabled")
 	}
 	for _, scope := range o.Scopes {
 		if strings.TrimSpace(scope) == "" || hasControlChars(scope) {
 			return fmt.Errorf("forge.github.oauth.scopes contains an invalid scope")
 		}
-	}
-	if o.StateTTL < time.Minute || o.StateTTL > time.Hour {
-		return fmt.Errorf("forge.github.oauth.state_ttl must be >= 1m and <= 1h when forge.github.oauth.enabled is true")
 	}
 	return nil
 }

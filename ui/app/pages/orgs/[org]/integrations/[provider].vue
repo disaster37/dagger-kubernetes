@@ -27,21 +27,16 @@
         </div>
         <div v-else class="space-y-4">
           <UAlert
-            v-if="!connection?.oauth_enabled"
+            v-if="!connection?.oauth_enabled && !connection?.device_flow_enabled"
             color="warning"
             variant="soft"
-            description="GitHub OAuth is not configured on this deployment. Use a personal access token to link repositories."
+            description="No GitHub sign-in is configured on this deployment. Use a personal access token to link repositories."
           />
           <div class="flex flex-wrap gap-2">
             <UButton v-if="connection?.oauth_enabled" :loading="oauthStarting" @click="startOAuth">Connect via GitHub OAuth</UButton>
             <UButton v-if="connection?.device_flow_enabled" variant="soft" :loading="deviceStarting" @click="startDeviceFlow">
               Connect via Device Code
             </UButton>
-          </div>
-          <div v-if="device" class="rounded border border-default p-3 text-[13px]">
-            <p>Enter code <span class="font-mono font-semibold">{{ device.user_code }}</span> at</p>
-            <UButton :to="device.verification_uri" target="_blank" variant="link" size="xs">{{ device.verification_uri }}</UButton>
-            <p class="mt-1 text-muted">Waiting for authorization…</p>
           </div>
           <form class="flex flex-wrap items-end gap-2" @submit.prevent="connectPAT">
             <UFormField label="Personal access token" class="min-w-64 flex-1">
@@ -159,6 +154,40 @@
         <UButton type="submit" :loading="loading">Save integration</UButton>
       </form>
     </UCard>
+
+    <UModal v-model:open="deviceModalOpen" @update:open="onDeviceModalOpen">
+      <UCard>
+        <template #header>
+          <div class="flex items-center justify-between gap-2">
+            <h2 class="font-semibold">Authorize GitHub device</h2>
+            <UButton color="neutral" variant="ghost" icon="i-lucide-x" aria-label="Close" @click="cancelDeviceFlow" />
+          </div>
+        </template>
+        <div v-if="device" class="space-y-4 text-[13px]">
+          <p class="text-muted">Enter this code on GitHub to authorize {{ org }}:</p>
+          <div class="flex flex-wrap items-center gap-2">
+            <code class="select-all rounded border border-default bg-elevated px-4 py-3 font-mono text-2xl font-semibold tracking-[0.3em]">{{ device.user_code }}</code>
+            <UButton size="sm" variant="soft" icon="i-lucide-copy" @click="copyCode">Copy</UButton>
+          </div>
+          <p v-if="copyState" class="text-muted">{{ copyState }}</p>
+          <UButton :to="device.verification_uri" target="_blank" rel="noopener noreferrer" variant="soft" icon="i-lucide-external-link">
+            Open {{ device.verification_uri }}
+          </UButton>
+          <p v-if="deviceExpired" class="text-error">Code expired — start again.</p>
+          <p v-else class="flex items-center gap-2 text-muted">
+            <UIcon name="i-lucide-loader-circle" class="size-4 animate-spin" />
+            <span>{{ deviceStatus || 'Waiting for authorization…' }}</span>
+            <span class="tabular-nums">({{ countdownLabel }})</span>
+          </p>
+        </div>
+        <template #footer>
+          <div class="flex justify-end gap-2">
+            <UButton v-if="deviceExpired" @click="startDeviceFlow">Start again</UButton>
+            <UButton color="neutral" variant="outline" @click="cancelDeviceFlow">Cancel</UButton>
+          </div>
+        </template>
+      </UCard>
+    </UModal>
   </div>
 </template>
 
@@ -207,6 +236,11 @@ const patLoading = ref(false)
 const oauthStarting = ref(false)
 const device = ref<GitHubDeviceFlowStart | null>(null)
 const deviceStarting = ref(false)
+const deviceModalOpen = ref(false)
+const deviceExpired = ref(false)
+const deviceStatus = ref('')
+const deviceRemaining = ref(0)
+const copyState = ref('')
 const accountOwner = ref('')
 const accountToken = ref('')
 const accountLoading = ref(false)
@@ -227,6 +261,14 @@ const error = ref('')
 const notice = ref('')
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+let expiryTimer: ReturnType<typeof setInterval> | null = null
+
+const countdownLabel = computed(() => {
+  const total = Math.max(0, deviceRemaining.value)
+  const minutes = Math.floor(total / 60)
+  const seconds = total % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+})
 
 function repoTail(repo: string): string {
   const parts = repo.toLowerCase().split('/')
@@ -238,6 +280,30 @@ function stopPolling() {
     clearTimeout(pollTimer)
     pollTimer = null
   }
+}
+
+function stopExpiryCountdown() {
+  if (expiryTimer) {
+    clearInterval(expiryTimer)
+    expiryTimer = null
+  }
+}
+
+function updateRemaining() {
+  const expiresAt = device.value ? Date.parse(device.value.expires_at) : Number.NaN
+  deviceRemaining.value = Number.isFinite(expiresAt) ? Math.max(0, Math.ceil((expiresAt - Date.now()) / 1000)) : 0
+  if (deviceRemaining.value <= 0) {
+    deviceExpired.value = true
+    deviceStatus.value = ''
+    stopPolling()
+    stopExpiryCountdown()
+  }
+}
+
+function startExpiryCountdown() {
+  stopExpiryCountdown()
+  updateRemaining()
+  if (!deviceExpired.value) expiryTimer = setInterval(updateRemaining, 1000)
 }
 
 async function load() {
@@ -321,11 +387,18 @@ async function startOAuth() {
 async function startDeviceFlow() {
   deviceStarting.value = true
   error.value = ''
+  copyState.value = ''
+  deviceStatus.value = 'Waiting for authorization…'
+  deviceExpired.value = false
   try {
     device.value = await startGitHubDeviceFlow(org.value)
+    deviceModalOpen.value = true
+    startExpiryCountdown()
     schedulePoll(device.value.interval)
   } catch (e: any) {
     error.value = e?.response?.data?.message ?? 'Failed to start device flow'
+    device.value = null
+    deviceModalOpen.value = false
   } finally {
     deviceStarting.value = false
   }
@@ -337,12 +410,15 @@ function schedulePoll(seconds: number) {
 }
 
 async function pollDevice() {
-  if (!device.value) return
+  if (!device.value || deviceExpired.value) return
   try {
     const resp = await pollGitHubDeviceFlow(device.value.session_id)
     if (resp.status === 'complete') {
       stopPolling()
+      stopExpiryCountdown()
       device.value = null
+      deviceModalOpen.value = false
+      deviceStatus.value = ''
       if (resp.result?.target_org_slug) {
         await navigateTo(`/orgs/${resp.result.target_org_slug}/integrations/github?connected=1`)
         return
@@ -351,12 +427,65 @@ async function pollDevice() {
       await load()
       return
     }
+    deviceStatus.value = resp.status === 'slow_down' ? 'GitHub asked us to slow down; retrying…' : 'Waiting for authorization…'
     schedulePoll(resp.interval ?? device.value.interval)
   } catch (e: any) {
     stopPolling()
+    stopExpiryCountdown()
     device.value = null
+    deviceModalOpen.value = false
+    deviceStatus.value = ''
     error.value = e?.response?.data?.message ?? 'GitHub device authorization failed'
   }
+}
+
+async function copyCode() {
+  const code = device.value?.user_code ?? ''
+  if (!code) return
+  copyState.value = ''
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(code)
+    } else {
+      fallbackCopy(code)
+    }
+    copyState.value = 'Copied.'
+  } catch {
+    try {
+      fallbackCopy(code)
+      copyState.value = 'Copied.'
+    } catch {
+      copyState.value = 'Copy failed — select the code and copy it manually.'
+    }
+  }
+}
+
+function fallbackCopy(text: string) {
+  const el = document.createElement('textarea')
+  el.value = text
+  el.setAttribute('readonly', '')
+  el.style.position = 'fixed'
+  el.style.opacity = '0'
+  document.body.appendChild(el)
+  el.select()
+  try {
+    if (!document.execCommand('copy')) throw new Error('copy failed')
+  } finally {
+    document.body.removeChild(el)
+  }
+}
+
+function cancelDeviceFlow() {
+  stopPolling()
+  stopExpiryCountdown()
+  device.value = null
+  deviceModalOpen.value = false
+  deviceStatus.value = ''
+  copyState.value = ''
+}
+
+function onDeviceModalOpen(open: boolean) {
+  if (!open) cancelDeviceFlow()
 }
 
 async function disconnectIdentity() {
@@ -483,5 +612,8 @@ async function remove(id: string) {
 }
 
 onMounted(load)
-onUnmounted(stopPolling)
+onBeforeUnmount(() => {
+  stopPolling()
+  stopExpiryCountdown()
+})
 </script>

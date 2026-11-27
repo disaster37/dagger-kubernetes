@@ -11,6 +11,7 @@ import (
 	"github.com/spf13/viper"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
+	"github.com/disaster/dagger-kubernetes/internal/service"
 )
 
 // TestMain satisfies the always-on S3 prerequisites (cli cache) so the Load
@@ -1118,6 +1119,115 @@ func TestValidateForgeConfigRejections(t *testing.T) {
 	loopback.Forge.GitHub.AllowedAPIURLs = []string{"http://localhost:8081"}
 	if err := validateForgeConfig(loopback); err != nil {
 		t.Fatalf("loopback URLs rejected: %v", err)
+	}
+}
+
+func TestValidateForgeConfigDeviceFlow(t *testing.T) {
+	base := func() *domain.Config {
+		return &domain.Config{Forge: domain.ForgeConfig{GitHub: domain.ForgeGitHubConfig{
+			HTTPTimeout: 15 * time.Second,
+			OAuth: domain.ForgeGitHubOAuthConfig{
+				OAuthBaseURL:      "https://github.com",
+				DeviceFlowEnabled: true,
+				Enabled:           false,
+				ClientID:          "device-client-id",
+				Scopes:            []string{"repo"},
+				StateTTL:          10 * time.Minute,
+			},
+		}}}
+	}
+	cases := []struct {
+		name   string
+		mutate func(*domain.Config)
+		want   string
+	}{
+		{"device only valid", func(*domain.Config) {}, ""},
+		{"device only without secret valid", func(c *domain.Config) { c.Forge.GitHub.OAuth.ClientSecret = "" }, ""},
+		{"device only without redirect url valid", func(c *domain.Config) { c.Forge.GitHub.OAuth.AllowedRedirectURIs = nil }, ""},
+		{"device only without scopes", func(c *domain.Config) { c.Forge.GitHub.OAuth.Scopes = nil }, "scopes"},
+		{"device only invalid scope", func(c *domain.Config) { c.Forge.GitHub.OAuth.Scopes = []string{"repo\x00"} }, "scopes"},
+		{"redirect flow without secret", func(c *domain.Config) { c.Forge.GitHub.OAuth.Enabled = true }, "client_secret"},
+		{"redirect flow valid", func(c *domain.Config) {
+			c.Forge.GitHub.OAuth.Enabled = true
+			c.Forge.GitHub.OAuth.ClientSecret = "secret"
+		}, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base()
+			tc.mutate(cfg)
+			err := validateForgeConfig(cfg)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatalf("valid config rejected: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("err = %v want substring %q", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadForgeGitHubDeviceOnlyConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.app.yaml")
+	content := []byte(`auth:
+  internal:
+    enabled: true
+forge:
+  github:
+    oauth:
+      enabled: false
+      client_id: "device-client-id"
+      device_flow_enabled: true
+`)
+	if err := os.WriteFile(path, content, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("device-only config rejected: %v", err)
+	}
+	o := cfg.Forge.GitHub.OAuth
+	if o.Enabled || o.ClientID != "device-client-id" || !o.DeviceFlowEnabled {
+		t.Fatalf("oauth = %+v", o)
+	}
+	if o.ClientSecret != "" {
+		t.Fatalf("client_secret must stay empty for a device-only config, got %q", o.ClientSecret)
+	}
+	svc := service.NewGitHubIntegrationService(service.GitHubIntegrationConfig{
+		OAuthEnabled:      o.Enabled,
+		ClientID:          o.ClientID,
+		ClientSecret:      o.ClientSecret,
+		Scopes:            o.Scopes,
+		StateTTL:          o.StateTTL,
+		DeviceFlowEnabled: o.DeviceFlowEnabled,
+	}, service.GitHubIntegrationDeps{})
+	if !svc.DeviceFlowEnabled() {
+		t.Fatal("device flow must be available with a client ID and no redirect flow")
+	}
+}
+
+func TestLoadForgeGitHubDeviceFlowWithoutClientIDIsUnavailable(t *testing.T) {
+	cfg, err := Load(filepath.Join(t.TempDir(), "config.app.yaml"))
+	if err != nil {
+		t.Fatalf("default config rejected: %v", err)
+	}
+	o := cfg.Forge.GitHub.OAuth
+	if o.ClientID != "" || !o.DeviceFlowEnabled {
+		t.Fatalf("defaults changed: %+v", o)
+	}
+	svc := service.NewGitHubIntegrationService(service.GitHubIntegrationConfig{
+		OAuthEnabled:      o.Enabled,
+		ClientID:          o.ClientID,
+		Scopes:            o.Scopes,
+		StateTTL:          o.StateTTL,
+		DeviceFlowEnabled: o.DeviceFlowEnabled,
+	}, service.GitHubIntegrationDeps{})
+	if svc.DeviceFlowEnabled() {
+		t.Fatal("device flow must be unavailable without a client ID")
 	}
 }
 
