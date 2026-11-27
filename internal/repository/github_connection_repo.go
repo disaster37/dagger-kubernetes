@@ -29,6 +29,15 @@ func (r *GitHubConnectionRepo) Upsert(ctx context.Context, conn *domain.UserGitH
 	return r.store.applyCtx(ctx, kindUpsertGitHubConnection, cmdGitHubConnectionFrom(conn))
 }
 
+// UpsertIfVersion persists conn only when the stored TokenVersion still equals
+// expectedVersion; a stale write returns domain.ErrConflict.
+func (r *GitHubConnectionRepo) UpsertIfVersion(ctx context.Context, conn *domain.UserGitHubConnection, expectedVersion uint64) error {
+	conn.UpdatedAt = time.Now().UTC()
+	return r.store.applyCtx(ctx, kindUpsertGitHubConnectionIfVersion, cmdGitHubConnectionIfVersion{
+		Connection: *cmdGitHubConnectionFrom(conn), ExpectedVersion: expectedVersion,
+	})
+}
+
 func (r *GitHubConnectionRepo) GetByUser(ctx context.Context, userID string) (*domain.UserGitHubConnection, error) {
 	return r.store.fsmRead().readGitHubConnection(userID)
 }
@@ -55,6 +64,15 @@ func (r *GitHubAccountSourceRepo) Upsert(ctx context.Context, src *domain.GitHub
 	}
 	src.UpdatedAt = now
 	return r.store.applyCtx(ctx, kindUpsertGitHubAccountSource, cmdGitHubAccountSourceFrom(src))
+}
+
+// UpsertIfVersion persists src only when the stored TokenVersion still equals
+// expectedVersion; a stale write returns domain.ErrConflict.
+func (r *GitHubAccountSourceRepo) UpsertIfVersion(ctx context.Context, src *domain.GitHubAccountSource, expectedVersion uint64) error {
+	src.UpdatedAt = time.Now().UTC()
+	return r.store.applyCtx(ctx, kindUpsertGitHubAccountSourceIfVersion, cmdGitHubAccountSourceIfVersion{
+		Source: *cmdGitHubAccountSourceFrom(src), ExpectedVersion: expectedVersion,
+	})
 }
 
 func (r *GitHubAccountSourceRepo) Get(ctx context.Context, id string) (*domain.GitHubAccountSource, error) {

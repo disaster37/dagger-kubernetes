@@ -715,6 +715,11 @@ type ForgeGitHubOAuthConfig struct {
 	StateTTL            time.Duration `mapstructure:"state_ttl"`      // default 10m
 	DeviceFlowEnabled   bool          `mapstructure:"device_flow_enabled"`
 	AllowedRedirectURIs []string      `mapstructure:"allowed_redirect_uris"`
+	// RefreshEnabled rotates expiring OAuth App tokens (kill switch). When
+	// false, an expiring token behaves like a non-expiring one (401 → revoke).
+	RefreshEnabled bool `mapstructure:"refresh_enabled"` // default true
+	// RefreshSkew is the proactive-rotation window before access-token expiry.
+	RefreshSkew time.Duration `mapstructure:"refresh_skew"` // default 5m, allowed 0..1h
 }
 
 // GraphQLConfig bounds Cloud GraphQL query complexity and introspection.

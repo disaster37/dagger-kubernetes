@@ -51,9 +51,56 @@ Outbound GitHub device flow is implemented server-side and exposed at
 `POST /api/v1/github/device/code` + `POST /api/v1/github/device/poll`. It is the
 UI fallback for port-forwarded / private-hostname deployments where only one
 callback URL can be registered. Default scopes are `repo`, `read:org`, and
-`admin:repo_hook`; OAuth App tokens do not expire by default and have no refresh
-token. A revoked token is surfaced as `ErrGitHubTokenRevoked` and can be replaced
-by re-running OAuth/device flow or pasting a new PAT.
+`admin:repo_hook`. A revoked token is surfaced as `ErrGitHubTokenRevoked` and
+can be replaced by re-running OAuth/device flow or pasting a new PAT.
+
+#### B.1 Expiring tokens and refresh-token rotation (amendment 2026-11-27)
+
+GitHub OAuth Apps may be configured with **"Expire user access tokens"**
+(8 h access token + 6-month rotating refresh token, `offline_access` opts a
+single sign-in into it). The original claim that OAuth App tokens "do not
+expire by default and have no refresh token" only holds for apps that keep the
+default; it is not a guarantee. Expiring tokens are now supported:
+
+- **Capture.** `GitHubTokenResult` decodes the full
+  `/login/oauth/access_token` response (`refresh_token`, `expires_in`,
+  `refresh_token_expires_in`). `UserGitHubConnection` and
+  `GitHubAccountSource` store a sealed refresh token (`json:"-"`) plus absolute
+  `TokenExpiresAt` / `RefreshExpiresAt` and a monotonic `TokenVersion`.
+  Responses without the fields degrade to the old behavior (no refresh).
+- **Proactive rotation.** A request that finds the access token inside
+  `forge.github.oauth.refresh_skew` (default 5 m) of expiry rotates it first.
+  A zero expiry (PAT, non-expiring app, legacy record) never refreshes.
+- **Reactive rotation.** A GitHub 401 on a refreshable credential triggers
+  exactly one rotation and one retry of the API call.
+- **Leader-only.** Only the Raft leader rotates, because only the leader can
+  persist the rotation (mirrors the OIDC `errOAuthNotLeaderRefresh` rule,
+  issue #61). Followers serve the still-valid token and answer a reactive 401
+  with `503 not the leader`. Rotation is single-flighted per scope, so a burst
+  of requests performs one `RefreshToken` call.
+- **CAS persistence.** The rotated pair is persisted with
+  `UpsertIfVersion` (new Raft kinds 55/56, `TokenVersion` compare-and-swap).
+  A stale write returns `ErrConflict` and the caller reloads the winner, so a
+  concurrent re-auth is never clobbered by a stale rotation.
+- **Revocation vs transient.** Only `bad_refresh_token` /
+  `incorrect_client_credentials` (and a locally-expired refresh token) revoke
+  the connection. 5xx/timeout/Raft failures return a retriable
+  `ErrGitHubRefreshUnavailable` (503) and never revoke. A persist failure after
+  a successful rotation is logged (`github_refresh_persist_failed`) and the
+  connection stays active; see the residual risk below.
+- **Refresh matrix.** Device-flow tokens refresh **without** a
+  `client_secret`; redirect-flow tokens require it
+  (`forge.github.oauth.client_secret`). `refresh_enabled` (default true) is the
+  kill switch that degrades to the pre-refresh behavior during a GitHub token
+  endpoint outage.
+- **Residual risk (rotation stranding).** GitHub rotates both tokens on every
+  refresh. If leadership is lost after GitHub responded but before the FSM
+  applied, the rotated refresh token cannot be persisted; the stored token then
+  yields `bad_refresh_token` on the next attempt and the user must reconnect
+  once. Leader gating + bounded persist retry make this rare; it cannot be
+  eliminated without a two-phase GitHub handshake.
+- **Migration.** Connections created before this change have no refresh token
+  and keep the old 8 h-then-reconnect behavior until the user reconnects once.
 
 #### Device-only configuration
 

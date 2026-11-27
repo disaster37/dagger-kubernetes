@@ -1001,6 +1001,12 @@ func TestLoadForgeGitHubDefaults(t *testing.T) {
 	if !g.OAuth.DeviceFlowEnabled {
 		t.Fatal("device_flow_enabled default should be true")
 	}
+	if !g.OAuth.RefreshEnabled {
+		t.Fatal("refresh_enabled default should be true")
+	}
+	if g.OAuth.RefreshSkew != 5*time.Minute {
+		t.Fatalf("refresh_skew = %v", g.OAuth.RefreshSkew)
+	}
 	wantScopes := []string{"repo", "read:org", "admin:repo_hook"}
 	if len(g.OAuth.Scopes) != len(wantScopes) {
 		t.Fatalf("scopes = %v", g.OAuth.Scopes)
@@ -1073,6 +1079,7 @@ func TestValidateForgeConfigRejections(t *testing.T) {
 			OAuth: domain.ForgeGitHubOAuthConfig{
 				OAuthBaseURL:      "https://github.com",
 				DeviceFlowEnabled: true,
+				RefreshEnabled:    true,
 				Enabled:           true,
 				ClientID:          "id",
 				ClientSecret:      "secret",
@@ -1100,6 +1107,8 @@ func TestValidateForgeConfigRejections(t *testing.T) {
 		{"scope control char", func(c *domain.Config) { c.Forge.GitHub.OAuth.Scopes = []string{"repo\x00"} }, "scopes"},
 		{"state ttl too short", func(c *domain.Config) { c.Forge.GitHub.OAuth.StateTTL = 30 * time.Second }, "state_ttl"},
 		{"state ttl too long", func(c *domain.Config) { c.Forge.GitHub.OAuth.StateTTL = 2 * time.Hour }, "state_ttl"},
+		{"refresh skew negative", func(c *domain.Config) { c.Forge.GitHub.OAuth.RefreshSkew = -time.Minute }, "refresh_skew"},
+		{"refresh skew too long", func(c *domain.Config) { c.Forge.GitHub.OAuth.RefreshSkew = 2 * time.Hour }, "refresh_skew"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

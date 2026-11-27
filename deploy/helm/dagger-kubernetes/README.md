@@ -931,6 +931,8 @@ subchart values.
 | `supervisor.config.forge.github.oauth.stateTtl` | string | `"10m"` | Redirect-flow OAuth state lifetime (Go duration; 1m..1h; only validated when `enabled=true`). |
 | `supervisor.config.forge.github.oauth.deviceFlowEnabled` | bool | `true` | Enable the RFC 8628 device-flow fallback. Needs `clientId` (and "Enable Device Flow" ticked on a GitHub OAuth App); `enabled` is not required. |
 | `supervisor.config.forge.github.oauth.allowedRedirectUris` | array | `[]` | Extra exact callback URLs (path must be `/github/callback`) allowed for the redirect flow. |
+| `supervisor.config.forge.github.oauth.refreshEnabled` | bool | `true` | Rotate expiring GitHub OAuth App tokens (device flow refreshes without a client secret; redirect flow needs `clientSecret`). Disable to fall back to token-expiry-then-reconnect. |
+| `supervisor.config.forge.github.oauth.refreshSkew` | string | `"5m"` | Proactive-rotation window before access-token expiry (Go duration; 0..1h). |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 | `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |

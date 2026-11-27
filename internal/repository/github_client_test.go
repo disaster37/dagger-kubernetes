@@ -311,3 +311,182 @@ func TestGitHubRepositoriesDeletedInSnapshotPreserveCiphertext(t *testing.T) {
 		t.Fatalf("connection payload = %s err=%v", raw, err)
 	}
 }
+
+func TestGitHubExchangeTokenParsesRefreshMaterial(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"gho_a","token_type":"bearer","scope":"repo, read:org","refresh_token":"ghr_r","expires_in":28800,"refresh_token_expires_in":15897600}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestGitHubClient(t, srv.URL)
+	res, err := c.ExchangeCode(context.Background(), "code", "https://supv.example.com/github/callback", "verifier")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RefreshToken != "ghr_r" || res.ExpiresIn != 28800 || res.RefreshTokenExpiresIn != 15897600 {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(res.Scopes) != 2 || res.Scopes[1] != "read:org" || res.TokenType != "bearer" {
+		t.Fatalf("normalized result = %+v", res)
+	}
+	if !strings.HasPrefix(gotAuth, "Basic ") {
+		t.Fatalf("code exchange must use basic auth, got %q", gotAuth)
+	}
+}
+
+func TestGitHubExchangeTokenNonExpiringDegrades(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"ghu_a","token_type":"bearer","scope":"repo"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestGitHubClient(t, srv.URL)
+	res, err := c.ExchangeCode(context.Background(), "code", "https://supv.example.com/github/callback", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RefreshToken != "" || res.ExpiresIn != 0 || res.RefreshTokenExpiresIn != 0 {
+		t.Fatalf("non-expiring response must keep zero refresh material: %+v", res)
+	}
+}
+
+func TestGitHubRefreshTokenErrors(t *testing.T) {
+	cases := []struct {
+		name        string
+		status      int
+		body        string
+		wantInvalid bool
+	}{
+		{"bad refresh token", http.StatusOK, `{"error":"bad_refresh_token"}`, true},
+		{"incorrect client credentials", http.StatusOK, `{"error":"incorrect_client_credentials"}`, true},
+		{"unknown error code", http.StatusOK, `{"error":"temporarily_unavailable"}`, false},
+		{"server error", http.StatusInternalServerError, `{"message":"boom"}`, false},
+		{"gateway timeout", http.StatusGatewayTimeout, ``, false},
+		{"empty access token", http.StatusOK, `{"token_type":"bearer"}`, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = io.WriteString(w, tc.body)
+			}))
+			t.Cleanup(srv.Close)
+			c := newTestGitHubClient(t, srv.URL)
+			_, err := c.RefreshToken(context.Background(), "ghr_old")
+			if err == nil {
+				t.Fatal("expected an error")
+			}
+			if got := errors.Is(err, domain.ErrGitHubRefreshInvalid); got != tc.wantInvalid {
+				t.Fatalf("ErrGitHubRefreshInvalid = %v (want %v) for err %v", got, tc.wantInvalid, err)
+			}
+			if strings.Contains(err.Error(), "ghr_old") {
+				t.Fatalf("error leaked the refresh token: %v", err)
+			}
+		})
+	}
+}
+
+func TestGitHubRefreshTokenForm(t *testing.T) {
+	cases := []struct {
+		name       string
+		secret     string
+		wantSecret bool
+	}{
+		{"device flow token refreshes without a secret", "", false},
+		{"redirect flow token sends the secret", "client-secret", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var got url.Values
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path != "/login/oauth/access_token" {
+					http.NotFound(w, r)
+					return
+				}
+				body, _ := io.ReadAll(r.Body)
+				got, _ = url.ParseQuery(string(body))
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"access_token":"gho_new","refresh_token":"ghr_new","expires_in":28800,"refresh_token_expires_in":15897600}`)
+			}))
+			t.Cleanup(srv.Close)
+			client, err := NewGitHubClient(GitHubClientConfig{ClientID: "client-id", ClientSecret: tc.secret, OAuthBaseURL: srv.URL, DefaultAPIURL: srv.URL, HTTPTimeout: 2 * time.Second})
+			if err != nil {
+				t.Fatal(err)
+			}
+			res, err := client.RefreshToken(context.Background(), "ghr_old")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if res.AccessToken != "gho_new" || res.RefreshToken != "ghr_new" {
+				t.Fatalf("result = %+v", res)
+			}
+			if got.Get("client_id") != "client-id" || got.Get("grant_type") != "refresh_token" || got.Get("refresh_token") != "ghr_old" {
+				t.Fatalf("form = %v", got)
+			}
+			if tc.wantSecret != (got.Get("client_secret") != "") {
+				t.Fatalf("client_secret present = %v, form = %v", got.Get("client_secret") != "", got)
+			}
+		})
+	}
+}
+
+func TestGitHubRefreshTokenUsesGHESBaseURL(t *testing.T) {
+	var gotPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"gho_new","refresh_token":"ghr_new","expires_in":60}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestGitHubClient(t, srv.URL)
+	if _, err := c.RefreshToken(context.Background(), "ghr_old"); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/login/oauth/access_token" {
+		t.Fatalf("refresh path = %q", gotPath)
+	}
+}
+
+func TestGitHubDevicePollSurfacesRefreshMaterial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"access_token":"gho_dev","token_type":"bearer","scope":"repo","refresh_token":"ghr_dev","expires_in":28800,"refresh_token_expires_in":15897600}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestGitHubClient(t, srv.URL)
+	res, err := c.PollDeviceFlow(context.Background(), "dev-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.RefreshToken != "ghr_dev" || res.ExpiresIn != 28800 || res.RefreshTokenExpiresIn != 15897600 {
+		t.Fatalf("device poll result = %+v", res)
+	}
+}
+
+func TestGitHubDevicePollUnknownErrorIsDenied(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"error":"device_flow_disabled"}`)
+	}))
+	t.Cleanup(srv.Close)
+	c := newTestGitHubClient(t, srv.URL)
+	if _, err := c.PollDeviceFlow(context.Background(), "dev-1"); !errors.Is(err, domain.ErrGitHubDeviceFlowDenied) {
+		t.Fatalf("err = %v want ErrGitHubDeviceFlowDenied", err)
+	}
+}
+
+func TestScrubGitHubBodyRedactsRefreshTokens(t *testing.T) {
+	raw := []byte(`{"access_token":"gho_leak","refresh_token":"ghr_leaked_refresh","pat":"github_pat_leak"}`)
+	got := scrubGitHubBody(raw)
+	for _, leaked := range []string{"gho_leak", "ghr_leaked_refresh", "github_pat_leak"} {
+		if strings.Contains(got, leaked) {
+			t.Fatalf("scrubbed body still contains %q: %s", leaked, got)
+		}
+	}
+	if !strings.Contains(got, "[redacted]") {
+		t.Fatalf("scrubbed body = %s", got)
+	}
+}

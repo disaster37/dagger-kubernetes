@@ -312,6 +312,8 @@ data:
           scopes: {{ .Values.supervisor.config.forge.github.oauth.scopes | toJson }}
           state_ttl: {{ .Values.supervisor.config.forge.github.oauth.stateTtl | quote }}
           device_flow_enabled: {{ .Values.supervisor.config.forge.github.oauth.deviceFlowEnabled }}
+          refresh_enabled: {{ .Values.supervisor.config.forge.github.oauth.refreshEnabled }}
+          refresh_skew: {{ .Values.supervisor.config.forge.github.oauth.refreshSkew | quote }}
           allowed_redirect_uris: {{ .Values.supervisor.config.forge.github.oauth.allowedRedirectUris | toJson }}
     graphql:
       introspection_enabled: {{ .Values.supervisor.config.graphql.introspectionEnabled }}

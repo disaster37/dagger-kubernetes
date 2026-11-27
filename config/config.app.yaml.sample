@@ -612,6 +612,13 @@ forge:
       scopes: ["repo", "read:org", "admin:repo_hook"]
       state_ttl: "10m"                    # replicated single-use OAuth state lifetime (1m..1h; redirect flow only)
       device_flow_enabled: true           # needs client_id; enabled is NOT required
+      # Rotate expiring OAuth App tokens ("Expire user access tokens" enabled on
+      # the app). Device-flow tokens refresh without a client_secret; redirect
+      # flow needs client_secret set. Disable to fall back to the pre-refresh
+      # behavior (token dies at expiry, connection flips to revoked).
+      refresh_enabled: true
+      # Proactive-rotation window before access-token expiry (0..1h).
+      refresh_skew: "5m"
       # Extra exact callback URLs (path must be /github/callback), e.g. a
       # staging ingress origin. The public URL and auth.cors.allowed_origins
       # origins are always allowed.

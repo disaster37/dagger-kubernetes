@@ -522,6 +522,10 @@ supervisor:
           stateTtl: "10m"
 ## @param supervisor.config.forge.github.oauth.deviceFlowEnabled Enable the RFC 8628 device-flow fallback. Needs clientId (and "Enable Device Flow" ticked on a GitHub OAuth App); enabled is not required.
           deviceFlowEnabled: true
+## @param supervisor.config.forge.github.oauth.refreshEnabled Rotate expiring GitHub OAuth App tokens (device flow needs no secret; redirect flow needs clientSecret). Disable to fall back to token-expiry-then-reconnect.
+          refreshEnabled: true
+## @param supervisor.config.forge.github.oauth.refreshSkew Proactive-rotation window before access-token expiry (Go duration; 0..1h).
+          refreshSkew: "5m"
 ## @param supervisor.config.forge.github.oauth.allowedRedirectUris Extra exact callback URLs (path must be /github/callback) allowed for the redirect flow.
           allowedRedirectUris: []
     graphql:

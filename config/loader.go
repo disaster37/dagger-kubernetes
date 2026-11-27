@@ -399,6 +399,8 @@ func load(configFile string, validations []validation) (*domain.Config, error) {
 	v.SetDefault("forge.github.oauth.state_ttl", 10*time.Minute)
 	v.SetDefault("forge.github.oauth.device_flow_enabled", true)
 	v.SetDefault("forge.github.oauth.allowed_redirect_uris", []string{})
+	v.SetDefault("forge.github.oauth.refresh_enabled", true)
+	v.SetDefault("forge.github.oauth.refresh_skew", 5*time.Minute)
 
 	v.AutomaticEnv()
 
@@ -1130,6 +1132,9 @@ func validateForgeGitHubOAuth(o *domain.ForgeGitHubOAuthConfig) error {
 			return fmt.Errorf("forge.github.oauth.allowed_redirect_uris: %w", err)
 		}
 	}
+	if err := validateGitHubRefreshConfig(o); err != nil {
+		return err
+	}
 	// Device flow is not gated on enabled: device_flow_enabled defaults to true,
 	// so requiring a client ID here would invalidate every existing config at
 	// startup. With an empty client ID, device flow is simply unavailable.
@@ -1158,6 +1163,14 @@ func validateForgeGitHubOAuth(o *domain.ForgeGitHubOAuthConfig) error {
 		if strings.TrimSpace(scope) == "" || hasControlChars(scope) {
 			return fmt.Errorf("forge.github.oauth.scopes contains an invalid scope")
 		}
+	}
+	return nil
+}
+
+// validateGitHubRefreshConfig bounds the refresh-token rotation knobs.
+func validateGitHubRefreshConfig(o *domain.ForgeGitHubOAuthConfig) error {
+	if o.RefreshEnabled && (o.RefreshSkew < 0 || o.RefreshSkew > time.Hour) {
+		return fmt.Errorf("forge.github.oauth.refresh_skew must be within 0..1h")
 	}
 	return nil
 }

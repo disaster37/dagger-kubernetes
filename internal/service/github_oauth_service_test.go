@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,16 +18,22 @@ import (
 )
 
 type fakeGitHubAPI struct {
-	profile       domain.GitHubUserProfile
-	scopes        []string
-	orgs          []domain.GitHubOwner
-	repos         []domain.GitHubRemoteRepo
-	repoErr       error
-	profileErr    error
-	reposErr      error
-	exchangeCalls int
-	pollToken     *domain.GitHubTokenResult
-	pollErr       error
+	mu                  sync.Mutex
+	profile             domain.GitHubUserProfile
+	scopes              []string
+	orgs                []domain.GitHubOwner
+	repos               []domain.GitHubRemoteRepo
+	repoErr             error
+	profileErr          error
+	reposErr            error
+	exchangeCalls       int
+	pollToken           *domain.GitHubTokenResult
+	pollErr             error
+	refreshToken        *domain.GitHubTokenResult
+	refreshErr          error
+	refreshCalls        int
+	profileRevokedCalls int
+	reposRevokedCalls   int
 }
 
 func (f *fakeGitHubAPI) AuthorizeURL(clientID, redirectURI, state, codeChallenge string, scopes []string) string {
@@ -53,9 +60,45 @@ func (f *fakeGitHubAPI) PollDeviceFlow(context.Context, string) (*domain.GitHubT
 	return &domain.GitHubTokenResult{AccessToken: "gho_device", TokenType: "bearer", Scopes: f.scopes}, nil
 }
 
+func (f *fakeGitHubAPI) RefreshToken(context.Context, string) (*domain.GitHubTokenResult, error) {
+	f.mu.Lock()
+	f.refreshCalls++
+	refreshErr := f.refreshErr
+	cp := f.refreshToken
+	scopes := append([]string(nil), f.scopes...)
+	f.mu.Unlock()
+	if refreshErr != nil {
+		return nil, refreshErr
+	}
+	if cp == nil {
+		cp = &domain.GitHubTokenResult{
+			AccessToken: "gho_refreshed", RefreshToken: "ghr_refreshed", TokenType: "bearer",
+			Scopes: scopes, ExpiresIn: 28800, RefreshTokenExpiresIn: 15897600,
+		}
+	}
+	out := *cp
+	return &out, nil
+}
+
+func (f *fakeGitHubAPI) refreshCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.refreshCalls
+}
+
 func (f *fakeGitHubAPI) GetAuthenticatedUser(context.Context, string, string) (*domain.GitHubUserProfile, []string, error) {
-	if f.profileErr != nil {
-		return nil, nil, f.profileErr
+	f.mu.Lock()
+	revoked := f.profileRevokedCalls > 0
+	if revoked {
+		f.profileRevokedCalls--
+	}
+	profileErr := f.profileErr
+	f.mu.Unlock()
+	if revoked {
+		return nil, nil, domain.ErrGitHubTokenRevoked
+	}
+	if profileErr != nil {
+		return nil, nil, profileErr
 	}
 	cp := f.profile
 	return &cp, append([]string(nil), f.scopes...), nil
@@ -66,8 +109,18 @@ func (f *fakeGitHubAPI) ListUserOrgs(context.Context, string, string) ([]domain.
 }
 
 func (f *fakeGitHubAPI) ListAccessibleRepos(context.Context, string, string) ([]domain.GitHubRemoteRepo, error) {
-	if f.reposErr != nil {
-		return nil, f.reposErr
+	f.mu.Lock()
+	revoked := f.reposRevokedCalls > 0
+	if revoked {
+		f.reposRevokedCalls--
+	}
+	reposErr := f.reposErr
+	f.mu.Unlock()
+	if revoked {
+		return nil, domain.ErrGitHubTokenRevoked
+	}
+	if reposErr != nil {
+		return nil, reposErr
 	}
 	return append([]domain.GitHubRemoteRepo(nil), f.repos...), nil
 }
@@ -167,6 +220,7 @@ func newGitHubEnv(t *testing.T) *gitHubEnv {
 		OAuthEnabled: true, ClientID: "client-id", ClientSecret: "client-secret",
 		Scopes: []string{"repo", "read:org", "admin:repo_hook"}, StateTTL: 10 * time.Minute,
 		DeviceFlowEnabled: true, AllowedRedirectURIs: []string{"https://alt.example.com/github/callback"},
+		RefreshEnabled: true,
 	}, GitHubIntegrationDeps{
 		Connections: connections, AccountSources: accounts, RepoSettings: repoSets,
 		ForgeSources: forges, OAuthStates: states, DeviceSessions: NewMemoryGitHubDeviceSessionStore(),
@@ -672,5 +726,474 @@ func TestMemoryGitHubDeviceSessionStoreBounds(t *testing.T) {
 	store.Delete("extra")
 	if _, err := store.Get("extra"); !errors.Is(err, domain.ErrNotFound) {
 		t.Fatalf("delete err = %v", err)
+	}
+}
+
+// seedRefreshableUser stores a user connection with sealed access/refresh
+// tokens expiring in expiresIn, so the proactive-refresh window is controllable.
+func (env *gitHubEnv) seedRefreshableUser(t *testing.T, userID, refreshToken string, expiresIn time.Duration) *domain.UserGitHubConnection {
+	t.Helper()
+	ctx := context.Background()
+	accessCT, err := env.svc.sealer.SealRaw(domain.SecretScopeGitHubUser, userID, "gho_old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var refreshCT string
+	if refreshToken != "" {
+		if refreshCT, err = env.svc.sealer.SealRaw(domain.SecretScopeGitHubUser, userID, refreshToken); err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	conn := &domain.UserGitHubConnection{
+		UserID: userID, GitHubUserID: 1, GitHubLogin: "alice", BaseURL: "https://api.github.com",
+		Scopes: []string{"repo"}, TokenCiphertext: accessCT, RefreshTokenCiphertext: refreshCT,
+		TokenExpiresAt: now.Add(expiresIn), RefreshExpiresAt: now.Add(180 * 24 * time.Hour),
+		TokenVersion: 1, Status: domain.GitHubConnectionActive, ConnectedAt: now, UpdatedAt: now,
+	}
+	if err := env.connections.Upsert(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	return conn
+}
+
+// flakyConnectionRepo injects UpsertIfVersion failures for persist-retry tests.
+type flakyConnectionRepo struct {
+	domain.GitHubConnectionRepository
+	mu       sync.Mutex
+	failures int
+	calls    int
+	err      error
+}
+
+func (f *flakyConnectionRepo) UpsertIfVersion(ctx context.Context, conn *domain.UserGitHubConnection, expected uint64) error {
+	f.mu.Lock()
+	f.calls++
+	fail := f.calls <= f.failures
+	f.mu.Unlock()
+	if fail {
+		return f.err
+	}
+	return f.GitHubConnectionRepository.UpsertIfVersion(ctx, conn, expected)
+}
+
+func (f *flakyConnectionRepo) callCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.calls
+}
+
+func TestGitHubIntegrationProactiveRefreshWindow(t *testing.T) {
+	cases := []struct {
+		name          string
+		expiresIn     time.Duration
+		wantRefreshed bool
+	}{
+		{"inside the skew window", time.Minute, true},
+		{"outside the skew window", time.Hour, false},
+		{"already expired", -time.Minute, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newGitHubEnv(t)
+			env.seedRefreshableUser(t, env.alice.ID, "ghr_old", tc.expiresIn)
+			if _, err := env.svc.ListUserOwners(context.Background(), env.alice.ID); err != nil {
+				t.Fatal(err)
+			}
+			if got := env.gh.refreshCount(); (got == 1) != tc.wantRefreshed {
+				t.Fatalf("refresh calls = %d, want refreshed=%v", got, tc.wantRefreshed)
+			}
+			conn, err := env.connections.GetByUser(context.Background(), env.alice.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.wantRefreshed {
+				if conn.TokenVersion != 2 || conn.RefreshTokenCiphertext == "" || !conn.TokenExpiresAt.After(time.Now().Add(time.Hour)) {
+					t.Fatalf("rotated connection = %+v", conn)
+				}
+				token, err := env.svc.sealer.OpenRaw(domain.SecretScopeGitHubUser, env.alice.ID, conn.TokenCiphertext)
+				if err != nil || token != "gho_refreshed" {
+					t.Fatalf("rotated access token = %q err=%v", token, err)
+				}
+			} else if conn.TokenVersion != 1 {
+				t.Fatalf("token must not rotate outside the window: %+v", conn)
+			}
+		})
+	}
+}
+
+func TestGitHubIntegrationReactiveRefreshRetriesOnce(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Hour)
+	env.gh.mu.Lock()
+	env.gh.profileRevokedCalls = 1
+	env.gh.mu.Unlock()
+
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
+		t.Fatalf("reactive refresh retry: %v", err)
+	}
+	if got := env.gh.refreshCount(); got != 1 {
+		t.Fatalf("refresh calls = %d want 1", got)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.Status != domain.GitHubConnectionActive || conn.TokenVersion != 2 {
+		t.Fatalf("connection = %+v err=%v", conn, err)
+	}
+}
+
+func TestGitHubIntegrationRefreshInvalidRevokes(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	env.gh.mu.Lock()
+	env.gh.refreshErr = fmt.Errorf("%w: bad_refresh_token", domain.ErrGitHubRefreshInvalid)
+	env.gh.mu.Unlock()
+
+	_, err := env.svc.ListUserOwners(ctx, env.alice.ID)
+	if !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("err = %v want ErrGitHubTokenRevoked", err)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.Status != domain.GitHubConnectionRevoked {
+		t.Fatalf("connection = %+v err=%v", conn, err)
+	}
+	env.gh.mu.Lock()
+	env.gh.refreshErr = nil
+	env.gh.mu.Unlock()
+}
+
+func TestGitHubIntegrationRefreshTransientDoesNotRevoke(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	env.gh.mu.Lock()
+	env.gh.refreshErr = errors.New("github token endpoint: status 503")
+	env.gh.mu.Unlock()
+
+	_, err := env.svc.ListUserOwners(ctx, env.alice.ID)
+	if !errors.Is(err, domain.ErrGitHubRefreshUnavailable) {
+		t.Fatalf("err = %v want ErrGitHubRefreshUnavailable", err)
+	}
+	if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("transient failure must not revoke: %v", err)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.Status != domain.GitHubConnectionActive {
+		t.Fatalf("connection = %+v err=%v", conn, err)
+	}
+}
+
+func TestGitHubIntegrationExpiredRefreshTokenRevokesWithoutRoundTrip(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	conn := env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	conn.RefreshExpiresAt = time.Now().UTC().Add(-time.Minute)
+	if err := env.connections.Upsert(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("err = %v want ErrGitHubTokenRevoked", err)
+	}
+	if got := env.gh.refreshCount(); got != 0 {
+		t.Fatalf("a doomed refresh must not call GitHub, calls=%d", got)
+	}
+	stored, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || stored.Status != domain.GitHubConnectionRevoked {
+		t.Fatalf("connection = %+v err=%v", stored, err)
+	}
+}
+
+func TestGitHubIntegrationWithoutRefreshTokenKeepsLegacyBehavior(t *testing.T) {
+	cases := []struct {
+		name         string
+		refreshToken string
+		expiresIn    time.Duration
+	}{
+		{"pat style record", "", 0},
+		{"non-expiring oauth record", "", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newGitHubEnv(t)
+			ctx := context.Background()
+			env.seedRefreshableUser(t, env.alice.ID, tc.refreshToken, tc.expiresIn)
+			env.gh.mu.Lock()
+			env.gh.profileRevokedCalls = 1
+			env.gh.mu.Unlock()
+			if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+				t.Fatalf("err = %v want ErrGitHubTokenRevoked", err)
+			}
+			if got := env.gh.refreshCount(); got != 0 {
+				t.Fatalf("no refresh token means no rotation, calls=%d", got)
+			}
+			conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+			if err != nil || conn.Status != domain.GitHubConnectionRevoked {
+				t.Fatalf("connection = %+v err=%v", conn, err)
+			}
+		})
+	}
+}
+
+func TestGitHubIntegrationLegacyRecordSkipsRefresh(t *testing.T) {
+	// A pre-refresh Raft record encodes the new fields as zero values.
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "", 0)
+	legacy, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.TokenExpiresAt = time.Time{}
+	legacy.RefreshExpiresAt = time.Time{}
+	legacy.TokenVersion = 0
+	if err := env.connections.Upsert(ctx, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.gh.refreshCount(); got != 0 {
+		t.Fatalf("legacy records must not refresh, calls=%d", got)
+	}
+}
+
+func TestGitHubIntegrationFollowerNeverRotates(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	env.svc.leaderFn = func() bool { return false }
+
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
+		t.Fatalf("follower must serve the current token: %v", err)
+	}
+	if got := env.gh.refreshCount(); got != 0 {
+		t.Fatalf("follower rotated the token, calls=%d", got)
+	}
+
+	env.gh.mu.Lock()
+	env.gh.profileRevokedCalls = 1
+	env.gh.mu.Unlock()
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); !errors.Is(err, domain.ErrNotLeader) {
+		t.Fatalf("reactive 401 on a follower = %v want ErrNotLeader", err)
+	}
+	if got := env.gh.refreshCount(); got != 0 {
+		t.Fatalf("follower rotated on the reactive path, calls=%d", got)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.Status != domain.GitHubConnectionActive {
+		t.Fatalf("follower must not revoke: %+v err=%v", conn, err)
+	}
+}
+
+func TestGitHubIntegrationRefreshSingleFlight(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+
+	const goroutines = 16
+	var wg sync.WaitGroup
+	errs := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, err := env.svc.ListUserOwners(ctx, env.alice.ID)
+			errs <- err
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent refresh: %v", err)
+		}
+	}
+	if got := env.gh.refreshCount(); got != 1 {
+		t.Fatalf("concurrent bursts must rotate once, calls=%d", got)
+	}
+}
+
+func TestGitHubIntegrationRefreshPersistRetriesThenFails(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	flaky := &flakyConnectionRepo{GitHubConnectionRepository: env.connections, failures: githubRefreshPersistAttempts, err: domain.ErrNotLeader}
+	env.svc.connections = flaky
+
+	_, err := env.svc.ListUserOwners(ctx, env.alice.ID)
+	if !errors.Is(err, domain.ErrGitHubRefreshUnavailable) || !errors.Is(err, domain.ErrNotLeader) {
+		t.Fatalf("err = %v want ErrGitHubRefreshUnavailable wrapping ErrNotLeader", err)
+	}
+	if errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("persist failure must not revoke: %v", err)
+	}
+	if got := flaky.callCount(); got != githubRefreshPersistAttempts {
+		t.Fatalf("persist attempts = %d want %d", got, githubRefreshPersistAttempts)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.Status != domain.GitHubConnectionActive || conn.TokenVersion != 1 {
+		t.Fatalf("connection = %+v err=%v", conn, err)
+	}
+}
+
+func TestGitHubIntegrationRefreshPersistRecoversOnRetry(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	flaky := &flakyConnectionRepo{GitHubConnectionRepository: env.connections, failures: 1, err: domain.ErrRaftTimeout}
+	env.svc.connections = flaky
+
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
+		t.Fatalf("transient persist failure should recover: %v", err)
+	}
+	if got := flaky.callCount(); got != 2 {
+		t.Fatalf("persist attempts = %d want 2", got)
+	}
+	conn, err := env.connections.GetByUser(ctx, env.alice.ID)
+	if err != nil || conn.TokenVersion != 2 {
+		t.Fatalf("connection = %+v err=%v", conn, err)
+	}
+}
+
+func TestGitHubIntegrationRefreshKillSwitch(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.seedRefreshableUser(t, env.alice.ID, "ghr_old", time.Minute)
+	env.svc.cfg.RefreshEnabled = false
+	if _, err := env.svc.ListUserOwners(ctx, env.alice.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.gh.refreshCount(); got != 0 {
+		t.Fatalf("refresh_enabled=false must disable rotation, calls=%d", got)
+	}
+}
+
+func TestGitHubIntegrationAccountRefreshResealsForgeSources(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	acct, err := env.svc.ConnectOrgAccount(ctx, env.alice.ID, false, env.org.ID, "alice", "", "ghp_org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	yes := true
+	if err := env.svc.UpdateOrgRepoSettings(ctx, env.alice.ID, false, env.org, []domain.RepoSettingMutation{{
+		Repo: "github.com/alice/api", SourceID: &acct.ID, RunChecksOnDefaultBranch: &yes,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	setting, err := env.repoSets.Get(ctx, env.org.ID, "github.com/alice/api")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Attach refresh material to the account and make it due.
+	scopeID, err := domain.GitHubOrgAccountScopeID(env.org.ID, acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshCT, err := env.svc.sealer.SealRaw(domain.SecretScopeGitHubOrgAccount, scopeID, "ghr_acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := env.accounts.Get(ctx, acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.RefreshTokenCiphertext = refreshCT
+	stored.TokenExpiresAt = time.Now().UTC().Add(time.Minute)
+	stored.RefreshExpiresAt = time.Now().UTC().Add(180 * 24 * time.Hour)
+	if err := env.accounts.Upsert(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := env.svc.ListSourceRepositories(ctx, env.org, acct.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := env.gh.refreshCount(); got != 1 {
+		t.Fatalf("account refresh calls = %d want 1", got)
+	}
+	rotated, err := env.accounts.Get(ctx, acct.ID)
+	if err != nil || rotated.TokenVersion != 2 {
+		t.Fatalf("account = %+v err=%v", rotated, err)
+	}
+	src, err := env.forges.Get(ctx, setting.ForgeSourceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resealed, err := env.svc.sealer.OpenRaw(domain.SecretScopeOrg, env.org.ID, src.TokenCiphertext)
+	if err != nil || resealed != "gho_refreshed" {
+		t.Fatalf("runtime forge source token = %q err=%v", resealed, err)
+	}
+}
+
+func TestGitHubIntegrationAccountRefreshInvalidRevokes(t *testing.T) {
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	acct, err := env.svc.ConnectOrgAccount(ctx, env.alice.ID, false, env.org.ID, "alice", "", "ghp_org")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopeID, err := domain.GitHubOrgAccountScopeID(env.org.ID, acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refreshCT, err := env.svc.sealer.SealRaw(domain.SecretScopeGitHubOrgAccount, scopeID, "ghr_acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := env.accounts.Get(ctx, acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.RefreshTokenCiphertext = refreshCT
+	stored.TokenExpiresAt = time.Now().UTC().Add(time.Minute)
+	if err := env.accounts.Upsert(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	env.gh.mu.Lock()
+	env.gh.refreshErr = fmt.Errorf("%w: incorrect_client_credentials", domain.ErrGitHubRefreshInvalid)
+	env.gh.mu.Unlock()
+
+	if _, err := env.svc.ListSourceRepositories(ctx, env.org, acct.ID); !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		t.Fatalf("err = %v want ErrGitHubTokenRevoked", err)
+	}
+	revoked, err := env.accounts.Get(ctx, acct.ID)
+	if err != nil || revoked.Status != domain.GitHubConnectionRevoked {
+		t.Fatalf("account = %+v err=%v", revoked, err)
+	}
+}
+
+func TestGitHubIntegrationFileTransferGuard(t *testing.T) {
+	// completeWithToken must capture refresh material and thread it into the
+	// auto-connected org account (device/redirect flow with expiring tokens).
+	env := newGitHubEnv(t)
+	ctx := context.Background()
+	env.gh.pollToken = &domain.GitHubTokenResult{
+		AccessToken: "gho_expiring", RefreshToken: "ghr_expiring", Scope: "repo,read:org",
+		ExpiresIn: 28800, RefreshTokenExpiresIn: 15897600,
+	}
+	start, err := env.svc.StartDeviceFlow(ctx, env.alice.ID, env.org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := env.svc.PollDeviceFlow(ctx, env.alice.ID, false, start.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn := result.Connection
+	if conn.TokenVersion != 1 || conn.RefreshTokenCiphertext == "" || conn.TokenExpiresAt.IsZero() || conn.RefreshExpiresAt.IsZero() {
+		t.Fatalf("connection = %+v", conn)
+	}
+	if result.AutoConnectedOrg == nil || result.AutoConnectedOrg.RefreshTokenCiphertext == "" || result.AutoConnectedOrg.TokenExpiresAt.IsZero() {
+		t.Fatalf("auto-connected account = %+v", result.AutoConnectedOrg)
+	}
+	scopeID, err := domain.GitHubOrgAccountScopeID(env.org.ID, result.AutoConnectedOrg.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refresh, err := env.svc.sealer.OpenRaw(domain.SecretScopeGitHubOrgAccount, scopeID, result.AutoConnectedOrg.RefreshTokenCiphertext)
+	if err != nil || refresh != "ghr_expiring" {
+		t.Fatalf("account refresh token = %q err=%v", refresh, err)
 	}
 }

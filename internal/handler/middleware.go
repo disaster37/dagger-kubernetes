@@ -281,6 +281,8 @@ func (s *Server) writeServiceError(c *app.RequestContext, err error) {
 		writeError(c, consts.StatusForbidden, "account access is disabled")
 	case errors.Is(err, domain.ErrNotLeader):
 		writeError(c, consts.StatusServiceUnavailable, "not the leader")
+	case errors.Is(err, domain.ErrGitHubRefreshUnavailable):
+		writeError(c, consts.StatusServiceUnavailable, "github token refresh is temporarily unavailable; retry shortly")
 	case errors.Is(err, domain.ErrRaftTimeout):
 		writeError(c, consts.StatusGatewayTimeout, "raft apply timeout")
 	case errors.Is(err, domain.ErrInvalidCredential):
