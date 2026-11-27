@@ -918,6 +918,16 @@ subchart values.
 | `supervisor.config.workflows.jobImagePullSecrets` | array | `[]` | Image pull secrets for workflow Job pods (empty = `supervisor.image.pullSecrets`). |
 | `supervisor.config.workflows.defaultTimeout` | string | `"30m"` | Default workflow job timeout when a job declares none. |
 | `supervisor.config.workflows.maxParallel` | int | `8` | Max concurrently running jobs in one workflow run. |
+| `supervisor.config.forge.github.oauth.enabled` | bool | `false` | Enable the GitHub OAuth App redirect flow for credential linking (independent of `auth.oauth`). Requires `clientId` and `clientSecret` (or `clientSecretRef`). Leave false for a device-flow-only or PAT-only setup. |
+| `supervisor.config.forge.github.oauth.clientId` | string | `""` | GitHub OAuth App client ID (public; safe in the ConfigMap). With `deviceFlowEnabled=true` it enables device-flow-only linking without a secret or callback URL; required when `enabled=true`. |
+| `supervisor.config.forge.github.oauth.clientSecret` | string | `""` | GitHub OAuth App client secret (rendered into the `<release>-github-integration-oauth` Secret). Required only for the redirect flow (`enabled=true`); leave empty for device-flow-only. |
+| `supervisor.config.forge.github.oauth.clientSecretRef.name` | string | `""` | K8s Secret holding the client secret (takes precedence over `clientSecret`; the chart-managed Secret is not rendered). |
+| `supervisor.config.forge.github.oauth.clientSecretRef.key` | string | `"client_secret"` | Key inside the client secret Secret. |
+| `supervisor.config.forge.github.oauth.oauthBaseUrl` | string | `"https://github.com"` | GitHub base URL (set for GitHub Enterprise Server). |
+| `supervisor.config.forge.github.oauth.scopes` | array | `["repo", "read:org", "admin:repo_hook"]` | OAuth scopes requested by the redirect and device flows. |
+| `supervisor.config.forge.github.oauth.stateTtl` | string | `"10m"` | Redirect-flow OAuth state lifetime (Go duration; 1m..1h; only validated when `enabled=true`). |
+| `supervisor.config.forge.github.oauth.deviceFlowEnabled` | bool | `true` | Enable the RFC 8628 device-flow fallback. Needs `clientId` (and "Enable Device Flow" ticked on a GitHub OAuth App); `enabled` is not required. |
+| `supervisor.config.forge.github.oauth.allowedRedirectUris` | array | `[]` | Extra exact callback URLs (path must be `/github/callback`) allowed for the redirect flow. |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 | `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |

@@ -569,19 +569,37 @@ forge:
     http_timeout: "15s"
     # GitHub OAuth App used ONLY to link GitHub repository credentials. It is
     # independent of auth.oauth: internal-auth-only and OIDC deployments can
-    # enable it, and it never changes how users log in. Register exactly one
-    # callback URL: <server.public_url>/github/callback.
+    # enable it, and it never changes how users log in.
+    #
+    # It must be a GitHub *OAuth App* (not a GitHub App — GitHub Apps do not
+    # support device flow). Two setups are supported:
+    #
+    #   1. Redirect flow (browser callback):
+    #        enabled: true
+    #        client_id + client_secret are required
+    #        register exactly one callback URL:
+    #          <server.public_url>/github/callback
+    #
+    #   2. Device-only flow (no secret, no callback URL):
+    #        enabled: false
+    #        client_id: "<OAuth App client ID>"   # public; safe in a ConfigMap
+    #        device_flow_enabled: true
+    #
+    # Both setups require ticking "Enable Device Flow" on the OAuth App to use
+    # the device flow. With no client_id, device flow is simply unavailable
+    # (the default device_flow_enabled: true does not require one), so a PAT
+    # remains the zero-config fallback.
     oauth:
-      enabled: false
-      client_id: ""                       # DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_ID
-      client_secret: ""                   # DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_SECRET (set via Secret)
+      enabled: false                      # redirect flow only; requires client_id + client_secret
+      client_id: ""                       # DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_ID (also enables device flow on its own)
+      client_secret: ""                   # DAGGER_KUBERNETES_FORGE_GITHUB_OAUTH_CLIENT_SECRET (set via Secret; redirect flow only)
       oauth_base_url: "https://github.com"
       # repo + read:org + admin:repo_hook let the supervisor list repositories,
       # enumerate GitHub organizations, clone private repos, post commit
       # statuses, and manage repository webhooks.
       scopes: ["repo", "read:org", "admin:repo_hook"]
-      state_ttl: "10m"                    # replicated single-use OAuth state lifetime (1m..1h)
-      device_flow_enabled: true           # UI fallback for port-forward / private hostnames
+      state_ttl: "10m"                    # replicated single-use OAuth state lifetime (1m..1h; redirect flow only)
+      device_flow_enabled: true           # needs client_id; enabled is NOT required
       # Extra exact callback URLs (path must be /github/callback), e.g. a
       # staging ingress origin. The public URL and auth.cors.allowed_origins
       # origins are always allowed.

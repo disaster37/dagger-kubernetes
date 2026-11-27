@@ -171,7 +171,7 @@ func (s *Server) handleGitHubDeviceCode(ctx context.Context, c *app.RequestConte
 	result, err := s.githubIntegration.StartDeviceFlow(ctx, id.UserID, orgID)
 	if err != nil {
 		if errors.Is(err, domain.ErrGitHubDeviceFlowDisabled) || errors.Is(err, domain.ErrGitHubOAuthDisabled) {
-			writeError(c, consts.StatusNotFound, "GitHub device flow is not configured on this deployment")
+			writeError(c, consts.StatusBadRequest, "GitHub device flow is not configured on this deployment")
 			return
 		}
 		s.writeServiceError(c, err)

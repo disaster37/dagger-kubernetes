@@ -311,9 +311,51 @@ func TestGitHubIntegrationDeviceFlow(t *testing.T) {
 	if _, err := env.svc.PollDeviceFlow(ctx, env.alice.ID, false, start.SessionID); !errors.Is(err, domain.ErrOAuthStateInvalid) {
 		t.Fatalf("replay err = %v", err)
 	}
+	// Device flow only needs a client ID: it stays available while the redirect
+	// flow is disabled, and disappears when the client ID is removed.
+	env.svc.cfg.OAuthEnabled = false
+	if !env.svc.DeviceFlowEnabled() {
+		t.Fatal("device flow must stay enabled with a client ID when redirect OAuth is disabled")
+	}
+	env.svc.cfg.ClientID = ""
+	if env.svc.DeviceFlowEnabled() {
+		t.Fatal("device flow must be disabled without a client ID")
+	}
+	if _, err := env.svc.StartDeviceFlow(ctx, env.alice.ID, ""); !errors.Is(err, domain.ErrGitHubDeviceFlowDisabled) {
+		t.Fatalf("no client id err = %v", err)
+	}
+	env.svc.cfg.ClientID = "client-id"
 	env.svc.cfg.DeviceFlowEnabled = false
 	if _, err := env.svc.StartDeviceFlow(ctx, env.alice.ID, ""); !errors.Is(err, domain.ErrGitHubDeviceFlowDisabled) {
 		t.Fatalf("disabled err = %v", err)
+	}
+}
+
+func TestGitHubIntegrationDeviceFlowEnabled(t *testing.T) {
+	cases := []struct {
+		name          string
+		oauthEnabled  bool
+		clientID      string
+		deviceEnabled bool
+		want          bool
+	}{
+		{name: "device only", clientID: "client-id", deviceEnabled: true, want: true},
+		{name: "device only with redirect flow disabled", oauthEnabled: false, clientID: "client-id", deviceEnabled: true, want: true},
+		{name: "redirect flow enabled does not imply device flow", oauthEnabled: true, clientID: "client-id", deviceEnabled: false, want: false},
+		{name: "no client id", oauthEnabled: true, deviceEnabled: true, want: false},
+		{name: "empty client id and device flag off", want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc := NewGitHubIntegrationService(GitHubIntegrationConfig{
+				OAuthEnabled:      tc.oauthEnabled,
+				ClientID:          tc.clientID,
+				DeviceFlowEnabled: tc.deviceEnabled,
+			}, GitHubIntegrationDeps{})
+			if got := svc.DeviceFlowEnabled(); got != tc.want {
+				t.Fatalf("DeviceFlowEnabled() = %v want %v", got, tc.want)
+			}
+		})
 	}
 }
 

@@ -75,17 +75,22 @@ func (handlerFakeForge) CreateCheckRun(context.Context, *domain.ForgeSource, str
 
 func newGitHubHandlerEnv(t *testing.T) (*testEnv, *handlerFakeGitHub) {
 	t.Helper()
+	return newGitHubHandlerEnvWithConfig(t, &service.GitHubIntegrationConfig{
+		PublicURL: "https://supv.example.com", DefaultAPIURL: "https://api.github.com",
+		OAuthEnabled: true, ClientID: "client", ClientSecret: "secret",
+		Scopes: []string{"repo"}, StateTTL: 10 * time.Minute, DeviceFlowEnabled: true,
+	})
+}
+
+func newGitHubHandlerEnvWithConfig(t *testing.T, cfg *service.GitHubIntegrationConfig) (*testEnv, *handlerFakeGitHub) {
+	t.Helper()
 	env := newTestEnv(t)
 	logger := logrus.New()
 	logger.SetOutput(io.Discard)
 	store := env.store
 	sealer := service.NewSecretService(repository.NewSecretRepo(store), testTokenEncKey(), logger)
 	gh := &handlerFakeGitHub{}
-	integration := service.NewGitHubIntegrationService(service.GitHubIntegrationConfig{
-		PublicURL: "https://supv.example.com", DefaultAPIURL: "https://api.github.com",
-		OAuthEnabled: true, ClientID: "client", ClientSecret: "secret",
-		Scopes: []string{"repo"}, StateTTL: 10 * time.Minute, DeviceFlowEnabled: true,
-	}, service.GitHubIntegrationDeps{
+	integration := service.NewGitHubIntegrationService(*cfg, service.GitHubIntegrationDeps{
 		Connections: repository.NewGitHubConnectionRepo(store), AccountSources: repository.NewGitHubAccountSourceRepo(store),
 		RepoSettings: repository.NewRepoSettingRepo(store), ForgeSources: repository.NewForgeSourceRepo(store),
 		OAuthStates: repository.NewGitHubOAuthStateRepo(store), DeviceSessions: service.NewMemoryGitHubDeviceSessionStore(),
@@ -105,6 +110,62 @@ func newGitHubHandlerEnv(t *testing.T) (*testEnv, *handlerFakeGitHub) {
 		}
 	}
 	return env, gh
+}
+
+func TestGitHubIntegrationDeviceOnlyConnectionFlags(t *testing.T) {
+	env, _ := newGitHubHandlerEnvWithConfig(t, &service.GitHubIntegrationConfig{
+		PublicURL: "https://supv.example.com", DefaultAPIURL: "https://api.github.com",
+		OAuthEnabled: false, ClientID: "device-client", Scopes: []string{"repo"},
+		StateTTL: 10 * time.Minute, DeviceFlowEnabled: true,
+	})
+	e := newAuthEngine(env.server)
+	admin := env.loginAsAdmin(t)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/github/connection", nil, ut.Header{Key: "Authorization", Value: admin})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("connection status = %d body=%s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+	var state map[string]any
+	_ = json.Unmarshal(resp.Result().Body(), &state)
+	if state["oauth_enabled"] != false || state["device_flow_enabled"] != true {
+		t.Fatalf("device-only connection state = %v", state)
+	}
+
+	// A client ID alone is enough to start the device flow.
+	resp = ut.PerformRequest(e, "POST", "/api/v1/github/device/code", &ut.Body{Body: strings.NewReader(`{}`), Len: 2},
+		ut.Header{Key: "Authorization", Value: admin}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("device code status = %d body=%s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+}
+
+func TestGitHubIntegrationDeviceFlowWithoutClientID(t *testing.T) {
+	env, _ := newGitHubHandlerEnvWithConfig(t, &service.GitHubIntegrationConfig{
+		PublicURL: "https://supv.example.com", DefaultAPIURL: "https://api.github.com",
+		OAuthEnabled: false, Scopes: []string{"repo"}, StateTTL: 10 * time.Minute,
+		DeviceFlowEnabled: true,
+	})
+	e := newAuthEngine(env.server)
+	admin := env.loginAsAdmin(t)
+
+	resp := ut.PerformRequest(e, "GET", "/api/v1/github/connection", nil, ut.Header{Key: "Authorization", Value: admin})
+	if resp.Result().StatusCode() != http.StatusOK {
+		t.Fatalf("connection status = %d body=%s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+	var state map[string]any
+	_ = json.Unmarshal(resp.Result().Body(), &state)
+	if state["oauth_enabled"] != false || state["device_flow_enabled"] != false {
+		t.Fatalf("no-client connection state = %v", state)
+	}
+
+	resp = ut.PerformRequest(e, "POST", "/api/v1/github/device/code", &ut.Body{Body: strings.NewReader(`{}`), Len: 2},
+		ut.Header{Key: "Authorization", Value: admin}, ut.Header{Key: "Content-Type", Value: "application/json"})
+	if resp.Result().StatusCode() != http.StatusBadRequest {
+		t.Fatalf("device code without client id status = %d body=%s", resp.Result().StatusCode(), resp.Result().Body())
+	}
+	if !strings.Contains(string(resp.Result().Body()), "not configured") {
+		t.Fatalf("device code body = %s", resp.Result().Body())
+	}
 }
 
 func TestGitHubIntegrationRoutes(t *testing.T) {

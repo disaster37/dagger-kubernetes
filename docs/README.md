@@ -1067,13 +1067,28 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   self-hosted instances (see **GitHub CLI integration** below).
 - **GitHub CLI integration (ADR-059).** `forge.github.oauth` configures a GitHub
   **OAuth App used only for credential linking** — it is independent of
-  `auth.oauth` and never changes how humans log in. Register exactly one
-  Authorization callback URL, `https://<public-host>/github/callback`, and
-  enable the app's Device Flow checkbox; the default scopes are `repo`,
-  `read:org`, and `admin:repo_hook` (list/clone private repositories, enumerate
-  GitHub organizations, post commit statuses, manage webhooks). `dagger cloud
-  integration create github [--open]` prints a GitHub authorize URL with PKCE
-  S256 + a replicated single-use state; the browser completes
+  `auth.oauth` and never changes how humans log in. It must be a GitHub
+  *OAuth App* (GitHub Apps do not support device flow). Two setups are
+  supported; tick the app's **Enable Device Flow** checkbox when device flow is
+  used. Default scopes are `repo`, `read:org`, and `admin:repo_hook`
+  (list/clone private repositories, enumerate GitHub organizations, post commit
+  statuses, manage webhooks).
+  - **Full OAuth app (redirect flow).** `forge.github.oauth.enabled: true` plus
+    `client_id` and `client_secret`; register exactly one Authorization callback
+    URL, `https://<public-host>/github/callback`. This is the only setup that
+    needs a secret and a callback URL.
+  - **Device-only (no secret, no callback URL).** Set `client_id` (public) and
+    leave `enabled: false`; `device_flow_enabled` defaults to `true`. The UI
+    offers **Connect via Device Code**, which opens a modal with the user code
+    and a copy button, links to `verification_uri` in a new tab, shows an expiry
+    countdown (with a "code expired — start again" state that stops polling),
+    and polls until approved; it closes on success. The GitHub access token is
+    never displayed or returned to the browser — it is sealed server-side. With
+    no `client_id`, device flow is unavailable and a PAT remains the zero-config
+    fallback.
+  The `dagger cloud integration create github [--open]` command prints a GitHub
+  authorize URL with PKCE S256 + a replicated single-use state; the browser
+  completes
   `/github/callback` → `POST /api/v1/github/oauth/complete`. After completion
   the caller's `UserGitHubConnection` is sealed under
   `github_user|<userID>`; on a single-org (or UI-bound) flow the personal
@@ -1087,8 +1102,12 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
     `POST /api/v1/orgs/:org/github/accounts` (account-wide) /
     `POST /api/v1/orgs/:org/integrations` (per-repo). Creating a per-repo
     GitHub source also idempotently mirrors the parent account and claim.
-  - **Device flow.** `POST /api/v1/github/device/code` + `/device/poll` power
-    the UI fallback for `kubectl port-forward` / single-callback-URL setups.
+  - **Device flow endpoints.** `POST /api/v1/github/device/code` +
+    `/device/poll` power the UI fallback for `kubectl port-forward` /
+    single-callback-URL setups. `GET /api/v1/github/connection` reports
+    `oauth_enabled` and `device_flow_enabled` independently, so the UI shows the
+    PAT-only warning only when neither flow is configured; `device/code`
+    returns `400` when no client ID is configured.
   - **Internal-auth & OIDC deployments.** Internal username/password
     (`auth.oauth.enabled: false`) and OIDC users can link any GitHub account;
     the browser completing `/github/callback` must be signed in as the **same
