@@ -30,6 +30,7 @@ type Metrics struct {
 	OrgQuotaSoftExceededTotal     *prometheus.CounterVec
 	OrgQuotaHardRejectedTotal     *prometheus.CounterVec
 	WebhookSignatureInvalid       *prometheus.CounterVec
+	GitHubTokenRefreshTotal       *prometheus.CounterVec
 }
 
 // DeleteOrgSeries removes every Prometheus series labelled with org (and the
@@ -160,6 +161,10 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			Name: "dagger_kubernetes_webhook_signature_invalid_total",
 			Help: "Total webhook requests rejected for an invalid signature, by provider",
 		}, []string{"provider"}),
+		GitHubTokenRefreshTotal: prometheus.NewCounterVec(prometheus.CounterOpts{
+			Name: "dagger_kubernetes_github_token_refresh_total",
+			Help: "Total GitHub OAuth token refresh attempts by scope and result",
+		}, []string{"scope", "result"}),
 	}
 
 	if reg != nil {
@@ -182,6 +187,7 @@ func NewMetrics(reg prometheus.Registerer) *Metrics {
 			m.RemoteCacheExportedBundles,
 			m.RemoteCacheStoredBytes,
 			m.WebhookSignatureInvalid,
+			m.GitHubTokenRefreshTotal,
 			m.OrgQuotaUsage,
 			m.OrgQuotaLimit,
 			m.OrgQuotaSoftExceededTotal,
