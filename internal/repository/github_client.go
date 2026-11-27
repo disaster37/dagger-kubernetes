@@ -3,6 +3,7 @@ package repository
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math/rand"
@@ -112,15 +113,100 @@ func (c *GitHubClient) AuthorizeURL(clientID, redirectURI, state, codeChallenge 
 	)
 }
 
-// ExchangeCode exchanges an authorization code (with PKCE verifier).
+// ExchangeCode exchanges an authorization code (with PKCE verifier). GitHub
+// accepts the client credentials as HTTP Basic auth on this endpoint (the
+// golang.org/x/oauth2 behavior this replaces).
 func (c *GitHubClient) ExchangeCode(ctx context.Context, code, redirectURI, codeVerifier string) (*domain.GitHubTokenResult, error) {
-	cfg := c.oauthConfig(redirectURI, nil)
-	ctx = context.WithValue(ctx, oauth2.HTTPClient, c.http)
-	token, err := cfg.Exchange(ctx, code, oauth2.VerifierOption(codeVerifier))
+	form := url.Values{
+		"grant_type":   {"authorization_code"},
+		"code":         {code},
+		"redirect_uri": {redirectURI},
+	}
+	if codeVerifier != "" {
+		form.Set("code_verifier", codeVerifier)
+	}
+	res, err := c.exchangeToken(ctx, form, true)
 	if err != nil {
 		return nil, fmt.Errorf("exchange github code: %w", err)
 	}
-	return githubTokenResult(token), nil
+	return res, nil
+}
+
+// RefreshToken rotates an expiring OAuth App token. client_secret is only sent
+// when configured: tokens minted by the device flow refresh without one.
+func (c *GitHubClient) RefreshToken(ctx context.Context, refreshToken string) (*domain.GitHubTokenResult, error) {
+	form := url.Values{
+		"client_id":     {c.cfg.ClientID},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+	}
+	if c.cfg.ClientSecret != "" {
+		form.Set("client_secret", c.cfg.ClientSecret)
+	}
+	res, err := c.exchangeToken(ctx, form, false)
+	if err != nil {
+		return nil, fmt.Errorf("refresh github token: %w", err)
+	}
+	return res, nil
+}
+
+// githubTokenEndpointError is a non-credential error code returned by
+// /login/oauth/access_token (for example authorization_pending).
+type githubTokenEndpointError struct{ code string }
+
+func (e *githubTokenEndpointError) Error() string {
+	return fmt.Sprintf("github token endpoint: %s", e.code)
+}
+
+// exchangeToken POSTs form to <oauthBase>/login/oauth/access_token, decodes the
+// full token response and normalizes it. A rejected refresh token maps to
+// domain.ErrGitHubRefreshInvalid; any other failure (network, 5xx, unknown
+// error code) is returned as a transient error and never as a revocation.
+// The form may carry a refresh token, so it is never logged.
+func (c *GitHubClient) exchangeToken(ctx context.Context, form url.Values, basicAuth bool) (*domain.GitHubTokenResult, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/login/oauth/access_token", c.oauthBase), strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("build github token request: %w", err)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("User-Agent", githubUserAgent)
+	if basicAuth {
+		req.SetBasicAuth(c.cfg.ClientID, c.cfg.ClientSecret)
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("github token request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, err := readGitHubBody(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+	var out struct {
+		domain.GitHubTokenResult
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("decode github token response: %w", err)
+	}
+	if out.Error != "" {
+		switch out.Error {
+		case "bad_refresh_token", "incorrect_client_credentials":
+			return nil, fmt.Errorf("%w: %s", domain.ErrGitHubRefreshInvalid, out.Error)
+		default:
+			return nil, &githubTokenEndpointError{code: out.Error}
+		}
+	}
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("github token endpoint: status %d: %s", resp.StatusCode, scrubGitHubBody(body))
+	}
+	if out.AccessToken == "" {
+		return nil, fmt.Errorf("github token endpoint returned no access token")
+	}
+	res := out.GitHubTokenResult
+	res.Normalize()
+	return &res, nil
 }
 
 // StartDeviceFlow begins an RFC 8628 device authorization.
@@ -154,46 +240,24 @@ func (c *GitHubClient) PollDeviceFlow(ctx context.Context, deviceCode string) (*
 	if c.cfg.ClientSecret != "" {
 		form.Set("client_secret", c.cfg.ClientSecret)
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, fmt.Sprintf("%s/login/oauth/access_token", c.oauthBase), strings.NewReader(form.Encode()))
+	res, err := c.exchangeToken(ctx, form, false)
 	if err != nil {
-		return nil, fmt.Errorf("build github device token request: %w", err)
-	}
-	c.standardHeaders(req)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	resp, err := c.http.Do(req)
-	if err != nil {
+		var endpointErr *githubTokenEndpointError
+		if errors.As(err, &endpointErr) {
+			switch endpointErr.code {
+			case "authorization_pending":
+				return nil, domain.ErrGitHubDeviceAuthorizationDelay
+			case "slow_down":
+				return nil, domain.ErrGitHubDeviceSlowDown
+			case "expired_token", "access_denied":
+				return nil, domain.ErrGitHubDeviceFlowDenied
+			default:
+				return nil, fmt.Errorf("github device flow: %s: %w", endpointErr.code, domain.ErrGitHubDeviceFlowDenied)
+			}
+		}
 		return nil, fmt.Errorf("poll github device flow: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
-	body, err := readGitHubBody(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	var out struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-		Scope       string `json:"scope"`
-		Error       string `json:"error"`
-	}
-	if err := json.Unmarshal(body, &out); err != nil {
-		return nil, fmt.Errorf("decode github device token response: %w", err)
-	}
-	if out.Error != "" {
-		switch out.Error {
-		case "authorization_pending":
-			return nil, domain.ErrGitHubDeviceAuthorizationDelay
-		case "slow_down":
-			return nil, domain.ErrGitHubDeviceSlowDown
-		case "expired_token", "access_denied":
-			return nil, domain.ErrGitHubDeviceFlowDenied
-		default:
-			return nil, fmt.Errorf("github device flow: %s: %w", out.Error, domain.ErrGitHubDeviceFlowDenied)
-		}
-	}
-	if resp.StatusCode >= 300 || out.AccessToken == "" {
-		return nil, fmt.Errorf("github device token: %w", domain.ErrGitHubTokenRevoked)
-	}
-	return &domain.GitHubTokenResult{AccessToken: out.AccessToken, TokenType: out.TokenType, Scopes: splitScopes(out.Scope)}, nil
+	return res, nil
 }
 
 // GetAuthenticatedUser fetches GET /user and the granted OAuth scopes.
@@ -439,7 +503,7 @@ func githubRateLimit(resp *http.Response) error {
 // removes token-like prefixes so credentials never appear in errors (CWE-209).
 func scrubGitHubBody(body []byte) string {
 	s := string(body)
-	for _, prefix := range []string{"gho_", "ghp_", "github_pat_"} {
+	for _, prefix := range []string{"gho_", "ghp_", "github_pat_", "ghr_"} {
 		for {
 			idx := strings.Index(s, prefix)
 			if idx < 0 {
@@ -486,17 +550,6 @@ func splitScopes(raw string) []string {
 		}
 	}
 	return out
-}
-
-func githubTokenResult(token *oauth2.Token) *domain.GitHubTokenResult {
-	if token == nil {
-		return &domain.GitHubTokenResult{}
-	}
-	scopes := []string{}
-	if raw, ok := token.Extra("scope").(string); ok {
-		scopes = splitScopes(raw)
-	}
-	return &domain.GitHubTokenResult{AccessToken: token.AccessToken, TokenType: token.TokenType, Scopes: scopes}
 }
 
 // pathSegment escapes one GitHub path segment and rejects traversal.

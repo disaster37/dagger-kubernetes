@@ -85,6 +85,9 @@ const (
 	kindDeleteRepoSetting         // 52
 	kindCreateGitHubOAuthState    // 53
 	kindConsumeGitHubOAuthState   // 54
+	// Conditional (TokenVersion CAS) token-rotation upserts.
+	kindUpsertGitHubConnectionIfVersion    // 55
+	kindUpsertGitHubAccountSourceIfVersion // 56
 )
 
 // command is a single Raft log payload: a kind plus a JSON payload decoded by
@@ -353,18 +356,23 @@ type (
 	}
 
 	// cmdGitHubConnection is the snapshot-safe user GitHub connection payload.
-	// domain.UserGitHubConnection hides TokenCiphertext with json:"-".
+	// domain.UserGitHubConnection hides TokenCiphertext/RefreshTokenCiphertext
+	// with json:"-".
 	cmdGitHubConnection struct {
-		UserID          string                        `json:"user_id"`
-		GitHubUserID    int64                         `json:"github_user_id"`
-		GitHubLogin     string                        `json:"github_login"`
-		AvatarURL       string                        `json:"avatar_url,omitempty"`
-		BaseURL         string                        `json:"base_url"`
-		Scopes          []string                      `json:"scopes,omitempty"`
-		TokenCiphertext string                        `json:"token_ciphertext"`
-		Status          domain.GitHubConnectionStatus `json:"status"`
-		ConnectedAt     time.Time                     `json:"connected_at"`
-		UpdatedAt       time.Time                     `json:"updated_at"`
+		UserID                 string                        `json:"user_id"`
+		GitHubUserID           int64                         `json:"github_user_id"`
+		GitHubLogin            string                        `json:"github_login"`
+		AvatarURL              string                        `json:"avatar_url,omitempty"`
+		BaseURL                string                        `json:"base_url"`
+		Scopes                 []string                      `json:"scopes,omitempty"`
+		TokenCiphertext        string                        `json:"token_ciphertext"`
+		RefreshTokenCiphertext string                        `json:"refresh_token_ciphertext,omitempty"`
+		TokenExpiresAt         time.Time                     `json:"token_expires_at,omitempty"`
+		RefreshExpiresAt       time.Time                     `json:"refresh_expires_at,omitempty"`
+		TokenVersion           uint64                        `json:"token_version,omitempty"`
+		Status                 domain.GitHubConnectionStatus `json:"status"`
+		ConnectedAt            time.Time                     `json:"connected_at"`
+		UpdatedAt              time.Time                     `json:"updated_at"`
 	}
 
 	cmdDeleteGitHubConnection struct {
@@ -373,19 +381,37 @@ type (
 
 	// cmdGitHubAccountSource is the snapshot-safe org account payload.
 	cmdGitHubAccountSource struct {
-		ID                string                        `json:"id"`
-		OrgID             string                        `json:"org_id"`
-		Owner             string                        `json:"owner"`
-		OwnerType         string                        `json:"owner_type"`
-		BaseURL           string                        `json:"base_url"`
-		ConnectedByUserID string                        `json:"connected_by_user_id,omitempty"`
-		Scopes            []string                      `json:"scopes,omitempty"`
-		TokenCiphertext   string                        `json:"token_ciphertext"`
-		AppID             string                        `json:"app_id,omitempty"`
-		InstallationID    string                        `json:"installation_id,omitempty"`
-		Status            domain.GitHubConnectionStatus `json:"status"`
-		CreatedAt         time.Time                     `json:"created_at"`
-		UpdatedAt         time.Time                     `json:"updated_at"`
+		ID                     string                        `json:"id"`
+		OrgID                  string                        `json:"org_id"`
+		Owner                  string                        `json:"owner"`
+		OwnerType              string                        `json:"owner_type"`
+		BaseURL                string                        `json:"base_url"`
+		ConnectedByUserID      string                        `json:"connected_by_user_id,omitempty"`
+		Scopes                 []string                      `json:"scopes,omitempty"`
+		TokenCiphertext        string                        `json:"token_ciphertext"`
+		RefreshTokenCiphertext string                        `json:"refresh_token_ciphertext,omitempty"`
+		TokenExpiresAt         time.Time                     `json:"token_expires_at,omitempty"`
+		RefreshExpiresAt       time.Time                     `json:"refresh_expires_at,omitempty"`
+		TokenVersion           uint64                        `json:"token_version,omitempty"`
+		AppID                  string                        `json:"app_id,omitempty"`
+		InstallationID         string                        `json:"installation_id,omitempty"`
+		Status                 domain.GitHubConnectionStatus `json:"status"`
+		CreatedAt              time.Time                     `json:"created_at"`
+		UpdatedAt              time.Time                     `json:"updated_at"`
+	}
+
+	// cmdGitHubConnectionIfVersion is the TokenVersion compare-and-swap form of
+	// cmdGitHubConnection, used only by token rotation.
+	cmdGitHubConnectionIfVersion struct {
+		Connection      cmdGitHubConnection `json:"connection"`
+		ExpectedVersion uint64              `json:"expected_version"`
+	}
+
+	// cmdGitHubAccountSourceIfVersion is the TokenVersion compare-and-swap form
+	// of cmdGitHubAccountSource, used only by token rotation.
+	cmdGitHubAccountSourceIfVersion struct {
+		Source          cmdGitHubAccountSource `json:"source"`
+		ExpectedVersion uint64                 `json:"expected_version"`
 	}
 
 	cmdDeleteGitHubAccountSource struct {
@@ -562,16 +588,20 @@ func (c *cmdGitHubConnection) toDomain() *domain.UserGitHubConnection {
 		return nil
 	}
 	return &domain.UserGitHubConnection{
-		UserID:          c.UserID,
-		GitHubUserID:    c.GitHubUserID,
-		GitHubLogin:     c.GitHubLogin,
-		AvatarURL:       c.AvatarURL,
-		BaseURL:         c.BaseURL,
-		Scopes:          append([]string(nil), c.Scopes...),
-		TokenCiphertext: c.TokenCiphertext,
-		Status:          c.Status,
-		ConnectedAt:     c.ConnectedAt,
-		UpdatedAt:       c.UpdatedAt,
+		UserID:                 c.UserID,
+		GitHubUserID:           c.GitHubUserID,
+		GitHubLogin:            c.GitHubLogin,
+		AvatarURL:              c.AvatarURL,
+		BaseURL:                c.BaseURL,
+		Scopes:                 append([]string(nil), c.Scopes...),
+		TokenCiphertext:        c.TokenCiphertext,
+		RefreshTokenCiphertext: c.RefreshTokenCiphertext,
+		TokenExpiresAt:         c.TokenExpiresAt,
+		RefreshExpiresAt:       c.RefreshExpiresAt,
+		TokenVersion:           c.TokenVersion,
+		Status:                 c.Status,
+		ConnectedAt:            c.ConnectedAt,
+		UpdatedAt:              c.UpdatedAt,
 	}
 }
 
@@ -582,16 +612,20 @@ func cmdGitHubConnectionFrom(conn *domain.UserGitHubConnection) *cmdGitHubConnec
 		return nil
 	}
 	return &cmdGitHubConnection{
-		UserID:          conn.UserID,
-		GitHubUserID:    conn.GitHubUserID,
-		GitHubLogin:     conn.GitHubLogin,
-		AvatarURL:       conn.AvatarURL,
-		BaseURL:         conn.BaseURL,
-		Scopes:          append([]string(nil), conn.Scopes...),
-		TokenCiphertext: conn.TokenCiphertext,
-		Status:          conn.Status,
-		ConnectedAt:     conn.ConnectedAt,
-		UpdatedAt:       conn.UpdatedAt,
+		UserID:                 conn.UserID,
+		GitHubUserID:           conn.GitHubUserID,
+		GitHubLogin:            conn.GitHubLogin,
+		AvatarURL:              conn.AvatarURL,
+		BaseURL:                conn.BaseURL,
+		Scopes:                 append([]string(nil), conn.Scopes...),
+		TokenCiphertext:        conn.TokenCiphertext,
+		RefreshTokenCiphertext: conn.RefreshTokenCiphertext,
+		TokenExpiresAt:         conn.TokenExpiresAt,
+		RefreshExpiresAt:       conn.RefreshExpiresAt,
+		TokenVersion:           conn.TokenVersion,
+		Status:                 conn.Status,
+		ConnectedAt:            conn.ConnectedAt,
+		UpdatedAt:              conn.UpdatedAt,
 	}
 }
 
@@ -602,19 +636,23 @@ func (c *cmdGitHubAccountSource) toDomain() *domain.GitHubAccountSource {
 		return nil
 	}
 	return &domain.GitHubAccountSource{
-		ID:                c.ID,
-		OrgID:             c.OrgID,
-		Owner:             c.Owner,
-		OwnerType:         c.OwnerType,
-		BaseURL:           c.BaseURL,
-		ConnectedByUserID: c.ConnectedByUserID,
-		Scopes:            append([]string(nil), c.Scopes...),
-		TokenCiphertext:   c.TokenCiphertext,
-		AppID:             c.AppID,
-		InstallationID:    c.InstallationID,
-		Status:            c.Status,
-		CreatedAt:         c.CreatedAt,
-		UpdatedAt:         c.UpdatedAt,
+		ID:                     c.ID,
+		OrgID:                  c.OrgID,
+		Owner:                  c.Owner,
+		OwnerType:              c.OwnerType,
+		BaseURL:                c.BaseURL,
+		ConnectedByUserID:      c.ConnectedByUserID,
+		Scopes:                 append([]string(nil), c.Scopes...),
+		TokenCiphertext:        c.TokenCiphertext,
+		RefreshTokenCiphertext: c.RefreshTokenCiphertext,
+		TokenExpiresAt:         c.TokenExpiresAt,
+		RefreshExpiresAt:       c.RefreshExpiresAt,
+		TokenVersion:           c.TokenVersion,
+		AppID:                  c.AppID,
+		InstallationID:         c.InstallationID,
+		Status:                 c.Status,
+		CreatedAt:              c.CreatedAt,
+		UpdatedAt:              c.UpdatedAt,
 	}
 }
 
@@ -625,19 +663,23 @@ func cmdGitHubAccountSourceFrom(src *domain.GitHubAccountSource) *cmdGitHubAccou
 		return nil
 	}
 	return &cmdGitHubAccountSource{
-		ID:                src.ID,
-		OrgID:             src.OrgID,
-		Owner:             src.Owner,
-		OwnerType:         src.OwnerType,
-		BaseURL:           src.BaseURL,
-		ConnectedByUserID: src.ConnectedByUserID,
-		Scopes:            append([]string(nil), src.Scopes...),
-		TokenCiphertext:   src.TokenCiphertext,
-		AppID:             src.AppID,
-		InstallationID:    src.InstallationID,
-		Status:            src.Status,
-		CreatedAt:         src.CreatedAt,
-		UpdatedAt:         src.UpdatedAt,
+		ID:                     src.ID,
+		OrgID:                  src.OrgID,
+		Owner:                  src.Owner,
+		OwnerType:              src.OwnerType,
+		BaseURL:                src.BaseURL,
+		ConnectedByUserID:      src.ConnectedByUserID,
+		Scopes:                 append([]string(nil), src.Scopes...),
+		TokenCiphertext:        src.TokenCiphertext,
+		RefreshTokenCiphertext: src.RefreshTokenCiphertext,
+		TokenExpiresAt:         src.TokenExpiresAt,
+		RefreshExpiresAt:       src.RefreshExpiresAt,
+		TokenVersion:           src.TokenVersion,
+		AppID:                  src.AppID,
+		InstallationID:         src.InstallationID,
+		Status:                 src.Status,
+		CreatedAt:              src.CreatedAt,
+		UpdatedAt:              src.UpdatedAt,
 	}
 }
 
@@ -1147,6 +1189,10 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 		return nil, applyPayload(cmd, "github connection", func(p cmdGitHubConnection) error {
 			return s.upsertGitHubConnection(p.toDomain())
 		}), true
+	case kindUpsertGitHubConnectionIfVersion:
+		return nil, applyPayload(cmd, "github connection if version", func(p cmdGitHubConnectionIfVersion) error {
+			return s.upsertGitHubConnectionIfVersion(p.Connection.toDomain(), p.ExpectedVersion)
+		}), true
 	case kindDeleteGitHubConnection:
 		return nil, applyPayload(cmd, "delete github connection", func(p cmdDeleteGitHubConnection) error {
 			s.deleteGitHubConnection(p.UserID)
@@ -1155,6 +1201,10 @@ func (s *fsmState) applyEntityCommand(cmd *command) (interface{}, error, bool) {
 	case kindUpsertGitHubAccountSource:
 		return nil, applyPayload(cmd, "github account source", func(p cmdGitHubAccountSource) error {
 			return s.upsertGitHubAccountSource(p.toDomain())
+		}), true
+	case kindUpsertGitHubAccountSourceIfVersion:
+		return nil, applyPayload(cmd, "github account source if version", func(p cmdGitHubAccountSourceIfVersion) error {
+			return s.upsertGitHubAccountSourceIfVersion(p.Source.toDomain(), p.ExpectedVersion)
 		}), true
 	case kindDeleteGitHubAccountSource:
 		return nil, applyPayload(cmd, "delete github account source", func(p cmdDeleteGitHubAccountSource) error {
@@ -1445,6 +1495,22 @@ func (s *fsmState) upsertGitHubConnection(conn *domain.UserGitHubConnection) err
 	return nil
 }
 
+// upsertGitHubConnectionIfVersion applies conn only when the stored record is
+// still at expectedVersion (token-rotation CAS).
+func (s *fsmState) upsertGitHubConnectionIfVersion(conn *domain.UserGitHubConnection, expectedVersion uint64) error {
+	if conn == nil || conn.UserID == "" {
+		return fmt.Errorf("github connection: %w", domain.ErrValidation)
+	}
+	existing, ok := s.githubConnections[conn.UserID]
+	if !ok {
+		return fmt.Errorf("github connection %s: %w", conn.UserID, domain.ErrNotFound)
+	}
+	if existing.TokenVersion != expectedVersion {
+		return fmt.Errorf("github connection %s: %w", conn.UserID, domain.ErrConflict)
+	}
+	return s.upsertGitHubConnection(conn)
+}
+
 // deleteGitHubConnection erases a user's connection and any pending OAuth
 // states bound to that user.
 func (s *fsmState) deleteGitHubConnection(userID string) {
@@ -1470,6 +1536,22 @@ func (s *fsmState) upsertGitHubAccountSource(src *domain.GitHubAccountSource) er
 	s.githubAccountSources[src.ID] = &cp
 	s.githubAccountsByOrgOwner[githubAccountOwnerKey(src.OrgID, src.Owner)] = src.ID
 	return nil
+}
+
+// upsertGitHubAccountSourceIfVersion applies src only when the stored record is
+// still at expectedVersion (token-rotation CAS).
+func (s *fsmState) upsertGitHubAccountSourceIfVersion(src *domain.GitHubAccountSource, expectedVersion uint64) error {
+	if src == nil || src.ID == "" {
+		return fmt.Errorf("github account source: %w", domain.ErrValidation)
+	}
+	existing, ok := s.githubAccountSources[src.ID]
+	if !ok {
+		return fmt.Errorf("github account source %s: %w", src.ID, domain.ErrNotFound)
+	}
+	if existing.TokenVersion != expectedVersion {
+		return fmt.Errorf("github account source %s: %w", src.ID, domain.ErrConflict)
+	}
+	return s.upsertGitHubAccountSource(src)
 }
 
 // deleteGitHubAccountSource removes an account source and its owner index.

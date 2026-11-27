@@ -88,6 +88,8 @@ func TestNewMetricsRegisters(t *testing.T) {
 	m.PipelineDisconnectFailedTotal.WithLabelValues("stale_sweep").Inc()
 	m.CLICacheTotal.WithLabelValues("hit").Inc()
 	m.CLIUpstreamFetchTotal.WithLabelValues("success").Inc()
+	m.GitHubTokenRefreshTotal.WithLabelValues("user", "success").Inc()
+	m.GitHubTokenRefreshTotal.WithLabelValues("org_account", "bad_refresh_token").Inc()
 	m.DataHandshakeFailuresTotal.WithLabelValues("client_rejected_server_certificate").Inc()
 	m.SecurityIPBansTotal.WithLabelValues("login").Inc()
 	m.SecurityRejectionsTotal.WithLabelValues("ip_banned").Inc()
@@ -126,6 +128,7 @@ func TestNewMetricsRegisters(t *testing.T) {
 	for _, name := range []string{
 		"dagger_kubernetes_security_ip_bans_total",
 		"dagger_kubernetes_security_rejections_total",
+		"dagger_kubernetes_github_token_refresh_total",
 	} {
 		found = false
 		for _, f := range fam {

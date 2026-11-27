@@ -1,7 +1,9 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -68,6 +70,116 @@ func TestRepoSettingAllowsWebhookEvent(t *testing.T) {
 				t.Fatalf("AllowsWebhookEvent = %v want %v", got, tc.want)
 			}
 		})
+	}
+}
+
+func TestGitHubTokenResultNormalize(t *testing.T) {
+	cases := []struct {
+		name      string
+		in        GitHubTokenResult
+		wantScope []string
+		wantType  string
+	}{
+		{"empty", GitHubTokenResult{}, nil, "bearer"},
+		{"single scope", GitHubTokenResult{Scope: "repo", TokenType: "bearer"}, []string{"repo"}, "bearer"},
+		{"comma separated with spaces", GitHubTokenResult{Scope: "repo, read:org,admin:repo_hook"}, []string{"repo", "read:org", "admin:repo_hook"}, "bearer"},
+		{"blank entries dropped", GitHubTokenResult{Scope: " , repo ,,"}, []string{"repo"}, "bearer"},
+		{"explicit token type kept", GitHubTokenResult{Scope: "repo", TokenType: "mac"}, []string{"repo"}, "mac"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			tc.in.Normalize()
+			if len(tc.in.Scopes) != len(tc.wantScope) {
+				t.Fatalf("Scopes = %v want %v", tc.in.Scopes, tc.wantScope)
+			}
+			for i := range tc.wantScope {
+				if tc.in.Scopes[i] != tc.wantScope[i] {
+					t.Fatalf("Scopes[%d] = %q want %q", i, tc.in.Scopes[i], tc.wantScope[i])
+				}
+			}
+			if tc.in.TokenType != tc.wantType {
+				t.Fatalf("TokenType = %q want %q", tc.in.TokenType, tc.wantType)
+			}
+		})
+	}
+}
+
+func TestGitHubTokenResultNormalizeResetsScopes(t *testing.T) {
+	res := GitHubTokenResult{Scope: "repo", Scopes: []string{"stale"}}
+	res.Normalize()
+	if len(res.Scopes) != 1 || res.Scopes[0] != "repo" {
+		t.Fatalf("Scopes = %v", res.Scopes)
+	}
+}
+
+func TestGitHubTokenResultDecodesUpstreamBody(t *testing.T) {
+	body := []byte(`{"access_token":"gho_a","token_type":"bearer","scope":"repo, read:org","refresh_token":"ghr_r","expires_in":28800,"refresh_token_expires_in":15897600}`)
+	var res GitHubTokenResult
+	if err := json.Unmarshal(body, &res); err != nil {
+		t.Fatal(err)
+	}
+	res.Normalize()
+	if res.RefreshToken != "ghr_r" || res.ExpiresIn != 28800 || res.RefreshTokenExpiresIn != 15897600 {
+		t.Fatalf("result = %+v", res)
+	}
+	if len(res.Scopes) != 2 || res.Scopes[1] != "read:org" {
+		t.Fatalf("Scopes = %v", res.Scopes)
+	}
+}
+
+func TestGitHubRefreshSentinels(t *testing.T) {
+	if errors.Is(ErrGitHubRefreshInvalid, ErrGitHubTokenRevoked) || errors.Is(ErrGitHubRefreshUnavailable, ErrGitHubTokenRevoked) {
+		t.Fatal("refresh sentinels must stay distinct from revocation")
+	}
+	if ErrGitHubRefreshInvalid.Error() == "" || ErrGitHubRefreshUnavailable.Error() == "" {
+		t.Fatal("refresh sentinels need messages")
+	}
+}
+
+func TestGitHubConnectionRefreshFieldsAreNotSerialized(t *testing.T) {
+	conn := UserGitHubConnection{UserID: "u1", TokenCiphertext: "access-ct", RefreshTokenCiphertext: "refresh-ct"}
+	raw, err := json.Marshal(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "refresh-ct") || strings.Contains(string(raw), "ciphertext") {
+		t.Fatalf("connection JSON leaked a ciphertext: %s", raw)
+	}
+	if !strings.Contains(string(raw), `"user_id":"u1"`) {
+		t.Fatalf("connection JSON = %s", raw)
+	}
+
+	now := time.Date(2026, 11, 27, 12, 0, 0, 0, time.UTC)
+	acct := GitHubAccountSource{ID: "ghacct-1", TokenCiphertext: "a", RefreshTokenCiphertext: "r", TokenExpiresAt: now, RefreshExpiresAt: now.Add(time.Hour), TokenVersion: 3}
+	raw, err = json.Marshal(acct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), `"a"`) || strings.Contains(string(raw), `"r"`) {
+		t.Fatalf("account JSON leaked a ciphertext: %s", raw)
+	}
+	for _, want := range []string{`"token_expires_at":"2026-11-27T12:00:00Z"`, `"refresh_expires_at":"2026-11-27T13:00:00Z"`, `"token_version":3`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("account JSON %s missing %s", raw, want)
+		}
+	}
+}
+
+func TestGitHubConnectionRefreshFieldsZeroWhenUnset(t *testing.T) {
+	// time.Time is a struct, so encoding/json emits its zero value even with
+	// omitempty. Legacy records therefore serialize as the zero timestamp
+	// (meaning "non-expiring / unknown") rather than omitting the key.
+	raw, err := json.Marshal(UserGitHubConnection{UserID: "u1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`"token_expires_at":"0001-01-01T00:00:00Z"`, `"refresh_expires_at":"0001-01-01T00:00:00Z"`} {
+		if !strings.Contains(string(raw), want) {
+			t.Fatalf("legacy connection JSON %s missing %s", raw, want)
+		}
+	}
+	if strings.Contains(string(raw), "token_version") {
+		t.Fatalf("zero token version must be omitted: %s", raw)
 	}
 }
 

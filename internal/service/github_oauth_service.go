@@ -15,6 +15,7 @@ import (
 	"github.com/sirupsen/logrus"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
+	"github.com/disaster/dagger-kubernetes/internal/observ"
 )
 
 const (
@@ -22,6 +23,17 @@ const (
 	maxGitHubRepoMutations    = 100
 	maxGitHubDeviceSessions   = 1024
 	githubDeviceSessionMaxTTL = 15 * time.Minute
+
+	// defaultGitHubRefreshSkew is the proactive-refresh margin: an access token
+	// within this window of expiry is rotated before it can 401 mid-request.
+	defaultGitHubRefreshSkew = 5 * time.Minute
+	// githubRefreshPersistAttempts/githubRefreshPersistBackoff bound the retry
+	// of a rotated token that failed to apply in Raft (leadership change).
+	githubRefreshPersistAttempts = 3
+	githubRefreshPersistBackoff  = 100 * time.Millisecond
+
+	githubScopeUser       = "user"
+	githubScopeOrgAccount = "org_account"
 )
 
 // GitHubIntegrationConfig is the forge credential-linking configuration. It is
@@ -38,6 +50,11 @@ type GitHubIntegrationConfig struct {
 	StateTTL            time.Duration
 	DeviceFlowEnabled   bool
 	AllowedRedirectURIs []string
+	// RefreshEnabled is the kill switch for refresh-token rotation. When false
+	// an expiring token behaves exactly like a non-expiring one (401 → revoke).
+	RefreshEnabled bool
+	// RefreshSkew is how long before expiry a token is proactively rotated.
+	RefreshSkew time.Duration
 }
 
 // GitHubIntegrationDeps bundles the service's collaborators.
@@ -55,6 +72,12 @@ type GitHubIntegrationDeps struct {
 	GitHub         domain.GitHubAPIClient
 	ForgeProvider  domain.ForgeProvider
 	Logger         *logrus.Logger
+	// IsLeader reports whether this pod is the Raft leader. Only the leader may
+	// rotate a token, because only the leader can persist the rotation. nil is
+	// treated as leader (single-node / tests).
+	IsLeader func() bool
+	// Metrics is optional; every counter is nil-guarded.
+	Metrics *observ.Metrics
 }
 
 // GitHubAdminOrg identifies a Dagger organization the caller administers.
@@ -98,6 +121,9 @@ type GitHubIntegrationService struct {
 	github         domain.GitHubAPIClient
 	forgeProvider  domain.ForgeProvider
 	logger         *logrus.Logger
+	leaderFn       func() bool
+	metrics        *observ.Metrics
+	refreshes      githubRefreshGate
 }
 
 var _ domain.GitHubCloudIntegrator = (*GitHubIntegrationService)(nil)
@@ -115,6 +141,9 @@ func NewGitHubIntegrationService(cfg GitHubIntegrationConfig, deps GitHubIntegra
 	if len(cfg.Scopes) == 0 {
 		cfg.Scopes = []string{"repo", "read:org", "admin:repo_hook"}
 	}
+	if cfg.RefreshSkew <= 0 {
+		cfg.RefreshSkew = defaultGitHubRefreshSkew
+	}
 	return &GitHubIntegrationService{
 		cfg:            cfg,
 		connections:    deps.Connections,
@@ -129,6 +158,9 @@ func NewGitHubIntegrationService(cfg GitHubIntegrationConfig, deps GitHubIntegra
 		github:         deps.GitHub,
 		forgeProvider:  deps.ForgeProvider,
 		logger:         deps.Logger,
+		leaderFn:       deps.IsLeader,
+		metrics:        deps.Metrics,
+		refreshes:      githubRefreshGate{calls: map[string]*githubRefreshCall{}},
 	}
 }
 
@@ -276,7 +308,7 @@ func (s *GitHubIntegrationService) PollDeviceFlow(ctx context.Context, userID st
 	return result, nil
 }
 
-// completeWithToken seals the token, upserts the user connection, and
+// completeWithToken seals the token pair, upserts the user connection, and
 // auto-connects a sole-admin org when applicable.
 func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID string, callerIsGlobalAdmin bool, boundOrgID string, token *domain.GitHubTokenResult) (*OAuthCompleteResult, error) {
 	if token == nil || token.AccessToken == "" {
@@ -289,22 +321,27 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 	if profile == nil || profile.Login == "" {
 		return nil, fmt.Errorf("github user profile is empty: %w", domain.ErrGitHubTokenRevoked)
 	}
-	scopes := token.Scopes
-	if len(scopes) == 0 {
-		scopes = apiScopes
+	now := time.Now().UTC()
+	cred := credentialFromTokenResult(token, now)
+	if len(cred.Scopes) == 0 {
+		cred.Scopes = apiScopes
 	}
-	userCT, err := s.sealer.SealRaw(domain.SecretScopeGitHubUser, userID, token.AccessToken)
+	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, &cred)
 	if err != nil {
 		return nil, fmt.Errorf("seal github user token: %w", err)
 	}
-	now := time.Now().UTC()
 	conn := &domain.UserGitHubConnection{
 		UserID: userID, GitHubUserID: profile.ID, GitHubLogin: profile.Login, AvatarURL: profile.AvatarURL,
-		BaseURL: s.cfg.DefaultAPIURL, Scopes: scopes, TokenCiphertext: userCT,
-		Status: domain.GitHubConnectionActive, ConnectedAt: now, UpdatedAt: now,
+		BaseURL: s.cfg.DefaultAPIURL, Scopes: cred.Scopes, TokenCiphertext: pair.access,
+		RefreshTokenCiphertext: pair.refresh, TokenExpiresAt: pair.accessExp, RefreshExpiresAt: pair.refreshExp,
+		TokenVersion: 1, Status: domain.GitHubConnectionActive, ConnectedAt: now, UpdatedAt: now,
 	}
 	if existing, err := s.connections.GetByUser(ctx, userID); err == nil {
 		conn.ConnectedAt = existing.ConnectedAt
+		// Re-authing replaces the whole token pair, so advance the version
+		// rather than resetting it: a rotation already in flight holds the old
+		// version and must fail its CAS instead of clobbering this re-auth.
+		conn.TokenVersion = existing.TokenVersion + 1
 	}
 	if err := s.connections.Upsert(ctx, conn); err != nil {
 		return nil, err
@@ -317,7 +354,7 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 	}
 	available := dedupeOwners(profile, owners)
 	adminOrgs := s.adminOrgs(ctx, userID, callerIsGlobalAdmin)
-	acct, targetSlug, err := s.autoConnect(ctx, userID, boundOrgID, profile, token.AccessToken, scopes, adminOrgs)
+	acct, targetSlug, err := s.autoConnect(ctx, userID, boundOrgID, profile, &cred, adminOrgs)
 	if err != nil {
 		return nil, err
 	}
@@ -325,9 +362,10 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 		"event":          "github_user_connected",
 		"user_id":        userID,
 		"github_login":   profile.Login,
-		"scopes":         scopes,
+		"scopes":         cred.Scopes,
 		"target_org":     targetSlug,
 		"auto_connected": acct != nil,
+		"refreshable":    pair.refresh != "",
 	}).Info("github user connected")
 
 	return &OAuthCompleteResult{
@@ -338,7 +376,7 @@ func (s *GitHubIntegrationService) completeWithToken(ctx context.Context, userID
 
 // autoConnect provisions a personal GitHubAccountSource for an explicitly
 // bound org or the caller's only administered org.
-func (s *GitHubIntegrationService) autoConnect(ctx context.Context, userID, boundOrgID string, profile *domain.GitHubUserProfile, token string, scopes []string, adminOrgs []GitHubAdminOrg) (*domain.GitHubAccountSource, string, error) {
+func (s *GitHubIntegrationService) autoConnect(ctx context.Context, userID, boundOrgID string, profile *domain.GitHubUserProfile, cred *githubCredential, adminOrgs []GitHubAdminOrg) (*domain.GitHubAccountSource, string, error) {
 	var target *domain.Org
 	if boundOrgID != "" {
 		for _, candidate := range adminOrgs {
@@ -361,7 +399,7 @@ func (s *GitHubIntegrationService) autoConnect(ctx context.Context, userID, boun
 	if target == nil {
 		return nil, "", nil
 	}
-	acct, err := s.upsertAccountSource(ctx, target.ID, profile.Login, profile.Type, s.cfg.DefaultAPIURL, scopes, token, userID)
+	acct, err := s.upsertAccountSource(ctx, target.ID, profile.Login, profile.Type, s.cfg.DefaultAPIURL, cred, userID)
 	if err != nil {
 		return nil, "", err
 	}
@@ -391,11 +429,12 @@ func (s *GitHubIntegrationService) ConnectUserPAT(ctx context.Context, userID, b
 	now := time.Now().UTC()
 	conn := &domain.UserGitHubConnection{
 		UserID: userID, GitHubUserID: profile.ID, GitHubLogin: profile.Login, AvatarURL: profile.AvatarURL,
-		BaseURL: base, Scopes: scopes, TokenCiphertext: ct, Status: domain.GitHubConnectionActive,
-		ConnectedAt: now, UpdatedAt: now,
+		BaseURL: base, Scopes: scopes, TokenCiphertext: ct, TokenVersion: 1,
+		Status: domain.GitHubConnectionActive, ConnectedAt: now, UpdatedAt: now,
 	}
 	if existing, err := s.connections.GetByUser(ctx, userID); err == nil {
 		conn.ConnectedAt = existing.ConnectedAt
+		conn.TokenVersion = existing.TokenVersion + 1
 	}
 	if err := s.connections.Upsert(ctx, conn); err != nil {
 		return nil, err
@@ -421,22 +460,22 @@ func (s *GitHubIntegrationService) DisconnectUser(ctx context.Context, userID st
 // ListUserOwners lists the GitHub user and organizations reachable by the
 // caller's token.
 func (s *GitHubIntegrationService) ListUserOwners(ctx context.Context, userID string) ([]domain.GitHubOwner, error) {
-	conn, token, err := s.userToken(ctx, userID)
-	if err != nil {
-		return nil, err
-	}
-	profile, _, err := s.github.GetAuthenticatedUser(ctx, conn.BaseURL, token)
-	if err != nil {
-		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markUserRevoked(ctx, userID)
+	var (
+		profile *domain.GitHubUserProfile
+		orgs    []domain.GitHubOwner
+	)
+	if err := s.callWithUserToken(ctx, userID, func(conn *domain.UserGitHubConnection, token string) error {
+		p, _, err := s.github.GetAuthenticatedUser(ctx, conn.BaseURL, token)
+		if err != nil {
+			return err
 		}
-		return nil, err
-	}
-	orgs, err := s.github.ListUserOrgs(ctx, conn.BaseURL, token)
-	if err != nil {
-		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markUserRevoked(ctx, userID)
+		found, err := s.github.ListUserOrgs(ctx, conn.BaseURL, token)
+		if err != nil {
+			return err
 		}
+		profile, orgs = p, found
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	return dedupeOwners(profile, orgs), nil
@@ -457,32 +496,36 @@ func (s *GitHubIntegrationService) ConnectOrgAccount(ctx context.Context, actorU
 	if err != nil {
 		return nil, err
 	}
-	var token string
+	var (
+		cred    githubCredential
+		profile *domain.GitHubUserProfile
+		orgs    []domain.GitHubOwner
+	)
 	if pat != "" {
 		if err := validatePAT(pat); err != nil {
 			return nil, err
 		}
-		token = pat
-	} else {
-		conn, existing, err := s.userToken(ctx, actorUserID)
-		if err != nil {
+		cred.AccessToken = pat
+		if profile, cred.Scopes, err = s.github.GetAuthenticatedUser(ctx, base, pat); err != nil {
 			return nil, err
 		}
+		if orgs, err = s.github.ListUserOrgs(ctx, base, pat); err != nil {
+			return nil, err
+		}
+	} else if err := s.callWithUserToken(ctx, actorUserID, func(conn *domain.UserGitHubConnection, token string) error {
 		base = conn.BaseURL
-		token = existing
-	}
-	profile, scopes, err := s.github.GetAuthenticatedUser(ctx, base, token)
-	if err != nil {
-		if pat == "" && errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markUserRevoked(ctx, actorUserID)
+		p, scopes, err := s.github.GetAuthenticatedUser(ctx, base, token)
+		if err != nil {
+			return err
 		}
-		return nil, err
-	}
-	orgs, err := s.github.ListUserOrgs(ctx, base, token)
-	if err != nil {
-		if pat == "" && errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markUserRevoked(ctx, actorUserID)
+		found, err := s.github.ListUserOrgs(ctx, base, token)
+		if err != nil {
+			return err
 		}
+		profile, orgs = p, found
+		cred = s.credentialFromUserConnection(conn, token, scopes)
+		return nil
+	}); err != nil {
 		return nil, err
 	}
 	owner = strings.TrimSpace(owner)
@@ -492,55 +535,70 @@ func (s *GitHubIntegrationService) ConnectOrgAccount(ctx context.Context, actorU
 	if !githubOwnerAllowed(owner, profile, orgs) {
 		return nil, fmt.Errorf("%w: github owner %q is not accessible through this token", domain.ErrForbidden, owner)
 	}
-	acct, err := s.upsertAccountSource(ctx, orgID, owner, ownerType(owner, profile, orgs), base, scopes, token, actorUserID)
+	acct, err := s.upsertAccountSource(ctx, orgID, owner, ownerType(owner, profile, orgs), base, &cred, actorUserID)
 	if err != nil {
 		return nil, err
 	}
 	return acct, nil
 }
 
-// upsertAccountSource seals token under the org-account AAD and re-seals child
-// forge sources when their account token rotates.
-func (s *GitHubIntegrationService) upsertAccountSource(ctx context.Context, orgID, owner, ownerType, baseURL string, scopes []string, token, connectedBy string) (*domain.GitHubAccountSource, error) {
+// upsertAccountSource seals the credential under the org-account AAD and
+// re-seals child forge sources when the account token rotates.
+func (s *GitHubIntegrationService) upsertAccountSource(ctx context.Context, orgID, owner, ownerType, baseURL string, cred *githubCredential, connectedBy string) (*domain.GitHubAccountSource, error) {
 	acctID := domain.GitHubAccountSourceID(orgID, baseURL, owner)
 	scopeID, err := domain.GitHubOrgAccountScopeID(orgID, acctID)
 	if err != nil {
 		return nil, err
 	}
-	ct, err := s.sealer.SealRaw(domain.SecretScopeGitHubOrgAccount, scopeID, token)
+	pair, err := s.sealCredential(domain.SecretScopeGitHubOrgAccount, scopeID, cred)
 	if err != nil {
 		return nil, fmt.Errorf("seal github account token: %w", err)
 	}
 	now := time.Now().UTC()
 	acct := &domain.GitHubAccountSource{
 		ID: acctID, OrgID: orgID, Owner: owner, OwnerType: ownerType, BaseURL: baseURL,
-		ConnectedByUserID: connectedBy, Scopes: scopes, TokenCiphertext: ct,
-		Status: domain.GitHubConnectionActive, CreatedAt: now, UpdatedAt: now,
+		ConnectedByUserID: connectedBy, Scopes: cred.Scopes, TokenCiphertext: pair.access,
+		RefreshTokenCiphertext: pair.refresh, TokenExpiresAt: pair.accessExp, RefreshExpiresAt: pair.refreshExp,
+		TokenVersion: 1, Status: domain.GitHubConnectionActive, CreatedAt: now, UpdatedAt: now,
 	}
 	if existing, err := s.accountSources.Get(ctx, acctID); err == nil {
 		acct.CreatedAt = existing.CreatedAt
+		// A re-link replaces the whole token pair: advance the version so an
+		// in-flight rotation holding the old version fails its CAS instead of
+		// clobbering this re-link.
+		acct.TokenVersion = existing.TokenVersion + 1
 	}
 	if err := s.accountSources.Upsert(ctx, acct); err != nil {
 		return nil, err
 	}
+	if err := s.reSealAccountForgeSources(ctx, orgID, acctID, cred.AccessToken); err != nil {
+		return nil, err
+	}
+	return acct, nil
+}
+
+// reSealAccountForgeSources re-seals every per-repo runtime ForgeSource of an
+// account with the account's current access token, so a rotation reaches the
+// webhook/check/clone paths.
+func (s *GitHubIntegrationService) reSealAccountForgeSources(ctx context.Context, orgID, acctID, accessToken string) error {
 	sources, err := s.forgeSources.ListByOrg(ctx, orgID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	for _, src := range sources {
 		if src.AccountSourceID != acctID {
 			continue
 		}
-		srcCT, err := s.sealer.SealRaw(domain.SecretScopeOrg, orgID, token)
+		srcCT, err := s.sealer.SealRaw(domain.SecretScopeOrg, orgID, accessToken)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		src.TokenCiphertext = srcCT
 		if err := s.forgeSources.Upsert(ctx, src); err != nil {
-			return nil, err
+			return err
 		}
 	}
-	return acct, nil
+	return nil
 }
 
 // DisconnectOrgAccount erases an org account token, optionally cascading its
@@ -595,15 +653,12 @@ func (s *GitHubIntegrationService) ListSourceRepositories(ctx context.Context, o
 	if acct.OrgID != org.ID {
 		return nil, domain.ErrNotFound
 	}
-	token, err := s.accountToken(acct)
-	if err != nil {
-		return nil, err
-	}
-	repos, err := s.github.ListAccessibleRepos(ctx, acct.BaseURL, token)
-	if err != nil {
-		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markAccountRevoked(ctx, acct)
-		}
+	var repos []domain.GitHubRemoteRepo
+	if err := s.callWithAccountToken(ctx, acct, func(token string) error {
+		found, err := s.github.ListAccessibleRepos(ctx, acct.BaseURL, token)
+		repos = found
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return s.mapSourceRepositories(ctx, org, acct, repos, "", ""), nil
@@ -634,15 +689,12 @@ func (s *GitHubIntegrationService) ListOrgGitHubRepositories(ctx context.Context
 		}
 		acct = accounts[0]
 	}
-	token, err := s.accountToken(acct)
-	if err != nil {
-		return nil, err
-	}
-	repos, err := s.github.ListAccessibleRepos(ctx, acct.BaseURL, token)
-	if err != nil {
-		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markAccountRevoked(ctx, acct)
-		}
+	var repos []domain.GitHubRemoteRepo
+	if err := s.callWithAccountToken(ctx, acct, func(token string) error {
+		found, err := s.github.ListAccessibleRepos(ctx, acct.BaseURL, token)
+		repos = found
+		return err
+	}); err != nil {
 		return nil, err
 	}
 	return s.mapSourceRepositories(ctx, org, acct, repos, ownerFilter, search), nil
@@ -737,17 +789,17 @@ func (s *GitHubIntegrationService) applyRepoSetting(ctx context.Context, actorUs
 	if !strings.EqualFold(acct.Owner, owner) {
 		return fmt.Errorf("repository %s %w", in.Repo, domain.ErrRepoNotInInstallation)
 	}
-	token, err := s.accountToken(acct)
-	if err != nil {
+	var (
+		remote *domain.GitHubRemoteRepo
+		token  string
+	)
+	if err := s.callWithAccountToken(ctx, acct, func(callToken string) error {
+		token = callToken
+		found, err := s.github.GetRepository(ctx, acct.BaseURL, callToken, owner, name)
+		remote = found
 		return err
-	}
-	remote, err := s.github.GetRepository(ctx, acct.BaseURL, token, owner, name)
-	if err != nil {
-		if errors.Is(err, domain.ErrGitHubTokenRevoked) {
-			s.markAccountRevoked(ctx, acct)
-			return err
-		}
-		if errors.Is(err, domain.ErrGitHubRateLimited) || errors.Is(err, domain.ErrValidation) {
+	}); err != nil {
+		if passthroughAccountError(err) {
 			return err
 		}
 		return fmt.Errorf("repository %s is not available through this GitHub connection: %w", canonical, domain.ErrRepoInaccessible)
@@ -1004,6 +1056,488 @@ func (s *GitHubIntegrationService) userToken(ctx context.Context, userID string)
 		return nil, "", fmt.Errorf("%w: github connection token cannot be opened", domain.ErrGitHubTokenRevoked)
 	}
 	return conn, token, nil
+}
+
+// githubCredential is the plaintext token material linked to a user connection
+// or an org account source. Tokens are never logged.
+type githubCredential struct {
+	AccessToken      string
+	RefreshToken     string
+	TokenExpiresAt   time.Time
+	RefreshExpiresAt time.Time
+	Scopes           []string
+}
+
+// sealedTokenPair is a githubCredential after scope-bound sealing.
+type sealedTokenPair struct {
+	access     string
+	refresh    string
+	accessExp  time.Time
+	refreshExp time.Time
+}
+
+// credentialFromTokenResult turns a GitHub token response into absolute expiry
+// metadata. GitHub omits expires_in / refresh_token_expires_in for a
+// non-expiring app, which leaves zero expiries (= never refresh).
+func credentialFromTokenResult(res *domain.GitHubTokenResult, now time.Time) githubCredential {
+	cred := githubCredential{
+		AccessToken:  res.AccessToken,
+		RefreshToken: res.RefreshToken,
+		Scopes:       append([]string(nil), res.Scopes...),
+	}
+	if res.ExpiresIn > 0 {
+		cred.TokenExpiresAt = now.Add(time.Duration(res.ExpiresIn) * time.Second)
+	}
+	if res.RefreshTokenExpiresIn > 0 {
+		cred.RefreshExpiresAt = now.Add(time.Duration(res.RefreshTokenExpiresIn) * time.Second)
+	}
+	return cred
+}
+
+// credentialFromUserConnection copies a user connection's token material for
+// re-sealing under an org-account scope. When the sealed refresh token cannot
+// be opened the account degrades to an access-token-only credential (like a
+// PAT) instead of failing the link.
+func (s *GitHubIntegrationService) credentialFromUserConnection(conn *domain.UserGitHubConnection, accessToken string, scopes []string) githubCredential {
+	cred := githubCredential{
+		AccessToken:      accessToken,
+		TokenExpiresAt:   conn.TokenExpiresAt,
+		RefreshExpiresAt: conn.RefreshExpiresAt,
+		Scopes:           scopes,
+	}
+	if conn.RefreshTokenCiphertext == "" {
+		return cred
+	}
+	refresh, err := s.sealer.OpenRaw(domain.SecretScopeGitHubUser, conn.UserID, conn.RefreshTokenCiphertext)
+	if err != nil {
+		s.logger.WithError(err).WithField("user_id", conn.UserID).Warn("github refresh token cannot be opened for org linking")
+		cred.RefreshExpiresAt = time.Time{}
+		return cred
+	}
+	cred.RefreshToken = refresh
+	return cred
+}
+
+// sealCredential seals the access token and, when present, the refresh token
+// under scope/scopeID.
+func (s *GitHubIntegrationService) sealCredential(scope domain.SecretScope, scopeID string, cred *githubCredential) (sealedTokenPair, error) {
+	access, err := s.sealer.SealRaw(scope, scopeID, cred.AccessToken)
+	if err != nil {
+		return sealedTokenPair{}, err
+	}
+	pair := sealedTokenPair{access: access, accessExp: cred.TokenExpiresAt}
+	if cred.RefreshToken == "" {
+		return pair, nil
+	}
+	refresh, err := s.sealer.SealRaw(scope, scopeID, cred.RefreshToken)
+	if err != nil {
+		return sealedTokenPair{}, err
+	}
+	pair.refresh, pair.refreshExp = refresh, cred.RefreshExpiresAt
+	return pair, nil
+}
+
+// refreshDue reports whether an access token expiring at expiresAt is inside
+// the proactive-refresh window. A zero expiry never refreshes.
+func refreshDue(expiresAt, now time.Time, skew time.Duration) bool {
+	return !expiresAt.IsZero() && !now.Before(expiresAt.Add(-skew))
+}
+
+// refreshTokenExpired reports whether the refresh token itself is past its
+// lifetime (GitHub returns it as refresh_token_expires_in).
+func refreshTokenExpired(refreshExpiresAt, now time.Time) bool {
+	return !refreshExpiresAt.IsZero() && !now.Before(refreshExpiresAt)
+}
+
+// refreshable reports whether a sealed credential can be rotated at all.
+func (s *GitHubIntegrationService) refreshable(refreshCiphertext string) bool {
+	return s.cfg.RefreshEnabled && refreshCiphertext != ""
+}
+
+func (s *GitHubIntegrationService) isLeader() bool {
+	return s.leaderFn == nil || s.leaderFn()
+}
+
+// recordRefresh increments the refresh counter (nil-safe).
+func (s *GitHubIntegrationService) recordRefresh(scope, result string) {
+	if s.metrics == nil {
+		return
+	}
+	s.metrics.GitHubTokenRefreshTotal.WithLabelValues(scope, result).Inc()
+}
+
+// githubRefreshGate is a per-scope single-flight gate: the first caller rotates
+// a scope while concurrent callers wait for it and then reload the persisted
+// record, so a burst of requests performs exactly one RefreshToken call.
+type githubRefreshGate struct {
+	mu    sync.Mutex
+	calls map[string]*githubRefreshCall
+}
+
+type githubRefreshCall struct {
+	done chan struct{}
+	err  error
+}
+
+func (g *githubRefreshGate) do(ctx context.Context, scope string, fn func(context.Context) error) error {
+	g.mu.Lock()
+	if g.calls == nil {
+		g.calls = map[string]*githubRefreshCall{}
+	}
+	if inFlight, ok := g.calls[scope]; ok {
+		g.mu.Unlock()
+		select {
+		case <-inFlight.done:
+			return inFlight.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	call := &githubRefreshCall{done: make(chan struct{})}
+	g.calls[scope] = call
+	g.mu.Unlock()
+
+	err := fn(ctx)
+	call.err = err
+	g.mu.Lock()
+	delete(g.calls, scope)
+	g.mu.Unlock()
+	close(call.done)
+	return err
+}
+
+// resolveUserToken loads the caller's connection and returns an active access
+// token, rotating it first when it is within RefreshSkew of expiry. A follower
+// never rotates: it serves the still-valid token and only reports not_leader on
+// the reactive (401) path.
+func (s *GitHubIntegrationService) resolveUserToken(ctx context.Context, userID string) (*domain.UserGitHubConnection, string, error) {
+	conn, token, err := s.userToken(ctx, userID)
+	if err != nil {
+		return nil, "", err
+	}
+	if !s.refreshable(conn.RefreshTokenCiphertext) || !refreshDue(conn.TokenExpiresAt, time.Now().UTC(), s.cfg.RefreshSkew) || !s.isLeader() {
+		return conn, token, nil
+	}
+	return s.refreshUserToken(ctx, conn)
+}
+
+// resolveAccountToken returns an active access token for an org account source,
+// rotating it first when it is within RefreshSkew of expiry.
+func (s *GitHubIntegrationService) resolveAccountToken(ctx context.Context, acct *domain.GitHubAccountSource) (string, error) {
+	latest, err := s.accountSources.Get(ctx, acct.ID)
+	if err != nil {
+		return "", err
+	}
+	if latest.Status != domain.GitHubConnectionActive {
+		return "", fmt.Errorf("%w: github account token is expired or revoked", domain.ErrGitHubTokenRevoked)
+	}
+	token, err := s.accountToken(latest)
+	if err != nil {
+		return "", err
+	}
+	if !s.refreshable(latest.RefreshTokenCiphertext) || !refreshDue(latest.TokenExpiresAt, time.Now().UTC(), s.cfg.RefreshSkew) || !s.isLeader() {
+		return token, nil
+	}
+	return s.refreshAccountToken(ctx, latest)
+}
+
+// callWithUserToken runs fn with the caller's active token and, on a GitHub 401
+// for a refreshable credential, performs ONE leader-gated rotation and retries.
+func (s *GitHubIntegrationService) callWithUserToken(ctx context.Context, userID string, fn func(conn *domain.UserGitHubConnection, token string) error) error {
+	conn, token, err := s.resolveUserToken(ctx, userID)
+	if err != nil {
+		return err
+	}
+	err = fn(conn, token)
+	if err == nil || !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		return err
+	}
+	if !s.refreshable(conn.RefreshTokenCiphertext) {
+		s.markUserRevoked(ctx, userID)
+		return err
+	}
+	if !s.isLeader() {
+		return s.notLeaderRefresh(githubScopeUser, userID)
+	}
+	conn, token, err = s.refreshUserToken(ctx, conn)
+	if err != nil {
+		return err
+	}
+	return fn(conn, token)
+}
+
+// callWithAccountToken is callWithUserToken for an org account source.
+func (s *GitHubIntegrationService) callWithAccountToken(ctx context.Context, acct *domain.GitHubAccountSource, fn func(token string) error) error {
+	token, err := s.resolveAccountToken(ctx, acct)
+	if err != nil {
+		return err
+	}
+	err = fn(token)
+	if err == nil || !errors.Is(err, domain.ErrGitHubTokenRevoked) {
+		return err
+	}
+	latest, loadErr := s.accountSources.Get(ctx, acct.ID)
+	if loadErr != nil {
+		return loadErr
+	}
+	if !s.refreshable(latest.RefreshTokenCiphertext) {
+		s.markAccountRevoked(ctx, latest)
+		return err
+	}
+	if !s.isLeader() {
+		return s.notLeaderRefresh(githubScopeOrgAccount, acct.ID)
+	}
+	token, err = s.refreshAccountToken(ctx, latest)
+	if err != nil {
+		return err
+	}
+	return fn(token)
+}
+
+// refreshUserToken rotates the credential observed on conn (leader-only,
+// single-flight) and returns the freshly persisted token. Concurrent callers
+// share one rotation; a rotation already applied by someone else surfaces as
+// ErrConflict from the gate and is served by reloading.
+func (s *GitHubIntegrationService) refreshUserToken(ctx context.Context, conn *domain.UserGitHubConnection) (*domain.UserGitHubConnection, string, error) {
+	err := s.refreshes.do(ctx, fmt.Sprintf("%s:%s", githubScopeUser, conn.UserID), func(ctx context.Context) error {
+		return s.rotateUserToken(ctx, conn)
+	})
+	if err != nil && !errors.Is(err, domain.ErrConflict) {
+		return nil, "", err
+	}
+	return s.userToken(ctx, conn.UserID)
+}
+
+// refreshAccountToken is refreshUserToken for an org account source.
+func (s *GitHubIntegrationService) refreshAccountToken(ctx context.Context, acct *domain.GitHubAccountSource) (string, error) {
+	err := s.refreshes.do(ctx, fmt.Sprintf("%s:%s", githubScopeOrgAccount, acct.ID), func(ctx context.Context) error {
+		return s.rotateAccountToken(ctx, acct)
+	})
+	if err != nil && !errors.Is(err, domain.ErrConflict) {
+		return "", err
+	}
+	latest, err := s.accountSources.Get(ctx, acct.ID)
+	if err != nil {
+		return "", err
+	}
+	return s.accountToken(latest)
+}
+
+// rotateUserToken performs one rotation of the credential observed on observed.
+// A credential already replaced (concurrent rotation or re-auth) is reported as
+// ErrConflict so the caller reloads instead of rotating twice.
+func (s *GitHubIntegrationService) rotateUserToken(ctx context.Context, observed *domain.UserGitHubConnection) error {
+	userID := observed.UserID
+	conn, err := s.connections.GetByUser(ctx, userID)
+	if err != nil {
+		return err
+	}
+	if conn.Status != domain.GitHubConnectionActive {
+		return fmt.Errorf("%w: github connection token is expired or revoked", domain.ErrGitHubTokenRevoked)
+	}
+	if !s.refreshable(conn.RefreshTokenCiphertext) {
+		return nil
+	}
+	if conn.RefreshTokenCiphertext != observed.RefreshTokenCiphertext {
+		return fmt.Errorf("github connection %s: %w", userID, domain.ErrConflict)
+	}
+	now := time.Now().UTC()
+	if refreshTokenExpired(conn.RefreshExpiresAt, now) {
+		return s.revokeByRefresh(githubScopeUser, userID, "refresh_token_expired", func() { s.markUserRevoked(ctx, userID) })
+	}
+	plaintext, err := s.sealer.OpenRaw(domain.SecretScopeGitHubUser, userID, conn.RefreshTokenCiphertext)
+	if err != nil {
+		return s.revokeByRefresh(githubScopeUser, userID, "unseal_failed", func() { s.markUserRevoked(ctx, userID) })
+	}
+	cred, err := s.rotateToken(ctx, plaintext)
+	if err != nil {
+		return s.refreshError(githubScopeUser, userID, err, func() { s.markUserRevoked(ctx, userID) })
+	}
+	pair, err := s.sealCredential(domain.SecretScopeGitHubUser, userID, &cred)
+	if err != nil {
+		return fmt.Errorf("seal rotated github user token: %w", err)
+	}
+	expected := conn.TokenVersion
+	conn.TokenCiphertext = pair.access
+	conn.RefreshTokenCiphertext = pair.refresh
+	conn.TokenExpiresAt = pair.accessExp
+	conn.RefreshExpiresAt = pair.refreshExp
+	conn.TokenVersion = expected + 1
+	if len(cred.Scopes) > 0 {
+		conn.Scopes = cred.Scopes
+	}
+	return s.persistRotation(ctx, githubScopeUser, userID, conn.TokenVersion, func() error {
+		return s.connections.UpsertIfVersion(ctx, conn, expected)
+	})
+}
+
+// rotateAccountToken performs one rotation of the credential observed on acct
+// and re-seals its per-repo forge sources. A credential already replaced is
+// reported as ErrConflict (see rotateUserToken).
+func (s *GitHubIntegrationService) rotateAccountToken(ctx context.Context, acct *domain.GitHubAccountSource) error {
+	current, err := s.accountSources.Get(ctx, acct.ID)
+	if err != nil {
+		return err
+	}
+	if current.Status != domain.GitHubConnectionActive {
+		return fmt.Errorf("%w: github account token is expired or revoked", domain.ErrGitHubTokenRevoked)
+	}
+	if !s.refreshable(current.RefreshTokenCiphertext) {
+		return nil
+	}
+	if current.RefreshTokenCiphertext != acct.RefreshTokenCiphertext {
+		return fmt.Errorf("github account source %s: %w", acct.ID, domain.ErrConflict)
+	}
+	scopeID, err := domain.GitHubOrgAccountScopeID(current.OrgID, current.ID)
+	if err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if refreshTokenExpired(current.RefreshExpiresAt, now) {
+		return s.revokeByRefresh(githubScopeOrgAccount, current.ID, "refresh_token_expired", func() { s.markAccountRevoked(ctx, current) })
+	}
+	plaintext, err := s.sealer.OpenRaw(domain.SecretScopeGitHubOrgAccount, scopeID, current.RefreshTokenCiphertext)
+	if err != nil {
+		return s.revokeByRefresh(githubScopeOrgAccount, current.ID, "unseal_failed", func() { s.markAccountRevoked(ctx, current) })
+	}
+	cred, err := s.rotateToken(ctx, plaintext)
+	if err != nil {
+		return s.refreshError(githubScopeOrgAccount, current.ID, err, func() { s.markAccountRevoked(ctx, current) })
+	}
+	pair, err := s.sealCredential(domain.SecretScopeGitHubOrgAccount, scopeID, &cred)
+	if err != nil {
+		return fmt.Errorf("seal rotated github account token: %w", err)
+	}
+	expected := current.TokenVersion
+	current.TokenCiphertext = pair.access
+	current.RefreshTokenCiphertext = pair.refresh
+	current.TokenExpiresAt = pair.accessExp
+	current.RefreshExpiresAt = pair.refreshExp
+	current.TokenVersion = expected + 1
+	if len(cred.Scopes) > 0 {
+		current.Scopes = cred.Scopes
+	}
+	if err := s.persistRotation(ctx, githubScopeOrgAccount, current.ID, current.TokenVersion, func() error {
+		return s.accountSources.UpsertIfVersion(ctx, current, expected)
+	}); err != nil {
+		return err
+	}
+	if err := s.reSealAccountForgeSources(ctx, current.OrgID, current.ID, cred.AccessToken); err != nil {
+		s.logger.WithError(err).WithFields(logrus.Fields{
+			"event": "github_refresh_reseal_failed", "scope": githubScopeOrgAccount, "scope_id": current.ID,
+		}).Warn("re-seal github forge sources after token rotation failed")
+	}
+	return nil
+}
+
+// rotateToken exchanges a plaintext refresh token for a fresh token pair.
+func (s *GitHubIntegrationService) rotateToken(ctx context.Context, refreshToken string) (githubCredential, error) {
+	res, err := s.github.RefreshToken(ctx, refreshToken)
+	if err != nil {
+		return githubCredential{}, err
+	}
+	if res == nil || res.AccessToken == "" {
+		return githubCredential{}, fmt.Errorf("%w: github token endpoint returned no access token", domain.ErrGitHubRefreshUnavailable)
+	}
+	res.Normalize()
+	return credentialFromTokenResult(res, time.Now().UTC()), nil
+}
+
+// persistRotation persists a rotated credential with a bounded retry. A stale
+// version (ErrConflict) is returned so the caller reloads the winner; any other
+// persistent failure is logged and surfaced as transient (never revokes).
+func (s *GitHubIntegrationService) persistRotation(ctx context.Context, scope, scopeID string, tokenVersion uint64, persist func() error) error {
+	backoff := githubRefreshPersistBackoff
+	var err error
+	for attempt := 0; attempt < githubRefreshPersistAttempts; attempt++ {
+		if err = persist(); err == nil {
+			s.recordRefresh(scope, "success")
+			s.logger.WithFields(logrus.Fields{
+				"event": "github_token_refreshed", "scope": scope, "scope_id": scopeID, "token_version": tokenVersion,
+			}).Info("github token refreshed")
+			return nil
+		}
+		if !retryableRefreshPersist(err) {
+			return err
+		}
+		if attempt < githubRefreshPersistAttempts-1 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
+	}
+	s.logger.WithError(err).WithFields(logrus.Fields{
+		"event": "github_refresh_persist_failed", "scope": scope, "scope_id": scopeID,
+	}).Error("rotated github token could not be persisted")
+	return fmt.Errorf("%w: persist rotated github token: %w", domain.ErrGitHubRefreshUnavailable, err)
+}
+
+// retryableRefreshPersist reports whether a failed Raft apply may succeed on a
+// retry (leadership transfer / apply timeout). A stale version is final.
+func retryableRefreshPersist(err error) bool {
+	if errors.Is(err, domain.ErrConflict) || errors.Is(err, domain.ErrNotFound) {
+		return false
+	}
+	return errors.Is(err, domain.ErrNotLeader) || errors.Is(err, domain.ErrRaftTimeout)
+}
+
+// refreshError converts a failed rotation into the caller-visible error: a
+// rejected refresh token revokes the credential, every other failure is
+// transient and must never revoke.
+func (s *GitHubIntegrationService) refreshError(scope, scopeID string, err error, revoke func()) error {
+	if errors.Is(err, domain.ErrGitHubRefreshInvalid) {
+		return s.revokeByRefresh(scope, scopeID, "bad_refresh_token", revoke)
+	}
+	reason := "transient"
+	switch {
+	case errors.Is(err, domain.ErrNotLeader):
+		reason = "not_leader"
+	case errors.Is(err, domain.ErrRaftTimeout):
+		reason = "raft_timeout"
+	}
+	s.recordRefresh(scope, reason)
+	s.logger.WithError(err).WithFields(logrus.Fields{
+		"event": "github_token_refresh_failed", "scope": scope, "scope_id": scopeID, "reason": reason,
+	}).Warn("github token refresh failed")
+	return fmt.Errorf("%w: %w", domain.ErrGitHubRefreshUnavailable, err)
+}
+
+// notLeaderRefresh reports a follower that cannot rotate a credential it could
+// not persist (mirrors the OIDC errOAuthNotLeaderRefresh rule, issue #61).
+func (s *GitHubIntegrationService) notLeaderRefresh(scope, scopeID string) error {
+	s.recordRefresh(scope, "not_leader")
+	s.logger.WithFields(logrus.Fields{
+		"event": "github_token_refresh_failed", "scope": scope, "scope_id": scopeID, "reason": "not_leader",
+	}).Warn("github token refresh requires the raft leader")
+	return fmt.Errorf("%w: github token refresh requires the raft leader", domain.ErrNotLeader)
+}
+
+// revokeByRefresh marks a credential revoked because its refresh token can no
+// longer be used (rejected by GitHub, already expired, or unopenable).
+func (s *GitHubIntegrationService) revokeByRefresh(scope, scopeID, reason string, revoke func()) error {
+	revoke()
+	s.recordRefresh(scope, "bad_refresh_token")
+	s.logger.WithFields(logrus.Fields{
+		"event": "github_connection_revoked_by_refresh", "scope": scope, "scope_id": scopeID, "reason": reason,
+	}).Warn("github connection revoked: refresh token unusable")
+	return fmt.Errorf("%w: the github refresh token is no longer usable; reconnect the account", domain.ErrGitHubTokenRevoked)
+}
+
+// passthroughAccountError reports whether a GitHub call failure must be
+// surfaced as-is instead of being masked as repository inaccessibility.
+func passthroughAccountError(err error) bool {
+	for _, sentinel := range []error{
+		domain.ErrGitHubTokenRevoked, domain.ErrGitHubRateLimited, domain.ErrValidation,
+		domain.ErrNotLeader, domain.ErrRaftTimeout, domain.ErrGitHubRefreshUnavailable,
+	} {
+		if errors.Is(err, sentinel) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *GitHubIntegrationService) requireHuman(ctx context.Context, userID string) error {

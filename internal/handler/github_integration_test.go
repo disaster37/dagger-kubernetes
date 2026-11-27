@@ -53,6 +53,9 @@ func (f *handlerFakeGitHub) ListAccessibleRepos(context.Context, string, string)
 func (f *handlerFakeGitHub) GetRepository(context.Context, string, string, string, string) (*domain.GitHubRemoteRepo, error) {
 	return &domain.GitHubRemoteRepo{ID: 1, Name: "api", FullName: "acme/api", Owner: "acme", Private: true, DefaultBranch: "main", AdminPerm: true}, nil
 }
+func (f *handlerFakeGitHub) RefreshToken(context.Context, string) (*domain.GitHubTokenResult, error) {
+	return &domain.GitHubTokenResult{AccessToken: "gho_refreshed", Scopes: []string{"repo"}}, nil
+}
 
 type handlerFakeForge struct{}
 

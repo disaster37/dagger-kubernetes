@@ -507,6 +507,10 @@ supervisor:
           scopes: ["repo", "read:org", "admin:repo_hook"]
           stateTtl: "10m"
           deviceFlowEnabled: true
+## @param supervisor.config.forge.github.oauth.refreshEnabled Rotate expiring GitHub OAuth App tokens (device flow needs no secret; redirect flow needs clientSecret). Disable to fall back to token-expiry-then-reconnect.
+          refreshEnabled: true
+## @param supervisor.config.forge.github.oauth.refreshSkew Proactive-rotation window before access-token expiry (Go duration; 0..1h).
+          refreshSkew: "5m"
           allowedRedirectUris: []
     graphql:
       introspectionEnabled: false

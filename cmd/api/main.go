@@ -296,12 +296,14 @@ func run(c *cli.Context) error {
 		StateTTL:            cfg.Forge.GitHub.OAuth.StateTTL,
 		DeviceFlowEnabled:   cfg.Forge.GitHub.OAuth.DeviceFlowEnabled,
 		AllowedRedirectURIs: cfg.Forge.GitHub.OAuth.AllowedRedirectURIs,
+		RefreshEnabled:      cfg.Forge.GitHub.OAuth.RefreshEnabled,
+		RefreshSkew:         cfg.Forge.GitHub.OAuth.RefreshSkew,
 	}, service.GitHubIntegrationDeps{
 		Connections: githubConnRepo, AccountSources: githubAccountRepo, RepoSettings: repoSettingRepo,
 		ForgeSources: forgeSourceRepo, OAuthStates: githubOAuthStateRepo,
 		DeviceSessions: service.NewMemoryGitHubDeviceSessionStore(), Users: userRepo,
 		Orgs: orgsSvc, Projects: projectsSvc, Sealer: secretSvc, GitHub: githubClient,
-		ForgeProvider: githubForge, Logger: logger,
+		ForgeProvider: githubForge, Logger: logger, IsLeader: raftStore.IsLeader, Metrics: metrics,
 	})
 	var checkRunner domain.CheckJobRunner
 	if cfg.Checks.Enabled && clientset != nil {

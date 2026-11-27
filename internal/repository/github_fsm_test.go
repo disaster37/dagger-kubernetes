@@ -15,17 +15,22 @@ import (
 func TestGitHubFSMSnapshotRestore(t *testing.T) {
 	f := newTestFSM(t)
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
+	expiresAt := now.Add(8 * time.Hour)
+	refreshExpiresAt := now.Add(180 * 24 * time.Hour)
 	conn := &domain.UserGitHubConnection{
 		UserID: "user-a", GitHubUserID: 7, GitHubLogin: "alice", BaseURL: "https://api.github.com",
-		Scopes: []string{"repo"}, TokenCiphertext: "conn-ct", Status: domain.GitHubConnectionActive,
-		ConnectedAt: now, UpdatedAt: now,
+		Scopes: []string{"repo"}, TokenCiphertext: "conn-ct", RefreshTokenCiphertext: "conn-rct",
+		TokenExpiresAt: expiresAt, RefreshExpiresAt: refreshExpiresAt, TokenVersion: 2,
+		Status: domain.GitHubConnectionActive, ConnectedAt: now, UpdatedAt: now,
 	}
 	if err := applyCmd(t, f, kindUpsertGitHubConnection, cmdGitHubConnectionFrom(conn)); err != nil {
 		t.Fatalf("upsert connection: %v", err)
 	}
 	acct := &domain.GitHubAccountSource{
 		ID: "ghacct-1", OrgID: "org-a", Owner: "Acme", OwnerType: "User", BaseURL: "https://api.github.com",
-		TokenCiphertext: "acct-ct", Status: domain.GitHubConnectionActive, CreatedAt: now, UpdatedAt: now,
+		TokenCiphertext: "acct-ct", RefreshTokenCiphertext: "acct-rct",
+		TokenExpiresAt: expiresAt, RefreshExpiresAt: refreshExpiresAt, TokenVersion: 3,
+		Status: domain.GitHubConnectionActive, CreatedAt: now, UpdatedAt: now,
 	}
 	if err := applyCmd(t, f, kindUpsertGitHubAccountSource, cmdGitHubAccountSourceFrom(acct)); err != nil {
 		t.Fatalf("upsert account: %v", err)
@@ -63,9 +68,16 @@ func TestGitHubFSMSnapshotRestore(t *testing.T) {
 	if err != nil || gotConn.TokenCiphertext != "conn-ct" || gotConn.GitHubLogin != "alice" {
 		t.Fatalf("connection after restore = %+v err=%v", gotConn, err)
 	}
+	if gotConn.RefreshTokenCiphertext != "conn-rct" || !gotConn.TokenExpiresAt.Equal(expiresAt) ||
+		!gotConn.RefreshExpiresAt.Equal(refreshExpiresAt) || gotConn.TokenVersion != 2 {
+		t.Fatalf("connection refresh fields after restore = %+v", gotConn)
+	}
 	gotAcct, err := restored.readGitHubAccountSourceByOwner("org-a", "acme")
 	if err != nil || gotAcct.ID != "ghacct-1" || gotAcct.TokenCiphertext != "acct-ct" {
 		t.Fatalf("account after restore = %+v err=%v", gotAcct, err)
+	}
+	if gotAcct.RefreshTokenCiphertext != "acct-rct" || !gotAcct.TokenExpiresAt.Equal(expiresAt) || gotAcct.TokenVersion != 3 {
+		t.Fatalf("account refresh fields after restore = %+v", gotAcct)
 	}
 	gotSetting, err := restored.readRepoSettingByCanonical("github.com/acme/api")
 	if err != nil || gotSetting.OrgID != "org-a" || !gotSetting.RunChecksOnDefaultBranch {
@@ -321,5 +333,134 @@ func TestGitHubRepositoriesRoundTrip(t *testing.T) {
 	}
 	if _, err := stateRepo.Consume(ctx, st.StateID, now.Add(time.Second)); !errors.Is(err, domain.ErrOAuthStateInvalid) {
 		t.Fatalf("replay err=%v", err)
+	}
+}
+
+func TestGitHubFSMTokenVersionCAS(t *testing.T) {
+	f := newTestFSM(t)
+	now := time.Date(2026, 6, 1, 0, 0, 0, 0, time.UTC)
+	conn := &domain.UserGitHubConnection{UserID: "u1", TokenCiphertext: "ct1", RefreshTokenCiphertext: "rct1", TokenVersion: 1, ConnectedAt: now}
+	if err := applyCmd(t, f, kindUpsertGitHubConnection, cmdGitHubConnectionFrom(conn)); err != nil {
+		t.Fatal(err)
+	}
+
+	next := *conn
+	next.TokenCiphertext, next.RefreshTokenCiphertext, next.TokenVersion = "ct2", "rct2", 2
+	if err := applyCmd(t, f, kindUpsertGitHubConnectionIfVersion, cmdGitHubConnectionIfVersion{
+		Connection: *cmdGitHubConnectionFrom(&next), ExpectedVersion: 1,
+	}); err != nil {
+		t.Fatalf("matching version: %v", err)
+	}
+	got, err := f.readGitHubConnection("u1")
+	if err != nil || got.TokenVersion != 2 || got.TokenCiphertext != "ct2" || got.RefreshTokenCiphertext != "rct2" {
+		t.Fatalf("after CAS apply = %+v err=%v", got, err)
+	}
+
+	// A stale writer (an older rotation) must not clobber the newer record.
+	stale := *conn
+	stale.TokenCiphertext = "stale"
+	err = applyCmd(t, f, kindUpsertGitHubConnectionIfVersion, cmdGitHubConnectionIfVersion{
+		Connection: *cmdGitHubConnectionFrom(&stale), ExpectedVersion: 1,
+	})
+	if !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale version err = %v want ErrConflict", err)
+	}
+	got, err = f.readGitHubConnection("u1")
+	if err != nil || got.TokenCiphertext != "ct2" || got.TokenVersion != 2 {
+		t.Fatalf("stale write must not apply: %+v err=%v", got, err)
+	}
+
+	if err := applyCmd(t, f, kindUpsertGitHubConnectionIfVersion, cmdGitHubConnectionIfVersion{
+		Connection: *cmdGitHubConnectionFrom(&domain.UserGitHubConnection{UserID: "nobody"}), ExpectedVersion: 0,
+	}); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing record err = %v want ErrNotFound", err)
+	}
+
+	acct := &domain.GitHubAccountSource{ID: "acct", OrgID: "org-a", Owner: "acme", TokenCiphertext: "a1", TokenVersion: 1, CreatedAt: now}
+	if err := applyCmd(t, f, kindUpsertGitHubAccountSource, cmdGitHubAccountSourceFrom(acct)); err != nil {
+		t.Fatal(err)
+	}
+	rotated := *acct
+	rotated.TokenCiphertext, rotated.RefreshTokenCiphertext, rotated.TokenVersion = "a2", "ar2", 2
+	if err := applyCmd(t, f, kindUpsertGitHubAccountSourceIfVersion, cmdGitHubAccountSourceIfVersion{
+		Source: *cmdGitHubAccountSourceFrom(&rotated), ExpectedVersion: 1,
+	}); err != nil {
+		t.Fatalf("account matching version: %v", err)
+	}
+	gotAcct, err := f.readGitHubAccountSource("acct")
+	if err != nil || gotAcct.TokenVersion != 2 || gotAcct.RefreshTokenCiphertext != "ar2" {
+		t.Fatalf("account after CAS apply = %+v err=%v", gotAcct, err)
+	}
+	if err := applyCmd(t, f, kindUpsertGitHubAccountSourceIfVersion, cmdGitHubAccountSourceIfVersion{
+		Source: *cmdGitHubAccountSourceFrom(acct), ExpectedVersion: 1,
+	}); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("account stale version err = %v want ErrConflict", err)
+	}
+}
+
+func TestGitHubFSMLegacyRecordsWithoutRefreshMaterial(t *testing.T) {
+	// A pre-refresh snapshot (no refresh fields) must restore with zero values
+	// so no rotation is attempted and behavior matches the old binary.
+	legacy := `{"github_connections":[{"user_id":"u1","github_login":"alice","token_ciphertext":"ct","status":"active"}],"github_account_sources":[{"id":"acct","org_id":"org-a","owner":"acme","token_ciphertext":"act","status":"active"}]}`
+	f := NewFSM()
+	if err := f.Restore(io.NopCloser(strings.NewReader(legacy))); err != nil {
+		t.Fatalf("restore legacy snapshot: %v", err)
+	}
+	conn, err := f.readGitHubConnection("u1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conn.RefreshTokenCiphertext != "" || !conn.TokenExpiresAt.IsZero() || !conn.RefreshExpiresAt.IsZero() || conn.TokenVersion != 0 {
+		t.Fatalf("legacy connection decoded refresh material: %+v", conn)
+	}
+	acct, err := f.readGitHubAccountSource("acct")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if acct.RefreshTokenCiphertext != "" || !acct.TokenExpiresAt.IsZero() || acct.TokenVersion != 0 {
+		t.Fatalf("legacy account decoded refresh material: %+v", acct)
+	}
+}
+
+func TestGitHubRepositoriesCASRoundTrip(t *testing.T) {
+	store := newTestRaftStore(t)
+	ctx := context.Background()
+	connRepo := NewGitHubConnectionRepo(store)
+	acctRepo := NewGitHubAccountSourceRepo(store)
+	now := time.Now().UTC()
+
+	conn := &domain.UserGitHubConnection{UserID: "u1", TokenCiphertext: "ct", RefreshTokenCiphertext: "rct", TokenExpiresAt: now.Add(time.Hour), RefreshExpiresAt: now.Add(time.Hour * 24), TokenVersion: 1}
+	if err := connRepo.Upsert(ctx, conn); err != nil {
+		t.Fatal(err)
+	}
+	conn.TokenCiphertext, conn.RefreshTokenCiphertext, conn.TokenVersion = "ct2", "rct2", 2
+	if err := connRepo.UpsertIfVersion(ctx, conn, 1); err != nil {
+		t.Fatalf("cas upsert: %v", err)
+	}
+	got, err := connRepo.GetByUser(ctx, "u1")
+	if err != nil || got.TokenVersion != 2 || got.RefreshTokenCiphertext != "rct2" {
+		t.Fatalf("connection = %+v err=%v", got, err)
+	}
+	if err := connRepo.UpsertIfVersion(ctx, conn, 1); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("stale cas err = %v want ErrConflict", err)
+	}
+	if err := connRepo.UpsertIfVersion(ctx, &domain.UserGitHubConnection{UserID: "missing"}, 0); !errors.Is(err, domain.ErrNotFound) {
+		t.Fatalf("missing cas err = %v want ErrNotFound", err)
+	}
+
+	acct := &domain.GitHubAccountSource{ID: "acct", OrgID: "org-a", Owner: "acme", TokenCiphertext: "a1", RefreshTokenCiphertext: "ar1", TokenVersion: 1}
+	if err := acctRepo.Upsert(ctx, acct); err != nil {
+		t.Fatal(err)
+	}
+	acct.TokenVersion = 2
+	if err := acctRepo.UpsertIfVersion(ctx, acct, 1); err != nil {
+		t.Fatalf("account cas upsert: %v", err)
+	}
+	gotAcct, err := acctRepo.Get(ctx, "acct")
+	if err != nil || gotAcct.TokenVersion != 2 {
+		t.Fatalf("account = %+v err=%v", gotAcct, err)
+	}
+	if err := acctRepo.UpsertIfVersion(ctx, acct, 1); !errors.Is(err, domain.ErrConflict) {
+		t.Fatalf("account stale cas err = %v want ErrConflict", err)
 	}
 }
