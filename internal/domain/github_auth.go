@@ -295,6 +295,10 @@ type SourceRepositoryItem struct {
 // GitHubConnectionRepository persists user-scoped GitHub connections.
 type GitHubConnectionRepository interface {
 	Upsert(ctx context.Context, conn *UserGitHubConnection) error
+	// UpsertIfVersion applies conn only when the stored record's TokenVersion
+	// still equals expectedVersion, returning ErrConflict (stale) or
+	// ErrNotFound otherwise. It is the compare-and-swap used by token rotation.
+	UpsertIfVersion(ctx context.Context, conn *UserGitHubConnection, expectedVersion uint64) error
 	GetByUser(ctx context.Context, userID string) (*UserGitHubConnection, error)
 	DeleteByUser(ctx context.Context, userID string) error
 }
@@ -302,6 +306,8 @@ type GitHubConnectionRepository interface {
 // GitHubAccountSourceRepository persists org-scoped GitHub account sources.
 type GitHubAccountSourceRepository interface {
 	Upsert(ctx context.Context, src *GitHubAccountSource) error
+	// UpsertIfVersion is the TokenVersion compare-and-swap for account sources.
+	UpsertIfVersion(ctx context.Context, src *GitHubAccountSource, expectedVersion uint64) error
 	Get(ctx context.Context, id string) (*GitHubAccountSource, error)
 	GetByOrgAndOwner(ctx context.Context, orgID, owner string) (*GitHubAccountSource, error)
 	ListByOrg(ctx context.Context, orgID string) ([]*GitHubAccountSource, error)
