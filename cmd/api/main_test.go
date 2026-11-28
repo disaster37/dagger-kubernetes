@@ -1317,3 +1317,31 @@ func TestSyncCASecretLoopImmediateAndNotify(t *testing.T) {
 		t.Fatal("syncCASecretLoop did not return after cancel")
 	}
 }
+
+// TestInternalServiceSANsCoverInternalControlHost proves the minting-CA
+// internal leaf covers the hostname engines and the follower relay dial
+// (server.internal_control_url) in its bare, .svc and cluster-domain forms.
+func TestInternalServiceSANsCoverInternalControlHost(t *testing.T) {
+	sans := internalServiceSANs(
+		"https://dagger-kubernetes-test-dagger-kubernetes-control.dagger-kubernetes-test.svc:80",
+		"",
+		"cluster.local",
+	)
+	want := []string{
+		"dagger-kubernetes-test-dagger-kubernetes-control.dagger-kubernetes-test.svc",
+		"dagger-kubernetes-test-dagger-kubernetes-control",
+		"dagger-kubernetes-test-dagger-kubernetes-control.dagger-kubernetes-test.svc.cluster.local",
+	}
+	for _, w := range want {
+		found := false
+		for _, san := range sans {
+			if san == w {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("SAN %q missing from %v", w, sans)
+		}
+	}
+}

@@ -14,6 +14,9 @@ metadata:
     nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"
     # F5 NGINX Ingress Controller equivalents (ignored by the community controller):
     nginx.org/ssl-services: "{{ include "dagger-kubernetes.fullname" . }}-control"
+    # /v1/engine is a WebSocket: name the upstream Service so the controller
+    # proxies the Upgrade (without it, WS handshakes get 400).
+    nginx.org/websocket-services: "{{ include "dagger-kubernetes.fullname" . }}-control"
     nginx.org/client-max-body-size: {{ .Values.ingress.proxyBodySize | default "64m" | quote }}
     nginx.org/proxy-read-timeout: "3600s"
     nginx.org/proxy-send-timeout: "3600s"
