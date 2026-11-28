@@ -5,6 +5,7 @@
       <p class="text-[13px] text-muted">Connect {{ org }} to a {{ provider }} repository.</p>
     </div>
     <UAlert v-if="error" color="error" variant="soft" :description="error" />
+    <UAlert v-if="ownersError" color="warning" variant="soft" :description="ownersError" />
     <UAlert v-if="notice" color="success" variant="soft" :description="notice" />
 
     <template v-if="provider === 'github'">
@@ -224,6 +225,7 @@ const appID = ref('')
 const installationID = ref('')
 const loading = ref(false)
 const error = ref('')
+const ownersError = ref('')
 const notice = ref('')
 
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -242,12 +244,18 @@ function stopPolling() {
 
 async function load() {
   error.value = ''
+  ownersError.value = ''
   try {
     sources.value = (await listForgeSources(org.value)).filter(s => s.provider === provider.value)
     if (provider.value !== 'github') return
     connection.value = await getGitHubConnection()
     accounts.value = await listOrgGitHubAccounts(org.value)
-    owners.value = await listGitHubOwners().catch(() => [])
+    owners.value = []
+    try {
+      owners.value = await listGitHubOwners()
+    } catch {
+      ownersError.value = 'Link a GitHub account to browse repositories.'
+    }
     if (selectedAccountID.value && !accounts.value.some(a => a.id === selectedAccountID.value)) selectedAccountID.value = ''
     if (!selectedAccountID.value && accounts.value.length) selectedAccountID.value = accounts.value[0]!.id
     if (selectedAccountID.value) await loadRepositories()

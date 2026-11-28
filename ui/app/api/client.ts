@@ -461,69 +461,73 @@ export async function deleteForgeSource(org: string, sourceId: string): Promise<
 }
 
 // --- GitHub credential linking & repo claims ---
+// Every GitHub integration call opts into 'local' auth recovery: a 401 may
+// trigger one silent refresh but never clears the session or navigates. A
+// missing/unlinked GitHub account is a business state (409), and the caller
+// must always observe the rejection instead of being logged out.
 export async function getGitHubConnection(): Promise<GitHubConnectionState> {
-  const { data } = await api.get('/api/v1/github/connection')
+  const { data } = await api.get('/api/v1/github/connection', { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function disconnectGitHub(): Promise<void> {
-  await api.delete('/api/v1/github/connection')
+  await api.delete('/api/v1/github/connection', { authRecovery: 'local' } as AuthRequestConfig)
 }
 export async function completeGitHubOAuth(code: string, state: string): Promise<GitHubOAuthCompleteResult> {
-  const { data } = await api.post('/api/v1/github/oauth/complete', { code, state })
+  const { data } = await api.post('/api/v1/github/oauth/complete', { code, state }, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function connectGitHubPAT(token: string, baseUrl = ''): Promise<{ connection: GitHubConnectionState['connection']; available_owners: GitHubOwner[] }> {
-  const { data } = await api.post('/api/v1/github/pat', { token, base_url: baseUrl })
+  const { data } = await api.post('/api/v1/github/pat', { token, base_url: baseUrl }, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function startGitHubDeviceFlow(org = ''): Promise<GitHubDeviceFlowStart> {
-  const { data } = await api.post('/api/v1/github/device/code', { org })
+  const { data } = await api.post('/api/v1/github/device/code', { org }, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function pollGitHubDeviceFlow(sessionId: string): Promise<{ status: 'pending' | 'slow_down' | 'complete'; interval?: number; result?: GitHubOAuthCompleteResult }> {
-  const { data } = await api.post('/api/v1/github/device/poll', { session_id: sessionId })
+  const { data } = await api.post('/api/v1/github/device/poll', { session_id: sessionId }, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function listGitHubOwners(): Promise<GitHubOwner[]> {
-  const { data } = await api.get('/api/v1/github/owners')
+  const { data } = await api.get('/api/v1/github/owners', { authRecovery: 'local' } as AuthRequestConfig)
   return (data?.owners as GitHubOwner[] | null) ?? []
 }
 export async function startOrgGitHubOAuth(org: string, redirectUri: string): Promise<string> {
-  const { data } = await api.post(`/api/v1/orgs/${org}/github/oauth/start`, { redirect_uri: redirectUri })
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/oauth/start`, { redirect_uri: redirectUri }, { authRecovery: 'local' } as AuthRequestConfig)
   return data.authorize_url
 }
 export async function listOrgGitHubAccounts(org: string): Promise<GitHubAccountSource[]> {
-  const { data } = await api.get(`/api/v1/orgs/${org}/github/accounts`)
+  const { data } = await api.get(`/api/v1/orgs/${org}/github/accounts`, { authRecovery: 'local' } as AuthRequestConfig)
   return (data as GitHubAccountSource[] | null) ?? []
 }
 export async function createOrgGitHubAccount(org: string, payload: { owner: string; base_url?: string; token?: string }): Promise<GitHubAccountSource> {
-  const { data } = await api.post(`/api/v1/orgs/${org}/github/accounts`, payload)
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/accounts`, payload, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function deleteOrgGitHubAccount(org: string, accountId: string, cascade = true): Promise<void> {
-  await api.delete(`/api/v1/orgs/${org}/github/accounts/${accountId}`, { params: { cascade } })
+  await api.delete(`/api/v1/orgs/${org}/github/accounts/${accountId}`, { params: { cascade }, authRecovery: 'local' } as AuthRequestConfig)
 }
 export async function fetchOrgRepoSettings(org: string): Promise<OrgRepoSettings[]> {
   const { data } = await api.post('/query', {
     query: `query($org: String!) { org(name: $org) { repoSettings { repo isPublic effectiveRunChecksOnDefaultBranch effectiveRunChecksOnPullRequest effectiveRunChecksOnBranchPush } } }`,
     variables: { org },
-  })
+  }, { authRecovery: 'local' } as AuthRequestConfig)
   return (data?.data?.org?.repoSettings as OrgRepoSettings[] | null) ?? []
 }
 export async function listOrgGitHubRepositories(org: string, params: { account_id?: string; owner?: string; q?: string } = {}): Promise<SourceRepositoryItem[]> {
-  const { data } = await api.get(`/api/v1/orgs/${org}/github/repositories`, { params })
+  const { data } = await api.get(`/api/v1/orgs/${org}/github/repositories`, { params, authRecovery: 'local' } as AuthRequestConfig)
   return (data?.repositories as SourceRepositoryItem[] | null) ?? []
 }
 export async function enableOrgGitHubSources(org: string, accountId: string, repos: Array<{ repo: string; run_checks_on_default_branch?: boolean; run_checks_on_pull_request?: boolean; run_checks_on_branch_push?: boolean; is_public?: boolean }>): Promise<{ updated: number }> {
-  const { data } = await api.post(`/api/v1/orgs/${org}/github/sources`, { account_id: accountId, repos })
+  const { data } = await api.post(`/api/v1/orgs/${org}/github/sources`, { account_id: accountId, repos }, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function updateOrgGitHubRepoSettings(org: string, owner: string, repo: string, payload: { run_checks_on_default_branch?: boolean; run_checks_on_pull_request?: boolean; run_checks_on_branch_push?: boolean; is_public?: boolean }): Promise<RepoSetting> {
-  const { data } = await api.put(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/settings`, payload)
+  const { data } = await api.put(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/settings`, payload, { authRecovery: 'local' } as AuthRequestConfig)
   return data
 }
 export async function deleteOrgGitHubRepoClaim(org: string, owner: string, repo: string): Promise<void> {
-  await api.delete(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/claim`)
+  await api.delete(`/api/v1/orgs/${org}/github/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/claim`, { authRecovery: 'local' } as AuthRequestConfig)
 }
 
 // --- Cloud Checks ---

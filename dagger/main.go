@@ -367,13 +367,18 @@ func (m *DaggerKubernetes) Test(ctx context.Context) (*dagger.File, error) {
 // Ui builds the Nuxt 4 + Nuxt UI v4 SPA and returns the .output/public/ directory.
 //
 // Implemented locally because the upstream golang module has no UI support.
-// Mirrors the Dockerfile: npm ci, typecheck, build (nuxt generate).
+// Mirrors the Dockerfile: npm ci, typecheck, build (nuxt generate). It also
+// runs the Node auth-regression harness (tests/auth-regression.mjs) so the
+// interceptor/navigation contracts are enforced in CI — the Go integration
+// wrapper skips that harness when Node or the UI deps are absent, which is
+// always the case inside the `test` container.
 func (m *DaggerKubernetes) Ui(ctx context.Context) (*dagger.Directory, error) {
 	ctr := dag.Container().
 		From(nodeImage).
 		WithMountedDirectory("/ui", m.Src.Directory("ui")).
 		WithWorkdir("/ui").
 		WithExec([]string{"npm", "ci"}).
+		WithExec([]string{"node", "--experimental-vm-modules", "tests/auth-regression.mjs"}).
 		WithExec([]string{"npm", "run", "typecheck"}).
 		WithExec([]string{"npm", "run", "build"})
 

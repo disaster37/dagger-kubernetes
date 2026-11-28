@@ -994,7 +994,10 @@ func (s *GitHubIntegrationService) accountToken(acct *domain.GitHubAccountSource
 func (s *GitHubIntegrationService) userToken(ctx context.Context, userID string) (*domain.UserGitHubConnection, string, error) {
 	conn, err := s.connections.GetByUser(ctx, userID)
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: connect a GitHub account first", domain.ErrUnauthenticated)
+		if errors.Is(err, domain.ErrNotFound) {
+			return nil, "", fmt.Errorf("%w: link a GitHub account first", domain.ErrGitHubNotConnected)
+		}
+		return nil, "", fmt.Errorf("get github connection: %w", err)
 	}
 	if conn.Status != domain.GitHubConnectionActive {
 		return nil, "", fmt.Errorf("%w: github connection token is expired or revoked", domain.ErrGitHubTokenRevoked)
