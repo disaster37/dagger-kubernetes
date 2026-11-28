@@ -50,7 +50,7 @@ functional, but not "automatic".
 **Supersession:** ADR-043's D1 statement *"the rewrite is gated on `tls: true`"*
 is superseded by this ADR. ADR-043's D2 (TLS on the mirrors) and D3
 (`engine_registry_mirrors_http` dropping TLS mirrors) are unchanged;
-`internal_addr` keeps serving BuildKit/`engine.toml` pipeline-mirror traffic
+`internal_addr` keeps serving BuildKit/`engine.json` `registries` pipeline-mirror traffic
 ([ADR-033](ADR-033-local-image-mirror.md)).
 
 The kubelet then dials `<registryIngress.host>:443` (public/cert-manager
@@ -70,7 +70,7 @@ stateless function; no new logging or concurrency.
   alternative).
 - **Run the mirror ingress for every preset** — rejected (scope): only the
   engine image (`registry.dagger.io`) needs a kubelet-reachable endpoint;
-  pipeline pulls stay in-cluster via `engine.toml`.
+  pipeline pulls stay in-cluster via `engine.json` `registries`.
 - **Supervisor flag to force engine-image routing** — remains rejected for the
   same reasons as ADR-043: the mirror list already carries the data.
 
@@ -98,3 +98,13 @@ stateless function; no new logging or concurrency.
   the mirror is exposed through an `HTTPRoute` (`gateway.registryMirror.*`)
   instead of an `Ingress`; `external_addr` then follows
   `gateway.registryMirror.host`.
+
+## Update — 2026-11-28: pipeline mirrors are delivered via `engine.json`
+
+The in-cluster mirror list for pipeline pulls is now rendered into
+`/etc/dagger/engine.json` as `registries[host].mirrors` (plus
+`registries[host].http: true` for plaintext mirrors), not into
+`engine.toml` — the engine does not read `engine.toml` for registry
+configuration. The engine-image rewrite itself (D1) is unaffected: the kubelet
+pull still uses the mirror's `external_addr` (or the legacy TLS
+`internal_addr`).
