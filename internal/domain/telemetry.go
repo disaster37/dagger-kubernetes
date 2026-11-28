@@ -20,6 +20,19 @@ type SpanNode struct {
 	Logs         []SpanLog         `json:"logs,omitempty"`
 	Events       []SpanEvent       `json:"events,omitempty"`
 	Exec         *ExecInfo         `json:"exec,omitempty"`
+	Test         *TestResult       `json:"test,omitempty"`
+}
+
+// TestResult is one test observed in a trace (per-test CI visibility,
+// changelog 1.0). It is derived at read time from the test spans' OTel
+// attributes, never persisted.
+type TestResult struct {
+	Name       string `json:"name"`
+	Suite      string `json:"suite,omitempty"`
+	File       string `json:"file,omitempty"`
+	Status     string `json:"status"` // passed | failed | skipped | running
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	SpanID     string `json:"span_id,omitempty"`
 }
 
 type SpanLog struct {
@@ -69,6 +82,8 @@ type TraceInfo struct {
 	UserID     string        `json:"user_id,omitempty"`  // owner from trace_meta
 	Username   string        `json:"username,omitempty"` // joined from users table
 	URL        string        `json:"url,omitempty"`      // self-hosted pipeline view URL
+	// Tests is the flattened per-test view derived from the span tree.
+	Tests []TestResult `json:"tests,omitempty"`
 }
 
 type LogEntry struct {

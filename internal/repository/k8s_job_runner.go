@@ -32,6 +32,8 @@ type K8sJobRunner struct {
 	internalControlURL string
 	caSecret           string
 	imagePullSecrets   []string
+	silent             bool
+	workflowPaths      []string
 }
 
 var _ domain.CheckJobRunner = (*K8sJobRunner)(nil)
@@ -47,6 +49,20 @@ func NewK8sJobRunner(clientset kubernetes.Interface, namespace, image string, ti
 // WithImagePullSecrets attaches the given image pull secrets to every Job pod.
 func (r *K8sJobRunner) WithImagePullSecrets(secrets []string) *K8sJobRunner {
 	r.imagePullSecrets = secrets
+	return r
+}
+
+// WithSilent runs the check-runner CLI with --silent (checks.silent). The flag
+// travels in the Job Secret so nested SDK sessions inherit DAGGER_SILENT too.
+func (r *K8sJobRunner) WithSilent(silent bool) *K8sJobRunner {
+	r.silent = silent
+	return r
+}
+
+// WithWorkflowPaths passes the configured workflow discovery directories to the
+// check runner (workflows.discovery_paths). Empty keeps the runner default.
+func (r *K8sJobRunner) WithWorkflowPaths(paths []string) *K8sJobRunner {
+	r.workflowPaths = paths
 	return r
 }
 
@@ -79,6 +95,10 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		checkRunRefLabel:     refHash(spec.Ref),
 	}
 	serverURL := r.controlURL()
+	args, err := r.checkRunnerArgs(spec, serverURL)
+	if err != nil {
+		return err
+	}
 	secretName := fmt.Sprintf("check-env-%s", refHash(spec.ID))
 	stringData := map[string]string{
 		"DAGGER_CLOUD_TOKEN":      spec.Token,
@@ -88,6 +108,9 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 	}
 	for k, v := range spec.Secrets {
 		stringData[k] = v
+	}
+	if r.silent {
+		stringData["DAGGER_SILENT"] = "1"
 	}
 	secret := &corev1.Secret{
 		ObjectMeta: metav1.ObjectMeta{Name: secretName, Namespace: r.namespace, Labels: labels},
@@ -123,29 +146,6 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		}
 	}
 
-	args := []string{
-		"check-runner",
-		"--run-id", spec.ID,
-		"--org", spec.OrgID,
-		"--project", spec.ProjectID,
-		"--repo", spec.Repo,
-		"--sha", spec.SHA,
-		"--ref", spec.Ref,
-		"--event", spec.Event,
-		"--default-branch", spec.DefaultBranch,
-		"--target-branch", spec.TargetBranch,
-		"--tag", spec.Tag,
-		"--server", serverURL,
-	}
-	if spec.CloneURL != "" {
-		args = append(args, "--clone-url", spec.CloneURL)
-	}
-	if spec.PRNumber > 0 {
-		args = append(args, "--pr", fmt.Sprintf("%d", spec.PRNumber))
-	}
-	if spec.IsRelease {
-		args = append(args, "--is-release")
-	}
 	job := &batchv1.Job{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: r.namespace, Labels: labels},
 		Spec: batchv1.JobSpec{
@@ -208,6 +208,46 @@ func (r *K8sJobRunner) Run(ctx context.Context, spec *domain.CheckRunSpec) error
 		return fmt.Errorf("own check env secret: %w", err)
 	}
 	return nil
+}
+
+// checkRunnerArgs builds the check-runner argv: the run metadata, the optional
+// clone URL/PR/release flags, and the validated typed filters (each passed as
+// --filter key=value so the runner appends --key=value to `dagger check`).
+func (r *K8sJobRunner) checkRunnerArgs(spec *domain.CheckRunSpec, serverURL string) ([]string, error) {
+	args := []string{
+		"check-runner",
+		"--run-id", spec.ID,
+		"--org", spec.OrgID,
+		"--project", spec.ProjectID,
+		"--repo", spec.Repo,
+		"--sha", spec.SHA,
+		"--ref", spec.Ref,
+		"--event", spec.Event,
+		"--default-branch", spec.DefaultBranch,
+		"--target-branch", spec.TargetBranch,
+		"--tag", spec.Tag,
+		"--server", serverURL,
+	}
+	if spec.CloneURL != "" {
+		args = append(args, "--clone-url", spec.CloneURL)
+	}
+	if spec.PRNumber > 0 {
+		args = append(args, "--pr", fmt.Sprintf("%d", spec.PRNumber))
+	}
+	if spec.IsRelease {
+		args = append(args, "--is-release")
+	}
+	for _, filter := range spec.Filters {
+		value, err := domain.ParseCheckFilterArgv(filter)
+		if err != nil {
+			return nil, fmt.Errorf("check run filters: %w", err)
+		}
+		args = append(args, "--filter", value)
+	}
+	for _, path := range r.workflowPaths {
+		args = append(args, "--workflow-path", path)
+	}
+	return args, nil
 }
 
 // createCheckJob creates the Job. On a rerun a transient AlreadyExists (the

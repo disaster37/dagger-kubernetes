@@ -276,3 +276,95 @@ func containsArg(args []string, flag, value string) bool {
 	}
 	return false
 }
+
+// TestJobSecretCarriesSilent proves checks.silent reaches the Job Secret (and
+// therefore the runner process and every nested CLI child), and that the
+// default leaves the variable untouched.
+func TestJobSecretCarriesSilent(t *testing.T) {
+	cases := []struct {
+		name   string
+		silent bool
+		want   string // "" = absent
+	}{
+		{name: "default off", silent: false, want: ""},
+		{name: "configured on", silent: true, want: "1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cs := fake.NewSimpleClientset()
+			r := NewK8sJobRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "").
+				WithSilent(tc.silent)
+			spec := &domain.CheckRunSpec{ID: "check-silent", OrgID: "acme", ProjectID: "proj", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main"}
+			if err := r.Run(context.Background(), spec); err != nil {
+				t.Fatal(err)
+			}
+			secret, err := cs.CoreV1().Secrets("resolved-ns").Get(context.Background(), "check-env-"+refHash(spec.ID), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := secret.StringData["DAGGER_SILENT"]
+			if got != tc.want {
+				t.Fatalf("DAGGER_SILENT = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestJobArgsCarryFilters proves validated typed filters reach the check-runner
+// argv as repeatable --filter key=value pairs, and that an invalid stored filter
+// fails before any Job or Secret is created.
+func TestJobArgsCarryFilters(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	r := NewK8sJobRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "")
+	spec := &domain.CheckRunSpec{
+		ID: "check-filters", OrgID: "acme", ProjectID: "proj", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main",
+		Filters: []string{"--go-test=TestGet", "--vitest-test-file=app.test.ts"},
+	}
+	if err := r.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	job, err := cs.BatchV1().Jobs("resolved-ns").Get(context.Background(), "check-"+refHash(spec.ID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := job.Spec.Template.Spec.Containers[0].Args
+	if !containsArg(args, "--filter", "go-test=TestGet") {
+		t.Fatalf("args missing go-test filter: %v", args)
+	}
+	if !containsArg(args, "--filter", "vitest-test-file=app.test.ts") {
+		t.Fatalf("args missing vitest filter: %v", args)
+	}
+
+	bad := *spec
+	bad.ID = "check-bad-filter"
+	bad.Filters = []string{"--rm -rf /"}
+	if err := r.Run(context.Background(), &bad); err == nil {
+		t.Fatal("invalid filter must be rejected")
+	}
+	if _, err := cs.BatchV1().Jobs("resolved-ns").Get(context.Background(), "check-"+refHash(bad.ID), metav1.GetOptions{}); err == nil {
+		t.Fatal("invalid filter must not create a Job")
+	}
+}
+
+// TestJobArgsCarryWorkflowPaths proves workflows.discovery_paths reaches the
+// check runner as repeatable --workflow-path flags.
+func TestJobArgsCarryWorkflowPaths(t *testing.T) {
+	cs := fake.NewSimpleClientset()
+	r := NewK8sJobRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "").
+		WithWorkflowPaths([]string{".dagger/workflows", "ci/workflows"})
+	spec := &domain.CheckRunSpec{ID: "check-paths", OrgID: "acme", ProjectID: "proj", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main"}
+	if err := r.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	job, err := cs.BatchV1().Jobs("resolved-ns").Get(context.Background(), "check-"+refHash(spec.ID), metav1.GetOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := job.Spec.Template.Spec.Containers[0].Args
+	if !containsArg(args, "--workflow-path", ".dagger/workflows") {
+		t.Fatalf("args missing default workflow path: %v", args)
+	}
+	if !containsArg(args, "--workflow-path", "ci/workflows") {
+		t.Fatalf("args missing configured workflow path: %v", args)
+	}
+}

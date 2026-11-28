@@ -912,12 +912,15 @@ subchart values.
 | `supervisor.config.checks.githubOidcIssuer` | string | `"https://token.actions.githubusercontent.com"` | GitHub Actions OIDC issuer URL. |
 | `supervisor.config.checks.gitlabOidcIssuer` | string | `"https://gitlab.com"` | Default GitLab CI OIDC issuer URL. |
 | `supervisor.config.checks.oidcAudience` | string | `"dagger-kubernetes"` | Expected audience of CI OIDC ID tokens. |
+| `supervisor.config.checks.silent` | bool | `false` | Run check-runner CLI calls with `--silent` (0.21.8+ skips the per-session frontend telemetry DB, lowering memory for concurrent runs). |
 | `supervisor.config.workflows.enabled` | bool | `false` | Enable Dagger-native CD workflows (ADR-057). |
 | `supervisor.config.workflows.namespace` | string | `""` | Namespace for workflow Jobs (empty = release namespace). |
 | `supervisor.config.workflows.jobImage` | string | `""` | Runner image for workflow Jobs (empty = supervisor image `<repo>:<tag>`). |
 | `supervisor.config.workflows.jobImagePullSecrets` | array | `[]` | Image pull secrets for workflow Job pods (empty = `supervisor.image.pullSecrets`). |
 | `supervisor.config.workflows.defaultTimeout` | string | `"30m"` | Default workflow job timeout when a job declares none. |
 | `supervisor.config.workflows.maxParallel` | int | `8` | Max concurrently running jobs in one workflow run. |
+| `supervisor.config.workflows.silent` | bool | `false` | Run workflow-runner CLI calls with `--silent` (same semantics as `checks.silent`). |
+| `supervisor.config.workflows.discoveryPaths` | array | `[]` | Workdir-relative directories scanned for workflow files. Empty = the supervisor default (`.dagger/workflows`); the chart omits the key so future defaults apply. |
 | `supervisor.config.pipeline.metrics.enabled` | bool | `true` | Enable the trace-scoped engine resource metrics endpoint (`GET /api/v1/traces/:id/metrics`). |
 | `supervisor.config.pipeline.metrics.step` | string | `"15s"` | `query_range` resolution for engine metrics (must be > 0 when enabled). |
 | `supervisor.config.pipeline.metrics.rateWindow` | string | `"1m"` | `rate()` lookback for cpu/disk/net engine series (must be > 0 when enabled). |
@@ -1251,5 +1254,6 @@ kubectl delete pvc -n dagger-stack -l app.kubernetes.io/instance=dagger-kubernet
 | `supervisor.config.graphql.maxSelections` | int | `250` | Maximum expanded selection count. |
 | `supervisor.config.graphql.maxQueryBytes` | int | `65536` | Maximum query length in bytes. |
 | `supervisor.config.graphql.maxParallelism` | int | `10` | Maximum resolver parallelism. |
+| `supervisor.config.graphql.logQueries` | bool | `false` | Log one debug line per `/query` (operation name, byte length, SHA-256, duration, error flag; never the query text). |
 | `supervisor.config.fleet.isolation` | string | `"per_org"` | Engine/cache namespace isolation (`per_org` or `shared`). |
 | `supervisor.config.cli.includePrereleases` | bool | `false` | Include `vX.Y.Z-beta.*` in `latest` CLI resolution. |

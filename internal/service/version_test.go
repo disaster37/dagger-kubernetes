@@ -118,6 +118,46 @@ func TestResolverAllowlist(t *testing.T) {
 	}
 }
 
+// TestResolverAdmitsChangelogRange proves every Dagger release in the
+// changelog support range (v0.21.8 → v1.0.0-beta.20) passes the shipped
+// version gate, so no entry in the compatibility matrix is blocked by the
+// control plane itself (ADR-061 V1).
+func TestResolverAdmitsChangelogRange(t *testing.T) {
+	r, err := NewResolver("v0.19.0", nil, map[string][]string{
+		"0.21": {"v0.21.0", "v0.21.8", "v0.21.9", "v0.21.10"},
+	})
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	cases := []struct {
+		version string
+		want    bool
+	}{
+		{version: "v0.21.8", want: true},
+		{version: "v0.21.9", want: true},
+		{version: "v0.21.10", want: true},
+		{version: "v1.0.0-beta.20", want: true},
+		{version: "v0.18.0", want: false},
+	}
+	for _, tc := range cases {
+		v, err := domain.Parse(tc.version)
+		if err != nil {
+			t.Fatalf("Parse(%q): %v", tc.version, err)
+		}
+		if got := r.IsAllowed(v); got != tc.want {
+			t.Errorf("IsAllowed(%s) = %v, want %v", tc.version, got, tc.want)
+		}
+	}
+
+	minimum, err := r.ResolveMinimal("0.21")
+	if err != nil {
+		t.Fatalf("ResolveMinimal: %v", err)
+	}
+	if minimum.Patch != 10 {
+		t.Errorf("ResolveMinimal(0.21) patch = %d, want 10", minimum.Patch)
+	}
+}
+
 func TestResolveMinimal(t *testing.T) {
 	releases := map[string][]string{
 		"0.21": {"v0.21.0", "v0.21.1", "v0.21.4"},

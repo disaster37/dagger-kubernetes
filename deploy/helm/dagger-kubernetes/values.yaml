@@ -474,6 +474,8 @@ supervisor:
       gitlabOidcIssuer: "https://gitlab.com"
 ## @param supervisor.config.checks.oidcAudience Expected audience of CI OIDC ID tokens.
       oidcAudience: "dagger-kubernetes"
+## @param supervisor.config.checks.silent Run check-runner CLI calls with --silent (0.21.8+ skips the per-session frontend telemetry DB, lowering memory for concurrent runs).
+      silent: false
     workflows:
 ## @param supervisor.config.workflows.enabled Enable Dagger-native CD workflows (ADR-057).
       enabled: false
@@ -487,6 +489,10 @@ supervisor:
       defaultTimeout: "30m"
 ## @param supervisor.config.workflows.maxParallel Max concurrently running jobs in one workflow run.
       maxParallel: 8
+## @param supervisor.config.workflows.silent Run workflow-runner CLI calls with --silent (same semantics as checks.silent).
+      silent: false
+## @param supervisor.config.workflows.discoveryPaths [array] Workdir-relative directories scanned for workflow files. Empty = the supervisor default (`.dagger/workflows`); the chart omits the key so future defaults apply.
+      discoveryPaths: []
     forge:
       githubApiUrl: "https://api.github.com"
       gitlabApiUrl: "https://gitlab.com/api/v4"
@@ -514,6 +520,8 @@ supervisor:
       maxSelections: 250
       maxQueryBytes: 65536
       maxParallelism: 10
+## @param supervisor.config.graphql.logQueries Log one debug line per /query (operation name, byte length, SHA-256, duration, error flag; never the query text).
+      logQueries: false
 ## @param supervisor.config.pipeline.metrics.enabled Enable the trace-scoped engine resource metrics endpoint (GET /api/v1/traces/:id/metrics).
 ## @param supervisor.config.pipeline.metrics.step query_range resolution for engine metrics (Go duration; must be > 0 when enabled).
 ## @param supervisor.config.pipeline.metrics.rateWindow rate() lookback for cpu/disk/net engine series (Go duration; must be > 0 when enabled).

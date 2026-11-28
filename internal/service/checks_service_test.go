@@ -649,3 +649,143 @@ func (f *fakeCheckRunRepo) Delete(_ context.Context, id string) error {
 	delete(f.records, id)
 	return nil
 }
+
+// TestRerunWithFilters proves typed filters merge into the record, reach the
+// dispatched spec as validated argv, and that an invalid filter fails with
+// ErrValidation before the record is mutated or a Job is dispatched.
+func TestRerunWithFilters(t *testing.T) {
+	svc, _, runner, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	ctx := context.Background()
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo","default_branch":"main"}}`)
+	if _, err := svc.HandleWebhook(ctx, domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body); err != nil {
+		t.Fatal(err)
+	}
+	runID := "check-src-1-abc123"
+	if len(runner.runs) != 1 {
+		t.Fatalf("dispatch count = %d, want 1", len(runner.runs))
+	}
+
+	record, err := svc.RerunWithFilters(ctx, runID, domain.CheckRunFilters{Tests: []string{"TestGet"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := record.Filters; len(got) != 1 || got[0] != "--go-test=TestGet" {
+		t.Fatalf("record filters = %v, want [--go-test=TestGet]", got)
+	}
+	if got := runner.runs[len(runner.runs)-1].Filters; len(got) != 1 || got[0] != "--go-test=TestGet" {
+		t.Fatalf("spec filters = %v, want [--go-test=TestGet]", got)
+	}
+
+	// A second rerun merges rather than replaces.
+	record, err = svc.RerunWithFilters(ctx, runID, domain.CheckRunFilters{
+		Tests: []string{"TestGet", "vitest-test-file=app.test.ts"},
+		Files: []string{"./pkg/..."},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--go-test=TestGet", "--vitest-test-file=app.test.ts", "--go-package=./pkg/..."}
+	if len(record.Filters) != len(want) {
+		t.Fatalf("merged filters = %v, want %v", record.Filters, want)
+	}
+	for i := range want {
+		if record.Filters[i] != want[i] {
+			t.Fatalf("merged filters = %v, want %v", record.Filters, want)
+		}
+	}
+
+	dispatched := len(runner.runs)
+	for _, bad := range []domain.CheckRunFilters{
+		{Tests: []string{"--rm -rf /"}},
+		{Files: []string{"$(whoami)"}},
+		{Checks: []string{""}},
+	} {
+		if _, err := svc.RerunWithFilters(ctx, runID, bad); !errors.Is(err, domain.ErrValidation) {
+			t.Fatalf("filter %+v err = %v, want ErrValidation", bad, err)
+		}
+	}
+	if len(runner.runs) != dispatched {
+		t.Fatal("invalid filters must not dispatch")
+	}
+	unchanged, err := svc.Get(ctx, runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(unchanged.Filters) != len(want) {
+		t.Fatalf("record mutated by invalid filters: %v", unchanged.Filters)
+	}
+
+	// A plain rerun keeps the stored filters.
+	if _, err := svc.Rerun(ctx, runID); err != nil {
+		t.Fatal(err)
+	}
+	if got := runner.runs[len(runner.runs)-1].Filters; len(got) != len(want) {
+		t.Fatalf("plain rerun lost filters: %v", got)
+	}
+
+	// Fork runs still require approval, filters or not.
+	svc.checkRuns.Upsert(ctx, &domain.CheckRunRecord{ID: "check-src-1-fork", OrgID: "acme", ProjectID: "p1", SourceID: "src-1", IsFork: true, Status: "waiting_approval"})
+	if _, err := svc.RerunWithFilters(ctx, "check-src-1-fork", domain.CheckRunFilters{Tests: []string{"TestGet"}}); !errors.Is(err, domain.ErrForbidden) {
+		t.Fatalf("fork rerun err = %v, want ErrForbidden", err)
+	}
+}
+
+// TestRecordLoadDescriptors proves the additive load descriptors become check
+// filters and typed-artifact refs, and that an old payload without descriptors
+// still works.
+func TestRecordLoadDescriptors(t *testing.T) {
+	svc, _, _, store := newChecksServiceForTest(t)
+	secretSvc := NewSecretService(repository.NewSecretRepo(store), []byte("0123456789abcdef0123456789abcdef"), logrus.New())
+	seedForgeSource(t, store, secretSvc)
+	ctx := context.Background()
+	body := []byte(`{"ref":"refs/heads/main","after":"abc123","repository":{"full_name":"acme/repo","default_branch":"main"}}`)
+	if _, err := svc.HandleWebhook(ctx, domain.ForgeGitHub, "src-1", map[string]string{"X-GitHub-Event": "push"}, body); err != nil {
+		t.Fatal(err)
+	}
+	records, err := svc.List(ctx, &domain.CheckRunFilter{OrgID: "acme"})
+	if err != nil || len(records) != 1 {
+		t.Fatalf("records = %v err=%v", records, err)
+	}
+	runID := records[0].ID
+
+	loaded, err := svc.RecordLoad(ctx, "acme", runID, LoadReportInput{
+		Checks: []string{"get-item", "plain"},
+		CheckDescriptors: []CheckDescriptorInput{
+			{Name: "get-item", Filters: map[string]string{"MODULE": "go", "GO-TEST": "TestGet", "LINK": "dag://go/test/TestGet"}},
+			{Name: "plain"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Checks) != 2 {
+		t.Fatalf("checks = %+v", loaded.Checks)
+	}
+	if loaded.Checks[0].Filters["GO-TEST"] != "TestGet" {
+		t.Fatalf("check filters = %+v", loaded.Checks[0].Filters)
+	}
+	if len(loaded.Checks[1].Filters) != 0 {
+		t.Fatalf("descriptor-less check must have no filters: %+v", loaded.Checks[1].Filters)
+	}
+	if len(loaded.Artifacts) != 1 {
+		t.Fatalf("artifacts = %+v", loaded.Artifacts)
+	}
+	artifact := loaded.Artifacts[0]
+	if artifact.Kind != "go" || artifact.Name != "get-item" || artifact.Link != "dag://go/test/TestGet" {
+		t.Fatalf("artifact = %+v", artifact)
+	}
+	if artifact.Filters["GO-TEST"] != "TestGet" {
+		t.Fatalf("artifact filters = %+v", artifact.Filters)
+	}
+
+	// Old payload shape (names only) remains accepted.
+	legacy, err := svc.RecordLoad(ctx, "acme", runID, LoadReportInput{Checks: []string{"build"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(legacy.Checks) != 1 || len(legacy.Artifacts) != 0 {
+		t.Fatalf("legacy load = %+v", legacy)
+	}
+}

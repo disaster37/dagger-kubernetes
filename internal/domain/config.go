@@ -655,6 +655,11 @@ type ChecksConfig struct {
 	GitLabOIDCIssuer string `mapstructure:"gitlab_oidc_issuer"`
 	// OIDCAudience is the expected audience of CI OIDC ID tokens.
 	OIDCAudience string `mapstructure:"oidc_audience"`
+	// Silent runs check-runner CLI invocations with --silent. Engines/CLIs
+	// >= v0.21.8 then skip the per-session frontend telemetry DB (much lower
+	// memory for concurrent runs). Older CLIs still get the flag, which they
+	// always supported.
+	Silent bool `mapstructure:"silent"`
 }
 
 // WorkflowConfig configures Dagger-native CD workflows (ADR-057).
@@ -670,6 +675,14 @@ type WorkflowConfig struct {
 	DefaultTimeout time.Duration `mapstructure:"default_timeout"`
 	// MaxParallel bounds concurrently running jobs in one workflow run.
 	MaxParallel int `mapstructure:"max_parallel"`
+	// Silent runs workflow-runner CLI invocations with --silent (same
+	// semantics as ChecksConfig.Silent).
+	Silent bool `mapstructure:"silent"`
+	// DiscoveryPaths are the workdir-relative directories scanned for workflow
+	// files. Beta workspaces may keep them outside .dagger/workflows
+	// (dagger.toml layouts), so discovery is declarative. Empty = the built-in
+	// default (.dagger/workflows).
+	DiscoveryPaths []string `mapstructure:"discovery_paths"`
 }
 
 // ForgeConfig configures outbound forge API endpoints (ADR-056).
@@ -711,4 +724,9 @@ type GraphQLConfig struct {
 	MaxSelections        int  `mapstructure:"max_selections"`
 	MaxQueryBytes        int  `mapstructure:"max_query_bytes"`
 	MaxParallelism       int  `mapstructure:"max_parallelism"`
+	// LogQueries logs one debug line per /query execution with the operation
+	// name, query byte length, query SHA-256, duration and error flag — never
+	// the query text (it can contain repo names and tokens). Used to capture
+	// which queries a CLI release sends without guessing.
+	LogQueries bool `mapstructure:"log_queries"`
 }

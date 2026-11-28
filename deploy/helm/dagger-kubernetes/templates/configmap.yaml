@@ -273,6 +273,7 @@ data:
       github_oidc_issuer: {{ .Values.supervisor.config.checks.githubOidcIssuer | quote }}
       gitlab_oidc_issuer: {{ .Values.supervisor.config.checks.gitlabOidcIssuer | quote }}
       oidc_audience: {{ .Values.supervisor.config.checks.oidcAudience | quote }}
+      silent: {{ .Values.supervisor.config.checks.silent }}
     workflows:
       enabled: {{ .Values.supervisor.config.workflows.enabled }}
       namespace: {{ default (include "dagger-kubernetes.namespace" .) .Values.supervisor.config.workflows.namespace | quote }}
@@ -287,6 +288,13 @@ data:
         {{- end }}
       default_timeout: {{ .Values.supervisor.config.workflows.defaultTimeout | quote }}
       max_parallel: {{ .Values.supervisor.config.workflows.maxParallel }}
+      silent: {{ .Values.supervisor.config.workflows.silent }}
+      {{- with .Values.supervisor.config.workflows.discoveryPaths }}
+      discovery_paths:
+        {{- range . }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
     forge:
       github_api_url: {{ .Values.supervisor.config.forge.githubApiUrl | quote }}
       gitlab_api_url: {{ .Values.supervisor.config.forge.gitlabApiUrl | quote }}
@@ -311,6 +319,7 @@ data:
       max_selections: {{ .Values.supervisor.config.graphql.maxSelections }}
       max_query_bytes: {{ .Values.supervisor.config.graphql.maxQueryBytes }}
       max_parallelism: {{ .Values.supervisor.config.graphql.maxParallelism }}
+      log_queries: {{ .Values.supervisor.config.graphql.logQueries }}
 {{- with .Values.supervisor.config.pipeline }}
     pipeline:
       metrics:

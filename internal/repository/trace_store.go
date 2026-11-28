@@ -76,10 +76,17 @@ func (r *SpanTreeReconstructor) reconstruct(traceID string, raw map[string]inter
 		parent, ok := nodes[s.ParentSpanID]
 		if !ok {
 			parentless = append(parentless, s)
-		} else {
-			parent.Children = append(parent.Children, s)
+			continue
 		}
+		parent.Children = append(parent.Children, s)
 	}
+
+	// A nested pipeline span whose parent arrived in a later batch/query would
+	// still be parentless at this point; re-check the complete span map so it
+	// attaches under its parent instead of surfacing at the root (where the UI
+	// would show nested work as a parallel root step). With a complete Tempo
+	// response this is a no-op; it hardens a streaming/partial response.
+	parentless = attachDeferred(nodes, parentless)
 
 	// Prefer the earliest-starting parentless span (the true root starts
 	// first); tie-break in favour of the span that parents the most others.
@@ -115,6 +122,23 @@ func (r *SpanTreeReconstructor) reconstruct(traceID string, raw map[string]inter
 	info.Duration = time.Duration(info.DurationMS) * time.Millisecond
 
 	return info
+}
+
+// attachDeferred re-parents spans whose parent was indexed after the first
+// linking pass (a nested pipeline span whose parent arrives in a later batch or
+// query) and returns the spans that are still parentless. A self-referencing
+// parent is left alone so a malformed span can never create a cycle.
+func attachDeferred(byID map[string]*domain.SpanNode, deferred []*domain.SpanNode) []*domain.SpanNode {
+	still := make([]*domain.SpanNode, 0, len(deferred))
+	for _, s := range deferred {
+		parent, ok := byID[s.ParentSpanID]
+		if !ok || parent == s {
+			still = append(still, s)
+			continue
+		}
+		parent.Children = append(parent.Children, s)
+	}
+	return still
 }
 
 // pickRoot selects the most likely root span from a list of candidates: the

@@ -32,8 +32,9 @@ func graphqlIdentity(ctx context.Context) GraphQLIdentity {
 	return id
 }
 
-// CheckRerunner re-dispatches a Cloud Checks run identified by runID.
-type CheckRerunner func(ctx context.Context, runID string) (*domain.CheckRunRecord, error)
+// CheckRerunner re-dispatches a Cloud Checks run identified by runID with an
+// optional set of typed filters (empty = re-dispatch as-is).
+type CheckRerunner func(ctx context.Context, runID string, filters domain.CheckRunFilters) (*domain.CheckRunRecord, error)
 
 const cloudGraphQLSchema = `
 schema { query: Query mutation: Mutation }
@@ -52,11 +53,12 @@ type Query {
   entireInstallations(org: ID!): [EntireInstallation!]!
   entireInstallURL(org: ID!, redirectURI: String!): String!
   getRepos: [Repo!]!
+  recommendedModules(repo: String!): [ModuleRecommendation!]!
 }
 type Mutation {
   createQuickstartOrg(name: String!): Org!
   createPortalSession(org: ID!): String!
-  rerunChecks(org: ID!, checkIds: [ID!]!, cleanSlate: Boolean): [Check!]!
+  rerunChecks(org: ID!, checkIds: [ID!]!, cleanSlate: Boolean, filters: [String!]): [Check!]!
   rerunLoad(org: ID!, checkId: ID!): Check!
   useGitLabAccount(org: ID!, source: ID!): GitLabSourceAccess
   updateOrgRepoSetting(org: ID!, setting: RepoSettingInput!): Boolean!
@@ -111,7 +113,7 @@ union CheckCommitRef = CheckCommitTagRef | CheckCommitBranchRef | CheckCommitPul
 type CheckCommitTagRef { name: String! url: String! }
 type CheckCommitBranchRef { name: String! url: String! }
 type CheckCommitPullRequestRef { number: Int! url: String! title: String! state: String! integrationCommit: String! }
-type Check { id: ID! name: String! status: String! startedAt: Time endTime: Time duration: Int traceId: String! spanId: String! moduleRef: String! moduleVersion: String! internal: Boolean! }
+type Check { id: ID! name: String! status: String! startedAt: Time endTime: Time duration: Int traceId: String! spanId: String! moduleRef: String! moduleVersion: String! internal: Boolean! filters: [String!]! }
 type Source { id: ID! name: String! type: String! configuredAt: String! orgId: ID orgName: String configUrl: String! repositories: [SourceRepository!]! }
 type SourceRepository { repository: String! selected: Boolean! eligible: Boolean! claimedByOrgName: String }
 type UserRepository { ref: String! settings: RepoSettings mappedSource: MappedSource }
@@ -121,6 +123,7 @@ type GitLabSource { id: ID! instanceURL: String! namespacePath: String! access(o
 type GitLabSourceAccess { connectionID: String! }
 type EntireInstallation { id: ID! name: String! manageURL: String! }
 type Repo { name: String! fullName: String! private: Boolean! }
+type ModuleRecommendation { moduleRef: String! version: String! reason: String }
 type RepoSettings { repo: String! isPublic: Boolean! effectiveRunChecksOnDefaultBranch: Boolean! effectiveRunChecksOnPullRequest: Boolean! effectiveRunChecksOnBranchPush: Boolean! }
 input RepoSettingInput { repo: String! isPublic: Boolean sourceId: ID runChecksOnDefaultBranch: Boolean runChecksOnPullRequest: Boolean runChecksOnBranchPush: Boolean }
 `

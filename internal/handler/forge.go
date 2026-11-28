@@ -311,6 +311,9 @@ func (s *Server) handleOrgChecksList(ctx context.Context, c *app.RequestContext)
 		s.writeServiceError(c, err)
 		return
 	}
+	for _, record := range records {
+		s.enrichCheckTests(record)
+	}
 	writeJSON(c, records)
 }
 
@@ -320,7 +323,34 @@ func (s *Server) handleCheckRunGet(ctx context.Context, c *app.RequestContext) {
 	if !ok {
 		return
 	}
+	s.enrichCheckTests(record)
 	writeJSON(c, record)
+}
+
+// enrichCheckTests fills each CheckItem.Tests from its trace at read time. The
+// per-test view is never persisted (it would bloat the replicated Raft state);
+// a missing trace simply yields no tests.
+func (s *Server) enrichCheckTests(records ...*domain.CheckRunRecord) {
+	if s.traces == nil {
+		return
+	}
+	for _, record := range records {
+		if record == nil {
+			continue
+		}
+		for i := range record.Checks {
+			traceID := record.Checks[i].TraceID
+			if traceID == "" {
+				continue
+			}
+			trace, err := s.traces.GetTrace(traceID)
+			if err != nil {
+				s.logger.WithError(err).WithField("trace_id", traceID).Debug("check test derivation failed")
+				continue
+			}
+			record.Checks[i].Tests = service.DeriveTests(trace.RootSpan)
+		}
+	}
 }
 
 type approveCheckRequest struct {
@@ -361,7 +391,11 @@ func (s *Server) handleCheckRunRerun(ctx context.Context, c *app.RequestContext)
 	if !ok {
 		return
 	}
-	updated, err := s.checks.Rerun(ctx, record.ID)
+	var filters domain.CheckRunFilters
+	if !decodeOptionalBody(c, &filters) {
+		return
+	}
+	updated, err := s.checks.RerunWithFilters(ctx, record.ID, filters)
 	if err != nil {
 		s.writeServiceError(c, err)
 		return

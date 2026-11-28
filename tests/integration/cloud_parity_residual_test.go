@@ -40,9 +40,43 @@ type parityServer struct {
 	secrets *service.SecretService
 	checks  *service.ChecksService
 	flows   *service.WorkflowService
+	traces  *stubTraceStore
+}
+
+// stubTraceStore serves pre-registered trace trees to the handler so
+// read-time derivations (exec/test view-models) can be asserted without Tempo.
+type stubTraceStore struct {
+	mu     sync.Mutex
+	traces map[string]*domain.TraceInfo
+}
+
+func (s *stubTraceStore) GetTrace(traceID string) (*domain.TraceInfo, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	trace, ok := s.traces[traceID]
+	if !ok {
+		return nil, domain.ErrNotFound
+	}
+	return trace, nil
+}
+
+func (s *stubTraceStore) set(trace *domain.TraceInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.traces == nil {
+		s.traces = make(map[string]*domain.TraceInfo)
+	}
+	s.traces[trace.TraceID] = trace
 }
 
 func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *service.OTLPStreamService, remote *service.RemoteCacheService, checkRunner domain.CheckJobRunner, flowRunner domain.WorkflowJobRunner) *parityServer {
+	t.Helper()
+	return newParityServerWith(t, graphqlCfg, otlp, remote, checkRunner, flowRunner, nil)
+}
+
+// newParityServerWith is newParityServer with a hook to adjust the handler
+// configuration (e.g. a recording OTLP collector URL) before the server starts.
+func newParityServerWith(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *service.OTLPStreamService, remote *service.RemoteCacheService, checkRunner domain.CheckJobRunner, flowRunner domain.WorkflowJobRunner, mutate func(*handler.ServerConfig)) *parityServer {
 	t.Helper()
 	logger := observ.NewTestLogger()
 	store := newIntegrationStore(t)
@@ -93,9 +127,10 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	checksSvc := service.NewChecksService(forgeRepo, secretSvc, projectsSvc, orgsSvc, checkRunner, checkRunRepo, workflowSvc, forgeProviders, "https://example.com", "", logger)
 	graphql.WithForgeSources(forgeRepo).WithProjects(projectRepo).WithPublicURL("https://example.com")
 	if checkRunner != nil {
-		graphql.WithCheckRerunner(checksSvc.Rerun)
+		graphql.WithCheckRerunner(checksSvc.RerunWithFilters)
 	}
 
+	traceStore := &stubTraceStore{}
 	mintingCA, _ := repository.NewMintingCA(2 * time.Hour)
 	versionResolver, _ := service.NewResolver("v0.19.0", nil, nil)
 	sessions := service.NewStore(2 * time.Minute)
@@ -105,7 +140,7 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	control := freeListener(t)
 	data := freeListener(t)
 	internal := freeListener(t)
-	srv := handler.NewServer(&handler.ServerConfig{
+	serverCfg := &handler.ServerConfig{
 		ControlAddr:      listenerAddr(control),
 		DataAddr:         listenerAddr(data),
 		ControlListener:  control,
@@ -113,11 +148,15 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 		InternalListener: internal,
 		DataHost:         "localhost",
 		PipelineURL:      "https://example.com",
-	}, &handler.Deps{
+	}
+	if mutate != nil {
+		mutate(serverCfg)
+	}
+	srv := handler.NewServer(serverCfg, &handler.Deps{
 		Logger: logger, Metrics: observ.NewMetrics(nil), MintingCA: mintingCA,
 		FleetManager: fleetManager, Sessions: sessions, SessionRegistry: repository.NewSessionRepo(store),
 		VersionResolver: versionResolver, Auth: authSvc, Users: usersSvc, Groups: groupsSvc,
-		Tokens: tokensSvc, TraceMeta: traceMetaRepo, JWT: jwtSvc, DeviceAuth: deviceSvc,
+		Tokens: tokensSvc, TraceMeta: traceMetaRepo, Traces: traceStore, JWT: jwtSvc, DeviceAuth: deviceSvc,
 		CloudGraphQL: graphql, OTLPStream: otlp, RemoteCache: remote,
 		Orgs: orgsSvc, Projects: projectsSvc, Secrets: secretSvc, Forge: service.NewForgeService(forgeRepo, secretSvc, nil, "https://example.com", logger),
 		Checks: checksSvc, Workflows: workflowSvc, Environments: service.NewEnvironmentService(envRepo, logger),
@@ -137,7 +176,7 @@ func newParityServer(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *servic
 	return &parityServer{
 		base: fmt.Sprintf("http://%s", control.Addr().String()), store: store, admin: adminToken,
 		users: usersSvc, groups: groupsSvc, tokens: tokensSvc, orgs: orgsSvc, secrets: secretSvc,
-		checks: checksSvc, flows: workflowSvc,
+		checks: checksSvc, flows: workflowSvc, traces: traceStore,
 	}
 }
 
@@ -390,6 +429,16 @@ func (r *recordingCheckRunner) count() int {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return len(r.runs)
+}
+
+// last returns the most recently recorded spec (nil when none).
+func (r *recordingCheckRunner) last() *domain.CheckRunSpec {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.runs) == 0 {
+		return nil
+	}
+	return r.runs[len(r.runs)-1]
 }
 
 func (r *recordingCheckRunner) tokenFor(runID string) string {

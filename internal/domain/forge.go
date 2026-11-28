@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -184,36 +185,47 @@ type CheckItem struct {
 	TraceID   string     `json:"trace_id,omitempty"`
 	Summary   string     `json:"summary,omitempty"`
 	UpdatedAt time.Time  `json:"updated_at"`
+	// Tests is filled at read time from the check's trace (never persisted) so
+	// GET /api/v1/checks/runs exposes per-test results.
+	Tests []TestResult `json:"tests,omitempty"`
+	// Filters carries the typed artifact columns discovered by
+	// `dagger check -l --all` (header column -> value). Optional.
+	Filters map[string]string `json:"filters,omitempty"`
 }
 
 // CheckRunRecord is the replicated Cloud Checks run state.
 type CheckRunRecord struct {
-	ID             string            `json:"id"`
-	OrgID          string            `json:"org_id"`
-	ProjectID      string            `json:"project_id"`
-	SourceID       string            `json:"source_id"`
-	Provider       ForgeKind         `json:"provider"`
-	Repo           string            `json:"repo"`
-	Event          string            `json:"event"`
-	SHA            string            `json:"sha"`
-	Ref            string            `json:"ref"`
-	DefaultBranch  string            `json:"default_branch,omitempty"`
-	TargetBranch   string            `json:"target_branch,omitempty"`
-	Tag            string            `json:"tag,omitempty"`
-	PRNumber       int               `json:"pr_number,omitempty"`
-	IsFork         bool              `json:"is_fork"`
-	IsRelease      bool              `json:"is_release"`
-	Status         string            `json:"status"` // waiting_approval | running | success | failed | canceled
-	IncludeSecrets bool              `json:"include_secrets"`
-	ApprovedBy     string            `json:"approved_by,omitempty"`
-	ApprovedAt     *time.Time        `json:"approved_at,omitempty"`
-	Checks         []CheckItem       `json:"checks,omitempty"`
-	WorkflowFiles  map[string]string `json:"workflow_files,omitempty"` // raw .dagger/workflows/*.yaml captured in load phase
-	ContextFiles   map[string][]byte `json:"context_files,omitempty"`  // <=1MiB structured files referenced by file()/next_semver()
-	Error          string            `json:"error,omitempty"`
-	RunTokenHash   string            `json:"-"` // SHA-256 of the per-run callback token; never exposed via API
-	CreatedAt      time.Time         `json:"created_at"`
-	UpdatedAt      time.Time         `json:"updated_at"`
+	ID             string      `json:"id"`
+	OrgID          string      `json:"org_id"`
+	ProjectID      string      `json:"project_id"`
+	SourceID       string      `json:"source_id"`
+	Provider       ForgeKind   `json:"provider"`
+	Repo           string      `json:"repo"`
+	Event          string      `json:"event"`
+	SHA            string      `json:"sha"`
+	Ref            string      `json:"ref"`
+	DefaultBranch  string      `json:"default_branch,omitempty"`
+	TargetBranch   string      `json:"target_branch,omitempty"`
+	Tag            string      `json:"tag,omitempty"`
+	PRNumber       int         `json:"pr_number,omitempty"`
+	IsFork         bool        `json:"is_fork"`
+	IsRelease      bool        `json:"is_release"`
+	Status         string      `json:"status"` // waiting_approval | running | success | failed | canceled
+	IncludeSecrets bool        `json:"include_secrets"`
+	ApprovedBy     string      `json:"approved_by,omitempty"`
+	ApprovedAt     *time.Time  `json:"approved_at,omitempty"`
+	Checks         []CheckItem `json:"checks,omitempty"`
+	// Filters holds the canonical "--<key>=<value>" typed-filter argv applied
+	// to a rerun (e.g. "--go-test=TestGet"). Stored only on explicit rerun.
+	Filters []string `json:"filters,omitempty"`
+	// Artifacts names the typed artifacts the run's checks cover (load phase).
+	Artifacts     []ArtifactRef     `json:"artifacts,omitempty"`
+	WorkflowFiles map[string]string `json:"workflow_files,omitempty"` // raw .dagger/workflows/*.yaml captured in load phase
+	ContextFiles  map[string][]byte `json:"context_files,omitempty"`  // <=1MiB structured files referenced by file()/next_semver()
+	Error         string            `json:"error,omitempty"`
+	RunTokenHash  string            `json:"-"` // SHA-256 of the per-run callback token; never exposed via API
+	CreatedAt     time.Time         `json:"created_at"`
+	UpdatedAt     time.Time         `json:"updated_at"`
 }
 
 // CheckRunFilter filters CheckRunRecord listings.
@@ -258,6 +270,8 @@ type CheckRunSpec struct {
 	CloneURL      string
 	Event         string
 	Secrets       map[string]string
+	// Filters are the validated "--<key>=<value>" argv passed to `dagger check`.
+	Filters []string
 }
 
 // CheckJobRunner executes check-run Jobs (implemented in repository).
@@ -276,3 +290,128 @@ const (
 	JobStateSucceeded JobState = "succeeded"
 	JobStateFailed    JobState = "failed"
 )
+
+// CheckRunFilters is the semantic set of typed filters a caller may request on
+// a rerun. Each entry is either an explicit "key=value" pair (module-specific,
+// e.g. "vitest-test-file=app.test.ts") or a bare value that is mapped to the
+// platform default key for its category.
+type CheckRunFilters struct {
+	Tests  []string `json:"tests,omitempty"`
+	Files  []string `json:"files,omitempty"`
+	Checks []string `json:"checks,omitempty"`
+}
+
+// ArtifactRef names one typed artifact a check covers. Typed artifacts
+// (discovered by Dagger) are distinct from stored workflow artifacts.
+type ArtifactRef struct {
+	Kind    string            `json:"kind"`              // module column, e.g. "go", "vitest"
+	Name    string            `json:"name,omitempty"`    // check name
+	Filters map[string]string `json:"filters,omitempty"` // column -> value
+	Link    string            `json:"link,omitempty"`    // dag:// link when the CLI provides one
+}
+
+// checkFilterRe is the strict charset for a typed filter: a lowercase
+// key=value pair with no shell metacharacters and no leading "-" (which would
+// be parsed as a flag).
+var checkFilterRe = regexp.MustCompile(`^[a-z][a-z0-9-]{0,40}=[A-Za-z0-9_./:@+\[\]-]{1,200}$`)
+
+// checkFilterPrefixes maps a semantic category to the default filter key used
+// when the caller passes a bare value.
+var checkFilterPrefixes = []struct {
+	category string
+	key      string
+}{
+	{category: "tests", key: "go-test"},
+	{category: "files", key: "go-package"},
+	{category: "checks", key: "check"},
+}
+
+// CheckFilterArgv validates one "key=value" typed filter and returns the
+// canonical "--key=value" argv form. It fails with ErrValidation.
+func CheckFilterArgv(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if !checkFilterRe.MatchString(raw) {
+		return "", invalidCheckFilter(raw)
+	}
+	return fmt.Sprintf("--%s", raw), nil
+}
+
+// ParseCheckFilterArgv validates a stored "--key=value" filter and returns the
+// bare "key=value" form used by the runner's --filter flag.
+func ParseCheckFilterArgv(arg string) (string, error) {
+	raw := strings.TrimPrefix(strings.TrimSpace(arg), "--")
+	if !checkFilterRe.MatchString(raw) {
+		return "", invalidCheckFilter(raw)
+	}
+	return raw, nil
+}
+
+// invalidCheckFilter is the shared validation error.
+func invalidCheckFilter(raw string) error {
+	return fmt.Errorf("%w: invalid check filter: %q must be key=value (lowercase key, no shell metacharacters, no leading dash)", ErrValidation, raw)
+}
+
+// NormalizeCheckFilters converts a semantic filter request into canonical
+// "--key=value" argv entries, de-duplicated in request order.
+func NormalizeCheckFilters(f CheckRunFilters) ([]string, error) {
+	values := map[string][]string{
+		"tests":  f.Tests,
+		"files":  f.Files,
+		"checks": f.Checks,
+	}
+	out := make([]string, 0, len(f.Tests)+len(f.Files)+len(f.Checks))
+	seen := make(map[string]bool, cap(out))
+	for _, p := range checkFilterPrefixes {
+		for _, value := range values[p.category] {
+			value = strings.TrimSpace(value)
+			if value == "" {
+				return nil, fmt.Errorf("%w: invalid check filter: empty %s entry", ErrValidation, p.category)
+			}
+			if !strings.Contains(value, "=") {
+				value = fmt.Sprintf("%s=%s", p.key, value)
+			}
+			argv, err := CheckFilterArgv(value)
+			if err != nil {
+				return nil, err
+			}
+			if seen[argv] {
+				continue
+			}
+			seen[argv] = true
+			out = append(out, argv)
+		}
+	}
+	return out, nil
+}
+
+// MergeCheckFilters validates the stored argv filters and unions them with a
+// new semantic request. Stored filters keep their order; new entries are
+// appended once. Validation happens before any mutation so a bad request never
+// alters a record.
+func MergeCheckFilters(stored []string, f CheckRunFilters) ([]string, error) {
+	out := make([]string, 0, len(stored)+len(f.Tests)+len(f.Files)+len(f.Checks))
+	seen := make(map[string]bool, cap(out))
+	for _, arg := range stored {
+		normalized, err := CheckFilterArgv(strings.TrimPrefix(strings.TrimSpace(arg), "--"))
+		if err != nil {
+			return nil, err
+		}
+		if seen[normalized] {
+			continue
+		}
+		seen[normalized] = true
+		out = append(out, normalized)
+	}
+	added, err := NormalizeCheckFilters(f)
+	if err != nil {
+		return nil, err
+	}
+	for _, argv := range added {
+		if seen[argv] {
+			continue
+		}
+		seen[argv] = true
+		out = append(out, argv)
+	}
+	return out, nil
+}

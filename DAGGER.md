@@ -27,6 +27,12 @@ the repository's `Dockerfile`.
 
 - **Dagger CLI** `0.21.8` (pinned in CI via `DAGGER_VERSION`; newer versions may work).
 - A running **Docker daemon** (Dagger uses it as the build engine).
+- `--x-release` through the `dagger-kubernetes-ci` wrapper requires an
+  installed CLI **>= 0.21.8**: earlier CLIs drop
+  `_EXPERIMENTAL_DAGGER_RUNNER_HOST` on the re-exec and fall back to a local
+  engine, so the wrapper rejects that combination with a clear error. The
+  pinned CI CLI (0.21.8) is the minimum; pass `--engine=…` to opt out of the
+  supervisor driver entirely.
 - An **initialized submodule**: `git submodule update --init` (the `ci` gate
   packages `ci-integrations/jenkins`, which is a git submodule).
 

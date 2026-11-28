@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"time"
 
@@ -12,11 +13,18 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
+// CheckDescriptorInput is one discovered check plus its typed-artifact columns.
+type CheckDescriptorInput struct {
+	Name    string            `json:"name"`
+	Filters map[string]string `json:"filters,omitempty"`
+}
+
 // LoadReportInput is the check-runner load-phase report.
 type LoadReportInput struct {
-	Checks        []string          `json:"checks"`
-	WorkflowFiles map[string]string `json:"workflow_files,omitempty"`
-	ContextFiles  map[string][]byte `json:"context_files,omitempty"`
+	Checks           []string               `json:"checks"`
+	CheckDescriptors []CheckDescriptorInput `json:"check_descriptors,omitempty"`
+	WorkflowFiles    map[string]string      `json:"workflow_files,omitempty"`
+	ContextFiles     map[string][]byte      `json:"context_files,omitempty"`
 }
 
 // CompleteReportInput is the check-runner completion report.
@@ -39,6 +47,7 @@ type ChecksService struct {
 	publicURL     string
 	webhookSecret string
 	enabled       atomic.Bool
+	silent        atomic.Bool
 	logger        *logrus.Logger
 }
 
@@ -70,6 +79,13 @@ func NewChecksService(sources domain.ForgeSourceRepository, secrets *SecretServi
 // WithEnabled gates check-run creation and dispatch. Reads always work.
 func (s *ChecksService) WithEnabled(enabled bool) *ChecksService {
 	s.enabled.Store(enabled)
+	return s
+}
+
+// WithSilent records whether check-runner Jobs run with --silent (checks.silent)
+// so dispatch logs state the effective mode.
+func (s *ChecksService) WithSilent(silent bool) *ChecksService {
+	s.silent.Store(silent)
 	return s
 }
 
@@ -239,13 +255,17 @@ func (s *ChecksService) dispatchCheckJob(ctx context.Context, src *domain.ForgeS
 	if err := s.checkRuns.Upsert(ctx, record); err != nil {
 		return fmt.Errorf("persist check run token: %w", err)
 	}
+	s.logger.WithFields(logrus.Fields{
+		"check_run_id": record.ID,
+		"silent":       s.silent.Load(),
+	}).Info("dispatching check run")
 	spec := &domain.CheckRunSpec{
 		ID: record.ID, OrgID: record.OrgID, ProjectID: record.ProjectID, SourceID: record.SourceID,
 		Provider: record.Provider, Repo: record.Repo, SHA: record.SHA, Ref: record.Ref,
 		DefaultBranch: record.DefaultBranch, TargetBranch: record.TargetBranch, Tag: record.Tag,
 		PRNumber: record.PRNumber, IsFork: record.IsFork, IsRelease: record.IsRelease,
 		Event: record.Event, Token: token, RunToken: runToken, CloneToken: cloneToken, Secrets: secrets,
-		CloneURL: domain.ForgeCloneURL(src.Provider, src.BaseURL, record.Repo),
+		CloneURL: domain.ForgeCloneURL(src.Provider, src.BaseURL, record.Repo), Filters: record.Filters,
 	}
 	return s.runner.Run(ctx, spec)
 }
@@ -260,9 +280,21 @@ func (s *ChecksService) RecordLoad(ctx context.Context, callerOrgID, runID strin
 		return nil, fmt.Errorf("%w: check run belongs to another org", domain.ErrForbidden)
 	}
 	now := time.Now().UTC()
+	descriptors := make(map[string]map[string]string, len(in.CheckDescriptors))
+	for _, d := range in.CheckDescriptors {
+		if d.Name == "" || len(d.Filters) == 0 {
+			continue
+		}
+		descriptors[d.Name] = d.Filters
+	}
 	record.Checks = make([]domain.CheckItem, 0, len(in.Checks))
+	record.Artifacts = make([]domain.ArtifactRef, 0, len(in.Checks))
 	for _, name := range in.Checks {
-		record.Checks = append(record.Checks, domain.CheckItem{Name: name, State: domain.CheckPending, UpdatedAt: now})
+		filters := descriptors[name]
+		record.Checks = append(record.Checks, domain.CheckItem{Name: name, State: domain.CheckPending, UpdatedAt: now, Filters: filters})
+		if len(filters) > 0 {
+			record.Artifacts = append(record.Artifacts, artifactFromFilters(name, filters))
+		}
 	}
 	record.WorkflowFiles = in.WorkflowFiles
 	record.ContextFiles = in.ContextFiles
@@ -285,6 +317,24 @@ func (s *ChecksService) RecordLoad(ctx context.Context, callerOrgID, runID strin
 		}
 	}
 	return record, nil
+}
+
+// artifactFromFilters names the typed artifact one check covers: the module
+// column (e.g. "go", "vitest") is the kind, every column is kept as a filter,
+// and a dag:// link supplied by the CLI is passed through verbatim.
+func artifactFromFilters(name string, filters map[string]string) domain.ArtifactRef {
+	ref := domain.ArtifactRef{Name: name, Filters: filters}
+	for key, value := range filters {
+		switch strings.ToUpper(key) {
+		case "MODULE":
+			ref.Kind = strings.ToLower(value)
+		case "LINK", "DAG-LINK":
+			if strings.HasPrefix(value, "dag://") {
+				ref.Link = value
+			}
+		}
+	}
+	return ref
 }
 
 // RecordComplete stores terminal check states and starts after_checks workflows.
@@ -371,8 +421,15 @@ func (s *ChecksService) ApproveForkRun(ctx context.Context, runID, approverUserI
 	return record, nil
 }
 
-// Rerun resets a run and re-dispatches it.
+// Rerun resets a run and re-dispatches it with the filters it already carries.
 func (s *ChecksService) Rerun(ctx context.Context, runID string) (*domain.CheckRunRecord, error) {
+	return s.RerunWithFilters(ctx, runID, domain.CheckRunFilters{})
+}
+
+// RerunWithFilters resets a run, merges the requested typed filters into the
+// record, re-validates them, and re-dispatches. Invalid filters fail with
+// ErrValidation before the record is mutated. Fork runs still require approval.
+func (s *ChecksService) RerunWithFilters(ctx context.Context, runID string, f domain.CheckRunFilters) (*domain.CheckRunRecord, error) {
 	if !s.enabled.Load() {
 		return nil, fmt.Errorf("%w: cloud checks are disabled (checks.enabled is false)", domain.ErrValidation)
 	}
@@ -383,6 +440,11 @@ func (s *ChecksService) Rerun(ctx context.Context, runID string) (*domain.CheckR
 	if record.IsFork && record.ApprovedAt == nil {
 		return nil, fmt.Errorf("%w: fork PR run requires approval", domain.ErrForbidden)
 	}
+	filters, err := domain.MergeCheckFilters(record.Filters, f)
+	if err != nil {
+		return nil, err
+	}
+	record.Filters = filters
 	record.Status = "running"
 	record.Error = ""
 	record.UpdatedAt = time.Now().UTC()

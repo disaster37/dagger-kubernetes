@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/urfave/cli/v2"
+
+	"github.com/disaster/dagger-kubernetes/internal/domain"
 )
 
 // checkRunnerFlags configures the `check-runner` subcommand.
@@ -37,6 +39,8 @@ func checkRunnerFlags() []cli.Flag {
 		&cli.StringFlag{Name: "token", EnvVars: []string{"DAGGER_KUBERNETES_TOKEN", "DAGGER_CLOUD_TOKEN"}, Usage: "supervisor token"},
 		&cli.StringFlag{Name: "run-token", EnvVars: []string{"DAGGER_RUN_TOKEN"}, Usage: "per-run callback token"},
 		&cli.StringFlag{Name: "workdir", Usage: "checkout directory (default: temp dir)"},
+		&cli.StringSliceFlag{Name: "filter", Usage: "typed check filter as key=value (repeatable; appended to dagger check as --key=value)"},
+		&cli.StringSliceFlag{Name: "workflow-path", Usage: "workdir-relative directory to scan for workflow files (repeatable; default .dagger/workflows)"},
 		&cli.DurationFlag{Name: "timeout", Value: 30 * time.Minute, Usage: "overall check-run timeout"},
 	}
 }
@@ -48,10 +52,19 @@ type checkResult struct {
 	Summary string `json:"summary,omitempty"`
 }
 
+// checkDescriptor is one discovered check plus its typed-artifact columns
+// (header column -> value, minus CHECK and DESCRIPTION). Additive: older
+// supervisors ignore it and still read Checks.
+type checkDescriptor struct {
+	Name    string            `json:"name"`
+	Filters map[string]string `json:"filters,omitempty"`
+}
+
 type loadReport struct {
-	Checks        []string          `json:"checks"`
-	WorkflowFiles map[string]string `json:"workflow_files,omitempty"`
-	ContextFiles  map[string][]byte `json:"context_files,omitempty"`
+	Checks           []string          `json:"checks"`
+	CheckDescriptors []checkDescriptor `json:"check_descriptors,omitempty"`
+	WorkflowFiles    map[string]string `json:"workflow_files,omitempty"`
+	ContextFiles     map[string][]byte `json:"context_files,omitempty"`
 }
 
 type completeReport struct {
@@ -94,18 +107,24 @@ func runCheckRunner(c *cli.Context) error {
 		return err
 	}
 	defer binCleanup()
-	env := append(runnerEnv(server, token, c.String("org")), binExtraEnv...)
+	env := append(runnerEnv(server, token, c.String("org"), defaultRunnerHost), binExtraEnv...)
 
-	workflowFiles, contextFiles := scanWorkflowFiles(workdir)
-	checks, err := listChecks(ctx, daggerBin, workdir, env)
+	filters, err := checkFilterArgv(c.StringSlice("filter"))
+	if err != nil {
+		return err
+	}
+
+	workflowFiles, contextFiles := scanWorkflowFiles(workdir, workflowPaths(c.StringSlice("workflow-path")))
+	table, err := listChecks(ctx, daggerBin, workdir, env)
 	if err != nil {
 		// A repository without a Dagger module has zero checks; treat a
 		// missing module as a valid GitOps-only result.
-		checks = nil
+		table = checkTable{}
 	}
+	checks := table.names()
 	if runID != "" {
 		if err := postJSON(ctx, server, token, runToken, fmt.Sprintf("/api/v1/checks/runs/%s/load", runID), loadReport{
-			Checks: checks, WorkflowFiles: workflowFiles, ContextFiles: contextFiles,
+			Checks: checks, CheckDescriptors: table.descriptors(), WorkflowFiles: workflowFiles, ContextFiles: contextFiles,
 		}); err != nil {
 			return fmt.Errorf("report load phase: %w", err)
 		}
@@ -115,7 +134,7 @@ func runCheckRunner(c *cli.Context) error {
 	var runErr error
 	for _, check := range checks {
 		fmt.Printf("running check %s\n", check)
-		result := runCheck(ctx, daggerBin, workdir, env, check)
+		result := runCheck(ctx, daggerBin, workdir, env, check, filters)
 		results = append(results, result)
 		if result.State != "success" && runErr == nil {
 			runErr = fmt.Errorf("check %s failed", check)
@@ -134,7 +153,9 @@ func runCheckRunner(c *cli.Context) error {
 }
 
 // runCheck executes one check and captures its trace ID and terminal state.
-func runCheck(ctx context.Context, daggerBin, dir string, env []string, check string) checkResult {
+// filters are canonical "--key=value" argv entries appended after the check
+// name (typed artifact/test filters).
+func runCheck(ctx context.Context, daggerBin, dir string, env []string, check string, filters []string) checkResult {
 	traceFile, err := os.CreateTemp("", "dagger-trace-*")
 	if err != nil {
 		return checkResult{Name: check, State: "failure", Summary: err.Error()}
@@ -143,7 +164,8 @@ func runCheck(ctx context.Context, daggerBin, dir string, env []string, check st
 	_ = traceFile.Close()
 	defer func() { _ = os.Remove(tracePath) }()
 
-	cmd := exec.CommandContext(ctx, daggerBin, "check", check) // #nosec G204 -- check names come from the repository's own dagger module
+	argv := append([]string{"check", check}, filters...)
+	cmd := exec.CommandContext(ctx, daggerBin, silentArgs(argv)...) // #nosec G204 -- check names and validated filters come from the repository's own dagger module / run request
 	cmd.Dir = dir
 	cmd.Env = append(append([]string(nil), env...), fmt.Sprintf("DAGGER_KUBERNETES_TRACE_ID_FILE=%s", tracePath))
 	cmd.Stdout = os.Stdout
@@ -160,51 +182,91 @@ func runCheck(ctx context.Context, daggerBin, dir string, env []string, check st
 	return result
 }
 
-// scanWorkflowFiles reads .dagger/workflows/*.y{a,}ml and the jailed context
-// files referenced by file()/next_semver().
-func scanWorkflowFiles(workdir string) (workflowFiles map[string]string, contextFiles map[string][]byte) {
-	dir := filepath.Join(workdir, ".dagger", "workflows")
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, nil
+// defaultWorkflowPath is the built-in workflow discovery directory.
+const defaultWorkflowPath = ".dagger/workflows"
+
+// workflowPaths returns the configured discovery directories, falling back to
+// the built-in default when none are supplied.
+func workflowPaths(configured []string) []string {
+	if len(configured) == 0 {
+		return []string{defaultWorkflowPath}
 	}
-	workflowFiles = make(map[string]string)
-	contextFiles = make(map[string][]byte)
+	return configured
+}
+
+// scanWorkflowFiles reads */*.y{a,}ml from each discovery directory and the
+// jailed context files referenced by file()/next_semver(). Missing directories
+// are skipped silently (a repository without workflows is valid). Paths are
+// confined to workdir: an escaping entry is ignored rather than read.
+func scanWorkflowFiles(workdir string, paths []string) (workflowFiles map[string]string, contextFiles map[string][]byte) {
 	root, err := os.OpenRoot(workdir)
 	if err != nil {
 		return nil, nil
 	}
 	defer func() { _ = root.Close() }()
-	for _, entry := range entries {
-		if entry.IsDir() {
+
+	workflowFiles = make(map[string]string)
+	contextFiles = make(map[string][]byte)
+	for _, path := range paths {
+		dir, ok := confinedPath(workdir, path)
+		if !ok {
 			continue
 		}
-		name := entry.Name()
-		if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- directory entry under the repo workflow dir
+		entries, err := os.ReadDir(dir)
 		if err != nil {
 			continue
 		}
-		workflowFiles[name] = string(data)
-		for _, match := range workflowFileRefRe.FindAllStringSubmatch(string(data), -1) {
-			path := filepath.Clean(match[1])
-			if _, ok := contextFiles[path]; ok {
+		for _, entry := range entries {
+			if entry.IsDir() {
 				continue
 			}
-			f, err := root.Open(path)
+			name := entry.Name()
+			if !strings.HasSuffix(name, ".yaml") && !strings.HasSuffix(name, ".yml") {
+				continue
+			}
+			if _, exists := workflowFiles[name]; exists {
+				continue
+			}
+			data, err := os.ReadFile(filepath.Join(dir, name)) // #nosec G304 -- directory entry under a confined workflow dir
 			if err != nil {
 				continue
 			}
-			content, err := io.ReadAll(io.LimitReader(f, 1<<20))
-			_ = f.Close()
-			if err == nil {
-				contextFiles[path] = content
+			workflowFiles[name] = string(data)
+			for _, match := range workflowFileRefRe.FindAllStringSubmatch(string(data), -1) {
+				ref := filepath.Clean(match[1])
+				if _, ok := contextFiles[ref]; ok {
+					continue
+				}
+				f, err := root.Open(ref)
+				if err != nil {
+					continue
+				}
+				content, err := io.ReadAll(io.LimitReader(f, 1<<20))
+				_ = f.Close()
+				if err == nil {
+					contextFiles[ref] = content
+				}
 			}
 		}
 	}
 	return workflowFiles, contextFiles
+}
+
+// confinedPath resolves rel under workdir and reports whether it stays inside
+// it (a configured ".." path must never read outside the checkout).
+func confinedPath(workdir, rel string) (string, bool) {
+	base, err := filepath.Abs(workdir)
+	if err != nil {
+		return "", false
+	}
+	abs, err := filepath.Abs(filepath.Join(base, rel))
+	if err != nil {
+		return "", false
+	}
+	if abs != base && !strings.HasPrefix(abs, fmt.Sprintf("%s%c", base, os.PathSeparator)) {
+		return "", false
+	}
+	return abs, true
 }
 
 // cloneRepo clones repo at sha/ref without persisting credentials in
@@ -287,27 +349,202 @@ func gitAuthEnv() (env []string, cleanup func(), err error) {
 	return env, func() { _ = os.RemoveAll(dir) }, nil
 }
 
-// listChecks runs `dagger check -l` and parses one check name per line.
-func listChecks(ctx context.Context, daggerBin, dir string, env []string) ([]string, error) {
-	cmd := exec.CommandContext(ctx, daggerBin, "check", "-l")
+// checkColumnSep splits a table row on runs of 2+ spaces or any tab. Check
+// names never contain whitespace, so a single space inside a description is
+// preserved.
+var checkColumnSep = regexp.MustCompile(`\s{2,}|\t+`)
+
+// checkSeparatorRow matches the dashed/equals header separator emitted by the
+// CLI's table renderer.
+var checkSeparatorRow = regexp.MustCompile(`^[-=\s]+$`)
+
+// checkTable is the parsed `dagger check -l` output: an optional normalized
+// header (uppercase column names), the header column start offsets, and the
+// data rows split into columns. The header is nil when the output has none
+// (e.g. a headerless fixture).
+type checkTable struct {
+	header  []string
+	offsets []int
+	rows    [][]string
+}
+
+// parseCheckTable splits `dagger check -l` output into a header + rows. It
+// tolerates both the pre-1.0 NAME table and the v1.0 multi-column table
+// (MODULE, GO-PACKAGE, …, CHECK, DESCRIPTION).
+//
+// Space-aligned tables are sliced by the header column offsets rather than by
+// runs of spaces: the v1.0 table leaves whole column families empty (a Go
+// module has no VITEST-* values), and collapsing their padding would shift
+// every later column — including CHECK. Tab-separated output has no padding to
+// lose, so it is split on runs of whitespace.
+func parseCheckTable(out string) checkTable {
+	var t checkTable
+	tabular := false
+	for _, raw := range strings.Split(out, "\n") {
+		line := strings.TrimRight(raw, "\r")
+		if strings.TrimSpace(line) == "" || checkSeparatorRow.MatchString(line) {
+			continue
+		}
+		if t.header == nil {
+			fields := checkColumnSep.Split(strings.TrimSpace(line), -1)
+			if !isCheckHeader(fields) {
+				t.rows = append(t.rows, fields)
+				continue
+			}
+			t.header = make([]string, len(fields))
+			for i, f := range fields {
+				t.header[i] = strings.ToUpper(strings.TrimSpace(f))
+			}
+			if !strings.Contains(line, "\t") {
+				t.offsets = columnOffsets(line, fields)
+			}
+			tabular = len(t.offsets) == 0
+			continue
+		}
+		if tabular {
+			t.rows = append(t.rows, checkColumnSep.Split(strings.TrimSpace(line), -1))
+			continue
+		}
+		t.rows = append(t.rows, splitByOffsets(line, t.offsets))
+	}
+	return t
+}
+
+// columnOffsets returns the start index of each header field in line, in order.
+// Nil when a field cannot be located again (caller falls back to splitting).
+func columnOffsets(line string, fields []string) []int {
+	offsets := make([]int, 0, len(fields))
+	cursor := 0
+	for _, f := range fields {
+		i := strings.Index(line[cursor:], f)
+		if i < 0 {
+			return nil
+		}
+		start := cursor + i
+		offsets = append(offsets, start)
+		cursor = start + len(f)
+	}
+	return offsets
+}
+
+// splitByOffsets slices line into the header's columns. Missing trailing
+// columns (a short row) yield empty values.
+func splitByOffsets(line string, offsets []int) []string {
+	out := make([]string, len(offsets))
+	for i, start := range offsets {
+		end := len(line)
+		if i+1 < len(offsets) {
+			end = offsets[i+1]
+		}
+		if start >= len(line) || end <= start {
+			continue
+		}
+		if end > len(line) {
+			end = len(line)
+		}
+		out[i] = strings.TrimSpace(line[start:end])
+	}
+	return out
+}
+
+// isCheckHeader reports whether a row is the table header: it carries a CHECK
+// column (v1.0) or starts with the legacy NAME column.
+func isCheckHeader(fields []string) bool {
+	for i, f := range fields {
+		upper := strings.ToUpper(strings.TrimSpace(f))
+		if upper == "CHECK" || (i == 0 && upper == "NAME") {
+			return true
+		}
+	}
+	return false
+}
+
+// nameIndex returns the column that holds the check name: the CHECK column in
+// the v1.0 table, otherwise the first column.
+func (t checkTable) nameIndex() int {
+	for i, c := range t.header {
+		if c == "CHECK" {
+			return i
+		}
+	}
+	return 0
+}
+
+// names returns the check names in table order. When the header contains a
+// CHECK column, that column is used; otherwise the first column is used. Rows
+// shorter than the name column are skipped rather than misparsed.
+func (t checkTable) names() []string {
+	idx := t.nameIndex()
+	checks := make([]string, 0, len(t.rows))
+	for _, fields := range t.rows {
+		if idx >= len(fields) {
+			continue
+		}
+		if name := strings.TrimSpace(fields[idx]); name != "" {
+			checks = append(checks, name)
+		}
+	}
+	return checks
+}
+
+// descriptors returns one descriptor per named row, carrying the typed column
+// values. CHECK (the name itself) and DESCRIPTION (prose) are not filters.
+func (t checkTable) descriptors() []checkDescriptor {
+	nameIdx := t.nameIndex()
+	out := make([]checkDescriptor, 0, len(t.rows))
+	for _, fields := range t.rows {
+		if nameIdx >= len(fields) {
+			continue
+		}
+		name := strings.TrimSpace(fields[nameIdx])
+		if name == "" {
+			continue
+		}
+		d := checkDescriptor{Name: name}
+		for i, column := range t.header {
+			if i == nameIdx || column == "DESCRIPTION" || i >= len(fields) {
+				continue
+			}
+			value := strings.TrimSpace(fields[i])
+			if value == "" {
+				continue
+			}
+			if d.Filters == nil {
+				d.Filters = make(map[string]string, len(t.header))
+			}
+			d.Filters[column] = value
+		}
+		out = append(out, d)
+	}
+	return out
+}
+
+// listChecks runs `dagger check -l` and returns the parsed table.
+func listChecks(ctx context.Context, daggerBin, dir string, env []string) (checkTable, error) {
+	args := silentArgs([]string{"check", "-l"})
+	//nolint:gosec // intentional: shell out to the dagger CLI with fixed args
+	cmd := exec.CommandContext(ctx, daggerBin, args...)
 	cmd.Dir = dir
 	cmd.Env = env
 	out, err := cmd.Output()
 	if err != nil {
-		return nil, fmt.Errorf("dagger check -l: %w", err)
+		return checkTable{}, fmt.Errorf("dagger check -l: %w", err)
 	}
-	var checks []string
-	for _, line := range strings.Split(string(out), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "Name") || strings.HasPrefix(line, "---") {
-			continue
+	return parseCheckTable(string(out)), nil
+}
+
+// checkFilterArgv validates the repeatable --filter values and returns the
+// canonical "--key=value" forms appended to `dagger check`.
+func checkFilterArgv(values []string) ([]string, error) {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		argv, err := domain.CheckFilterArgv(value)
+		if err != nil {
+			return nil, err
 		}
-		fields := strings.Fields(line)
-		if len(fields) > 0 {
-			checks = append(checks, fields[0])
-		}
+		out = append(out, argv)
 	}
-	return checks, nil
+	return out, nil
 }
 
 // postJSON posts payload to the supervisor and requires a 2xx response.

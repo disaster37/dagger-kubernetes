@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
 
 	"github.com/disaster/dagger-kubernetes/internal/domain"
@@ -1269,7 +1270,7 @@ func TestResolveCloneURL(t *testing.T) {
 }
 
 func TestRunnerEnvSetsBothEngineVars(t *testing.T) {
-	env := runnerEnv("https://example.com", "tok", "acme")
+	env := runnerEnv("https://example.com", "tok", "acme", defaultRunnerHost)
 	joined := strings.Join(env, "\n")
 	for _, want := range []string{
 		"DAGGER_ENGINE=cloud",
@@ -1281,8 +1282,409 @@ func TestRunnerEnvSetsBothEngineVars(t *testing.T) {
 			t.Fatalf("env missing %q: %v", want, env)
 		}
 	}
-	if strings.Contains(strings.Join(runnerEnv("https://example.com", "tok", ""), "\n"), "DAGGER_ORG=") {
+	if strings.Contains(strings.Join(runnerEnv("https://example.com", "tok", "", defaultRunnerHost), "\n"), "DAGGER_ORG=") {
 		t.Fatal("empty org must not set DAGGER_ORG")
+	}
+	// No runner host means no export: an explicit --engine selector must win.
+	// The inherited process env is left untouched (it is neither replaced nor
+	// duplicated).
+	noHost := runnerEnv("https://example.com", "tok", "", "")
+	if got, want := envKeyCount(noHost, runnerHostEnvName), envKeyCount(os.Environ(), runnerHostEnvName); got != want {
+		t.Fatalf("empty runner host changed %s entries: got %d, want %d", runnerHostEnvName, got, want)
+	}
+}
+
+// envKeyCount counts entries for key in env.
+func envKeyCount(env []string, key string) int {
+	prefix := fmt.Sprintf("%s=", key)
+	n := 0
+	for _, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			n++
+		}
+	}
+	return n
+}
+
+func TestWithSilentFlag(t *testing.T) {
+	cases := []struct {
+		name   string
+		args   []string
+		silent bool
+		want   []string
+	}{
+		{name: "off", args: []string{"call", "build"}, want: []string{"call", "build"}},
+		{name: "prepends before subcommand", args: []string{"call", "build"}, silent: true, want: []string{"--silent", "call", "build"}},
+		{name: "already present", args: []string{"--silent", "call"}, silent: true, want: []string{"--silent", "call"}},
+		{name: "short form present", args: []string{"call", "-s", "build"}, silent: true, want: []string{"call", "-s", "build"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := withSilentFlag(tc.args, tc.silent)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("withSilentFlag = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSilentArgs(t *testing.T) {
+	cases := []struct {
+		name string
+		env  string
+		args []string
+		want []string
+	}{
+		{name: "unset", env: "", args: []string{"check", "-l"}, want: []string{"check", "-l"}},
+		{name: "true", env: "1", args: []string{"check", "-l"}, want: []string{"--silent", "check", "-l"}},
+		{name: "parse bool true", env: "TRUE", args: []string{"check", "-l"}, want: []string{"--silent", "check", "-l"}},
+		{name: "false", env: "0", args: []string{"check", "-l"}, want: []string{"check", "-l"}},
+		{name: "unparseable", env: "maybe", args: []string{"check", "-l"}, want: []string{"check", "-l"}},
+		{name: "idempotent", env: "1", args: []string{"--silent", "check"}, want: []string{"--silent", "check"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("DAGGER_SILENT", tc.env)
+			got := silentArgs(tc.args)
+			if strings.Join(got, " ") != strings.Join(tc.want, " ") {
+				t.Fatalf("silentArgs = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// renderCheckTable renders an aligned table (2+ spaces between columns) so the
+// parser sees the same shape a CLI tablewriter produces.
+func renderCheckTable(header []string, rows [][]string) string {
+	widths := make([]int, len(header))
+	for i, h := range header {
+		widths[i] = len(h)
+	}
+	for _, row := range rows {
+		for i := 0; i < len(row) && i < len(widths); i++ {
+			if len(row[i]) > widths[i] {
+				widths[i] = len(row[i])
+			}
+		}
+	}
+	renderRow := func(cells []string) string {
+		var b strings.Builder
+		for i := range header {
+			cell := ""
+			if i < len(cells) {
+				cell = cells[i]
+			}
+			b.WriteString(cell)
+			if i+1 < len(header) {
+				b.WriteString(strings.Repeat(" ", widths[i]-len(cell)+2))
+			}
+		}
+		return strings.TrimRight(b.String(), " ")
+	}
+	var b strings.Builder
+	b.WriteString(renderRow(header))
+	b.WriteString("\n")
+	sep := make([]string, len(header))
+	for i := range sep {
+		sep[i] = strings.Repeat("-", widths[i])
+	}
+	b.WriteString(renderRow(sep))
+	b.WriteString("\n")
+	for _, row := range rows {
+		b.WriteString(renderRow(row))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+func TestParseCheckList(t *testing.T) {
+	legacy := renderCheckTable(
+		[]string{"NAME", "DESCRIPTION"},
+		[][]string{{"build", "Build the project"}, {"test", "Run the tests"}},
+	)
+	v1 := renderCheckTable(
+		[]string{"MODULE", "GO-PACKAGE", "GO-TEST", "VITEST-PROJECT", "VITEST-TEST-FILE", "CHECK", "DESCRIPTION"},
+		[][]string{
+			{"go", "./...", "TestGet", "", "", "get-item", "fetch one item"},
+			{"go", "./...", "", "", "", "list-items", "list every item"},
+			{"node", "", "", "web", "app.test.ts", "vitest", "run vitest"},
+		},
+	)
+	cases := []struct {
+		name string
+		out  string
+		want []string
+	}{
+		{name: "legacy name table", out: legacy, want: []string{"build", "test"}},
+		{name: "v1.0 multi-column table", out: v1, want: []string{"get-item", "list-items", "vitest"}},
+		{name: "header only", out: renderCheckTable([]string{"NAME", "DESCRIPTION"}, nil)},
+		{name: "empty output", out: ""},
+		{name: "short row skipped", out: strings.Join([]string{
+			"NAME    DESCRIPTION",
+			"------  -----------",
+			"build   Build it",
+			"",
+		}, "\n") + "\n", want: []string{"build"}},
+		{name: "name with separators", out: renderCheckTable(
+			[]string{"NAME", "DESCRIPTION"},
+			[][]string{{"go/pkg:Test=a", "unit test"}},
+		), want: []string{"go/pkg:Test=a"}},
+		{name: "tab separated", out: "NAME\tDESCRIPTION\nbuild\tBuild it\ntest\tRun it\n", want: []string{"build", "test"}},
+		{name: "headerless rows use first column", out: "build  Build it\ntest   Run it\n", want: []string{"build", "test"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseCheckTable(tc.out).names()
+			if strings.Join(got, ",") != strings.Join(tc.want, ",") {
+				t.Fatalf("check names = %v, want %v (input %q)", got, tc.want, tc.out)
+			}
+		})
+	}
+}
+
+func TestCheckDescriptors(t *testing.T) {
+	out := renderCheckTable(
+		[]string{"MODULE", "GO-PACKAGE", "GO-TEST", "VITEST-PROJECT", "VITEST-TEST-FILE", "CHECK", "DESCRIPTION"},
+		[][]string{
+			{"go", "./...", "TestGet", "", "", "get-item", "fetch one item"},
+			{"node", "", "", "web", "app.test.ts", "vitest", "run vitest"},
+		},
+	)
+	got := parseCheckTable(out).descriptors()
+	if len(got) != 2 {
+		t.Fatalf("descriptors = %+v, want 2", got)
+	}
+	if got[0].Name != "get-item" || got[0].Filters["MODULE"] != "go" || got[0].Filters["GO-TEST"] != "TestGet" {
+		t.Fatalf("first descriptor = %+v", got[0])
+	}
+	if _, ok := got[0].Filters["CHECK"]; ok {
+		t.Fatal("CHECK column must not be a filter")
+	}
+	if _, ok := got[0].Filters["DESCRIPTION"]; ok {
+		t.Fatal("DESCRIPTION column must not be a filter")
+	}
+	if _, ok := got[0].Filters["VITEST-PROJECT"]; ok {
+		t.Fatal("empty columns must be omitted")
+	}
+	if got[1].Name != "vitest" || got[1].Filters["VITEST-TEST-FILE"] != "app.test.ts" {
+		t.Fatalf("second descriptor = %+v", got[1])
+	}
+
+	// Legacy NAME/DESCRIPTION table: no filters, names still reported.
+	legacy := parseCheckTable(renderCheckTable([]string{"NAME", "DESCRIPTION"}, [][]string{{"build", "Build it"}})).descriptors()
+	if len(legacy) != 1 || legacy[0].Name != "build" || len(legacy[0].Filters) != 0 {
+		t.Fatalf("legacy descriptors = %+v", legacy)
+	}
+}
+
+func TestParseCheckListTruncatedTable(t *testing.T) {
+	// A row that ends before the CHECK column must be skipped, never reported
+	// with a DESCRIPTION value as its name.
+	out := strings.Join([]string{
+		"MODULE    GO-PACKAGE    CHECK    DESCRIPTION",
+		"------    ----------    -----    -----------",
+		"go        ./...",
+	}, "\n")
+	if got := parseCheckTable(out).names(); len(got) != 0 {
+		t.Fatalf("truncated row must be skipped, got %v", got)
+	}
+}
+
+func TestUpsertEnv(t *testing.T) {
+	base := []string{"PATH=/bin", "DAGGER_ORG=old", "DAGGER_ORG=duplicate", "OTHER=1"}
+	got := upsertEnv(base, "DAGGER_ORG", "new")
+	if got[0] != "PATH=/bin" {
+		t.Errorf("unrelated entry lost: %v", got)
+	}
+	if got[2] != "OTHER=1" {
+		t.Errorf("unrelated entry lost: %v", got)
+	}
+	count := 0
+	for _, kv := range got {
+		if strings.HasPrefix(kv, "DAGGER_ORG=") {
+			count++
+			if kv != "DAGGER_ORG=new" {
+				t.Errorf("value = %q, want DAGGER_ORG=new", kv)
+			}
+		}
+	}
+	if count != 1 {
+		t.Errorf("duplicate keys left behind: %v", got)
+	}
+	appended := upsertEnv([]string{"PATH=/bin"}, "NEW", "v")
+	if len(appended) != 2 || appended[1] != "NEW=v" {
+		t.Errorf("append failed: %v", appended)
+	}
+	// A key that is a prefix of another must not match.
+	kept := upsertEnv([]string{"FOOBAR=1"}, "FOO", "2")
+	if len(kept) != 2 || kept[0] != "FOOBAR=1" {
+		t.Errorf("prefix key matched: %v", kept)
+	}
+}
+
+func TestDaggerEnvUpsert(t *testing.T) {
+	base := []string{"DAGGER_ORG=stale", "PATH=/bin"}
+	env := daggerEnv(base, &daggerEnvOpts{
+		Server: "https://example.com", Token: "tok", RunnerHost: defaultRunnerHost,
+		EngineVersion: "v1.0.0-beta.20", Org: "acme",
+	})
+	want := map[string]string{
+		"DAGGER_CLOUD_URL":               "https://example.com",
+		"DAGGER_CLOUD_TOKEN":             "tok",
+		"OTEL_EXPORTER_OTLP_TRACES_LIVE": "1",
+		runnerHostEnvName:                defaultRunnerHost,
+		"_EXPERIMENTAL_DAGGER_TAG":       "v1.0.0-beta.20",
+		"DAGGER_ORG":                     "acme",
+	}
+	seen := make(map[string]int, len(env))
+	for _, kv := range env {
+		key, value, ok := strings.Cut(kv, "=")
+		if !ok {
+			t.Fatalf("malformed env entry %q", kv)
+		}
+		seen[key]++
+		if w, ok := want[key]; ok && value != w {
+			t.Errorf("%s = %q, want %q", key, value, w)
+		}
+	}
+	for key := range want {
+		if seen[key] != 1 {
+			t.Errorf("%s appears %d times, want 1 (%v)", key, seen[key], env)
+		}
+	}
+
+	// Empty optional values are omitted, not blanked.
+	minimal := daggerEnv([]string{"PATH=/bin"}, &daggerEnvOpts{Server: "s", Token: "t"})
+	joined := strings.Join(minimal, "\n")
+	for _, absent := range []string{runnerHostEnvName, "_EXPERIMENTAL_DAGGER_TAG", "DAGGER_ORG="} {
+		if strings.Contains(joined, absent) {
+			t.Errorf("optional %q must be omitted: %v", absent, minimal)
+		}
+	}
+}
+
+func TestResolveRunnerHost(t *testing.T) {
+	cases := []struct {
+		name      string
+		requested string
+		args      []string
+		want      string
+	}{
+		{name: "default", requested: defaultRunnerHost, args: []string{"call", "build"}, want: defaultRunnerHost},
+		{name: "explicit engine flag", requested: defaultRunnerHost, args: []string{"call", "--engine", "ssh://host", "build"}, want: ""},
+		{name: "inline engine flag", requested: defaultRunnerHost, args: []string{"call", "--engine=k8s://ctx", "build"}, want: ""},
+		{name: "empty requested stays empty", requested: "", args: []string{"call"}, want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveRunnerHost(tc.requested, tc.args); got != tc.want {
+				t.Fatalf("resolveRunnerHost = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestXReleaseRequested(t *testing.T) {
+	cases := []struct {
+		name string
+		args []string
+		env  []string
+		want bool
+	}{
+		{name: "flag", args: []string{"call", "--x-release", "v1.0.0"}, want: true},
+		{name: "flag with value", args: []string{"call", "--x-release=v1.0.0"}, want: true},
+		{name: "env", args: []string{"call"}, env: []string{"DAGGER_X_RELEASE=v1.0.0"}, want: true},
+		{name: "empty env", args: []string{"call"}, env: []string{"DAGGER_X_RELEASE="}, want: false},
+		{name: "absent", args: []string{"call"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := xReleaseRequested(tc.args, tc.env); got != tc.want {
+				t.Fatalf("xReleaseRequested = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+// fakeCLI writes an executable that prints version as its `version` output.
+func fakeCLI(t *testing.T, version string) string {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "dagger")
+	script := fmt.Sprintf("#!/bin/sh\necho \"dagger %s (dagger-cloud://self) linux/amd64\"\n", version)
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil { //nolint:gosec // test helper must be executable
+		t.Fatalf("write fake cli: %v", err)
+	}
+	return path
+}
+
+func TestCheckXReleaseRunnerHost(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	ctx := context.Background()
+
+	cases := []struct {
+		name       string
+		version    string
+		args       []string
+		env        []string
+		runnerHost string
+		wantErr    bool
+	}{
+		{name: "no x-release", version: "v0.21.7", args: []string{"call"}, runnerHost: defaultRunnerHost},
+		{name: "explicit engine wins", version: "v0.21.7", args: []string{"call", "--x-release", "--engine", "ssh://h"}, runnerHost: ""},
+		{name: "old cli rejected", version: "v0.21.7", args: []string{"call", "--x-release"}, runnerHost: defaultRunnerHost, wantErr: true},
+		{name: "minimum accepted", version: "v0.21.8", args: []string{"call", "--x-release"}, runnerHost: defaultRunnerHost},
+		{name: "beta accepted", version: "v1.0.0-beta.28", args: []string{"call", "--x-release"}, runnerHost: defaultRunnerHost},
+		{name: "env-triggered rejected", version: "v0.21.7", args: []string{"call"}, env: []string{"DAGGER_X_RELEASE=v1.0.0"}, runnerHost: defaultRunnerHost, wantErr: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := fakeCLI(t, tc.version)
+			err := checkXReleaseRunnerHost(ctx, logger, bin, tc.args, tc.env, tc.runnerHost)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("checkXReleaseRunnerHost error = %v, wantErr %v", err, tc.wantErr)
+			}
+			if err != nil && !strings.Contains(err.Error(), runnerHostEnvName) {
+				t.Fatalf("error must name the dropped env var: %v", err)
+			}
+		})
+	}
+}
+
+func TestCheckXReleaseRunnerHostUnknownVersion(t *testing.T) {
+	logger := logrus.New()
+	logger.SetOutput(io.Discard)
+	bin := fakeCLI(t, "devel")
+	if err := checkXReleaseRunnerHost(context.Background(), logger, bin, []string{"call", "--x-release"}, nil, defaultRunnerHost); err != nil {
+		t.Fatalf("unknown CLI version must warn and proceed, got %v", err)
+	}
+	// A missing binary is also "unknown": warn, do not fail the run here (the
+	// dispatch itself reports the real exec error).
+	if err := checkXReleaseRunnerHost(context.Background(), logger, filepath.Join(t.TempDir(), "absent"), []string{"call", "--x-release"}, nil, defaultRunnerHost); err != nil {
+		t.Fatalf("missing CLI must warn and proceed, got %v", err)
+	}
+}
+
+func TestCliSemver(t *testing.T) {
+	cases := []struct {
+		name    string
+		version string
+		want    string
+	}{
+		{name: "0.21 form", version: "v0.21.10", want: "v0.21.10"},
+		{name: "beta form", version: "v1.0.0-beta.28", want: "v1.0.0-beta.28"},
+		{name: "unparseable", version: "devel", want: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cliSemver(context.Background(), fakeCLI(t, tc.version), nil); got != tc.want {
+				t.Fatalf("cliSemver = %q, want %q", got, tc.want)
+			}
+		})
+	}
+	if got := cliSemver(context.Background(), filepath.Join(t.TempDir(), "absent"), nil); got != "" {
+		t.Fatalf("missing binary must yield empty version, got %q", got)
 	}
 }
 
@@ -1341,5 +1743,108 @@ func TestResolveDaggerBinProvisionsAbsolutePath(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(env, "\n"), filepath.Dir(bin)) {
 		t.Fatalf("env must prepend the provisioned bin dir: %v", env)
+	}
+}
+
+func TestCheckFilterArgv(t *testing.T) {
+	got, err := checkFilterArgv([]string{"go-test=TestGet", "vitest-test-file=app.test.ts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"--go-test=TestGet", "--vitest-test-file=app.test.ts"}
+	if strings.Join(got, " ") != strings.Join(want, " ") {
+		t.Fatalf("checkFilterArgv = %v, want %v", got, want)
+	}
+	if empty, err := checkFilterArgv(nil); err != nil || len(empty) != 0 {
+		t.Fatalf("empty filters = %v, %v", empty, err)
+	}
+	if _, err := checkFilterArgv([]string{"--rm -rf"}); err == nil {
+		t.Fatal("invalid filter must be rejected")
+	}
+}
+
+func TestGuardInteractive(t *testing.T) {
+	original := stdinIsTerminal
+	t.Cleanup(func() { stdinIsTerminal = original })
+
+	cases := []struct {
+		name      string
+		args      []string
+		steps     bool
+		tty       bool
+		wantError bool
+	}{
+		{name: "call is fine", args: []string{"call", "build"}, tty: false},
+		{name: "check -l is fine", args: []string{"check", "-l"}, tty: false},
+		{name: "shell without tty", args: []string{"shell"}, tty: false, wantError: true},
+		{name: "shell with tty", args: []string{"shell"}, tty: true},
+		{name: "shell in steps mode", args: []string{"shell"}, tty: true, steps: true, wantError: true},
+		{name: "silent prefix still detects shell", args: []string{"--silent", "shell"}, tty: false, wantError: true},
+		{name: "check interactive short without tty", args: []string{"check", "-i", "build"}, tty: false, wantError: true},
+		{name: "check interactive short with tty", args: []string{"check", "-i", "build"}, tty: true},
+		{name: "check interactive long", args: []string{"check", "--interactive", "build"}, tty: false, wantError: true},
+		{name: "interactive flag before check is not a shell", args: []string{"call", "-i"}, tty: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			stdinIsTerminal = func() bool { return tc.tty }
+			err := guardInteractive(tc.args, tc.steps)
+			if (err != nil) != tc.wantError {
+				t.Fatalf("guardInteractive(%v, %v) err = %v, wantError %v", tc.args, tc.steps, err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestScanWorkflowFilesDiscoveryPaths(t *testing.T) {
+	workdir := t.TempDir()
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(workdir, rel)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write(".dagger/workflows/release.yaml", "name: release\njobs: {build: {call: build}}\n")
+	write("ci/workflows/test.yml", "name: test\njobs: {test: {call: test}}\n")
+	write("ci/context/payload.json", `{"a":1}`)
+	write("ci/workflows/refs.yaml", `jobs: {x: {call: file("ci/context/payload.json")}}`)
+
+	files, contextFiles := scanWorkflowFiles(workdir, []string{".dagger/workflows", "ci/workflows"})
+	if len(files) != 3 {
+		t.Fatalf("workflow files = %v, want 3", files)
+	}
+	if _, ok := files["release.yaml"]; !ok {
+		t.Fatalf("missing release.yaml: %v", files)
+	}
+	if _, ok := contextFiles["ci/context/payload.json"]; !ok {
+		t.Fatalf("context file not captured: %v", contextFiles)
+	}
+
+	// An escaping path is ignored and does not leak files outside the checkout.
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.yaml"), []byte("name: secret\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	escaped, _ := scanWorkflowFiles(workdir, []string{filepath.Join("..", filepath.Base(outside))})
+	if len(escaped) != 0 {
+		t.Fatalf("escaping path must be ignored: %v", escaped)
+	}
+
+	// Missing directories are skipped silently.
+	if files, ctx := scanWorkflowFiles(workdir, []string{"absent"}); len(files) != 0 || len(ctx) != 0 {
+		t.Fatalf("missing dir = %v / %v", files, ctx)
+	}
+}
+
+func TestWorkflowPaths(t *testing.T) {
+	if got := workflowPaths(nil); len(got) != 1 || got[0] != defaultWorkflowPath {
+		t.Fatalf("default workflow paths = %v", got)
+	}
+	if got := workflowPaths([]string{"a", "b"}); len(got) != 2 || got[0] != "a" {
+		t.Fatalf("configured workflow paths = %v", got)
 	}
 }

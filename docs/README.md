@@ -1160,7 +1160,12 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   lives). A dispatch failure marks the run `failed` and reports
   `CheckFailure`; a rerun replaces the terminal Job and its env Secret.
   `DELETE /api/v1/checks/runs/:id` (org admin or global admin) removes a run
-  and is idempotent.
+  and is idempotent. `checks.silent: true` runs every check-runner CLI call
+  with `--silent` and exports `DAGGER_SILENT=1` into the Job Secret, so nested
+  SDK sessions inherit it; Dagger >= 0.21.8 then skips the per-session frontend
+  telemetry database, which is the memory win for concurrent runs. Older CLIs
+  still accept `--silent`; the default stays `false` because silent mode
+  suppresses progress output.
 - **Workflows.** `.dagger/workflows/*.y{a,}ml` supports `call:` jobs,
   cross-repo `trigger:` jobs (`wait` + `timeout`), typed `workflow_dispatch`
   inputs, `robfig/cron` schedules, `on: artifact` listeners, artifacts, and
@@ -1172,7 +1177,13 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   false` gates run creation (`Start`/`Dispatch`/`OnChecksSucceeded`); reads
   stay `200`. Workflow Jobs use `workflows.job_image` /
   `workflows.job_image_pull_secrets` and `workflows.namespace` (default
-  `fleet.namespace`).
+  `fleet.namespace`). `workflows.silent: true` applies the same `--silent` +
+  `DAGGER_SILENT=1` treatment to workflow-runner calls.
+  `workflows.discovery_paths` lists the workdir-relative directories scanned for
+  workflow files (default `[".dagger/workflows"]`); entries outside the checkout
+  are ignored. Use it for beta workspaces that keep workflows elsewhere; the
+  chart's `discoveryPaths: []` omits the key so the supervisor default (and any
+  future default change) applies.
 - **Environment secrets.** Secrets are scoped `org`, `project`, or
   `environment` (`<orgID>/<envName>`). Resolution precedence is
   `org/env > project > org`; environment secrets are only injected into a job
@@ -1183,7 +1194,8 @@ New configuration keys: `server.max_data_conns`,
 `server.internal_control_url`, `server.internal_data_host`,
 `otel.max_inflight_bytes`, `cli.include_prereleases`, `fleet.isolation`,
 `cache.remote.*` (including `pack_max_member_bytes` and `gc_interval`),
-`graphql.*`, `checks.*`, `workflows.*`, `forge.*`,
+`graphql.*` (including `log_queries`), `checks.*` (including `silent`),
+`workflows.*` (including `silent` and `discovery_paths`), `forge.*`,
 `supervisor.cache_scratch.size_limit`, and `supervisor.gomemlimit`. See
 `config/config.app.yaml.sample` for the full reference.
 
@@ -3067,7 +3079,59 @@ log for the trace ID and prints a boxed link to
 `$DAGGER_KUBERNETES_UI/traces/<id>`. The GHA, Jenkins, and Drone integrations
 all delegate to (or mirror) this script.
 
+### `dagger-kubernetes-ci` wrapper flags
+
+The wrapper points the CLI at this supervisor through
+`_EXPERIMENTAL_DAGGER_RUNNER_HOST` (`--runner-host`, also read from that env
+var; default `dagger-cloud://self`). An explicit `--engine`/`--engine=…`
+argument (v1.0 remote execution: SSH, Kubernetes, cloud) always wins — the
+wrapper then stops exporting the host instead of overriding the caller.
+
+`--x-release` re-execs the CLI with a different release on the same engine
+driver. Dagger preserves `_EXPERIMENTAL_DAGGER_RUNNER_HOST` across that re-exec
+only from **v0.21.8**; on an older CLI the wrapper therefore refuses the
+combination with a clear error rather than letting the inner CLI fall back to a
+**local** engine (which hangs at "connecting to engine" on an agent without
+Docker). Upgrade the CLI (or provision one with `--cli-version`) or drop
+`--x-release`. `--engine=…` is the escape hatch.
+
+`--silent` (also `DAGGER_SILENT=1`) prepends `--silent` to the wrapped command
+and exports `DAGGER_SILENT=1` so nested sessions inherit it. Silent mode
+suppresses progress output; the run result, exit code, NDJSON `--steps` stream
+and pipeline-view link are unaffected.
+
+`dagger shell` and `dagger check -i` need an interactive TTY. The wrapper
+rejects them with a clear error when `--steps` is active (stdout is the NDJSON
+protocol channel) or when stdin is not a terminal, instead of letting a
+TTY-less CI job hang until `--timeout`. Run dev shells without `--steps` from a
+real terminal; check/workflow Jobs never pass `-i`.
+
 ---
+
+## Dagger version support
+
+The version gate (`version.floor`, `version.allowlist`) admits every release in
+the changelog range **v0.21.8 → v1.0.0-beta.20**: the supervisor defaults are
+`floor: v0.19.0` with an empty allowlist, and the chart's allowlist
+(`0.19`, `0.20`, `0.21`, `1.0`) covers the same range. Per-entry obligations
+and proofs are in
+[ADR-061](design/ADR-061-dagger-changelog-support-matrix.md).
+
+| Range | Status | What is verified |
+|---|---|---|
+| v0.19.0 – v0.21.7 | admitted | version gate; runner/env plumbing unchanged |
+| v0.21.8 – v0.21.10 | admitted, fully supported | version gate, silent sessions, `--x-release` host preservation, multi-column `check -l`, idle scale-down guard |
+| v1.0.0-beta.1 – v1.0.0-beta.20 | admitted, supported with documented NO-OPs | per-test results, typed filters, nested traces, progress spans, workspace discovery, Cloud GraphQL parity |
+| later betas / 0.21.11+ | admitted | the live fleet serves them; they are outside ADR-061's matrix |
+
+What the platform does **not** do (by design): set `disableDaggerInDagger`
+(it breaks self-orchestrating tests), run a module-recommendation service
+(`recommendedModules` returns an empty list), or migrate this repository to
+`dagger.toml` (`dagger/dagger.json` stays).
+
+**Config keys added for this range:** `checks.silent` (default `false`),
+`workflows.silent` (default `false`), `workflows.discovery_paths` (default
+`[".dagger/workflows"]`), `graphql.log_queries` (default `false`).
 
 ## Operations
 

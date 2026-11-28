@@ -175,6 +175,54 @@ func TestSweepScaleDown(t *testing.T) {
 	}
 }
 
+// TestIdleScaleDownSkipsActiveSessions locks in the "never suspend a replica
+// with a live session" guard (changelog 0.21.9, entry 21; ADR-061 V2). Idle
+// time alone is never sufficient: a pinned session — at any count up to
+// MaxSessionsPerReplica — blocks the scale-down of its replica.
+func TestIdleScaleDownSkipsActiveSessions(t *testing.T) {
+	cases := []struct {
+		name         string
+		pinned       int
+		wantReplicas int
+	}{
+		{name: "one active session blocks scale-down", pinned: 1, wantReplicas: 1},
+		{name: "full replica of sessions blocks scale-down", pinned: 8, wantReplicas: 1},
+		{name: "no sessions scales down", pinned: 0, wantReplicas: 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := repository.NewStubProvider()
+			sessions := NewStore(5 * time.Minute)
+			m := NewManager(provider, sessions, ManagerConfig{
+				MaxReplicasPerVersion: 3,
+				MaxSessionsPerReplica: 8,
+				ReplicaIdleTTL:        0,
+			}, observ.NewTestLogger(), observ.NewMetrics(nil))
+
+			provider.EnsureStatefulSet("v0.21.8", "")
+			if err := provider.ScaleUp("v0.21.8", 1); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < tc.pinned; i++ {
+				sessions.Register("", fmt.Sprintf("fp-%d", i), "v0.21.8", "dagger-engine-v0-21-8-0", fmt.Sprintf("inst-%d", i), fmt.Sprintf("trace-%d", i), "")
+			}
+			if err := m.Sweep(context.Background()); err != nil {
+				t.Fatalf("Sweep: %v", err)
+			}
+			replicas, err := provider.GetReplicas("v0.21.8")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(replicas) != tc.wantReplicas {
+				t.Fatalf("replicas after sweep = %d, want %d", len(replicas), tc.wantReplicas)
+			}
+			if tc.pinned > 0 && replicas[0].Name != "dagger-engine-v0-21-8-0" {
+				t.Fatalf("wrong replica survived: %+v", replicas)
+			}
+		})
+	}
+}
+
 func TestAllFleetInfoEmptyReturnsEmptySlice(t *testing.T) {
 	provider := repository.NewStubProvider()
 	sessions := NewStore(5 * time.Minute)

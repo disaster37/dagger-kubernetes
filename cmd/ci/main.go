@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -95,7 +96,9 @@ func ciFlags() []cli.Flag {
 		&cli.StringFlag{Name: "ui-url", Usage: "UI base URL for pipeline-view links (overrides server.public_url; links use /pipelines/<traceID>)"},
 		&cli.StringFlag{Name: "config", Value: "config.app.yaml", Usage: "path to config file (provides server.public_url fallback)"},
 		&cli.StringFlag{Name: "version", Usage: "Dagger engine version"},
+		&cli.StringFlag{Name: "runner-host", EnvVars: []string{runnerHostEnvName}, Value: defaultRunnerHost, Usage: "Dagger engine driver for the wrapped CLI; an explicit --engine argument always wins (empty = do not export)"},
 		&cli.StringFlag{Name: "ci", Usage: "CI mode: gha, jenkins, drone"},
+		&cli.BoolFlag{Name: "silent", EnvVars: []string{"DAGGER_SILENT"}, Usage: "run Dagger with --silent (suppresses progress and per-session frontend telemetry)"},
 		&cli.BoolFlag{Name: "cli", Usage: "Provision the Dagger CLI binary on the fly from the supervisor"},
 		&cli.StringFlag{Name: "cli-version", Usage: "Dagger CLI version to provision (empty = latest allowed)"},
 		&cli.StringFlag{Name: "cli-os", Value: "linux", Usage: "CLI target OS (linux, darwin)"},
@@ -119,6 +122,7 @@ func run(c *cli.Context) error {
 	if err != nil {
 		return fmt.Errorf("load config: %w", err)
 	}
+	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	// Only trust config values when an actual regular config file was
 	// present; config.LoadForCIWrapper otherwise returns compiled-in
@@ -161,17 +165,37 @@ func run(c *cli.Context) error {
 		return fmt.Errorf("no dagger command specified")
 	}
 
-	_ = os.Setenv("DAGGER_CLOUD_URL", serverURL)
-	_ = os.Setenv("DAGGER_CLOUD_TOKEN", token)
-	_ = os.Setenv("_EXPERIMENTAL_DAGGER_RUNNER_HOST", "dagger-cloud://self")
-	// Live span export: without this the engine only exports spans at
-	// completion, so per-step state would never appear while the run is live.
-	_ = os.Setenv("OTEL_EXPORTER_OTLP_TRACES_LIVE", "1")
-
-	if version != "" {
-		_ = os.Setenv("_EXPERIMENTAL_DAGGER_TAG", version)
+	silent := c.Bool("silent")
+	cmdArgs = withSilentFlag(cmdArgs, silent)
+	if gerr := guardInteractive(cmdArgs, steps); gerr != nil {
+		return gerr
 	}
 
+	runnerHost := resolveRunnerHost(c.String("runner-host"), cmdArgs)
+	org := c.String("org")
+	env := daggerEnv(os.Environ(), &daggerEnvOpts{
+		Server:        serverURL,
+		Token:         token,
+		RunnerHost:    runnerHost,
+		EngineVersion: version,
+		Org:           org,
+	})
+	if silent {
+		// Nested SDK sessions in the same process tree inherit silent mode.
+		env = upsertEnv(env, "DAGGER_SILENT", "1")
+	}
+
+	// Resolve the CLI the wrapper will actually exec (PATH lookup happens in
+	// the parent process, so a provisioned PATH entry does not change it).
+	// The x-release guard must inspect that exact binary: before 0.21.8 the
+	// re-exec drops the runner host and would dial a local engine.
+	daggerBin := "dagger"
+	if p, lerr := exec.LookPath("dagger"); lerr == nil {
+		daggerBin = p
+	}
+	if gerr := checkXReleaseRunnerHost(rootCtx, logger, daggerBin, cmdArgs, env, runnerHost); gerr != nil {
+		return gerr
+	}
 	timeout := c.Duration("timeout")
 	if timeout < 0 {
 		return fmt.Errorf("--timeout must be >= 0")
@@ -182,7 +206,6 @@ func run(c *cli.Context) error {
 		cmdCtx, cmdCancel = context.WithTimeout(rootCtx, timeout)
 	}
 	defer cmdCancel()
-	org := c.String("org")
 	//nolint:gosec // intentional: shell out to dagger CLI with user-supplied args
 	cmd := exec.CommandContext(cmdCtx, "dagger", cmdArgs...)
 	cmd.Stdin = os.Stdin
@@ -195,17 +218,14 @@ func run(c *cli.Context) error {
 		cmd.Stdout = os.Stdout
 	}
 
-	cmd.Env = os.Environ()
-	if org != "" {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("DAGGER_ORG=%s", org))
-	}
+	cmd.Env = env
 	if c.Bool("cli") {
 		binDir, cleanup, err := provisionCLI(rootCtx, serverURL, token, c.String("cli-version"), c.String("cli-os"), c.String("cli-arch"))
 		if err != nil {
 			return fmt.Errorf("provision dagger cli: %w", err)
 		}
 		defer cleanup()
-		cmd.Env = append(cmd.Env, fmt.Sprintf("PATH=%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
+		cmd.Env = upsertEnv(cmd.Env, "PATH", fmt.Sprintf("%s%c%s", binDir, os.PathListSeparator, os.Getenv("PATH")))
 	}
 
 	var logBuf strings.Builder
@@ -227,8 +247,6 @@ func run(c *cli.Context) error {
 	)
 
 	cmd.Stderr = io.MultiWriter(os.Stderr, &logBuf)
-
-	logger := observ.NewLogger(cfg.LogLevel, cfg.LogFormat)
 
 	timeoutDisplay := "none"
 	if timeout > 0 {
@@ -392,6 +410,50 @@ func run(c *cli.Context) error {
 	}
 
 	return err
+}
+
+// errInteractive is returned when an invocation needs a TTY but cannot get one.
+var errInteractive = errors.New("dagger shell / check -i needs an interactive TTY; run it without --steps and from a terminal")
+
+// stdinIsTerminal reports whether stdin is a terminal (a character device). It
+// is a variable so tests can simulate both a TTY and a redirected stdin.
+var stdinIsTerminal = func() bool {
+	info, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
+}
+
+// guardInteractive rejects invocations that need a TTY but cannot get one: in
+// --steps mode stdout is the NDJSON channel, and a TTY-less CI Job would hang
+// until --timeout. Runners never pass -i, so Jobs are unaffected.
+func guardInteractive(args []string, stepsMode bool) error {
+	if !interactiveRequested(args) {
+		return nil
+	}
+	if stepsMode || !stdinIsTerminal() {
+		return errInteractive
+	}
+	return nil
+}
+
+// interactiveRequested reports whether args invoke `shell` or `check -i`.
+func interactiveRequested(args []string) bool {
+	subcommand := ""
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			subcommand = arg
+			break
+		}
+	}
+	if subcommand == "shell" {
+		return true
+	}
+	if subcommand != "check" {
+		return false
+	}
+	return hasFlag(args, "-i") || hasFlag(args, "--interactive")
 }
 
 // clampPollInterval enforces the minimum step-stream poll cadence so a

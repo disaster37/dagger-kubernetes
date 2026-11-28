@@ -121,3 +121,29 @@ func TestK8sWorkflowRunnerNilClient(t *testing.T) {
 		t.Fatal("nil client must error")
 	}
 }
+
+// TestWorkflowSecretCarriesSilent proves workflows.silent reaches the workflow
+// Job Secret; the default leaves the variable untouched.
+func TestWorkflowSecretCarriesSilent(t *testing.T) {
+	for _, silent := range []bool{false, true} {
+		cs := fake.NewSimpleClientset()
+		r := NewK8sWorkflowRunner(cs, "resolved-ns", "runner:latest", time.Minute, "https://example.com", "", "").
+			WithSilent(silent)
+		spec := &domain.WorkflowCallSpec{RunID: "run-silent", OrgID: "acme", ProjectID: "proj", JobName: "build", Call: "build", Repo: "acme/repo", SHA: "abc", Ref: "refs/heads/main"}
+		if _, err := r.RunCall(context.Background(), spec); err != nil {
+			t.Fatal(err)
+		}
+		name := "workflow-env-" + refHash(spec.RunID) + "-" + refHash(spec.JobName)
+		secret, err := cs.CoreV1().Secrets("resolved-ns").Get(context.Background(), name, metav1.GetOptions{})
+		if err != nil {
+			t.Fatal(err)
+		}
+		want := ""
+		if silent {
+			want = "1"
+		}
+		if got := secret.StringData["DAGGER_SILENT"]; got != want {
+			t.Fatalf("silent=%v DAGGER_SILENT = %q, want %q", silent, got, want)
+		}
+	}
+}

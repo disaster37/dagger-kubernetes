@@ -48,7 +48,7 @@ func newParityEnv(t *testing.T, withRerunner bool) *parityEnv {
 	g := NewCloudGraphQL(NewUserRepo(store), orgRepo, NewGroupRepo(store), traceRepo, checkRepo, parityConfig()).
 		WithForgeSources(forgeRepo).WithProjects(projectRepo).WithPublicURL("https://example.com")
 	if withRerunner {
-		g.WithCheckRerunner(func(_ context.Context, runID string) (*domain.CheckRunRecord, error) {
+		g.WithCheckRerunner(func(_ context.Context, runID string, _ domain.CheckRunFilters) (*domain.CheckRunRecord, error) {
 			return &domain.CheckRunRecord{ID: runID, Status: "running"}, nil
 		})
 	}
@@ -696,13 +696,18 @@ func TestParityRerunChecksIDOR(t *testing.T) {
 func TestParityRerunLoad(t *testing.T) {
 	e := newParityEnv(t, true)
 	seedCheckRun(t, e.checks, &domain.CheckRunRecord{ID: "check-loadfail", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s", Status: "failed", CreatedAt: time.Now().UTC()})
-	res := execJSON(t, e.g, e.ctx(), `mutation { rerunLoad(org: "acme", checkId: "check-loadfail/load") { id name status internal } }`, nil)
+	res := execJSON(t, e.g, e.ctx(), `mutation { rerunLoad(org: "acme", checkId: "check-loadfail/load") { id name status internal filters } }`, nil)
 	if hasErrors(res) {
 		t.Fatalf("errors: %v", errorMessages(t, res))
 	}
 	c := res["data"].(map[string]any)["rerunLoad"].(map[string]any)
 	if c["name"] != "load" || c["status"] != "pending" || c["internal"] != true {
 		t.Fatalf("rerunLoad = %v", c)
+	}
+	// filters is [String!]! in the schema: it must serialize as an empty list,
+	// never null, so a beta CLI selecting Check.filters cannot error.
+	if f, ok := c["filters"].([]any); !ok || f == nil {
+		t.Fatalf("rerunLoad filters = %v, want a non-null empty list", c["filters"])
 	}
 }
 
@@ -1270,5 +1275,86 @@ func TestParitySourcesDedupStandaloneOwners(t *testing.T) {
 	sources := res["data"].(map[string]any)["sources"].([]any)
 	if len(sources) != 1 || sources[0].(map[string]any)["name"] != "acme" {
 		t.Fatalf("sources = %v", sources)
+	}
+}
+
+// TestParityRerunChecksFilters proves the additive `filters` argument on
+// rerunChecks is accepted by the schema and that Check.filters resolves, while
+// an older query without the argument still works (additive change).
+func TestParityRerunChecksFilters(t *testing.T) {
+	e := newParityEnv(t, true)
+	seedCheckRun(t, e.checks, &domain.CheckRunRecord{
+		ID: "check-filtered", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s",
+		Status: "failed", CreatedAt: time.Now().UTC(),
+		Filters: []string{"--go-test=TestGet"},
+		Checks:  []domain.CheckItem{{Name: "test", State: domain.CheckFailure}},
+	})
+	res := execJSON(t, e.g, e.ctx(), `mutation {
+		rerunChecks(org: "acme", checkIds: ["check-filtered/test"], cleanSlate: true, filters: ["go-test=TestGet"]) {
+			id name status filters
+		}
+	}`, nil)
+	if hasErrors(res) {
+		t.Fatalf("errors: %v", errorMessages(t, res))
+	}
+	arr := res["data"].(map[string]any)["rerunChecks"].([]any)
+	if len(arr) != 1 {
+		t.Fatalf("rerunChecks = %v", arr)
+	}
+	got, _ := arr[0].(map[string]any)["filters"].([]any)
+	if len(got) != 1 || got[0] != "--go-test=TestGet" {
+		t.Fatalf("filters = %v, want [--go-test=TestGet]", got)
+	}
+
+	// Old query shape (no filters argument, no filters field) stays valid.
+	old := execJSON(t, e.g, e.ctx(), `mutation { rerunChecks(org: "acme", checkIds: ["check-filtered/test"]) { id name status } }`, nil)
+	if hasErrors(old) {
+		t.Fatalf("legacy rerunChecks errors: %v", errorMessages(t, old))
+	}
+}
+
+// TestParityBetaCLIQueries replays the query shapes the Dagger CLI 1.0-beta
+// command matrix (org, billing, usage, traces, checks, integration, modules)
+// sends against /query. Each must resolve with no GraphQL `errors`, so a beta
+// CLI command cannot fail with "Cannot query field …".
+//
+// The fixtures are derived from the commands documented for the deployment
+// (schema shapes), not captured byte-for-byte from a live CLI run; ADR-061
+// records that provenance. `recommendedModules` is an additive empty-list
+// answer (no recommendation service runs here).
+func TestParityBetaCLIQueries(t *testing.T) {
+	e := newParityEnv(t, true)
+	seedCheckRun(t, e.checks, &domain.CheckRunRecord{
+		ID: "check-beta", OrgID: "acme", Provider: domain.ForgeGitHub, Repo: "acme/api", SHA: "s",
+		Status: "success", CreatedAt: time.Now().UTC(),
+		Checks: []domain.CheckItem{{Name: "test", State: domain.CheckSuccess}},
+	})
+	cases := []struct {
+		name  string
+		query string
+	}{
+		{name: "org list", query: `query { user { id nickname orgs { id name createdAt subscription { planID hasCaching status } } } }`},
+		{name: "org info", query: `query { org(name: "acme") { id name features { name status } subscription { planID } cliNotice { level title body } } }`},
+		{name: "billing usage", query: `query { billingUsage(org: "acme", month: "2026-11") { month totalUSD: revision warnings } }`},
+		{name: "traces list", query: `query { org(name: "acme") { traces(first: 5) { nodes { id name status { code message } durationMS startedAt updatedAt } pageInfo { hasNextPage endCursor } } } }`},
+		{name: "checks list", query: `query { org(name: "acme") { checks(repos: ["github.com/acme/api"], first: 5) { nodes { repo commitSHA timestamp checks { id name status traceId spanId moduleRef moduleVersion internal filters } } } } }`},
+		{name: "sources", query: `query { sources { id name type configuredAt orgId orgName configUrl repositories { repository selected eligible claimedByOrgName } } }`},
+		{name: "github connection", query: `query { githubConnection { githubLogin connectedAt scopes status } }`},
+		{name: "module recommendations", query: `query { recommendedModules(repo: "github.com/acme/api") { moduleRef version reason } }`},
+		{name: "rerun checks with filters", query: `mutation { rerunChecks(org: "acme", checkIds: ["check-beta/test"], filters: ["go-test=TestGet"]) { id status filters } }`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			res := execJSON(t, e.g, e.ctx(), tc.query, nil)
+			if hasErrors(res) {
+				t.Fatalf("query returned errors: %v", errorMessages(t, res))
+			}
+		})
+	}
+
+	// An unauthenticated recommendation query is rejected, not silently empty.
+	anon := execJSON(t, e.g, context.Background(), `query { recommendedModules(repo: "x/y") { moduleRef } }`, nil)
+	if !hasErrors(anon) {
+		t.Fatal("unauthenticated recommendedModules must fail")
 	}
 }
