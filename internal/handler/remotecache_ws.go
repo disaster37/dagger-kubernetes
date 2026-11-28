@@ -85,7 +85,7 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 							_ = conn.Close()
 							return
 						}
-					} else if !s.orgAccessStillValid(ctx, id, namespace) {
+					} else if s.remoteCacheNamespaceFor(id.OrgID) != namespace {
 						_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(remoteCacheCloseRevoked, "org access revoked"), time.Now().Add(5*time.Second))
 						_ = conn.Close()
 						return
@@ -103,25 +103,6 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 		}
 		rc.HandleFrame(ctx, msg)
 	}
-}
-
-// orgAccessStillValid re-checks the caller's organization membership on every
-// WebSocket heartbeat so a removed member's open engine connection closes.
-func (s *Server) orgAccessStillValid(ctx context.Context, id *domain.Identity, orgID string) bool {
-	if id == nil {
-		return false
-	}
-	if id.IsAdmin() {
-		return true
-	}
-	if id.OrgID != "" {
-		return id.OrgID == orgID
-	}
-	if s.orgs == nil || id.UserID == "" {
-		return false
-	}
-	member, err := s.orgs.IsOrgMember(ctx, orgID, id.UserID)
-	return err == nil && member
 }
 
 // remoteCacheNamespaceFor maps an org ID to its cache namespace. Deprecated
