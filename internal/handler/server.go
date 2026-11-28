@@ -1396,8 +1396,13 @@ func (s *Server) handleOTel(signal string) app.HandlerFunc {
 				s.otlpStream.Ingest(ctx, org.ID, traceID, signal, body)
 			}
 		}
-		if s.remoteCache != nil && len(batch.CacheEvents) > 0 {
-			s.remoteCache.IngestCacheEvents(ctx, s.remoteCacheNamespaceFor(org.ID), batch.CacheEvents)
+		if s.remoteCache != nil {
+			if len(batch.CacheEvents) > 0 {
+				s.remoteCache.IngestCacheEvents(ctx, s.remoteCacheNamespaceFor(org.ID), batch.CacheEvents)
+			}
+			if len(batch.Roots) > 0 {
+				s.remoteCache.RecordCacheRoots(batch.Roots)
+			}
 		}
 
 		if signal == "traces" {

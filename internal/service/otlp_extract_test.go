@@ -590,3 +590,35 @@ func TestExtractTraceSummariesFinishRecordWithoutStart(t *testing.T) {
 		t.Fatalf("started_at = %v, want preserved start", s.StartedAt)
 	}
 }
+
+// TestCacheRootsFromSpans proves the remote cache learns a result number, its
+// recipe digest and the engine cache identity from one span.
+func TestCacheRootsFromSpans(t *testing.T) {
+	rs := &tracepb.ResourceSpans{
+		Resource: &resourcepb.Resource{Attributes: []*commonpb.KeyValue{
+			strAttr(telemetryEngineCacheAttr, "cache-abc/2"),
+		}},
+		ScopeSpans: []*tracepb.ScopeSpans{{Spans: []*tracepb.Span{{
+			TraceId: tid(t, "0123456789abcdef0123456789abcdef"),
+			Attributes: []*commonpb.KeyValue{
+				strAttr(telemetryCacheResultAttr, "42"),
+				strAttr(telemetryDagDigestAttr, "sha256:recipe"),
+			},
+		}}}},
+	}
+	batch := ExtractOTLPBatch("traces", mustMarshalRequest(t, rs))
+	if len(batch.Roots) != 1 {
+		t.Fatalf("roots = %+v, want one", batch.Roots)
+	}
+	got := batch.Roots[0]
+	if got.CacheID != "cache-abc/2" || got.Number != 42 || got.Recipe != "sha256:recipe" {
+		t.Fatalf("root = %+v", got)
+	}
+
+	// A number without a recipe, or malformed, is ignored: the service cannot
+	// index a value it cannot later be asked for.
+	rs.ScopeSpans[0].Spans[0].Attributes = []*commonpb.KeyValue{strAttr(telemetryCacheResultAttr, "7")}
+	if roots := ExtractOTLPBatch("traces", mustMarshalRequest(t, rs)).Roots; len(roots) != 0 {
+		t.Fatalf("roots without a recipe = %+v, want none", roots)
+	}
+}

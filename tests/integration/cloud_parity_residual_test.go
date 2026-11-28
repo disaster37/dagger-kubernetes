@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -99,6 +100,7 @@ func newParityServerWith(t *testing.T, graphqlCfg domain.GraphQLConfig, otlp *se
 	tokensSvc := service.NewTokenService(tokenRepo, logger, []byte("0123456789abcdef0123456789abcdef"))
 	jwtSvc := service.NewJWTService([]byte("cloud-parity-secret-32-bytes-ok!!"), 15*time.Minute, 168*time.Hour)
 	authSvc := service.NewAuthService(usersSvc, groupRepo, tokensSvc, jwtSvc, nil, logger)
+	authSvc.SetOrgRepository(orgRepo)
 	deviceSvc := service.NewDeviceAuthService(service.NewMemoryDeviceAuthStore(), usersSvc, groupRepo, jwtSvc, 10*time.Minute, 5*time.Second, logger)
 	orgsSvc := service.NewOrgService(orgRepo, groupRepo, tokensSvc, logger)
 	projectsSvc := service.NewProjectService(projectRepo, groupRepo, logger)
@@ -326,8 +328,12 @@ func TestRemoteCachePackRange206AndRevocationClose(t *testing.T) {
 	remote := service.NewRemoteCacheService(index, store, time.Hour, 1<<30, 4, 4<<20, time.Minute, observ.NewMetrics(nil), observ.NewTestLogger())
 	srv := newParityServer(t, domain.GraphQLConfig{MaxDepth: 15, MaxSelections: 250, MaxQueryBytes: 65536, MaxParallelism: 10}, nil, remote, nil, nil)
 
+	orgToken, _, err := srv.tokens.GenerateFor(context.Background(), "org:acme", "dag_acme_")
+	if err != nil {
+		t.Fatal(err)
+	}
 	wsURL := "ws" + strings.TrimPrefix(srv.base, "http") + "/v1/engine"
-	header := http.Header{"Authorization": []string{fmt.Sprintf("Bearer %s", srv.admin)}, "X-Dagger-Org": []string{"acme"}}
+	header := http.Header{"Authorization": []string{"Basic " + base64.StdEncoding.EncodeToString([]byte(orgToken+":"))}}
 	conn, dialResp, err := websocket.DefaultDialer.Dial(wsURL, header)
 	if err != nil {
 		t.Fatal(err)
@@ -336,29 +342,38 @@ func TestRemoteCachePackRange206AndRevocationClose(t *testing.T) {
 		_ = dialResp.Body.Close()
 	}
 	defer func() { _ = conn.Close() }()
-	if err := conn.WriteMessage(websocket.TextMessage, mustEnvelope(t, domain.RCTypeHello, domain.Hello{Version: "v1"})); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, mustEnvelope(t, 1, domain.RCTypeHello, domain.Hello{CacheID: "cache-acme", Period: 1})); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := conn.ReadMessage(); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.WriteMessage(websocket.TextMessage, mustEnvelope(t, domain.RCTypeMerge, domain.Merge{SessionID: "s", Digests: []string{"sha256:member"}})); err != nil {
+	if err := conn.WriteMessage(websocket.TextMessage, mustEnvelope(t, 2, domain.RCTypeRenew, domain.Renew{NeededBlob: "sha256:member"})); err != nil {
 		t.Fatal(err)
 	}
 	_, raw, err := conn.ReadMessage()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var merged domain.Merged
-	if _, err := domain.DecodeRemoteCacheEnvelope(raw, &merged); err != nil {
+	var renewed domain.Renewed
+	reply, err := domain.DecodeRCEnvelope(raw)
+	if err != nil {
 		t.Fatal(err)
 	}
-	loc, ok := merged.Locations["sha256:member"]
-	if !ok || loc.Headers["Range"] != "bytes=10-14" {
-		t.Fatalf("location = %+v", loc)
+	if reply.Type != domain.RCTypeRenewed || reply.Re != 2 {
+		t.Fatalf("reply = %+v, want renewed to 2", reply)
 	}
-	req, _ := http.NewRequest(http.MethodGet, loc.URL, http.NoBody)
-	req.Header.Set("Range", loc.Headers["Range"])
+	if err := reply.DecodeBody(&renewed); err != nil {
+		t.Fatal(err)
+	}
+	address, ok := renewed.Addresses["sha256:member"]
+	if !ok {
+		t.Fatalf("addresses = %+v", renewed.Addresses)
+	}
+	// The engine ranges inside the pack itself; the address is the pack's
+	// presigned GET.
+	req, _ := http.NewRequest(http.MethodGet, address.URL, http.NoBody)
+	req.Header.Set("Range", "bytes=10-14")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -372,8 +387,8 @@ func TestRemoteCachePackRange206AndRevocationClose(t *testing.T) {
 		t.Fatalf("body = %q", body)
 	}
 
-	// Revoke the token and wait for the 4001 close on the next ping.
-	if err := srv.tokens.Revoke(context.Background(), srv.adminUserID(t)); err != nil {
+	// Revoke the org token and wait for the 4001 close on the next ping.
+	if err := srv.tokens.Revoke(context.Background(), "org:acme"); err != nil {
 		t.Fatal(err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(20 * time.Second))
@@ -389,28 +404,17 @@ func TestRemoteCachePackRange206AndRevocationClose(t *testing.T) {
 	}
 }
 
-func mustEnvelope(t *testing.T, typ string, payload any) []byte {
+func mustEnvelope(t *testing.T, id uint64, typ string, payload any) []byte {
 	t.Helper()
-	raw, err := domain.NewRemoteCacheEnvelope(typ, payload)
+	env, err := domain.NewRCEnvelope(id, 0, typ, payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := env.Marshal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	return raw
-}
-
-func (p *parityServer) adminUserID(t *testing.T) string {
-	t.Helper()
-	users, err := p.users.List(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, u := range users {
-		if u.Username == "admin" {
-			return u.ID
-		}
-	}
-	t.Fatal("admin user not found")
-	return ""
 }
 
 type recordingCheckRunner struct {
