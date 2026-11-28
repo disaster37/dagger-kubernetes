@@ -1,7 +1,9 @@
 package repository
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -1535,7 +1537,7 @@ func TestK8sEngineCAInjectionDisabled(t *testing.T) {
 	}
 }
 
-func TestK8sEngineTOMLConfigMap(t *testing.T) {
+func TestK8sEngineConfigMap(t *testing.T) {
 	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
 		cfg.Debug = true
 		cfg.LogFormat = "json"
@@ -1546,13 +1548,13 @@ func TestK8sEngineTOMLConfigMap(t *testing.T) {
 
 	sts := ensureEngineSet(t, p, cs)
 
-	wantTOML := "debug = true\n\n[log]\n  format = \"json\"\n\n[registry.\"docker.io\"]\n  mirrors = [\"mirror.gcr.io\"]\n"
-	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
-		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	want := `{"logLevel":"debug","registries":{"docker.io":{"mirrors":["mirror.gcr.io"]}}}`
+	if got := engineConfigMap(t, cs).Data[engineConfigKey]; got != want {
+		t.Errorf("configmap %s = %q, want %q", engineConfigKey, got, want)
 	}
 
 	// STS has a single projected engine-config volume carrying the image-auth
-	// secret plus the engine.toml ConfigMap key.
+	// secret plus the engine.json ConfigMap key.
 	authVol := volumeByName(sts, volumeEngineConfig)
 	if authVol == nil || authVol.Projected == nil {
 		t.Fatalf("expected projected %s volume, got %+v", volumeEngineConfig, sts.Spec.Template.Spec.Volumes)
@@ -1567,25 +1569,26 @@ func TestK8sEngineTOMLConfigMap(t *testing.T) {
 	if cm == nil || cm.Name != engineConfigMapName {
 		t.Fatalf("second projection = %+v, want configmap %s", authVol.Projected.Sources[1], engineConfigMapName)
 	}
-	if len(cm.Items) != 1 || cm.Items[0].Key != engineTOMLKey || cm.Items[0].Path != engineTOMLKey {
-		t.Errorf("configmap items = %+v, want key/path %s", cm.Items, engineTOMLKey)
+	if len(cm.Items) != 1 || cm.Items[0].Key != engineConfigKey || cm.Items[0].Path != engineConfigKey {
+		t.Errorf("configmap items = %+v, want key/path %s", cm.Items, engineConfigKey)
 	}
 
 	// The projected volume is mounted at /etc/dagger, so the ConfigMap key
-	// lands at /etc/dagger/engine.toml — the engine's hard-coded --config
-	// path. Assert the literal end path (not just the constant) so a wrong
-	// mount path that BuildKit would silently ignore fails the test.
+	// lands at /etc/dagger/engine.json — the path the engine's
+	// config.LoadDefault() reads. Assert the literal end path (not just the
+	// constant) so a wrong mount path that the engine would silently ignore
+	// fails the test.
 	container := sts.Spec.Template.Spec.Containers[0]
 	authMount := mountByName(&container, volumeEngineConfig)
 	if authMount == nil || authMount.MountPath != "/etc/dagger" || authMount.SubPath != "" {
 		t.Fatalf("engine-config mount = %+v, want path /etc/dagger with no subPath", authMount)
 	}
-	if got := authMount.MountPath + "/" + cm.Items[0].Path; got != "/etc/dagger/engine.toml" {
-		t.Errorf("engine.toml lands at %s, want /etc/dagger/engine.toml", got)
+	if got := authMount.MountPath + "/" + cm.Items[0].Path; got != "/etc/dagger/engine.json" {
+		t.Errorf("engine.json lands at %s, want /etc/dagger/engine.json", got)
 	}
 }
 
-func TestK8sEngineTOMLMirrorHTTP(t *testing.T) {
+func TestK8sEngineConfigMirrorHTTP(t *testing.T) {
 	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
 		cfg.RegistryMirrors = map[string][]string{
 			"docker.io": {"docker-io-mirror.dagger-kubernetes.svc:5000"},
@@ -1595,26 +1598,32 @@ func TestK8sEngineTOMLMirrorHTTP(t *testing.T) {
 
 	ensureEngineSet(t, p, cs)
 
-	wantTOML := "[registry.\"docker.io\"]\n  mirrors = [\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n\n" +
-		"[registry.\"docker-io-mirror.dagger-kubernetes.svc:5000\"]\n  http = true\n"
-	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
-		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	want := `{"registries":{"docker-io-mirror.dagger-kubernetes.svc:5000":{"http":true},` +
+		`"docker.io":{"mirrors":["docker-io-mirror.dagger-kubernetes.svc:5000"]}}}`
+	if got := engineConfigMap(t, cs).Data[engineConfigKey]; got != want {
+		t.Errorf("configmap %s = %q, want %q", engineConfigKey, got, want)
 	}
 }
 
-func TestK8sEngineTOMLDefaultLogFormat(t *testing.T) {
+func TestK8sEngineConfigLogFormatNotRendered(t *testing.T) {
+	// The engine hardcodes its text log formatter: engine_log_format has no
+	// engine.json equivalent, so a format-only config renders no file (and
+	// leaves the engine defaults intact).
 	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
 		cfg.LogFormat = "json"
 	})
-	ensureEngineSet(t, p, cs)
+	sts := ensureEngineSet(t, p, cs)
 
-	wantTOML := "[log]\n  format = \"json\"\n"
-	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
-		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	if _, err := cs.CoreV1().ConfigMaps("dagger-kubernetes").Get(context.Background(), engineConfigMapName, metav1.GetOptions{}); err == nil {
+		t.Errorf("expected no %s ConfigMap for a log-format-only config", engineConfigMapName)
+	}
+	vol := volumeByName(sts, volumeEngineConfig)
+	if vol == nil || vol.Secret == nil || vol.Projected != nil {
+		t.Errorf("engine-config volume = %+v, want secret-only", vol)
 	}
 }
 
-func TestK8sEngineTOMLEmpty(t *testing.T) {
+func TestK8sEngineConfigEmpty(t *testing.T) {
 	p, cs := defaultK8sProvider()
 
 	// Pre-create a stale ConfigMap to verify deletion.
@@ -1623,7 +1632,7 @@ func TestK8sEngineTOMLEmpty(t *testing.T) {
 			Name:      engineConfigMapName,
 			Namespace: "dagger-kubernetes",
 		},
-		Data: map[string]string{engineTOMLKey: "stale"},
+		Data: map[string]string{engineConfigKey: "stale"},
 	}, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatalf("pre-create stale configmap: %v", err)
@@ -1636,7 +1645,7 @@ func TestK8sEngineTOMLEmpty(t *testing.T) {
 		t.Error("expected stale configmap to be deleted")
 	}
 
-	// No engine.toml projection: the engine-config volume stays a plain
+	// No engine.json projection: the engine-config volume stays a plain
 	// secret-only volume (no projected source, no file mount).
 	vol := volumeByName(sts, volumeEngineConfig)
 	if vol == nil || vol.Secret == nil || vol.Secret.SecretName != engineImageAuthSecretName || vol.Projected != nil {
@@ -1644,23 +1653,90 @@ func TestK8sEngineTOMLEmpty(t *testing.T) {
 	}
 	container := sts.Spec.Template.Spec.Containers[0]
 	for _, m := range container.VolumeMounts {
-		if m.MountPath == "/etc/dagger/engine.toml" {
-			t.Errorf("expected no engine.toml file mount, got %+v", m)
+		if m.MountPath == "/etc/dagger/engine.json" {
+			t.Errorf("expected no engine.json file mount, got %+v", m)
+		}
+	}
+}
+
+func TestK8sEngineConfigRemoteCacheVersionGate(t *testing.T) {
+	tests := []struct {
+		version string
+		want    bool
+	}{
+		{"v0.19.0", false},
+		{"v0.20.0", false},
+		{"v0.21.12", false},
+		{"v1.0.0-beta.10", false},
+		{"v1.0.0-beta.15", false},
+		{"v1.0.0-beta.19", false},
+		{"v1.0.0-beta.20", false},
+		{"v1.0.0-beta.28", true},
+		{"v1.0.0", true},
+		{"dev", false},
+		{"latest", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
+				cfg.Debug = true
+				cfg.RemoteCacheURL = "https://control.example.test/v1/engine"
+			})
+			if err := p.EnsureStatefulSet(tt.version, "registry.dagger.io/engine:"+tt.version); err != nil {
+				t.Fatalf("EnsureStatefulSet: %v", err)
+			}
+			raw := engineConfigMap(t, cs).Data[engineConfigKey]
+			var decoded map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(raw), &decoded); err != nil {
+				t.Fatalf("decode engine.json %q: %v", raw, err)
+			}
+			_, got := decoded["remoteCache"]
+			if got != tt.want {
+				t.Errorf("remoteCache rendered = %v, want %v (config %s)", got, tt.want, raw)
+			}
+		})
+	}
+}
+
+func TestK8sEngineConfigDeterministic(t *testing.T) {
+	cfg := K8sProviderConfig{
+		Debug: true,
+		RegistryMirrors: map[string][]string{
+			"ghcr.io":            {"ghcr-mirror.example:5000"},
+			"docker.io":          {"docker-mirror.example:5000"},
+			"public.ecr.aws":     {"ecr-mirror.example:5000"},
+			"quay.io":            {"quay-mirror.example:5000"},
+			"registry.dagger.io": {"dagger-mirror.example:5000"},
+		},
+		MirrorHTTP:     []string{"docker-mirror.example:5000", "quay-mirror.example:5000"},
+		RemoteCacheURL: "https://control.example.test/v1/engine",
+	}
+	first, err := buildEngineConfig(&cfg, "v1.0.0-beta.28").render()
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	for i := 0; i < 20; i++ {
+		next, err := buildEngineConfig(&cfg, "v1.0.0-beta.28").render()
+		if err != nil {
+			t.Fatalf("render: %v", err)
+		}
+		if !bytes.Equal(next, first) {
+			t.Fatalf("non-deterministic render:\n%s\n%s", first, next)
 		}
 	}
 }
 
 func TestK8sEngineConfigMapIdempotent(t *testing.T) {
 	p, cs := defaultK8sProvider(func(cfg *K8sProviderConfig) {
-		cfg.LogFormat = "json"
+		cfg.Debug = true
 	})
 
 	ensureEngineSet(t, p, cs)
 	ensureEngineSet(t, p, cs) // second ensure takes the update path
 
-	wantTOML := "[log]\n  format = \"json\"\n"
-	if got := engineConfigMap(t, cs).Data[engineTOMLKey]; got != wantTOML {
-		t.Errorf("configmap %s = %q, want %q", engineTOMLKey, got, wantTOML)
+	want := `{"logLevel":"debug"}`
+	if got := engineConfigMap(t, cs).Data[engineConfigKey]; got != want {
+		t.Errorf("configmap %s = %q, want %q", engineConfigKey, got, want)
 	}
 }
 
