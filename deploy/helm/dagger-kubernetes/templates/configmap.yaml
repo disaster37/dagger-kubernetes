@@ -218,8 +218,8 @@ data:
       engine_log_format: {{ .Values.supervisor.config.fleet.engineLogFormat | quote }}
       engine_registry_mirrors:
 {{ include "dagger-kubernetes.engineRegistryMirrors" . | indent 8 }}
-      # Mirror host[:port] values dialed over plaintext HTTP; engine.toml emits
-      # a [registry."<mirror>"] http = true section per entry.
+      # Mirror host[:port] values dialed over plaintext HTTP; engine.json
+      # emits registries["<mirror>"].http = true per entry.
       engine_registry_mirrors_http:
 {{ include "dagger-kubernetes.imageCacheMirrorHosts" . | indent 8 }}
       isolation: {{ .Values.supervisor.config.fleet.isolation | quote }}

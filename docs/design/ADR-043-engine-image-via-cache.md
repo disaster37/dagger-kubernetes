@@ -7,7 +7,7 @@
 
 [ADR-033](ADR-033-local-image-mirror.md) built the local image cache — one
 Zot on-demand pull-through mirror per upstream — and wired it into the
-engine's `engine.toml` registry mirrors so **pipeline** pulls (`container
+engine's `engine.json` `registries` mirrors so **pipeline** pulls (`container
 from`, `with-exec`, …) hit the in-cluster cache. Its Scope bullet explicitly
 left a gap: *"The engine image itself is pulled by the kubelet before the pod
 starts and is not routed through the mirror — that remains
@@ -23,8 +23,8 @@ pulled the same layers.
 
 Two constraints shape the design:
 
-1. **The engine image is a kubelet pull.** `engine.toml` (and BuildKit's
-   `http = true` mirror marking) only governs pipeline image pulls inside the
+1. **The engine image is a kubelet pull.** `engine.json` `registries` (and BuildKit's
+   `http: true` mirror marking) only governs pipeline image pulls inside the
    engine. The kubelet resolves the StatefulSet's container `image` itself,
    before any engine config exists.
 2. **The kubelet will not dial a plaintext in-cluster registry** unless every
@@ -89,7 +89,7 @@ CA trust has two distinct surfaces:
 
 ### D3 — `engine_registry_mirrors_http` must drop TLS mirrors
 
-`fleet.engine_registry_mirrors_http` makes `engine.toml` emit
+`fleet.engine_registry_mirrors_http` makes `engine.json` emit
 `[registry."<mirror>"] http = true` per entry (ADR-033 D4). When the mirrors
 serve HTTPS, listing them there would make BuildKit dial plaintext HTTP
 against a TLS listener and **every pipeline pull would fail**. The chart's
@@ -141,3 +141,14 @@ explicit: plaintext mirrors keep `http = true` exactly as today.
 - Follow-ups: cert-manager auto-issuance of the mirror
   `Certificate` (reusing the chart's `data-cert.yaml` pattern) and
   private-upstream credentials (ADR-033) remain open.
+
+## Update — 2026-11-28: mirror delivery moved to `engine.json`
+
+The pipeline mirror block is delivered in the engine's own JSON config
+(`/etc/dagger/engine.json`, `registries[host].mirrors` and
+`registries[host].http`), not in `engine.toml`. `engine.toml` is BuildKit's
+`--config` file and the engine never read it for `registries`, so mirror
+configuration was silently inert. The decision (D1: rewrite the engine image
+through a TLS mirror, D2: TLS on mirrors, D3: drop TLS mirrors from the
+plaintext list) is unchanged; only the delivery file and key names changed.
+See [ADR-055](ADR-055-read-through-remote-cache.md) D1.

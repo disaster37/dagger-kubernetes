@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/hex"
 	"math"
+	"strconv"
 	"time"
 
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -346,6 +347,7 @@ type OTLPBatch struct {
 	TraceIDs    []string
 	LogTraceIDs []string
 	CacheEvents []CacheEvent
+	Roots       []CacheRootRef
 }
 
 // ExtractOTLPBatch decodes an OTLP/HTTP protobuf body at most once and returns
@@ -362,6 +364,7 @@ func ExtractOTLPBatch(signal string, body []byte) OTLPBatch {
 			Summaries:   summariesFromSpans(spans),
 			TraceIDs:    traceIDsFromSpans(spans),
 			CacheEvents: cacheEventsFromSpans(spans),
+			Roots:       cacheRootsFromSpans(spans),
 		}
 	case "logs":
 		return extractLogBatch(body)
@@ -412,6 +415,54 @@ func cacheEventsFromSpans(spans []spanWithResource) []CacheEvent {
 		}
 	}
 	return out
+}
+
+// Telemetry attributes the remote cache uses to learn an engine's cache
+// entries: the engine cache identity (a resource attribute on session spans)
+// names the connection, the cache result number names the entry, and the
+// dagger digest is the recipe a later lookup asks for.
+const (
+	telemetryEngineCacheAttr = "dagger.io/engine.cache"
+	telemetryCacheResultAttr = "dagger.io/cache.result.id"
+	telemetryDagDigestAttr   = "dagger.io/dag.digest"
+)
+
+// cacheRootsFromSpans extracts the engine cache entries a batch of spans
+// reports, so the service can export them after the engine settles.
+func cacheRootsFromSpans(spans []spanWithResource) []CacheRootRef {
+	var out []CacheRootRef
+	for i := range spans {
+		cacheID := spans[i].resource[telemetryEngineCacheAttr]
+		if cacheID == "" {
+			cacheID = spanStringAttr(spans[i].span, telemetryEngineCacheAttr)
+		}
+		if cacheID == "" {
+			continue
+		}
+		number, err := strconv.ParseUint(spanStringAttr(spans[i].span, telemetryCacheResultAttr), 10, 64)
+		if err != nil || number == 0 {
+			continue
+		}
+		recipe := spanStringAttr(spans[i].span, telemetryDagDigestAttr)
+		if recipe == "" {
+			continue
+		}
+		out = append(out, CacheRootRef{CacheID: cacheID, Number: number, Recipe: recipe})
+	}
+	return out
+}
+
+// spanStringAttr returns one string attribute of a span.
+func spanStringAttr(sp *tracepb.Span, key string) string {
+	for _, kv := range sp.GetAttributes() {
+		if kv.GetKey() != key {
+			continue
+		}
+		if v, ok := kv.GetValue().GetValue().(*commonpb.AnyValue_StringValue); ok {
+			return v.StringValue
+		}
+	}
+	return ""
 }
 
 // extractLogBatch decodes an ExportLogsServiceRequest once, returning trace IDs

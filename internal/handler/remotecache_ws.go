@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -15,23 +16,28 @@ import (
 )
 
 const (
-	remoteCacheMaxMessageBytes = 64 << 20
-	remoteCachePingInterval    = 15 * time.Second
-	remoteCacheCloseRevoked    = 4001
+	remoteCacheMaxMessageBytes = domain.RCMaxMessageBytes
+	remoteCachePingInterval    = domain.RCPingInterval
+	remoteCacheCloseRevoked    = domain.RCCloseTokenRevoked
 )
 
-// handleRemoteCacheWS serves GET /v1/engine on the leader.
+// handleRemoteCacheWS serves GET /v1/engine on the leader. The engine dials it
+// with an org engine token as HTTP Basic; the org is resolved from the token
+// identity itself (never from user membership or X-Dagger-Org).
 func (s *Server) handleRemoteCacheWS(ctx context.Context, c *app.RequestContext) {
 	if s.remoteCache == nil {
 		writeError(c, consts.StatusNotFound, "remote cache disabled")
 		return
 	}
-	org, id, ok := s.resolveRequestOrg(ctx, c)
+	id, ok := s.resolveIdentity(ctx, c)
 	if !ok {
 		return
 	}
-	_ = id
-	namespace := s.remoteCacheNamespaceFor(org.ID)
+	if id.OrgID == "" {
+		writeError(c, consts.StatusForbidden, "organization token required")
+		return
+	}
+	namespace := s.remoteCacheNamespaceFor(id.OrgID)
 	bearer := s.bearerFromRequest(c)
 	readOnly := string(c.Request.Header.Peek("X-Dagger-Cache-Mode")) == "read-only"
 	upgrader := websocket.HertzUpgrader{CheckOrigin: func(*app.RequestContext) bool { return true }}
@@ -49,6 +55,18 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 	conn.SetPongHandler(func(string) error {
 		return conn.SetReadDeadline(time.Now().Add(3 * remoteCachePingInterval))
 	})
+
+	// gorilla/hertz allow exactly one concurrent writer, so every frame —
+	// replies, service requests and pings — goes through this mutex.
+	var writeMu sync.Mutex
+	send := func(data []byte) error {
+		writeMu.Lock()
+		defer writeMu.Unlock()
+		return conn.WriteMessage(websocket.TextMessage, data)
+	}
+	rc := s.remoteCache.NewConn(namespace, readOnly, send)
+	defer rc.Close()
+
 	stopPing := make(chan struct{})
 	defer close(stopPing)
 	go func() {
@@ -77,19 +95,13 @@ func (s *Server) serveRemoteCacheConn(ctx context.Context, conn *websocket.Conn,
 			}
 		}
 	}()
+
 	for {
-		mt, msg, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			return
 		}
-		resp, err := s.remoteCache.Handle(ctx, namespace, readOnly, msg)
-		if err != nil {
-			_ = conn.WriteMessage(mt, []byte(fmt.Sprintf(`{"type":"error","data":{"message":%q}}`, err.Error())))
-			continue
-		}
-		if err := conn.WriteMessage(mt, resp); err != nil {
-			return
-		}
+		rc.HandleFrame(ctx, msg)
 	}
 }
 
@@ -122,24 +134,31 @@ func (s *Server) remoteCacheNamespaceFor(orgID string) string {
 }
 
 // relayRemoteCacheWS upgrades a follower-side /v1/engine request and relays
-// frames to the leader's internal control listener (ADR-055).
+// frames to the leader's internal control listener (ADR-055). The leader is
+// dialed by its internal service hostname (not the advertise IP) so the
+// minting-CA leaf's SAN matches; the caller's Authorization is forwarded and
+// the leader resolves the org from that token.
 func (s *Server) relayRemoteCacheWS(ctx context.Context, c *app.RequestContext) {
 	if s.wsDialer == nil || s.leaderInfo == nil || s.internalControlPort <= 0 {
 		writeError(c, consts.StatusServiceUnavailable, "no raft leader available")
 		return
 	}
-	leader := s.leaderInfo.LeaderAddress()
-	host, _, err := net.SplitHostPort(leader)
-	if err != nil {
-		host = leader
+	host := hostOnly(s.cfg.InternalControlURL)
+	if host == "" {
+		leader := s.leaderInfo.LeaderAddress()
+		host, _, _ = net.SplitHostPort(leader)
+		if host == "" {
+			host = leader
+		}
+	}
+	if host == "" {
+		writeError(c, consts.StatusServiceUnavailable, "internal control host unknown")
+		return
 	}
 	target := fmt.Sprintf("wss://%s/v1/engine", net.JoinHostPort(host, fmt.Sprintf("%d", s.internalControlPort)))
 	headers := map[string][]string{}
 	if auth := string(c.Request.Header.Peek("Authorization")); auth != "" {
 		headers["Authorization"] = []string{auth}
-	}
-	if org := string(c.Request.Header.Peek(orgHeaderName)); org != "" {
-		headers[orgHeaderName] = []string{org}
 	}
 	upstream, err := s.wsDialer.Dial(ctx, target, host, headers)
 	if err != nil {

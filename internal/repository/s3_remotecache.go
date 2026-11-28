@@ -103,6 +103,20 @@ func (s *S3RemoteCacheStore) GetBundle(ctx context.Context, namespace, digest st
 	return data, nil
 }
 
+// GetBundleByKey reads a bundle by its stored object key.
+func (s *S3RemoteCacheStore) GetBundleByKey(ctx context.Context, key string) ([]byte, error) {
+	obj, err := s.client.GetObject(ctx, s.bucket, key, minio.GetObjectOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("get remote cache bundle: %w", err)
+	}
+	defer func() { _ = obj.Close() }()
+	data, err := io.ReadAll(obj)
+	if err != nil {
+		return nil, fmt.Errorf("read remote cache bundle: %w", err)
+	}
+	return data, nil
+}
+
 // PresignPut returns a presigned PUT URL for a blob.
 func (s *S3RemoteCacheStore) PresignPut(ctx context.Context, namespace, digest string) (string, error) {
 	u, err := s.signer.PresignedPutObject(ctx, s.bucket, s.blobKey(namespace, digest), s.presignTTL)

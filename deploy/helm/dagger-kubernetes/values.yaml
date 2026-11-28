@@ -273,6 +273,16 @@ supervisor:
 ##   provider create it before enabling the backend:
 ##     kubectl -n <namespace> create secret generic engine-s3-auth \
 ##       --from-literal=accessKey=... --from-literal=secretKey=...
+## @param supervisor.config.cache.remote.enabled Enable the read-through remote cache. Served to engines >= v1.0.0-beta.28 only (earlier releases never dial /v1/engine and never get remoteCache in engine.json).
+## @param supervisor.config.cache.remote.bucket Remote-cache S3 bucket (empty = cache.s3.bucket).
+## @param supervisor.config.cache.remote.prefix Object prefix under orgs/<orgID>/.
+## @param supervisor.config.cache.remote.s3EngineEndpoint Endpoint used to sign presigned URLs for engines; must equal the S3 host engines dial in-cluster.
+## @param supervisor.config.cache.remote.indexPath Rebuildable bbolt lookup index path.
+## @param supervisor.config.cache.remote.ttl Cache entry TTL.
+## @param supervisor.config.cache.remote.maxBytes Global cache byte ceiling (per-org quotas may be lower).
+## @param supervisor.config.cache.remote.workers Bounded concurrent export->upload chains.
+## @param supervisor.config.cache.remote.packMaxMemberBytes Largest blob packed into a dagger-pack v1 object.
+## @param supervisor.config.cache.remote.gcInterval GC + S3 index checkpoint cadence.
     cache:
       s3:
         bucket: ""
@@ -335,8 +345,8 @@ supervisor:
 ##   NOT an imagePullSecret: the supervisor never attaches it to the engine
 ##   StatefulSet's `imagePullSecrets`; it is provided as a Docker config file
 ##   for the engine's own registry authentication.
-## @param supervisor.config.fleet.engineDebug Enable engine.toml [debug].
-## @param supervisor.config.fleet.engineLogFormat Engine log format (json, text; empty omits).
+## @param supervisor.config.fleet.engineDebug Enable engine.json logLevel=debug (verbose engine logging).
+## @param supervisor.config.fleet.engineLogFormat Supervisor-only; the engine hardcodes its text log formatter, so this is NOT rendered into engine.json.
 ## @param supervisor.config.fleet.engineRegistryMirrors [object] Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). When imageCache.enabled, the generated in-cluster mirror addresses are merged into this map.
     fleet:
       maxReplicasPerVersion: 3
@@ -380,7 +390,7 @@ supervisor:
       engineDockerConfig: ""
       engineDebug: false
       engineLogFormat: "json"
-      # engineRegistryMirrors: engine.toml registry mirrors (quote registry
+      # engineRegistryMirrors: engine.json registry mirrors (quote registry
       # names containing dots, or YAML nests them; the supervisor preserves
       # dotted keys such as "docker.io", "ghcr.io", "public.ecr.aws" verbatim).
       # When imageCache.enabled, the generated in-cluster mirror addresses are
@@ -555,7 +565,7 @@ supervisor:
 ## A Zot OCI registry per upstream, acting as an on-demand pull-through cache.
 ## When enabled, the chart renders one Deployment + `<name>-zot-config`
 ## ConfigMap + Service per enabled preset / custom registry and merges the
-## generated mirror addresses into the engine's `engine.toml` registry mirrors
+## generated mirror addresses into the engine's `engine.json` registry mirrors
 ## (with `http = true` when the mirrors are plaintext HTTP, the default; with
 ## `imageCache.tls.enabled` the mirrors serve HTTPS and are dialed accordingly).
 ## When the `registry.dagger.io` preset is enabled and the mirrors serve TLS,

@@ -91,29 +91,6 @@ func TestEnforceCacheWriteQuotaUnlimited(t *testing.T) {
 	}
 }
 
-func TestCacheWelcomeUsesOrgHardLimit(t *testing.T) {
-	const orgID = "org-aaaaaaaaaaaaaaaa"
-	svc, _ := newCacheIndexService(t, orgID, 100, 1<<30)
-
-	raw, err := domain.NewRemoteCacheEnvelope(domain.RCTypeHello, domain.Hello{})
-	if err != nil {
-		t.Fatalf("marshal hello: %v", err)
-	}
-	resp, err := svc.Handle(context.Background(), orgID, false, raw)
-	if err != nil {
-		t.Fatalf("handle hello: %v", err)
-	}
-	var welcome domain.Welcome
-	if typ, err := domain.DecodeRemoteCacheEnvelope(resp, &welcome); err != nil {
-		t.Fatalf("decode welcome: %v", err)
-	} else if typ != domain.RCTypeWelcome {
-		t.Fatalf("type = %q, want welcome", typ)
-	}
-	if welcome.MaxBytes != 100 {
-		t.Fatalf("welcome MaxBytes = %d, want 100 (org hard limit)", welcome.MaxBytes)
-	}
-}
-
 func TestEnforceCacheWriteQuotaSoftExceededAdmits(t *testing.T) {
 	const orgID = "org-aaaaaaaaaaaaaaaa"
 	orgRepo := newFakeOrgRepo()

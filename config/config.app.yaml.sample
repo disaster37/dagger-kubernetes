@@ -266,10 +266,13 @@ telemetry:
 cache:
   # Read-through remote cache (GET /v1/engine, ADR-055).
   remote:
-    enabled: false
+    enabled: false                        # Read-through cache. Served to engines >= v1.0.0-beta.28 only:
+                                          # remoteCache.url is rendered into /etc/dagger/engine.json only for those
+                                          # tags (0.19/0.20/0.21 and earlier 1.0 betas never dial /v1/engine).
     bucket: ""                            # empty = cache.s3.bucket
     prefix: "remote-cache"
-    s3_engine_endpoint: ""                # endpoint used to sign presigned URLs handed to engine pods
+    s3_engine_endpoint: ""                # endpoint used to sign presigned URLs handed to engine pods; MUST match the
+                                          # S3 host engines dial in-cluster, otherwise engine PUT/GET fails while the service looks healthy.
     index_path: "/var/cache/dagger-kubernetes/remotecache.db"
     ttl: "720h"
     max_bytes: 107374182400               # 100 GiB
@@ -362,10 +365,10 @@ fleet:
     #   key: "https_proxy"
   engine_ca_secret: ""                            # K8s Secret with a custom CA PEM bundle for engine pods; mounted at /usr/local/share/ca-certificates. Dagger auto-detects CAs from this directory on startup. Empty = disabled.
   engine_ca_secret_key: "ca.crt"                  # key inside engine_ca_secret holding the PEM bundle.
-  engine_debug: false                             # engine.toml: debug = true (verbose engine logging).
-  engine_log_format: "json"                       # engine.toml: [log] format; "" omits the section.
-  engine_registry_mirrors: {}                     # engine.toml registry mirrors, e.g. {"docker.io": ["mirror.gcr.io"]}.
-  engine_registry_mirrors_http: []                # mirror host[:port] values dialed over plaintext HTTP; engine.toml emits [registry."<mirror>"] + http = true per entry (the Helm chart fills it with the local image-cache mirrors).
+  engine_debug: false                             # engine.json: logLevel = "debug" (verbose engine logging).
+  engine_log_format: "json"                       # SUPERVISOR-ONLY: the engine hardcodes its text log formatter, so this is NOT rendered into engine.json.
+  engine_registry_mirrors: {}                     # engine.json registries mirrors, e.g. {"docker.io": ["mirror.gcr.io"]}.
+  engine_registry_mirrors_http: []                # mirror host[:port] values dialed over plaintext HTTP; engine.json emits registries["<mirror>"].http = true per entry (the Helm chart fills it with the local image-cache mirrors).
 
 # --- Certificate authority (client mTLS) -------------------------------------
 ca:

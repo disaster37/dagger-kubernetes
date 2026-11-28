@@ -3,8 +3,11 @@ package service
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -16,8 +19,25 @@ import (
 	"github.com/disaster/dagger-kubernetes/internal/repository"
 )
 
-// RemoteCacheService implements the read-through remote cache protocol
-// (ADR-055). It is stateless apart from the local bbolt index and S3 store.
+// CacheRootRef is one engine cache entry the service learned from telemetry: a
+// result number, the recipe digest a later lookup names, and the engine cache
+// identity that owns the number.
+type CacheRootRef struct {
+	CacheID string
+	Number  uint64
+	Recipe  string
+}
+
+// maxCacheRootsPerEngine bounds the telemetry-derived root list kept per engine
+// cache identity, so a long-lived engine cannot grow it without limit.
+const maxCacheRootsPerEngine = 20000
+
+// exportRootsPerRequest bounds the roots asked for in one export.
+const exportRootsPerRequest = 64
+
+// RemoteCacheService implements the read-through remote cache service
+// (ADR-055). It is stateless apart from the local bbolt index, the S3 store and
+// the in-memory telemetry-derived root list.
 type RemoteCacheService struct {
 	index              *repository.BboltCacheIndex
 	store              *repository.S3RemoteCacheStore
@@ -30,8 +50,15 @@ type RemoteCacheService struct {
 	exportSem          *semaphore.Weighted
 	quota              *QuotaService // nil = per-org cache_bytes quota not enforced
 
-	mu       sync.Mutex
-	inflight map[string]time.Time
+	rootsMu sync.Mutex
+	roots   map[string]*cacheRootSet
+}
+
+// cacheRootSet is the root list learned for one engine cache identity, in
+// arrival order, deduplicated by result number.
+type cacheRootSet struct {
+	order []CacheRootRef
+	seen  map[uint64]string
 }
 
 // NewRemoteCacheService returns a RemoteCacheService.
@@ -49,7 +76,7 @@ func NewRemoteCacheService(index *repository.BboltCacheIndex, store *repository.
 		index: index, store: store, ttl: ttl, maxBytes: maxBytes,
 		packMaxMemberBytes: packMaxMemberBytes, gcInterval: gcInterval,
 		exportSem: semaphore.NewWeighted(int64(workers)), metrics: metrics, logger: logger,
-		inflight: make(map[string]time.Time),
+		roots: make(map[string]*cacheRootSet),
 	}
 }
 
@@ -59,6 +86,96 @@ func NewRemoteCacheService(index *repository.BboltCacheIndex, store *repository.
 func (s *RemoteCacheService) WithCacheQuota(q *QuotaService) *RemoteCacheService {
 	s.quota = q
 	return s
+}
+
+// NewConn returns a per-connection protocol state machine.
+func (s *RemoteCacheService) NewConn(namespace string, readOnly bool, send func([]byte) error) *RemoteCacheConn {
+	return newRemoteCacheConn(s, namespace, readOnly, send)
+}
+
+// RecordCacheRoots records the engine cache entries observed in telemetry. The
+// service exports these roots after a settle, which is how values reach the
+// cache without the engine sending them unprompted.
+func (s *RemoteCacheService) RecordCacheRoots(refs []CacheRootRef) {
+	if len(refs) == 0 {
+		return
+	}
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	for _, ref := range refs {
+		if ref.CacheID == "" || ref.Number == 0 || ref.Recipe == "" {
+			continue
+		}
+		set := s.roots[ref.CacheID]
+		if set == nil {
+			set = &cacheRootSet{seen: make(map[uint64]string)}
+			s.roots[ref.CacheID] = set
+		}
+		if recipe, ok := set.seen[ref.Number]; ok {
+			if recipe == ref.Recipe {
+				continue
+			}
+			// The number now names another recipe: replace the stale entry.
+			set.seen[ref.Number] = ref.Recipe
+			for i := range set.order {
+				if set.order[i].Number == ref.Number {
+					set.order[i].Recipe = ref.Recipe
+					break
+				}
+			}
+			continue
+		}
+		if len(set.order) >= maxCacheRootsPerEngine {
+			continue
+		}
+		set.seen[ref.Number] = ref.Recipe
+		set.order = append(set.order, ref)
+	}
+}
+
+// cacheRoots returns the roots learned for cacheID, in arrival order.
+func (s *RemoteCacheService) cacheRoots(cacheID string) []CacheRootRef {
+	if cacheID == "" {
+		return nil
+	}
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	set := s.roots[cacheID]
+	if set == nil {
+		return nil
+	}
+	out := make([]CacheRootRef, len(set.order))
+	copy(out, set.order)
+	return out
+}
+
+// forgetCacheRoots drops the exported roots from the cacheID's list.
+func (s *RemoteCacheService) forgetCacheRoots(cacheID string, numbers []uint64) {
+	if cacheID == "" || len(numbers) == 0 {
+		return
+	}
+	drop := make(map[uint64]bool, len(numbers))
+	for _, n := range numbers {
+		drop[n] = true
+	}
+	s.rootsMu.Lock()
+	defer s.rootsMu.Unlock()
+	set := s.roots[cacheID]
+	if set == nil {
+		return
+	}
+	kept := set.order[:0]
+	for _, ref := range set.order {
+		if drop[ref.Number] {
+			delete(set.seen, ref.Number)
+			continue
+		}
+		kept = append(kept, ref)
+	}
+	set.order = kept
+	if len(set.order) == 0 {
+		delete(s.roots, cacheID)
+	}
 }
 
 // cacheQuota resolves the effective soft/hard cache_bytes threshold for a
@@ -84,219 +201,228 @@ func (s *RemoteCacheService) cacheBytes(namespace string) (int64, error) {
 	return size, err
 }
 
-// Handle processes one protocol message and returns the response envelope.
-//
-//nolint:gocyclo // protocol message dispatch
-func (s *RemoteCacheService) Handle(ctx context.Context, namespace string, readOnly bool, raw []byte) ([]byte, error) {
-	var env domain.RemoteCacheEnvelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return s.errorEnvelope("invalid envelope")
+// storeBundle stores one opaque dagql ValueBundle and indexes it under its own
+// content digest plus each recipe digest that led to it.
+func (s *RemoteCacheService) storeBundle(ctx context.Context, namespace string, recipes []string, bundle []byte) (*repository.CacheIndexEntry, error) {
+	if err := s.enforceCacheWriteQuota(ctx, namespace, int64(len(bundle))); err != nil {
+		return nil, err
 	}
-	switch env.Type {
-	case domain.RCTypeHello:
-		var hello domain.Hello
-		_ = json.Unmarshal(env.Data, &hello)
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeWelcome, domain.Welcome{Namespace: namespace, MaxBytes: s.cacheQuota(ctx, namespace).Hard})
-	case domain.RCTypeOpen:
-		var open domain.Open
-		_ = json.Unmarshal(env.Data, &open)
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeOpened, domain.Opened{SessionID: open.SessionID})
-	case domain.RCTypeClaims:
-		var claims domain.Claims
-		_ = json.Unmarshal(env.Data, &claims)
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeClaimed, domain.Claimed{SessionID: claims.SessionID})
-	case domain.RCTypeSettle:
-		var settle domain.Settle
-		_ = json.Unmarshal(env.Data, &settle)
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeSettled, domain.Settled{Root: settle.Root})
-	case domain.RCTypeExport:
-		var export domain.Export
-		if err := json.Unmarshal(env.Data, &export); err != nil {
-			return s.errorEnvelope("invalid export payload")
-		}
-		if readOnly {
-			return domain.NewRemoteCacheEnvelope(domain.RCTypeExported, domain.Exported{Root: export.Root})
-		}
-		return s.handleExport(ctx, namespace, &export)
-	case domain.RCTypeUpload:
-		var upload domain.Upload
-		_ = json.Unmarshal(env.Data, &upload)
-		if readOnly {
-			return domain.NewRemoteCacheEnvelope(domain.RCTypeUploaded, domain.Uploaded{URLs: map[string]string{}})
-		}
-		return s.handleUpload(ctx, namespace, &upload)
-	case domain.RCTypeLookup:
-		var lookup domain.Lookup
-		_ = json.Unmarshal(env.Data, &lookup)
-		return s.handleLookup(namespace, &lookup)
-	case domain.RCTypeMerge:
-		var merge domain.Merge
-		_ = json.Unmarshal(env.Data, &merge)
-		return s.handleGet(ctx, namespace, merge.Digests, domain.RCTypeMerged)
-	case domain.RCTypeOffer:
-		var offer domain.Offer
-		_ = json.Unmarshal(env.Data, &offer)
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeOffered, domain.Offered{Root: offer.Root})
-	case domain.RCTypeRenew:
-		var renew domain.Renew
-		_ = json.Unmarshal(env.Data, &renew)
-		return s.handleGet(ctx, namespace, renew.Digests, domain.RCTypeRenewed)
-	default:
-		return s.errorEnvelope(fmt.Sprintf("unsupported message type %q", env.Type))
-	}
-}
-
-func (s *RemoteCacheService) handleExport(ctx context.Context, namespace string, export *domain.Export) ([]byte, error) {
-	if err := s.exportSem.Acquire(ctx, 1); err != nil {
-		return s.errorEnvelope("export saturated")
-	}
-	defer s.exportSem.Release(1)
-	if err := s.enforceCacheWriteQuota(ctx, namespace, int64(len(export.Bundle))); err != nil {
-		return s.errorEnvelope(err.Error())
-	}
-	key, err := s.store.PutBundle(ctx, namespace, export.Digest, export.Bundle)
+	digest := bundleDigest(bundle)
+	key, err := s.store.PutBundle(ctx, namespace, digest, bundle)
 	if err != nil {
-		return s.errorEnvelope(err.Error())
+		return nil, err
 	}
 	entry := &repository.CacheIndexEntry{
-		Digest: export.Digest, Root: export.Root, BundleKey: key, Size: int64(len(export.Bundle)),
-	}
-	var bundle domain.ValueBundle
-	if err := json.Unmarshal(export.Bundle, &bundle); err == nil {
-		entry.Aliases = bundleAliases(&bundle)
+		Digest: digest, BundleKey: key, Size: int64(len(bundle)),
+		CreatedAt: time.Now().UTC(), LastAccess: time.Now().UTC(),
 	}
 	if err := s.index.Put(namespace, entry); err != nil {
-		return s.errorEnvelope(err.Error())
+		return nil, err
 	}
-	for _, alias := range entry.Aliases {
-		aliasEntry := *entry
-		aliasEntry.Digest = alias
-		_ = s.index.Put(namespace, &aliasEntry)
+	for _, recipe := range recipes {
+		if recipe == "" || recipe == digest {
+			continue
+		}
+		alias := *entry
+		alias.Digest = recipe
+		if err := s.index.Put(namespace, &alias); err != nil {
+			return nil, err
+		}
 	}
 	if s.metrics != nil {
 		s.metrics.RemoteCacheExportedBundles.WithLabelValues(namespace).Inc()
 		s.metrics.RemoteCacheStoredBytes.WithLabelValues(namespace).Set(float64(entry.Size))
 	}
-	return domain.NewRemoteCacheEnvelope(domain.RCTypeExported, domain.Exported{Root: export.Root, Key: key})
+	return entry, nil
 }
 
-func bundleAliases(b *domain.ValueBundle) []string {
-	seen := map[string]bool{b.Digest: true}
-	var out []string
-	add := func(d string) {
-		if d != "" && !seen[d] {
-			seen[d] = true
-			out = append(out, d)
+// bundleDigest returns the content digest of a stored bundle.
+func bundleDigest(bundle []byte) string {
+	sum := sha256.Sum256(bundle)
+	return fmt.Sprintf("sha256:%s", hex.EncodeToString(sum[:]))
+}
+
+// handleUpload presigns a PUT for every layer blob the exported bundle carries.
+// Small blobs are grouped into one dagger-pack v1 object (upstream format), the
+// rest are standalone blobs. Member offsets are recorded so a later renew can
+// hand out a range-addressable pack URL.
+func (s *RemoteCacheService) handleUpload(ctx context.Context, namespace, exportID string, bundle json.RawMessage) (*domain.Upload, error) {
+	layers := bundleLayers(bundle)
+	upload := &domain.Upload{ExportID: exportID, URLs: make(map[string]string, len(layers)), Merged: true}
+	var packMembers []domain.PackMember
+	var packBytes int64
+	addMember := func(layer domain.PackMember) bool {
+		if len(packMembers) >= domain.MaxPackMembers || packBytes+layer.Size > domain.MaxPackBytes {
+			return false
+		}
+		packMembers = append(packMembers, layer)
+		packBytes += layer.Size
+		return true
+	}
+	var standalone []domain.PackMember
+	for _, layer := range layers {
+		if layer.Size > 0 && layer.Size <= s.packMaxMemberBytes && addMember(layer) {
+			continue
+		}
+		standalone = append(standalone, layer)
+	}
+	for _, blob := range standalone {
+		url, err := s.store.PresignPut(ctx, namespace, blob.Digest)
+		if err != nil {
+			return nil, err
+		}
+		upload.URLs[blob.Digest] = url
+	}
+	if len(packMembers) > 0 {
+		packUpload, err := s.storePresignPack(ctx, namespace, packMembers)
+		if err != nil {
+			return nil, err
+		}
+		upload.Packs = append(upload.Packs, *packUpload)
+	}
+	s.logger.WithFields(logrus.Fields{"namespace": namespace, "layers": len(layers), "blobs": len(upload.URLs), "packs": len(upload.Packs)}).Debug("remote cache: upload prepared")
+	return upload, nil
+}
+
+// storePresignPack presigns one pack PUT and records its member offsets in the
+// index so renew can serve the exact slice inside the pack.
+func (s *RemoteCacheService) storePresignPack(ctx context.Context, namespace string, members []domain.PackMember) (*domain.UploadPack, error) {
+	id, err := domain.BuildPackID(members)
+	if err != nil {
+		return nil, err
+	}
+	url, err := s.store.PresignPackPut(ctx, namespace, id.Digest)
+	if err != nil {
+		return nil, err
+	}
+	packKey := s.store.PackKey(namespace, id.Digest)
+	headerLen := domain.PackHeaderLen(members)
+	offset := headerLen
+	wire := make([]domain.RCPackMember, 0, len(members))
+	for _, member := range members {
+		wire = append(wire, domain.RCPackMember{Digest: member.Digest, Size: member.Size})
+		if err := s.index.Put(namespace, &repository.CacheIndexEntry{
+			Digest: member.Digest, PackDigest: id.Digest, PackKey: packKey,
+			PackOffset: offset, Size: member.Size,
+		}); err != nil {
+			return nil, err
+		}
+		offset += member.Size
+	}
+	return &domain.UploadPack{Pack: id.Digest, URL: url, Members: wire}, nil
+}
+
+// bundleLayers returns the unique sha256 layer blobs a dagql bundle names,
+// whether it lists them once (ShareChainLayers) or carries each chain's own
+// copy.
+func bundleLayers(bundle json.RawMessage) []domain.PackMember {
+	if len(bundle) == 0 {
+		return nil
+	}
+	type wireBundle struct {
+		Layers  []wireLayer  `json:"layers"`
+		Outputs []wireOutput `json:"outputs"`
+	}
+	var parsed wireBundle
+	if err := json.Unmarshal(bundle, &parsed); err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []domain.PackMember
+	add := func(items []wireLayer) {
+		for _, item := range items {
+			digest := item.Descriptor.Digest
+			if !strings.HasPrefix(digest, "sha256:") || len(digest) != len("sha256:")+64 || seen[digest] {
+				continue
+			}
+			seen[digest] = true
+			out = append(out, domain.PackMember{Digest: digest, Size: item.Descriptor.Size})
 		}
 	}
-	add(b.RecipeDigest)
-	add(b.SelfDigest)
-	for _, d := range b.ExtraDigests {
-		add(d)
-	}
-	for _, d := range b.InputDigests {
-		add(d)
-	}
-	for _, d := range b.Layers {
-		add(d)
+	add(parsed.Layers)
+	for _, output := range parsed.Outputs {
+		if output.Chain != nil {
+			add(output.Chain.Layers)
+		}
 	}
 	return out
 }
 
-func (s *RemoteCacheService) handleUpload(ctx context.Context, namespace string, upload *domain.Upload) ([]byte, error) {
-	if err := s.enforceCacheWriteQuota(ctx, namespace, uploadDelta(upload)); err != nil {
-		return s.errorEnvelope(err.Error())
-	}
-	urls := make(map[string]string, len(upload.Digests))
-	now := time.Now().UTC()
-	s.mu.Lock()
-	for _, digest := range upload.Digests {
-		s.inflight[namespace+"/"+digest] = now
-	}
-	s.mu.Unlock()
-
-	var packMembers []PackMemberSpec
-	var packDigests []string
-	for _, blob := range upload.Blobs {
-		if blob.Size > 0 && blob.Size <= s.packMaxMemberBytes {
-			packMembers = append(packMembers, PackMemberSpec{Digest: blob.Digest, Size: blob.Size})
-			packDigests = append(packDigests, blob.Digest)
-			continue
-		}
-		u, err := s.store.PresignPut(ctx, namespace, blob.Digest)
-		if err != nil {
-			return s.errorEnvelope(err.Error())
-		}
-		urls[blob.Digest] = u
-	}
-	for _, digest := range upload.Digests {
-		if _, ok := urls[digest]; ok {
-			continue
-		}
-		u, err := s.store.PresignPut(ctx, namespace, digest)
-		if err != nil {
-			return s.errorEnvelope(err.Error())
-		}
-		urls[digest] = u
-	}
-	for _, manifest := range upload.Packs {
-		packKey := s.store.PackKey(namespace, manifest.ID.Digest)
-		for _, member := range manifest.Members {
-			_ = s.index.Put(namespace, &repository.CacheIndexEntry{
-				Digest: member.Digest, PackDigest: manifest.ID.Digest, PackKey: packKey,
-				PackOffset: member.Offset, Size: member.Size,
-			})
-		}
-	}
-	var packs []domain.UploadPack
-	if len(packMembers) > 0 {
-		id := domain.BuildPackID(packDigests)
-		u, err := s.store.PresignPackPut(ctx, namespace, id.Digest)
-		if err != nil {
-			return s.errorEnvelope(err.Error())
-		}
-		packKey := s.store.PackKey(namespace, id.Digest)
-		headerLen := PackHeaderLen(id, packMembers)
-		members := make([]domain.PackMember, 0, len(packMembers))
-		var rel int64
-		for _, m := range packMembers {
-			abs := headerLen + rel
-			members = append(members, domain.PackMember{Digest: m.Digest, Offset: abs, Size: m.Size})
-			// Pre-record the member descriptor so a later Merge/Renew can serve
-			// the exact member slice via a signed HTTP Range (206) URL.
-			_ = s.index.Put(namespace, &repository.CacheIndexEntry{
-				Digest: m.Digest, PackDigest: id.Digest, PackKey: packKey,
-				PackOffset: abs, Size: m.Size,
-			})
-			rel += m.Size
-		}
-		packs = append(packs, domain.UploadPack{PackID: id, URL: u, Members: members})
-	}
-	return domain.NewRemoteCacheEnvelope(domain.RCTypeUploaded, domain.Uploaded{URLs: urls, Packs: packs})
+// wireLayer is one layer descriptor a dagql bundle names.
+type wireLayer struct {
+	Descriptor struct {
+		Digest string `json:"digest"`
+		Size   int64  `json:"size"`
+	} `json:"descriptor"`
 }
 
-// uploadDelta estimates the bytes a cache upload will add to the namespace. It
-// sums the declared blob sizes and pack totals only; opaque digests without a
-// declared size are not counted, and a digest that only appears in
-// upload.Digests contributes nothing. The result is a deliberately cheap
-// estimate that can under-count an upload, unlike the single-bundle Export path
-// which is enforced on the exact bundle length.
-func uploadDelta(upload *domain.Upload) int64 {
-	var delta int64
-	for _, b := range upload.Blobs {
-		delta += b.Size
+// wireOutput is the subset of a dagql bundle output the service reads.
+type wireOutput struct {
+	Chain *struct {
+		Layers []wireLayer `json:"layers"`
+	} `json:"chain"`
+}
+
+// handleRenew returns a fresh presigned GET for the blob the engine needs. A
+// blob stored inside a pack gets the pack object's presigned GET: the engine
+// already knows the member offset and ranges inside it.
+func (s *RemoteCacheService) handleRenew(ctx context.Context, namespace string, renew *domain.Renew) (*domain.Renewed, error) {
+	renewed := &domain.Renewed{}
+	if renew.NeededBlob == "" {
+		renewed.Unavailable = true
+		return renewed, nil
 	}
-	for _, p := range upload.Packs {
-		delta += p.Total
+	var url string
+	var err error
+	if entry, ok, getErr := s.index.Get(namespace, renew.NeededBlob); getErr == nil && ok && entry.PackKey != "" {
+		url, _, err = s.store.PresignGetRange(ctx, entry.PackKey, entry.PackOffset, entry.Size)
+	} else {
+		url, err = s.store.PresignGet(ctx, namespace, renew.NeededBlob)
 	}
-	return delta
+	if err != nil {
+		return nil, err
+	}
+	renewed.Addresses = map[string]domain.RCBlobAddress{
+		renew.NeededBlob: {URL: url, ExpiresAtUnix: time.Now().Add(s.ttl).Unix()},
+	}
+	return renewed, nil
+}
+
+// lookupBundle resolves one lookup miss to a stored bundle. It returns the
+// index entry and the bundle bytes, or ok=false when nothing matches.
+func (s *RemoteCacheService) lookupBundle(ctx context.Context, namespace string, miss *domain.LookupMiss) ([]byte, bool) {
+	candidates := make([]string, 0, 2+len(miss.Extra)+len(miss.Inputs))
+	candidates = append(candidates, miss.Recipe, miss.Self)
+	candidates = append(candidates, miss.Extra...)
+	candidates = append(candidates, miss.Inputs...)
+	for _, digest := range candidates {
+		if digest == "" {
+			continue
+		}
+		entry, ok, err := s.index.Get(namespace, digest)
+		if err != nil || !ok || entry.BundleKey == "" {
+			continue
+		}
+		bundle, err := s.store.GetBundleByKey(ctx, entry.BundleKey)
+		if err != nil {
+			continue
+		}
+		_ = s.index.Touch(namespace, digest, time.Now().UTC())
+		if s.metrics != nil {
+			s.metrics.RemoteCacheLookupHits.WithLabelValues(namespace).Inc()
+		}
+		return bundle, true
+	}
+	if s.metrics != nil {
+		s.metrics.RemoteCacheLookupMisses.WithLabelValues(namespace).Inc()
+	}
+	return nil, false
 }
 
 // enforceCacheWriteQuota blocks a cache write that would push the namespace
 // past its cache_bytes hard cap, after one synchronous GC to make room. Reads
-// (Lookup/Merge/Renew) are never blocked. Soft-limit breaches admit the write
-// and increment the org-quota soft-exceeded metric; a hard breach that survives
-// GC is rejected with the standard quota error envelope.
+// are never blocked. Soft-limit breaches admit the write and increment the
+// org-quota soft-exceeded metric; a hard breach that survives GC is rejected.
 func (s *RemoteCacheService) enforceCacheWriteQuota(ctx context.Context, namespace string, delta int64) error {
 	th := s.cacheQuota(ctx, namespace)
 	if th.Hard <= 0 {
@@ -326,72 +452,6 @@ func (s *RemoteCacheService) enforceCacheWriteQuota(ctx context.Context, namespa
 	return nil
 }
 
-func (s *RemoteCacheService) handleLookup(namespace string, lookup *domain.Lookup) ([]byte, error) {
-	status := make(map[string]string, len(lookup.Digests))
-	now := time.Now().UTC()
-	for _, digest := range lookup.Digests {
-		if _, ok, err := s.index.Get(namespace, digest); err == nil && ok {
-			status[digest] = "stored"
-			_ = s.index.Touch(namespace, digest, now)
-			if s.metrics != nil {
-				s.metrics.RemoteCacheLookupHits.WithLabelValues(namespace).Inc()
-			}
-			continue
-		}
-		s.mu.Lock()
-		_, merging := s.inflight[namespace+"/"+digest]
-		s.mu.Unlock()
-		if merging {
-			status[digest] = "merging"
-			continue
-		}
-		status[digest] = "notStored"
-		if s.metrics != nil {
-			s.metrics.RemoteCacheLookupMisses.WithLabelValues(namespace).Inc()
-		}
-	}
-	return domain.NewRemoteCacheEnvelope(domain.RCTypeLookedUp, domain.LookedUp{Status: status})
-}
-
-func (s *RemoteCacheService) handleGet(ctx context.Context, namespace string, digests []string, responseType string) ([]byte, error) {
-	urls := make(map[string]string, len(digests))
-	locations := make(map[string]domain.BlobLocation, len(digests))
-	bundleURLs := make(map[string]string, len(digests))
-	for _, digest := range digests {
-		entry, ok, err := s.index.Get(namespace, digest)
-		if err != nil || !ok {
-			continue
-		}
-		if entry.PackKey != "" && entry.Size > 0 {
-			u, rangeHdr, err := s.store.PresignGetRange(ctx, entry.PackKey, entry.PackOffset, entry.Size)
-			if err != nil {
-				return s.errorEnvelope(err.Error())
-			}
-			urls[digest] = u
-			locations[digest] = domain.BlobLocation{
-				URL: u, PackDigest: entry.PackDigest, Offset: entry.PackOffset, Size: entry.Size,
-				Headers: map[string]string{"Range": rangeHdr},
-			}
-		} else {
-			u, err := s.store.PresignGet(ctx, namespace, digest)
-			if err != nil {
-				return s.errorEnvelope(err.Error())
-			}
-			urls[digest] = u
-			locations[digest] = domain.BlobLocation{URL: u, Size: entry.Size}
-		}
-		if entry.BundleKey != "" {
-			if u, err := s.store.PresignBundleGet(ctx, namespace, digest); err == nil {
-				bundleURLs[digest] = u
-			}
-		}
-	}
-	if responseType == domain.RCTypeRenewed {
-		return domain.NewRemoteCacheEnvelope(domain.RCTypeRenewed, domain.Renewed{URLs: urls, Locations: locations, BundleURLs: bundleURLs})
-	}
-	return domain.NewRemoteCacheEnvelope(domain.RCTypeMerged, domain.Merged{URLs: urls, Locations: locations, BundleURLs: bundleURLs})
-}
-
 // IngestCacheEvents touches referenced digests and increments cache metrics.
 func (s *RemoteCacheService) IngestCacheEvents(ctx context.Context, namespace string, events []CacheEvent) {
 	now := time.Now().UTC()
@@ -405,10 +465,6 @@ func (s *RemoteCacheService) IngestCacheEvents(ctx context.Context, namespace st
 			s.metrics.RemoteCacheLookupHits.WithLabelValues(namespace).Inc()
 		}
 	}
-}
-
-func (s *RemoteCacheService) errorEnvelope(msg string) ([]byte, error) {
-	return domain.NewRemoteCacheEnvelope(domain.RCTypeError, domain.RemoteCacheError{Message: msg})
 }
 
 // Stats returns index statistics for a namespace.
@@ -434,6 +490,9 @@ func (s *RemoteCacheService) GC(ctx context.Context, namespace string) error {
 	}
 	for i := range evicted {
 		e := &evicted[i]
+		if e.BundleKey == "" {
+			continue
+		}
 		if err := s.store.DeleteBundle(ctx, namespace, e.Digest); err != nil {
 			s.logger.WithError(err).WithField("digest", e.Digest).Warn("remote cache bundle delete failed")
 		}

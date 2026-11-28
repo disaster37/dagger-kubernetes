@@ -476,10 +476,10 @@ inline comments. The sections below summarise the most important ones.
 |                 | `engine_extra_env_from`                   | `{}`                                                     | Env vars from Secret keys (proxy credentials).                                                                                                |
 |                 | `engine_ca_secret`                        | `""`                                                     | Secret with custom CA PEM bundle; empty = off.                                                                                                |
 |                 | `engine_ca_secret_key`                    | `ca.crt`                                                 | Key inside `engine_ca_secret`.                                                                                                                |
-|                 | `engine_debug`                            | `false`                                                  | `engine.toml: debug = true`.                                                                                                                  |
-|                 | `engine_log_format`                       | `json`                                                   | `engine.toml: [log] format`; `""` omits.                                                                                                      |
-|                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.toml` registry mirrors.                                                                                                               |
-|                 | `engine_registry_mirrors_http`            | `[]` (chart: generated plaintext mirror hosts)           | `engine.toml`: emit `[registry."<mirror>"]` + `http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors and omits TLS mirrors, which BuildKit dials over HTTPS). |
+|                 | `engine_debug`                            | `false`                                                  | `engine.json`: `logLevel: "debug"`.                                                                                                            |
+|                 | `engine_log_format`                       | `json`                                                   | **Supervisor-only**; the engine hardcodes its text formatter, so this is not rendered into `engine.json`.                                       |
+|                 | `engine_registry_mirrors`                 | `{}`                                                     | `engine.json` registry mirrors (`registries[host].mirrors`).                                                                                  |
+|                 | `engine_registry_mirrors_http`            | `[]` (chart: generated plaintext mirror hosts)           | `engine.json`: `registries[host].http = true` per entry (plaintext HTTP mirrors; the chart populates it from the image-cache mirrors and omits TLS mirrors, which BuildKit dials over HTTPS). |
 | `ca`            | `minting_ca_secret`                       | `supervisor-minting-ca`                                  | K8s Secret for the minting CA (holds the CA private key). **Auto-bootstrapped** on first boot; set `supervisor.dataplane.tls.caCrt`/`caKey` (Helm) to bring an existing CA. |
 |                 | `minting_ca_configmap`                    | `supervisor-minting-ca-bundle`                           | K8s ConfigMap the leader keeps in sync with the public minting CA trust bundle (key `ca.crt`, certificates only — never the private key) for Gateway API `BackendTLSPolicy`; tracks phased rotation (dual-trust during the overlap). `""` disables publishing. |
 |                 | `client_cert_ttl`                         | `2h`                                                     | TTL of minted client certs.                                                                                                                   |
@@ -653,7 +653,7 @@ can be added to those PVCs via `fleet.engine_pvc_labels` (map, e.g.
 ### Enterprise engine environment
 
 The supervisor can inject proxy settings, a custom CA bundle, and a generated
-Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
+Dagger `engine.json` into every engine pod, driven by `fleet.*` config:
 
 - **Proxy env vars** (`fleet.engine_extra_env`, `map[string]string`) —
   injected as literal env vars on the engine container, sorted by name for
@@ -683,29 +683,44 @@ Dagger `engine.toml` into every engine pod, driven by `fleet.*` config:
   NOT `Optional`: a missing Secret/key fails the pod loudly rather than
   running with a dangling `SSL_CERT_FILE`. Empty `engine_ca_secret`
   disables CA injection entirely (pre-change behavior).
-- **Generated `engine.toml`** (`fleet.engine_debug`,
-  `fleet.engine_log_format`, `fleet.engine_registry_mirrors`,
-  `fleet.engine_registry_mirrors_http`) — the
-  supervisor renders a legacy BuildKit-style `engine.toml` and stores it in
-  a fleet-wide ConfigMap `dagger-engine-config` (key `engine.toml`), which
-  it ensures on every `EnsureStatefulSet` (i.e. on every acquire). The
-  `engine_registry_mirrors_http` entries add `[registry."<mirror>"]` +
-  `http = true` sections for plaintext mirrors (the chart populates it from
-  the local image-cache mirrors). The ConfigMap key is **projected**,
-  together with the `engine-image-auth` Secret, into one engine-config volume
-  mounted at `/etc/dagger`, so the file lands at `/etc/dagger/engine.toml`
-  and the Secret entry at `/etc/dagger/.dockerconfigjson` — the Dagger engine
-  (v0.19+) reads its hard-coded default config path automatically, with no
-  extra engine arg or env var. (A file `subPath` mount nested under the
-  Secret's directory mount is rejected by runc with `... not a directory`;
-  the projected volume avoids that.) Config edits propagate to new pods on
-  the next acquire; already-running pods keep the old config until restarted
-  or scaled. When the rendered TOML is empty (debug=false, log format `""`,
-  no mirrors), the volume falls back to the Secret-only source and any stale
-  ConfigMap is deleted best-effort — the pod spec reverts to the pre-change
-  shape. By default `engine_log_format: "json"` renders `[log]\n  format =
-  "json"`, so every engine gets the mount by default (intended behavior
-  change).
+- **Generated `engine.json`** (`fleet.engine_debug`,
+  `fleet.engine_registry_mirrors`, `fleet.engine_registry_mirrors_http`) — the
+  supervisor renders the engine's own JSON config (`engine/config.Config`) and
+  stores it in a fleet-wide ConfigMap `dagger-engine-config` (key
+  `engine.json`), ensured on every `EnsureStatefulSet` (i.e. on every acquire).
+  The ConfigMap key is **projected**, together with the `engine-image-auth`
+  Secret, into one engine-config volume mounted at `/etc/dagger`, so the file
+  lands at `/etc/dagger/engine.json` and the Secret entry at
+  `/etc/dagger/.dockerconfigjson`. The Dagger engine reads
+  `/etc/dagger/engine.json` through `config.LoadDefault()`: it is the only
+  config channel that carries `logLevel`, `registries` and `remoteCache`
+  (`engine.toml` is BuildKit-only and was never read for these). (A file
+  `subPath` mount nested under the Secret's directory mount is rejected by runc
+  with `... not a directory`; the projected volume avoids that.)
+
+  **The file is version-gated and fatal on unknown keys.** The engine decodes
+  `engine.json` with `DisallowUnknownFields` and exits on a config error, so
+  the renderer emits only what the target release's `engine/config.Config`
+  declares:
+  - every engine: `logLevel` (`"debug"` when `fleet.engine_debug`, omitted
+    otherwise) and `registries` (mirrors plus `http: true` for plaintext
+    mirror hosts — the chart populates `engine_registry_mirrors_http` from the
+    local image-cache mirrors);
+  - `remoteCache.url` **only for engines `>= v1.0.0-beta.28`**. All 0.x
+    releases (including 0.21.x) and the 1.0 betas before beta.28 have no
+    `RemoteCache` field (or no remote-cache package) and would fail config
+    load on the unknown key. Unparseable/custom tags (`dev`, a git SHA, …)
+    fail closed: no `remoteCache`, so such an engine never dials `/v1/engine`.
+
+  `fleet.engine_log_format` is **supervisor-only**: the engine hardcodes its
+  text log formatter (`logrus.TextFormatter` + slog text handler), so the value
+  is not rendered into `engine.json` and changing it has no effect on engine
+  logs. Config edits propagate to new pods on the next acquire; already-running
+  pods keep the old config until restarted or scaled. When the rendered config
+  is empty (debug=false, no mirrors, no gated remote cache), the volume falls
+  back to the Secret-only source and any stale ConfigMap is deleted best-effort.
+  `engine.json` never carries a token: engine tokens stay in
+  `Secret/dagger-engine-token-<orgID>` and are injected via `SecretKeyRef`.
 
 See [ADR-011](design/ADR-011-engine-env-ca-config-injection.md) for the
 full rationale and alternatives considered.
@@ -831,8 +846,8 @@ OCI registry per upstream registry, acting as an **on-demand pull-through
 cache**, backed by the shared MinIO/S3 store (Helm: `imageCache.enabled`,
 default `false`). Every enabled upstream gets a `Deployment` +
 `<name>-zot-config` ConfigMap + `Service` in the release namespace, and the
-generated mirror addresses are merged into the engine's `engine.toml` so
-pipeline image pulls hit the mirror first. See
+generated mirror addresses are merged into the engine's `engine.json`
+(`registries`) so pipeline image pulls hit the mirror first. See
 [ADR-033](design/ADR-033-local-image-mirror.md).
 
 Zot's `extensions.sync` fetches an upstream image on the first request
@@ -868,7 +883,7 @@ imageCache:
 The mirror address is deterministic —
 `<release>-<slug>-mirror.<namespace>.svc:5000`, with `slug` derived from the
 upstream host (`docker.io` → `docker-io`) — so it lines up 1:1 with the
-`engine.toml` mirror entry. A slug collision between two upstreams fails `helm
+`engine.json` mirror entry. A slug collision between two upstreams fails `helm
 template`. Private-upstream credentials (`imageCache.registries[].username`/
 `passwordSecretRef`) are **not rendered yet**: v1 presets are public, and
 private registries are a documented follow-up (Zot `extensions.sync.
@@ -929,7 +944,7 @@ With TLS enabled the chart:
 
 - renders `image_cache.mirrors[].tls: true`, and
 - **omits** the mirror hosts from `fleet.engine_registry_mirrors_http`, so
-  `engine.toml` no longer emits `http = true` and BuildKit dials the mirrors
+  `engine.json` no longer emits `http: true` and BuildKit dials the mirrors
   over HTTPS instead of plaintext.
 
 **Engine-image routing:** when a mirror's `host` matches the host of
@@ -985,23 +1000,28 @@ storage wipe, or rollout restart — so it is safe to run on a live mirror.
 Deleted manifests are re-fetched from upstream on the next request; blob bytes
 are reclaimed by Zot GC after `gcDelay` as described above.
 
-### `engine.toml` wiring
+### `engine.json` registry wiring
 
 When `imageCache.enabled` the chart merges the generated mirror addresses into
 `fleet.engine_registry_mirrors` (user-provided entries are preserved) and sets
 `fleet.engine_registry_mirrors_http` to the list of plaintext mirror hosts. The
-supervisor renders both; the HTTP list adds the BuildKit-required `http = true`
-sections:
+supervisor renders both as the engine's `registries` map; the HTTP list adds
+`http: true` for the plaintext mirrors:
 
-```toml
-[registry."docker.io"]
-  mirrors = ["my-release-docker-io-mirror.dagger-kubernetes.svc:5000"]
-
-[registry."my-release-docker-io-mirror.dagger-kubernetes.svc:5000"]
-  http = true
+```json
+{
+  "registries": {
+    "docker.io": {
+      "mirrors": ["my-release-docker-io-mirror.dagger-kubernetes.svc:5000"]
+    },
+    "my-release-docker-io-mirror.dagger-kubernetes.svc:5000": {
+      "http": true
+    }
+  }
+}
 ```
 
-`engine.toml` mirrors cover the images pipelines pull (`container from`,
+`engine.json` `registries` mirrors cover the images pipelines pull (`container from`,
 `with-exec`, …). The **engine image** is pulled by the kubelet before the pod
 starts; it is routed through the mirror when an image-cache mirror's host
 matches `fleet.engine_image_registry` — with the `registry.dagger.io` preset
@@ -1159,12 +1179,24 @@ The supervisor implements the Dagger Cloud 1.0-beta protocols (ADR-051–057):
   metrics are scope-aware, so every org's fleet is discovered and reclaimed by
   its actual name.
 - **Remote cache.** `GET /v1/engine` is a read-through cache WebSocket backed
-  by S3 presigned URLs and a rebuildable `bbolt` index. Small blobs are packed
-  into `dagger-pack v1` objects and served as HTTP `206 Partial Content` via
-  presigned `Range` GET URLs (`cache.remote.pack_max_member_bytes`, default
-  4 MiB). Enable with `cache.remote.enabled`; stats/purge live at
+  by S3 presigned URLs and a rebuildable `bbolt` index. It speaks the
+  **v1.0.0-beta.28 bidirectional protocol only** (`{id,re,type,body}` envelopes
+  with camelCase bodies): the service answers engine requests (`hello`,
+  `open`, `settle`, `claims`, `lookup`, `renew`) and sends its own (`export`,
+  `upload`, `merge`). It is enabled only for engines `>= v1.0.0-beta.28`
+  (`remoteCache.url` is rendered into `engine.json` only for those tags — see
+  "Generated `engine.json`" above); 0.21.x and earlier 1.0 betas never dial
+  it. Enable with `cache.remote.enabled` (default `false`); stats/purge live at
   `/api/v1/remote-cache`. `cache.remote.workers` bounds concurrent exports and
   `cache.remote.gc_interval` controls GC + S3 index checkpointing.
+  **Operational caveats:** the presigned URLs are signed for
+  `cache.remote.s3_engine_endpoint`, which must equal the S3 host engines dial
+  in-cluster (a mismatch makes engine PUT/GET fail even though the service
+  looks healthy); the cache key is the engine's telemetry-derived cache entry,
+  so the engine must export OTLP traces/logs to the supervisor; and the
+  protocol is pinned to beta.28, so a future engine bump needs the beta-only
+  gate re-verified against that tag's `engine/remotecache` and
+  `engine/config.Config`.
 - **Cloud Checks.** Configure a forge under
   `/api/v1/orgs/<org>/integrations`, then webhooks at
   `/v1/webhooks/<provider>/<sourceID>` dispatch `batch/v1` check Jobs. The

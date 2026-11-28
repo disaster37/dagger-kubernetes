@@ -738,7 +738,7 @@ next `imageCache.gc.interval`. `imageCache.sync.downloadDir` (default
 is always rendered because Zot requires it when sync is enabled with S3 storage;
 `imageCache.dedupe` defaults to `false` (Zot rejects dedupe with the S3 driver
 unless a remote DB is configured). The generated mirror addresses are merged
-into the engine's `engine.toml` with `http = true` for the plaintext in-cluster
+into the engine's `engine.json` `registries` with `http: true` for the plaintext in-cluster
 mirrors (the default). With `imageCache.tls.enabled: true` the mirrors serve
 HTTPS instead — `http = true` is dropped (BuildKit dials TLS), the kubelet
 needs the mirror CA in its trust store, and when the `registry.dagger.io`
@@ -852,6 +852,16 @@ subchart values.
 | `supervisor.config.cache.s3.useSSL` | bool | `false` | Use HTTPS for the S3 endpoint. |
 | `supervisor.config.cache.s3.accessKey` | string | `""` | S3 access key. Leave empty: the supervisor reads it from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_ACCESS_KEY`. |
 | `supervisor.config.cache.s3.secretKey` | string | `""` | S3 secret key. Leave empty: the supervisor reads it from the `engine-s3-auth` Secret via `DAGGER_KUBERNETES_CACHE_S3_SECRET_KEY`. |
+| `supervisor.config.cache.remote.enabled` | bool | `false` | Enable the read-through remote cache. Served to engines >= v1.0.0-beta.28 only (earlier releases never dial /v1/engine and never get remoteCache in engine.json). |
+| `supervisor.config.cache.remote.bucket` | string | `""` | Remote-cache S3 bucket (empty = cache.s3.bucket). |
+| `supervisor.config.cache.remote.prefix` | string | `"remote-cache"` | Object prefix under orgs/<orgID>/. |
+| `supervisor.config.cache.remote.s3EngineEndpoint` | string | `""` | Endpoint used to sign presigned URLs for engines; must equal the S3 host engines dial in-cluster. |
+| `supervisor.config.cache.remote.indexPath` | string | `"/var/cache/dagger-kubernetes/remotecache.db"` | Rebuildable bbolt lookup index path. |
+| `supervisor.config.cache.remote.ttl` | string | `"720h"` | Cache entry TTL. |
+| `supervisor.config.cache.remote.maxBytes` | int | `107374182400` | Global cache byte ceiling (per-org quotas may be lower). |
+| `supervisor.config.cache.remote.workers` | int | `16` | Bounded concurrent export->upload chains. |
+| `supervisor.config.cache.remote.packMaxMemberBytes` | int | `4194304` | Largest blob packed into a dagger-pack v1 object. |
+| `supervisor.config.cache.remote.gcInterval` | string | `"5m"` | GC + S3 index checkpoint cadence. |
 | `supervisor.config.history.gc.enabled` | bool | `false` | Master switch for the history auto-purge sweeper. |
 | `supervisor.config.history.gc.maxAge` | string | `"720h"` | Purge traces older than this (30d default). Duration strings accept Go units plus `d` (day) and `w` (week), e.g. `7d`, `1w`. |
 | `supervisor.config.history.gc.schedule` | string | `"1h"` | History sweeper ticker interval. |
@@ -878,10 +888,10 @@ subchart values.
 | `supervisor.config.fleet.engineCaSecret` | string | `""` | Secret with custom CA PEM bundle for engines (empty = disabled). |
 | `supervisor.config.fleet.engineCaSecretKey` | string | `"ca.crt"` | Key inside engineCaSecret containing the CA cert. |
 | `supervisor.config.fleet.engineDockerConfig` | string | `""` | Base64-encoded Docker config.json (auths for private registries). Stored verbatim in the `engine-image-auth` Secret `data` key `.dockerconfigjson` and base64-decoded exactly once on mount, so engine pods read raw JSON at `/etc/dagger/.dockerconfigjson`. Empty = `e30K` (`{}`). NOT an imagePullSecret. |
-| `supervisor.config.fleet.engineDebug` | bool | `false` | Enable engine.toml [debug]. |
-| `supervisor.config.fleet.engineLogFormat` | string | `"json"` | Engine log format (json, text; empty omits). |
+| `supervisor.config.fleet.engineDebug` | bool | `false` | Enable engine.json logLevel=debug (verbose engine logging). |
+| `supervisor.config.fleet.engineLogFormat` | string | `"json"` | Supervisor-only; the engine hardcodes its text log formatter, so this is NOT rendered into engine.json. |
 | `supervisor.config.fleet.engineRegistryMirrors` | object | `{}` | Engine registry mirrors (e.g. {"docker.io": ["mirror.gcr.io"]}). Dotted keys such as `docker.io`, `ghcr.io`, `public.ecr.aws` are preserved verbatim. When `imageCache.enabled`, the generated in-cluster mirror addresses are merged into this map. |
-| `supervisor.config.fleet.engineRegistryMirrorsHttp` | array | `[]` | Mirror host[:port] values dialed over plaintext HTTP; engine.toml emits `[registry."<mirror>"]` + `http = true` per entry. Auto-populated with the image-cache mirrors when `imageCache.enabled`. |
+| `supervisor.config.fleet.engineRegistryMirrorsHttp` | array | `[]` | Mirror host[:port] values dialed over plaintext HTTP; engine.json emits `registries["<mirror>"].http = true` per entry. Auto-populated with the image-cache mirrors when `imageCache.enabled`. |
 | `supervisor.config.leaseTtl` | string | `"2m"` | Engine session lease TTL. |
 | `supervisor.config.version.floor` | string | `"v0.19.0"` | Minimum supported Dagger engine version. |
 | `supervisor.config.version.allowlist` | array | `["0.19", "0.20", "0.21", "1.0"]` | Allowed Dagger versions. A `MAJOR.MINOR` entry admits the whole minor series (including pre-releases); a full `MAJOR.MINOR.PATCH` admits that exact version; a dotted-pre-release-less full version such as `1.0.0-beta` admits only that pre-release track. Empty = admit all versions >= floor. |
